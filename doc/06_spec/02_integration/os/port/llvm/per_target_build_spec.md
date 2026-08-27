@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 60 | 60 | 0 | 0 |
+| 21 | 21 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -14,6 +14,7 @@
 ## Scenarios
 
 ### SimpleOS LLVM per-target build (A4/A5)
+_Scaffolding checks for the multi-target cross-build + compiler-rt stage._
 
 #### declares CROSS_SUPPORTED_TARGETS
 
@@ -23,7 +24,7 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -77,8 +78,8 @@ Reproduction: this block contains the complete executable scenario source.
 step("honours SIMPLE_TARGET env override")
 """Single-target override must be wired into selection."""
 val src = build_spl_src()
-check(src.contains("SIMPLE_TARGET"))
-check(src.contains("cross_selected_targets"))
+src.contains("SIMPLE_TARGET").to_equal(true)
+src.contains("cross_selected_targets").to_equal(true)
 ```
 
 </details>
@@ -99,8 +100,8 @@ Reproduction: this block contains the complete executable scenario source.
 step("cross_build_all iterates CROSS_SUPPORTED_TARGETS")
 """Full cross-build must loop via the per-target stage helper."""
 val src = build_spl_src()
-check(src.contains("fn cross_build_all"))
-check(src.contains("cross_build_stage_for_target"))
+src.contains("fn cross_build_all").to_equal(true)
+src.contains("cross_build_stage_for_target").to_equal(true)
 ```
 
 </details>
@@ -121,7 +122,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("exports build_compiler_rt(triple)")
 """A5's public compiler-rt builder must be present with a triple parameter."""
 val src = build_spl_src()
-check(src.contains("fn build_compiler_rt(triple: text)"))
+src.contains("fn build_compiler_rt(triple: text)").to_equal(true)
 ```
 
 </details>
@@ -142,7 +143,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("exports build_compiler_rt_for_target")
 """Internal per-target helper must also be exposed for callers/tests."""
 val src = build_spl_src()
-check(src.contains("fn build_compiler_rt_for_target"))
+src.contains("fn build_compiler_rt_for_target").to_equal(true)
 ```
 
 </details>
@@ -163,8 +164,8 @@ Reproduction: this block contains the complete executable scenario source.
 step("registers compiler-rt subcommand in cross_build_main")
 """The new `compiler-rt` subcommand keyword must be wired up."""
 val src = build_spl_src()
-check(src.contains("\"compiler-rt\""))
-check(src.contains("subcommand"))
+src.contains("\"compiler-rt\"").to_equal(true)
+src.contains("subcommand").to_equal(true)
 ```
 
 </details>
@@ -184,7 +185,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-INTEGRATION
 step("exposes --print-plan CLI flag")
 val src = build_spl_src()
-check(src.contains("--print-plan"))
+src.contains("--print-plan").to_equal(true)
 ```
 
 </details>
@@ -222,7 +223,7 @@ check(shs.contains(":-20"))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -437,7 +438,7 @@ check(!cache.contains("set(CMAKE_ASM_FLAGS"))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -655,7 +656,7 @@ check(regular_file_exists(WCTYPE_H))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -977,6 +978,17 @@ check(regular_file_exists(RT_CMAKE))
 
 - compiler_rt_cmake.cmake enables COMPILER_RT_BUILD_BUILTINS
 
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val src = rt_cmake_src()
+src.contains("COMPILER_RT_BUILD_BUILTINS").to_equal(true)
+```
+
+</details>
+
+#### compiler_rt_cmake.cmake disables sanitizers / xray / profile
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1023,7 +1035,7 @@ check(src.contains("COMPILER_RT_BUILD_PROFILE"))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1190,7 +1202,7 @@ check(src.contains("AddressSanitizer.cpp"))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1495,8 +1507,8 @@ Tests covering SimpleOS LLVM per-target build (A4/A5).
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 60 |
-| Active scenarios | 60 |
+| Total scenarios | 21 |
+| Active scenarios | 21 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -1,6 +1,32 @@
 # Semantic Render Transport Specification
 
-> Tests covering semantic render transport bridge.
+> <details>
+
+<!-- sdn-diagram:id=semantic_render_transport_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=semantic_render_transport_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+semantic_render_transport_spec -> std
+semantic_render_transport_spec -> common
+semantic_render_transport_spec -> nogc_sync_mut
+semantic_render_transport_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=semantic_render_transport_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,22 +43,13 @@
 
 #### attaches semantic snapshots at the shared render IPC boundary
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- attaches semantic snapshots at the shared render IPC boundary
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("attaches semantic snapshots at the shared render IPC boundary")
 val state = sample_state()
 val body = WebBackend.new(4020).render_html(state)
 val req = WebRenderRequest.html(WEB_RENDER_TARGET_ELECTRON, "", body, "", "", 1280, 720)
@@ -52,20 +69,13 @@ expect(browser_semantic_render_ipc_json(state, 1280, 720)).to_contain("\"semanti
 
 #### exposes backend semantic snapshot envelopes through one target-aware shape
 
-- exposes backend semantic snapshot envelopes through one target-aware shape
-   - Expected: tui_semantic_snapshot(state).stage equals `SEMANTIC_UI_STAGE_STATE`
-   - Expected: none_semantic_snapshot(state).stage equals `SEMANTIC_UI_STAGE_STATE`
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("exposes backend semantic snapshot envelopes through one target-aware shape")
 val state = sample_state()
 val web = WebBackend.new(4022)
 val tui_web = TuiWebBackend.new()
@@ -115,35 +125,13 @@ expect(tauri_bundle.snapshot_json).to_contain("\"target\":\"tauri\"")
 
 #### validates one semantic command transport shape across Web TUI Electron Tauri headless and pure Simple
 
-- validates one semantic command transport shape across Web TUI Electron Tauri headless and pure Simple
-   - Expected: matrix.len() equals `6`
-   - Expected: row.surface_id equals `main`
-   - Expected: row.command_type equals `click`
-   - Expected: row.input_has_target is true
-   - Expected: row.input_has_event is true
-   - Expected: row.snapshot_has_target is true
-   - Expected: row.snapshot_has_semantic is true
-   - Expected: row.patch_has_target is true
-   - Expected: row.patch_has_snapshot is true
-   - Expected: row.ready is true
-   - Expected: row.reason equals `pass`
-   - Expected: matrix[0].target equals `WEB_RENDER_TARGET_SIMPLE_WEB`
-   - Expected: matrix[1].target equals `WEB_RENDER_TARGET_TUI_WEB`
-   - Expected: matrix[2].target equals `WEB_RENDER_TARGET_ELECTRON`
-   - Expected: matrix[3].target equals `WEB_RENDER_TARGET_TAURI`
-   - Expected: matrix[4].target equals `WEB_RENDER_TARGET_HEADLESS`
-   - Expected: matrix[5].target equals `WEB_RENDER_TARGET_PURE_SIMPLE`
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("validates one semantic command transport shape across Web TUI Electron Tauri headless and pure Simple")
 val state = sample_state()
 val snapshot = web_semantic_snapshot(state)
 val command = SemanticUiCommand.click("main", "web_render_action")
@@ -175,7 +163,11 @@ expect(matrix[5].summary()).to_contain("target=pure_simple")
 
 #### dispatches click type and focus commands through one session path across render targets
 
-- dispatches click type and focus commands through one session path across render targets
+1. SemanticUiCommand click
+
+2. SemanticUiCommand type text
+
+3. SemanticUiCommand focus
    - Expected: matrix.len() equals `6`
    - Expected: row.command_type equals `command.command_type`
    - Expected: row.dispatch_ok is true
@@ -190,14 +182,12 @@ expect(matrix[5].summary()).to_contain("target=pure_simple")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("dispatches click type and focus commands through one session path across render targets")
 val commands = [
     SemanticUiCommand.click("main", "web_render_action"),
     SemanticUiCommand.type_text("main", "web_render_action", "Run"),
@@ -230,12 +220,12 @@ for command in commands:
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/semantic_render_transport_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering semantic render transport bridge.
+Tests covering:
 - semantic render transport bridge
 
 ## Scenario Summary
@@ -250,54 +240,3 @@ Tests covering semantic render transport bridge.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-APP`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `1ecc152e04d5e8e5aa23732acb7adb7531ad42f0cc96dd908e2bde4858249771`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `1ecc152e04d5e8e5aa23732acb7adb7531ad42f0cc96dd908e2bde4858249771`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `1ecc152e04d5e8e5aa23732acb7adb7531ad42f0cc96dd908e2bde4858249771`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
-
-SSpec documentization score: 88/100
-source: test/01_unit/app/ui/semantic_render_transport_spec.spl
-mirror: doc/06_spec/01_unit/app/ui/semantic_render_transport_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=80
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/ui/semantic_render_transport_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/ui/semantic_render_transport_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/ui/semantic_render_transport_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/app/ui/semantic_render_transport_spec.spl:67:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'attaches semantic snapshots at the shared render IPC boundary' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui/semantic_render_transport_spec.spl:84:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'exposes backend semantic snapshot envelopes through one target-aware shape' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui/semantic_render_transport_spec.spl:131:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'validates one semantic command transport shape across Web TUI Electron Tauri headless and pure Simple' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

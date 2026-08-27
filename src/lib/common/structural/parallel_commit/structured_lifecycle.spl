@@ -1,0 +1,590 @@
+# Bounded structured owner/task lifecycle for parent-authoritative commit.
+#
+# Runtime boundaries carry only a fixed-width scalar wire record. Children
+# construct that record; the owner validates it and reconstructs the canonical
+# ResultEnvelopeV1. No address, mutable object, or dynamic value crosses here.
+
+use std.common.hash.djb2.{djb2_hash_text}
+use std.common.structural.parallel_commit.commit_contracts.{
+    PARALLEL_COMMIT_SCHEMA_VERSION,
+    ParallelCommitOrder,
+    ParallelConflictPolicy,
+    ParallelResultKind,
+    ResultEnvelopeV1,
+    parallel_result_kind_to_u8,
+    result_envelope_v1,
+    result_envelope_v1_well_formed
+}
+use std.common.structural.parallel_commit.commit_engine.{parallel_commit_validate}
+
+val STRUCTURED_TASK_WIRE_MAGIC_V1: i64 = 1398035028
+val STRUCTURED_TASK_WIRE_WORD_COUNT_V1: i64 = 11
+val STRUCTURED_TASK_WIRE_I64_MIN_V1: i64 = -1152921504606846976
+val STRUCTURED_TASK_WIRE_I64_MAX_V1: i64 = 1152921504606846975
+
+enum StructuredTaskStateV1:
+    Reserved
+    Completed
+    Failed
+    Cancelled
+
+enum StructuredTaskResultStatusV1:
+    Success
+    Failed
+
+enum StructuredTaskErrorCodeV1:
+    None
+    WorkerReportedFailure
+    ResultTransportFailure
+    InvalidResultWire
+    ActorResultRejected
+
+struct OwnerSnapshotV1:
+    owner_id: i64
+    revision: i64
+    generation: i64
+    frozen_input_token: i64
+    values: [i64]
+    value_capacity: i64
+    state_digest: i64
+
+struct StructuredTaskSpecV1:
+    task_id: i64
+    sequence: i64
+    write_region: i64
+    kind: ParallelResultKind
+    deterministic_key: text
+    deterministic_key_token: i64
+
+struct StructuredSpawnReceiptV1:
+    accepted: bool
+    task_id: i64
+    lease_token: i64
+    reason: text
+
+struct StructuredTaskFailureV1:
+    task_id: i64
+    lease_token: i64
+    error_code: StructuredTaskErrorCodeV1
+    reason: text
+
+struct StructuredWaitReceiptV1:
+    ready: bool
+    completed: i64
+    failed: i64
+    cancelled: i64
+    failure_notifications: i64
+    reason: text
+
+struct StructuredCommitReceiptV1:
+    committed: bool
+    previous_revision: i64
+    new_revision: i64
+    applied_count: i64
+    ordered_task_ids: [i64]
+    before_digest: i64
+    after_digest: i64
+    reason: text
+
+struct StructuredTaskWireResultV1:
+    magic: i64
+    contract_version: i64
+    status: StructuredTaskResultStatusV1
+    error_code: StructuredTaskErrorCodeV1
+    base_revision: i64
+    task_id: i64
+    sequence: i64
+    write_region: i64
+    result_kind_code: i64
+    payload_token: i64
+    deterministic_key_token: i64
+
+fn structured_values_digest(values: [i64]) -> i64:
+    """Return a deterministic, non-cryptographic value-state digest."""
+    var digest = values.len() + 1
+    var i = 0
+    while i < values.len():
+        digest = digest + values[i] * (i + 1)
+        i = i + 1
+    digest
+
+fn structured_copy_values(values: [i64]) -> [i64]:
+    """Make the snapshot/staging disconnection explicit on every runtime."""
+    var copied: [i64] = []
+    for value in values:
+        copied.push(value)
+    copied
+
+fn structured_copy_snapshot(snapshot: OwnerSnapshotV1) -> OwnerSnapshotV1:
+    """Disconnect a task group from the caller's snapshot container."""
+    OwnerSnapshotV1(owner_id: snapshot.owner_id, revision: snapshot.revision,
+        generation: snapshot.generation,
+        frozen_input_token: snapshot.frozen_input_token,
+        values: structured_copy_values(snapshot.values),
+        value_capacity: snapshot.value_capacity,
+        state_digest: snapshot.state_digest)
+
+fn structured_values_equal(left: [i64], right: [i64]) -> bool:
+    """Compare immutable snapshot contents exactly, without hash trust."""
+    if left.len() != right.len():
+        return false
+    var i = 0
+    while i < left.len():
+        if left[i] != right[i]:
+            return false
+        i = i + 1
+    true
+
+fn structured_wire_scalar_v1(value: i64) -> bool:
+    value >= STRUCTURED_TASK_WIRE_I64_MIN_V1
+        and value <= STRUCTURED_TASK_WIRE_I64_MAX_V1
+
+fn structured_task_key_token(value: text) -> i64:
+    """Return a positive scalar binding for a deterministic text key."""
+    djb2_hash_text(value) + 2147483649
+
+fn structured_task_state_to_u8(state: StructuredTaskStateV1) -> i64:
+    match state:
+        case StructuredTaskStateV1.Reserved: 0
+        case StructuredTaskStateV1.Completed: 1
+        case StructuredTaskStateV1.Failed: 2
+        case StructuredTaskStateV1.Cancelled: 3
+
+fn structured_task_result_status_to_u8(status: StructuredTaskResultStatusV1) -> i64:
+    match status:
+        case StructuredTaskResultStatusV1.Success: 1
+        case StructuredTaskResultStatusV1.Failed: 2
+
+fn structured_task_error_code_to_u8(error_code: StructuredTaskErrorCodeV1) -> i64:
+    match error_code:
+        case StructuredTaskErrorCodeV1.None: 0
+        case StructuredTaskErrorCodeV1.WorkerReportedFailure: 1
+        case StructuredTaskErrorCodeV1.ResultTransportFailure: 2
+        case StructuredTaskErrorCodeV1.InvalidResultWire: 3
+        case StructuredTaskErrorCodeV1.ActorResultRejected: 4
+
+fn structured_task_result_status_from_u8(value: i64) -> StructuredTaskResultStatusV1?:
+    if value == 1:
+        return StructuredTaskResultStatusV1.Success
+    if value == 2:
+        return StructuredTaskResultStatusV1.Failed
+    nil
+
+fn structured_task_error_code_from_u8(value: i64) -> StructuredTaskErrorCodeV1?:
+    if value == 0:
+        return StructuredTaskErrorCodeV1.None
+    if value == 1:
+        return StructuredTaskErrorCodeV1.WorkerReportedFailure
+    if value == 2:
+        return StructuredTaskErrorCodeV1.ResultTransportFailure
+    if value == 3:
+        return StructuredTaskErrorCodeV1.InvalidResultWire
+    if value == 4:
+        return StructuredTaskErrorCodeV1.ActorResultRejected
+    nil
+
+fn structured_task_error_reason(error_code: StructuredTaskErrorCodeV1) -> text:
+    match error_code:
+        case StructuredTaskErrorCodeV1.None: ""
+        case StructuredTaskErrorCodeV1.WorkerReportedFailure: "worker-reported-failure"
+        case StructuredTaskErrorCodeV1.ResultTransportFailure: "result-transport-failure"
+        case StructuredTaskErrorCodeV1.InvalidResultWire: "invalid-result-wire"
+        case StructuredTaskErrorCodeV1.ActorResultRejected: "actor-result-rejected"
+
+fn structured_task_wire_success(base_revision: i64, task_id: i64,
+                                sequence: i64, write_region: i64,
+                                kind: ParallelResultKind, payload_token: i64,
+                                deterministic_key_token: i64) -> StructuredTaskWireResultV1:
+    StructuredTaskWireResultV1(magic: STRUCTURED_TASK_WIRE_MAGIC_V1,
+        contract_version: PARALLEL_COMMIT_SCHEMA_VERSION,
+        status: StructuredTaskResultStatusV1.Success,
+        error_code: StructuredTaskErrorCodeV1.None,
+        base_revision: base_revision, task_id: task_id, sequence: sequence,
+        write_region: write_region,
+        result_kind_code: parallel_result_kind_to_u8(kind),
+        payload_token: payload_token,
+        deterministic_key_token: deterministic_key_token)
+
+fn structured_task_wire_failure(base_revision: i64, task_id: i64,
+                                sequence: i64, write_region: i64,
+                                kind: ParallelResultKind,
+                                deterministic_key_token: i64,
+                                error_code: StructuredTaskErrorCodeV1) -> StructuredTaskWireResultV1:
+    StructuredTaskWireResultV1(magic: STRUCTURED_TASK_WIRE_MAGIC_V1,
+        contract_version: PARALLEL_COMMIT_SCHEMA_VERSION,
+        status: StructuredTaskResultStatusV1.Failed, error_code: error_code,
+        base_revision: base_revision, task_id: task_id, sequence: sequence,
+        write_region: write_region,
+        result_kind_code: parallel_result_kind_to_u8(kind), payload_token: 0,
+        deterministic_key_token: deterministic_key_token)
+
+fn structured_task_wire_well_formed(value: StructuredTaskWireResultV1) -> bool:
+    if value.magic != STRUCTURED_TASK_WIRE_MAGIC_V1
+        or value.contract_version != PARALLEL_COMMIT_SCHEMA_VERSION
+        or value.base_revision < 0 or value.task_id <= 0 or value.sequence < 0
+        or value.write_region <= 0 or value.result_kind_code < 0
+        or value.result_kind_code >= 5 or value.deterministic_key_token <= 0:
+        return false
+    for word in structured_task_wire_words(value):
+        if not structured_wire_scalar_v1(word):
+            return false
+    val status = structured_task_result_status_to_u8(value.status)
+    val error_code = structured_task_error_code_to_u8(value.error_code)
+    if status == 1:
+        return error_code == 0 and value.payload_token > 0
+    status == 2 and error_code > 0 and value.payload_token == 0
+
+fn structured_task_wire_words(value: StructuredTaskWireResultV1) -> [i64]:
+    [value.magic, value.contract_version,
+     structured_task_result_status_to_u8(value.status),
+     structured_task_error_code_to_u8(value.error_code),
+     value.base_revision, value.task_id, value.sequence, value.write_region,
+     value.result_kind_code, value.payload_token,
+     value.deterministic_key_token]
+
+fn structured_task_wire_from_words(words: [i64]) -> StructuredTaskWireResultV1?:
+    if words.len() != STRUCTURED_TASK_WIRE_WORD_COUNT_V1:
+        return nil
+    val status_value = structured_task_result_status_from_u8(words[2])
+    val error_value = structured_task_error_code_from_u8(words[3])
+    if status_value == nil or error_value == nil:
+        return nil
+    val wire = StructuredTaskWireResultV1(magic: words[0],
+        contract_version: words[1],
+        status: status_value as StructuredTaskResultStatusV1,
+        error_code: error_value as StructuredTaskErrorCodeV1,
+        base_revision: words[4], task_id: words[5], sequence: words[6],
+        write_region: words[7], result_kind_code: words[8],
+        payload_token: words[9], deterministic_key_token: words[10])
+    if not structured_task_wire_well_formed(wire):
+        return nil
+    wire
+
+fn structured_spawn_rejected(reason: text) -> StructuredSpawnReceiptV1:
+    StructuredSpawnReceiptV1(accepted: false, task_id: 0,
+        lease_token: 0, reason: reason)
+
+fn structured_commit_rejected(revision: i64, digest: i64,
+                              reason: text) -> StructuredCommitReceiptV1:
+    StructuredCommitReceiptV1(committed: false,
+        previous_revision: revision, new_revision: revision, applied_count: 0,
+        ordered_task_ids: [], before_digest: digest, after_digest: digest,
+        reason: reason)
+
+class StructuredTaskGroupV1:
+    snapshot: OwnerSnapshotV1
+    capacity: i64
+    retain_failure_notifications: bool
+    next_task_id: i64
+    next_lease_token: i64
+    specs: [StructuredTaskSpecV1]
+    states: [StructuredTaskStateV1]
+    lease_tokens: [i64]
+    results: [ResultEnvelopeV1]
+    failures: [StructuredTaskFailureV1]
+
+    static fn create(snapshot: OwnerSnapshotV1, capacity: i64,
+                     retain_failure_notifications: bool) -> StructuredTaskGroupV1:
+        var bounded_capacity = capacity
+        if bounded_capacity < 1:
+            bounded_capacity = 1
+        StructuredTaskGroupV1(snapshot: structured_copy_snapshot(snapshot),
+            capacity: bounded_capacity,
+            retain_failure_notifications: retain_failure_notifications,
+            next_task_id: 1, next_lease_token: 1, specs: [], states: [],
+            lease_tokens: [], results: [], failures: [])
+
+    fn reserved_count() -> i64:
+        self.specs.len()
+
+    fn remaining_capacity() -> i64:
+        self.capacity - self.specs.len()
+
+    fn can_reserve(count: i64) -> bool:
+        count >= 0 and count <= self.remaining_capacity()
+
+    fn task_index(task_id: i64) -> i64:
+        var i = 0
+        while i < self.specs.len():
+            if self.specs[i].task_id == task_id:
+                return i
+            i = i + 1
+        -1
+
+    fn task_state(task_id: i64) -> StructuredTaskStateV1:
+        val index = self.task_index(task_id)
+        if index < 0:
+            return StructuredTaskStateV1.Failed
+        self.states[index]
+
+    fn task_spec(task_id: i64) -> StructuredTaskSpecV1?:
+        val index = self.task_index(task_id)
+        if index < 0:
+            return nil
+        self.specs[index]
+
+    fn failure_notification_count() -> i64:
+        self.failures.len()
+
+    fn failure_notification_at(index: i64) -> StructuredTaskFailureV1?:
+        if index < 0 or index >= self.failures.len():
+            return nil
+        self.failures[index]
+
+    fn result_count() -> i64:
+        self.results.len()
+
+    fn completed_results() -> [ResultEnvelopeV1]:
+        var copied: [ResultEnvelopeV1] = []
+        for result in self.results:
+            copied.push(result)
+        copied
+
+    me reserve(write_region: i64, kind: ParallelResultKind,
+               deterministic_key: text) -> StructuredSpawnReceiptV1:
+        """Reserve one bounded child slot and mint its publication lease."""
+        if self.specs.len() >= self.capacity:
+            return structured_spawn_rejected("task-group-capacity-exhausted")
+        if write_region <= 0 or deterministic_key.len() == 0:
+            return structured_spawn_rejected("invalid-task-spec")
+        if self.next_task_id <= 0 or self.next_lease_token <= 0:
+            return structured_spawn_rejected("task-identity-exhausted")
+        val task_id = self.next_task_id
+        val lease_token = self.next_lease_token
+        self.next_task_id = self.next_task_id + 1
+        self.next_lease_token = self.next_lease_token + 1
+        self.specs.push(StructuredTaskSpecV1(task_id: task_id,
+            sequence: self.specs.len(), write_region: write_region,
+            kind: kind, deterministic_key: deterministic_key,
+            deterministic_key_token: structured_task_key_token(deterministic_key)))
+        self.states.push(StructuredTaskStateV1.Reserved)
+        self.lease_tokens.push(lease_token)
+        StructuredSpawnReceiptV1(accepted: true, task_id: task_id,
+            lease_token: lease_token, reason: "")
+
+    me publish_result(task_id: i64, lease_token: i64,
+                      result: ResultEnvelopeV1) -> bool:
+        """Consume a live lease and accept one canonical result envelope."""
+        val index = self.task_index(task_id)
+        if index < 0 or structured_task_state_to_u8(self.states[index]) != 0:
+            return false
+        if lease_token <= 0 or self.lease_tokens[index] != lease_token:
+            return false
+        val spec = self.specs[index]
+        if not result_envelope_v1_well_formed(result)
+            or result.base_revision != self.snapshot.revision
+            or result.task_id != spec.task_id or result.sequence != spec.sequence
+            or result.write_region != spec.write_region
+            or parallel_result_kind_to_u8(result.kind) != parallel_result_kind_to_u8(spec.kind)
+            or result.deterministic_key != spec.deterministic_key:
+            return false
+        self.lease_tokens[index] = 0
+        self.states[index] = StructuredTaskStateV1.Completed
+        self.results.push(result)
+        true
+
+    me publish_success(task_id: i64, lease_token: i64,
+                       payload_token: i64) -> bool:
+        val spec_value = self.task_spec(task_id)
+        if spec_value == nil:
+            return false
+        val spec = spec_value as StructuredTaskSpecV1
+        val result = result_envelope_v1(self.snapshot.revision, task_id,
+            spec.sequence, spec.write_region, spec.kind, payload_token,
+            spec.deterministic_key)
+        self.publish_result(task_id, lease_token, result)
+
+    me fail_task(task_id: i64, lease_token: i64,
+                 error_code: StructuredTaskErrorCodeV1, reason: text) -> bool:
+        """Record one cooperative failure and optionally retain its receipt."""
+        val index = self.task_index(task_id)
+        if index < 0 or structured_task_state_to_u8(self.states[index]) != 0
+            or self.lease_tokens[index] != lease_token:
+            return false
+        self.lease_tokens[index] = 0
+        self.states[index] = StructuredTaskStateV1.Failed
+        if self.retain_failure_notifications:
+            self.failures.push(StructuredTaskFailureV1(task_id: task_id,
+                lease_token: lease_token, error_code: error_code, reason: reason))
+        else:
+            self.cancel_all()
+        true
+
+    me publish_wire_result(task_id: i64, lease_token: i64,
+                           wire: StructuredTaskWireResultV1) -> bool:
+        """Validate one child-created scalar wire result and consume its lease."""
+        val spec_value = self.task_spec(task_id)
+        if spec_value == nil:
+            return false
+        val spec = spec_value as StructuredTaskSpecV1
+        if not structured_task_wire_well_formed(wire)
+            or wire.base_revision != self.snapshot.revision
+            or wire.task_id != spec.task_id or wire.sequence != spec.sequence
+            or wire.write_region != spec.write_region
+            or wire.result_kind_code != parallel_result_kind_to_u8(spec.kind)
+            or wire.deterministic_key_token != spec.deterministic_key_token:
+            return self.fail_task(task_id, lease_token,
+                StructuredTaskErrorCodeV1.InvalidResultWire,
+                structured_task_error_reason(StructuredTaskErrorCodeV1.InvalidResultWire))
+        if structured_task_result_status_to_u8(wire.status) == 2:
+            return self.fail_task(task_id, lease_token, wire.error_code,
+                structured_task_error_reason(wire.error_code))
+        val result = result_envelope_v1(wire.base_revision, wire.task_id,
+            wire.sequence, wire.write_region, spec.kind, wire.payload_token,
+            spec.deterministic_key)
+        self.publish_result(task_id, lease_token, result)
+
+    me cancel_task(task_id: i64) -> bool:
+        """Revoke one publication lease. Late child output is rejected."""
+        val index = self.task_index(task_id)
+        if index < 0 or structured_task_state_to_u8(self.states[index]) != 0:
+            return false
+        self.lease_tokens[index] = 0
+        self.states[index] = StructuredTaskStateV1.Cancelled
+        true
+
+    me cancel_all() -> i64:
+        var cancelled = 0
+        var i = 0
+        while i < self.states.len():
+            if structured_task_state_to_u8(self.states[i]) == 0:
+                self.lease_tokens[i] = 0
+                self.states[i] = StructuredTaskStateV1.Cancelled
+                cancelled = cancelled + 1
+            i = i + 1
+        cancelled
+
+    fn wait_all() -> StructuredWaitReceiptV1:
+        var completed = 0
+        var failed = 0
+        var cancelled = 0
+        var reserved = 0
+        for state in self.states:
+            match state:
+                case StructuredTaskStateV1.Reserved: reserved = reserved + 1
+                case StructuredTaskStateV1.Completed: completed = completed + 1
+                case StructuredTaskStateV1.Failed: failed = failed + 1
+                case StructuredTaskStateV1.Cancelled: cancelled = cancelled + 1
+        if reserved > 0:
+            return StructuredWaitReceiptV1(ready: false, completed: completed,
+                failed: failed, cancelled: cancelled,
+                failure_notifications: self.failures.len(),
+                reason: "children-still-running")
+        StructuredWaitReceiptV1(ready: true, completed: completed,
+            failed: failed, cancelled: cancelled,
+            failure_notifications: self.failures.len(), reason: "")
+
+    fn ready_to_commit() -> bool:
+        val wait = self.wait_all()
+        self.specs.len() > 0 and wait.ready
+            and wait.failed == 0 and wait.cancelled == 0
+            and wait.completed == self.specs.len()
+
+class StructuredOwnerV1:
+    owner_id: i64
+    revision: i64
+    values: [i64]
+
+    static fn create(owner_id: i64, revision: i64,
+                     values: [i64]) -> StructuredOwnerV1:
+        StructuredOwnerV1(owner_id: owner_id, revision: revision,
+            values: structured_copy_values(values))
+
+    fn snapshot() -> OwnerSnapshotV1:
+        val digest = structured_values_digest(self.values)
+        var token = self.owner_id + self.revision + digest
+        if token <= 0:
+            token = 1
+        OwnerSnapshotV1(owner_id: self.owner_id, revision: self.revision,
+            generation: self.revision,
+            frozen_input_token: token, values: structured_copy_values(self.values),
+            value_capacity: self.values.len(),
+            state_digest: digest)
+
+    fn value_at(write_region: i64) -> i64:
+        if write_region <= 0 or write_region > self.values.len():
+            return 0
+        self.values[write_region - 1]
+
+    fn value_count() -> i64:
+        self.values.len()
+
+    fn state_digest() -> i64:
+        structured_values_digest(self.values)
+
+    me commit(group: StructuredTaskGroupV1, order: ParallelCommitOrder,
+              conflict: ParallelConflictPolicy) -> StructuredCommitReceiptV1:
+        """Validate, stage, and publish all child results in the owner domain."""
+        val before_digest = structured_values_digest(self.values)
+        val expected_snapshot = self.snapshot()
+        if group.snapshot.owner_id != expected_snapshot.owner_id:
+            return structured_commit_rejected(self.revision, before_digest,
+                "owner-mismatch")
+        if group.snapshot.revision != expected_snapshot.revision
+            or group.snapshot.generation != expected_snapshot.generation:
+            return structured_commit_rejected(self.revision, before_digest,
+                "stale-owner-revision")
+        if group.snapshot.frozen_input_token != expected_snapshot.frozen_input_token
+            or group.snapshot.value_capacity != expected_snapshot.value_capacity
+            or group.snapshot.state_digest != expected_snapshot.state_digest
+            or not structured_values_equal(group.snapshot.values,
+                expected_snapshot.values):
+            return structured_commit_rejected(self.revision, before_digest,
+                "snapshot-state-mismatch")
+        if self.revision == 9223372036854775807:
+            return structured_commit_rejected(self.revision, before_digest,
+                "owner-revision-exhausted")
+        if not group.ready_to_commit():
+            return structured_commit_rejected(self.revision, before_digest,
+                "task-group-not-commit-ready")
+        val validation = parallel_commit_validate(group.completed_results(),
+            order, conflict)
+        if not validation.ok:
+            return structured_commit_rejected(self.revision, before_digest,
+                validation.reason)
+        var staged = structured_copy_values(self.values)
+        var ordered_task_ids: [i64] = []
+        for result in validation.ordered:
+            if result.base_revision != self.revision:
+                return structured_commit_rejected(self.revision, before_digest,
+                    "result-base-revision-mismatch")
+            val kind = parallel_result_kind_to_u8(result.kind)
+            val index = result.write_region - 1
+            if kind == 4:
+                if result.write_region != staged.len() + 1:
+                    return structured_commit_rejected(self.revision, before_digest,
+                        "invalid-new-shard-region")
+                staged.push(result.payload_token)
+            else:
+                if index < 0 or index >= staged.len():
+                    return structured_commit_rejected(self.revision, before_digest,
+                        "invalid-write-region")
+                if kind == 2 or kind == 3:
+                    staged[index] = staged[index] + result.payload_token
+                else:
+                    staged[index] = result.payload_token
+            ordered_task_ids.push(result.task_id)
+        self.values = staged
+        val previous_revision = self.revision
+        self.revision = self.revision + 1
+        StructuredCommitReceiptV1(committed: true,
+            previous_revision: previous_revision, new_revision: self.revision,
+            applied_count: validation.ordered.len(),
+            ordered_task_ids: ordered_task_ids, before_digest: before_digest,
+            after_digest: structured_values_digest(self.values), reason: "")
+
+export STRUCTURED_TASK_WIRE_MAGIC_V1, STRUCTURED_TASK_WIRE_WORD_COUNT_V1
+export STRUCTURED_TASK_WIRE_I64_MIN_V1, STRUCTURED_TASK_WIRE_I64_MAX_V1
+export StructuredTaskStateV1, StructuredTaskResultStatusV1
+export StructuredTaskErrorCodeV1, StructuredTaskWireResultV1
+export OwnerSnapshotV1, StructuredTaskSpecV1, StructuredSpawnReceiptV1
+export StructuredTaskFailureV1, StructuredWaitReceiptV1
+export StructuredCommitReceiptV1, StructuredTaskGroupV1, StructuredOwnerV1
+export structured_values_digest, structured_copy_values, structured_copy_snapshot
+export structured_values_equal, structured_wire_scalar_v1
+export structured_task_key_token
+export structured_task_state_to_u8, structured_task_result_status_to_u8
+export structured_task_error_code_to_u8, structured_task_error_reason
+export structured_task_wire_success, structured_task_wire_failure
+export structured_task_wire_well_formed, structured_task_wire_words
+export structured_task_wire_from_words

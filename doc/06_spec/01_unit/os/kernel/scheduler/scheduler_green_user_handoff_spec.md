@@ -2,6 +2,30 @@
 
 > The green-carrier scheduler lane and the normal OS task lane must remain separate. This spec builds a scheduler-level x86_64 user process image, creates a hosted scheduler task through `create_user_task_pid`, dispatches the pid through the green-carrier queue, and verifies that the user handoff record still exposes the same user context expected by syscall `14`.
 
+<!-- sdn-diagram:id=scheduler_green_user_handoff_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=scheduler_green_user_handoff_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+scheduler_green_user_handoff_spec -> std
+scheduler_green_user_handoff_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=scheduler_green_user_handoff_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 1 | 1 | 0 | 0 |
@@ -24,7 +48,7 @@ The green-carrier scheduler lane and the normal OS task lane must remain separat
 | Design | doc/05_design/multicore_green.md |
 | Research | doc/01_research/local/multicore_green.md |
 | Source | `test/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -63,13 +87,9 @@ and cannot replace the final live QEMU AP ring/user marker triplet.
 
 #### dispatches a real user handoff pid through the green lane
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- dispatches a real user handoff pid through the green lane
 - build a scheduler-level x86_64 user process image
 - create a hosted scheduler user task through the real spawn path
+- var sched = Scheduler new with cpu count
    - Expected: created_present equals `1`
    - Expected: created_task.entry_point equals `expected_entry`
    - Expected: created_task.user_stack equals `expected_stack_top`
@@ -103,12 +123,10 @@ and cannot replace the final live QEMU AP ring/user marker triplet.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 72 lines folded for reproduction.
+Runnable source: 70 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("dispatches a real user handoff pid through the green lane")
 step("build a scheduler-level x86_64 user process image")
 val image = make_x86_64_user_image()
 val expected_entry = image.entry
@@ -196,55 +214,10 @@ if validation.context != nil:
 
 ## Related Documentation
 
-- **Requirements:** `doc/02_requirements/feature/multicore_green.md`
-- **Plan:** `doc/03_plan/sys_test/multicore_green.md`
-- **Design:** `doc/05_design/multicore_green.md`
-- **Research:** `doc/01_research/local/multicore_green.md`
+- **Requirements:** [doc/02_requirements/feature/multicore_green.md](doc/02_requirements/feature/multicore_green.md)
+- **Plan:** [doc/03_plan/sys_test/multicore_green.md](doc/03_plan/sys_test/multicore_green.md)
+- **Design:** [doc/05_design/multicore_green.md](doc/05_design/multicore_green.md)
+- **Research:** [doc/01_research/local/multicore_green.md](doc/01_research/local/multicore_green.md)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `cfcc4e549e9450dcd98f981df376a94ffed0b173b58bc4900e3bd9d979bd6c7a`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `cfcc4e549e9450dcd98f981df376a94ffed0b173b58bc4900e3bd9d979bd6c7a`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `cfcc4e549e9450dcd98f981df376a94ffed0b173b58bc4900e3bd9d979bd6c7a`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
-
-SSpec documentization score: 89/100
-source: test/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.spl
-mirror: doc/06_spec/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.md (current)
-findings: 4 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=90 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 7 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.spl:78:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'dispatches a real user handoff pid through the green lane' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

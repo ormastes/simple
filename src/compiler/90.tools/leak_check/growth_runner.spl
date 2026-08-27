@@ -4,18 +4,18 @@
 # Runs a target in a subprocess and samples per-process RSS to detect
 # sustained memory growth or hard RSS budget breaches.
 
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
 extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
+extern fn rt_process_is_running(pid: i64) -> bool
 extern fn rt_process_kill(pid: i64) -> bool
-extern fn rt_file_read_text(path: text) -> text
-use std.io_runtime.{thread_sleep, file_exists, process_spawn_async, process_is_running, time_now_unix_micros}
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_sleep_ms(ms: i64)
 
+use std.io_runtime.{file_exists, read_file_text}
 use types
 
 fn current_time_ms() -> i64:
     time_now_unix_micros() / 1000
-
-fn read_file_text(path: text) -> text:
-    rt_file_read_text(path) ?? ""
 
 fn _extract_numeric_token(line: text) -> i64:
     val parts = line.split(" ")
@@ -107,7 +107,7 @@ fn run_growth_check(cfg: LeakCheckConfig) -> LeakCheckResult:
         return result
 
     val (cmd, args, target_label) = build_growth_command(cfg)
-    val pid = process_spawn_async(cmd, args)
+    val pid = rt_process_spawn_async(cmd, args)
     if pid <= 0:
         print "Error: failed to spawn growth target"
         result.exit_code = 1
@@ -119,7 +119,7 @@ fn run_growth_check(cfg: LeakCheckConfig) -> LeakCheckResult:
     var max_rss_kb: i64 = 0
     var timed_out = false
 
-    while process_is_running(pid):
+    while rt_process_is_running(pid):
         val now_ms = current_time_ms()
         val rss_kb = read_process_rss_kb(pid)
         if rss_kb > 0:
@@ -159,7 +159,7 @@ fn run_growth_check(cfg: LeakCheckConfig) -> LeakCheckResult:
             timed_out = true
             _ = rt_process_kill(pid)
             break
-        thread_sleep(cfg.sample_ms)
+        rt_sleep_ms(cfg.sample_ms)
 
     val exit_code = rt_process_wait(pid, 0)
     result.max_rss_kb = max_rss_kb

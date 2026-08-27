@@ -1,0 +1,51 @@
+use std.spec
+use std.io.file_read_text
+
+describe "HTTP server runtime worker policy":
+    it "keeps only the unavailable-thread fallback inline and never joins its invalid handle":
+        val source = file_read_text(
+            "src/lib/nogc_async_mut/http_server/server.spl")
+        expect(source).to_contain("server_worker_plan(")
+        expect(source).to_contain("if i < worker_plan.spawn_count:")
+        expect(source).to_contain("if server_thread_handle_joinable(handle):")
+        expect(source).to_contain("last_worker = worker")
+        expect(source).to_contain("worker_count = i + 1")
+        expect(source).to_contain(
+            "wh.is_alive and server_thread_handle_joinable(wh.thread_handle)")
+
+    it "uses a dedicated status channel and remembers each drain acknowledgement":
+        val server_source = file_read_text(
+            "src/lib/nogc_async_mut/http_server/server.spl")
+        val worker_source = file_read_text(
+            "src/lib/nogc_async_mut/http_server/worker.spl")
+        expect(server_source).to_contain("status_channels: [Channel]")
+        expect(server_source).to_contain("drained_workers[status_index] = true")
+        expect(server_source).to_contain(
+            "self.status_channels[status_index].try_recv()")
+        expect(worker_source).to_contain("self.status.send(\"drained\")")
+        expect(worker_source.contains("self.control.send(\"drained\")")).to_equal(false)
+
+    it "releases the listener when TLS construction fails after bind":
+        val worker_source = file_read_text(
+            "src/lib/nogc_async_mut/http_server/worker.spl")
+        val cert_failure = worker_source.index_of(
+            "certificate load failed: {msg}")
+        val key_failure = worker_source.index_of(
+            "private key load failed: {msg}")
+        val first_close = worker_source.index_of("tcp_backend_close(listen_fd)")
+        expect(cert_failure).to_be_greater_than(first_close)
+        expect(key_failure).to_be_greater_than(cert_failure)
+        expect(worker_source.count("tcp_backend_close(listen_fd)")).to_equal(2)
+
+    it "keeps h2c initial SETTINGS and acknowledgement in one ordered write":
+        val worker_source = file_read_text(
+            "src/lib/nogc_async_mut/http_server/worker.spl")
+        val transition_start = worker_source.index_of("if h2c_probe == 1:")
+        val transition_end = worker_source.index_of(
+            "# A failed probe may include bytes retained from earlier recv")
+        val transition = worker_source.slice(transition_start, transition_end)
+        expect(transition).to_contain("H2Connection.new(fd, peer, now)")
+        expect(transition).to_contain("h2conn.consume_frames()")
+        expect(transition).to_contain("h2conn.take_pending_writes()")
+        expect(transition.count("self.driver.submit_send_bytes(fd")).to_equal(1)
+        expect(transition.contains("h2conn.settings_sent = true")).to_equal(false)

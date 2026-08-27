@@ -29,6 +29,20 @@ unsuccessful results through the reset generation. Executable regressions prove
 one resolution pass for an exact repeated miss, distinct adjacent caller
 entries, and reset invalidation.
 
+On 2026-08-19 the long-lived-session remainder was closed in Pure Simple: the
+combined caches are capped at 256 entries, each uncached resolution retains its
+bounded file/directory probe dependency set, and explicit create/edit/move/
+delete notifications invalidate stale hits and misses. The compiler watcher now
+routes added/modified/deleted source events through those notifications, while
+its move bridge preserves old and new identities in one invalidation event.
+Fast, precise-full, fail-closed-full, ambiguity, event-kind, and changed-path
+counts are reported separately. A fast-entry invalidation can therefore no
+longer suppress the conservative full-cache clear required by an unmatched
+producer path spelling. The focused regression covers 300 unique misses, all
+four mutation classes, exact telemetry, and the spelling-mismatch case. The
+correctness receipt and still-blocked self-hosted admission are retained in
+`doc/10_metrics/compiler/loader_negative_cache_bounded_2026-08-19.md`.
+
 ## Unblock condition
 Reproduce on an admitted self-hosted binary and prove at least 90% fewer failed
 loader metadata probes with no p95 latency or maximum-RSS regression. The

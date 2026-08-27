@@ -1,10 +1,11 @@
 # CLI compile — opt-level parsing + pure/dynamic driver compile
+use app.io.cli_compile.*
 # CLI Compile Functions - Compilation pipeline
 # Extracted from cli_ops.spl for modularity
 # Functions here reference helpers in cli_ops.spl (same directory, no imports needed)
 
 # Helpers from cli_ops.spl
-use app.io.cli_ops (cli_handle_compile, env_set, _cli_eprint, _cli_dir_create_impl, _cli_file_write_impl, _cli_file_copy_impl, _cli_process_run, _cli_shell, _cli_shell_bool, _cli_file_exists_impl, _cli_file_read_impl, _cli_driver_binary)
+use app.io.cli_ops (rt_cli_handle_compile, rt_env_get, env_set, _cli_eprint, _cli_dir_create_impl, _cli_file_write_impl, _cli_file_copy_impl, _cli_process_run, _cli_shell, _cli_shell_bool, _cli_file_exists_impl, _cli_file_read_impl, _cli_driver_binary)
 
 # Pure Simple compiler driver (use desugared static methods for interpreter compatibility)
 use compiler.driver.driver (compiler_driver_create, compiler_driver_run_compile, aot_file, aot_c_file, aot_cuda_file, aot_opencl_file, aot_vhdl_file, compile_to_smf)
@@ -12,7 +13,7 @@ use lazy compiler.driver.driver_api (aot_native_file_with_backend, aot_native_pr
 use lazy compiler.backend.linker.lib_smf_writer (LibSmfBuilder)
 use lazy app.compile.native (compile_native)
 use compiler.driver.driver_types (CompileOptions, CompileMode, CompileResult, OutputFormat)
-use compiler.common.driver_core_types (driver_core_compile_options_default, compileoptions_normalize_mir_optimization)
+use compiler.common.driver_core_types (compileoptions_normalize_mir_optimization)
 use compiler.mir_opt (mir_optimization_inventory_lines)
 use compiler.mir_opt.mod (TargetOptContext, target_opt_context_default)
 use std.common.convert.{try_parse_int}
@@ -48,23 +49,6 @@ fn cli_parse_opt_level(level: text) -> i64?:
     if level == "aggressive" or level == "3" or level == "max":
         return Some(3)
     nil
-
-fn cli_mcdc_mode_canonical(raw: text) -> text?:
-    match raw.trim().to_lower():
-        case "off" | "static-off" | "disabled" | "0": Some("off")
-        case "on" | "static" | "static-on" | "enabled" | "1": Some("on")
-        case "dynamic" | "dynamic-aspect" | "aspect" | "dynload": Some("dynamic")
-        case _: nil
-
-fn cli_mcdc_route_requested(mode: text, owner_bytes: i64, global_bytes: i64) -> bool:
-    mode == "on" or mode == "dynamic" or owner_bytes > 0 or global_bytes > 0
-
-fn cli_reject_unsupported_mcdc_route(route: text, mode: text):
-    _cli_eprint("Error: MC/DC instrumentation is unsupported by {route}")
-    if mode == "dynamic":
-        _cli_eprint("MCDC-E-DYNAMIC-UNSUPPORTED: use an admitted dynamic-capable target")
-    else:
-        _cli_eprint("MCDC-E-PROBE-UNLOWERED: use the Pure Simple native/LLVM driver")
 
 fn cli_print_shared_opt_level_help():
     print "  --opt-level=<level>  Optimization level: none, basic, standard, aggressive"
@@ -116,8 +100,7 @@ fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: 
                 parent = p
             val build_dir = "{parent}/.simple/build"
             _cli_dir_create_impl(build_dir, true)
-            val smf_filename: text = filename.replace(".spl", ".smf")
-            out = "{build_dir}/{smf_filename}"
+            out = "{build_dir}/{filename.replace(".spl", ".smf")}"
         else:
             # Contained default: never a bare filename in cwd. See
             # default_output_dir_containment_plan.md.
@@ -129,25 +112,23 @@ fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: 
 
     # Use the Pure Simple compiler driver directly
     # (use desugared __default/__create for interpreter compatibility)
-    var options = driver_core_compile_options_default()
+    var options = CompileOptions.default()
     options.mode = CompileMode.Aot
     options.input_files = [source_file]
     options.output_file = out
     options.verbose = verbose
     options.low_memory = low_memory
     options.profile = profile
+    # Snapshot the CLI-scoped compatibility transport into the typed request.
+    # CompileContext and cache identity no longer reread mutable process state.
+    options.mcdc_policy = CompilerConfig.from_env().mcdc_policy.to_text()
     if release or opt_level > 0:
         options.release = release
         options.opt_level = opt_level
     if backend != "" and backend != "auto":
         options.backend = backend
-    options.target_opt_ctx = target_opt_ctx
     if debug_trace_level != "":
         options.debug_trace_level = debug_trace_level
-    options.coverage_enabled = coverage_enabled
-    options.mcdc_mode_text = mcdc_mode_text
-    options.mcdc_owner_bytes = mcdc_owner_bytes
-    options.mcdc_global_bytes = mcdc_global_bytes
     options = compileoptions_normalize_mir_optimization(options)
 
     val driver = compiler_driver_create(options)
@@ -214,12 +195,10 @@ fn cli_compile_uses_simple_driver(args: [text]) -> bool:
     while i < args.len():
         val arg = args[i]
         if arg == "--backend" and i + 1 < args.len():
-            if args[i + 1] == "vhdl" or args[i + 1] == "wasm" or args[i + 1] == "vulkan" or args[i + 1] == "spirv":
+            if args[i + 1] == "vhdl" or args[i + 1] == "wasm":
                 return true
             i = i + 1
-        elif arg == "--backend=vhdl" or arg == "--backend=wasm" or arg == "--backend=vulkan" or arg == "--backend=spirv":
-            return true
-        elif arg == "--emit-vulkan-spirv-assembly" or arg.starts_with("--emit-vulkan-spirv-assembly="):
+        elif arg == "--backend=vhdl" or arg == "--backend=wasm":
             return true
         elif arg == "--format=smf":
             return true
@@ -254,21 +233,22 @@ fn cli_validate_opt_level_args(args: [text]) -> i64:
     0
 
 fn cli_compile_via_runtime(args: [text]) -> i64:
-    val exit_code = cli_handle_compile(args)
+    val exit_code = rt_cli_handle_compile(args)
     if exit_code == 3:
         _cli_eprint("Error: compile bridge exited early before reporting diagnostics")
         _cli_eprint("Hint: this usually means the delegated compiler binary failed during startup or config load")
         _cli_eprint("Hint: try a bootstrap/release driver rebuild, or inspect workspace config files such as simple.sdn")
     exit_code
 
-fn cli_compile(args: [text]) -> i64:
+pub fn cli_compile(args: [text]) -> i64:
     val opt_level_validation = cli_validate_opt_level_args(args)
     if opt_level_validation != 0:
         return opt_level_validation
     if not cli_compile_uses_simple_driver(args):
         return cli_compile_via_runtime(args)
 
-    val _compile_target_opt_ctx = target_opt_context_default()
+    val _driver_flags = parse_build_driver_flags(args)
+    val _compile_target_opt_ctx = build_driver_flags_to_target_opt_ctx(_driver_flags)
 
     var source_file: text = ""
     var output_file: text = ""
@@ -290,10 +270,6 @@ fn cli_compile(args: [text]) -> i64:
     var optimization_requested: bool = false
     var profile: text = "dev"
     var debug_trace_level: text = ""
-    var coverage_enabled: bool = false
-    var mcdc_mode_text: text = ""
-    var mcdc_owner_bytes: i64 = 0
-    var mcdc_global_bytes: i64 = 0
     var vulkan_assembly_output: text = ""
 
     var i = 0
@@ -314,24 +290,14 @@ fn cli_compile(args: [text]) -> i64:
             print "  --format=<fmt>        Output: native, smf, self-contained (sc), both"
             print "  --native              Compile to native binary via C codegen + gcc"
             print "  --backend=<backend>   Backend: auto, cranelift, llvm, vhdl, c, cuda, vulkan (default: auto)"
-            print "  --emit-vulkan-spirv-assembly <path>  Emit Vulkan SPIR-V assembly"
             print "  --driver-mode=<mode>  Driver packaging mode: dynamic emits .lsm"
             print "  --emit-c              Emit C++20 source code (C backend)"
             print "  --coverage            Enable coverage instrumentation"
-            print "  --mcdc                Enable static MC/DC instrumentation"
-            print "  --mcdc-mode=<mode>    MC/DC mode: static-off, static-on, dynamic-aspect"
-            print "  --no-mcdc             Fully disable MC/DC instrumentation"
-            print "  --mcdc-owner-bytes=N  Fixed per-owner MC/DC buffer budget"
-            print "  --mcdc-global-bytes=N Fixed process-wide MC/DC buffer budget"
             print "  --coverage-output=<p> Coverage output file path"
             print "  --release             Release build (optimized, prefers LLVM)"
             print "  --release-optimized   Max optimization: -O3 + x86-64-v3 + ThinLTO"
             cli_print_shared_opt_level_help()
             print "  --debug-trace=<level> Semantic trace instrumentation: functions, objects, full"
-            print "  --debug-info=<level>  DWARF debug info (LLVM backend): none, line-tables, full"
-            print "                        (default: on for dev builds, off for --release; 'full'"
-            print "                        currently emits the same line-table-level info as"
-            print "                        'line-tables' -- per-instruction locations pending)"
             print "  --profile=<name>      Compile profile: dev, test, prod"
             print "  --list-optimizations  Print implemented optimization groups and levels"
             print "  --lto                 Enable ThinLTO (+2-3% speed)"
@@ -383,25 +349,6 @@ fn cli_compile(args: [text]) -> i64:
             else:
                 _cli_eprint("Error: --backend requires an argument")
                 return 1
-        elif arg.starts_with("--emit-vulkan-spirv-assembly="):
-            vulkan_assembly_output = arg.substring("--emit-vulkan-spirv-assembly=".len())
-            if vulkan_assembly_output == "":
-                _cli_eprint("Error: --emit-vulkan-spirv-assembly requires a path")
-                return 1
-            if backend != "auto" and backend != "vulkan" and backend != "spirv":
-                _cli_eprint("Error: --emit-vulkan-spirv-assembly requires --backend=vulkan")
-                return 1
-            backend = "vulkan"
-        elif arg == "--emit-vulkan-spirv-assembly":
-            i = i + 1
-            if i >= args.len() or args[i] == "" or args[i].starts_with("-"):
-                _cli_eprint("Error: --emit-vulkan-spirv-assembly requires a path")
-                return 1
-            vulkan_assembly_output = args[i]
-            if backend != "auto" and backend != "vulkan" and backend != "spirv":
-                _cli_eprint("Error: --emit-vulkan-spirv-assembly requires --backend=vulkan")
-                return 1
-            backend = "vulkan"
         elif arg.starts_with("--driver-mode="):
             driver_mode = arg.substring(14)
         elif arg == "--driver-mode":
@@ -487,17 +434,6 @@ fn cli_compile(args: [text]) -> i64:
                 _cli_eprint("Valid levels: functions, objects, full")
                 return 1
             debug_trace_level = trace_val
-        elif arg.starts_with("--debug-info="):
-            val di_val = arg.substring(13)
-            if di_val != "none" and di_val != "line-tables" and di_val != "full":
-                _cli_eprint("Error: Unknown debug-info level: {di_val}")
-                _cli_eprint("Valid levels: none, line-tables, full")
-                return 1
-            # Consumed by backend_helper_debug_info (backend_helpers.spl),
-            # which layers this override on top of the release-mode default
-            # (debug_info: not is_release). No CompileOptions field for this
-            # yet -- see that function's doc for why an env var was chosen.
-            env_set("SIMPLE_DEBUG_INFO_LEVEL", di_val)
         elif arg == "--lto":
             use_lto = true
         elif arg.starts_with("--march="):
@@ -507,45 +443,8 @@ fn cli_compile(args: [text]) -> i64:
         elif arg.starts_with("--pgo-use="):
             pgo_use_path = arg.substring(10)
         elif arg == "--coverage":
-            coverage_enabled = true
-        elif arg == "--mcdc":
-            mcdc_mode_text = "on"
-        elif arg == "--no-mcdc":
-            mcdc_mode_text = "off"
-        elif arg.starts_with("--mcdc-mode="):
-            val mode_value = arg.substring(12)
-            val canonical_mode = cli_mcdc_mode_canonical(mode_value)
-            if canonical_mode.is_none():
-                _cli_eprint("Error: Unknown MC/DC mode: {mode_value}")
-                _cli_eprint("Valid modes: static-off, static-on, dynamic-aspect")
-                return 1
-            mcdc_mode_text = canonical_mode ?? ""
-        elif arg == "--mcdc-mode":
-            i = i + 1
-            if i >= args.len():
-                _cli_eprint("Error: --mcdc-mode requires an argument")
-                return 1
-            val mode_value = args[i]
-            val canonical_mode = cli_mcdc_mode_canonical(mode_value)
-            if canonical_mode.is_none():
-                _cli_eprint("Error: Unknown MC/DC mode: {mode_value}")
-                _cli_eprint("Valid modes: static-off, static-on, dynamic-aspect")
-                return 1
-            mcdc_mode_text = canonical_mode ?? ""
-        elif arg.starts_with("--mcdc-owner-bytes="):
-            val owner_value = arg.substring(19)
-            val parsed_owner = try_parse_int(owner_value)
-            if parsed_owner.is_none() or (parsed_owner ?? 0) <= 0:
-                _cli_eprint("Error: --mcdc-owner-bytes requires a positive integer")
-                return 1
-            mcdc_owner_bytes = parsed_owner ?? 0
-        elif arg.starts_with("--mcdc-global-bytes="):
-            val global_value = arg.substring(20)
-            val parsed_global = try_parse_int(global_value)
-            if parsed_global.is_none() or (parsed_global ?? 0) <= 0:
-                _cli_eprint("Error: --mcdc-global-bytes requires a positive integer")
-                return 1
-            mcdc_global_bytes = parsed_global ?? 0
+            # Pass-through (compiler config reads env/args)
+            pass
         elif arg.starts_with("--coverage-output="):
             # Pass-through (handled by compiler)
             pass
@@ -590,13 +489,7 @@ fn cli_compile(args: [text]) -> i64:
         _cli_eprint("Error: --emit-vulkan-spirv-assembly requires --backend=vulkan")
         return 1
 
-    val mcdc_route_requested = cli_mcdc_route_requested(
-        mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes)
-
     if driver_mode != "":
-        if mcdc_route_requested:
-            cli_reject_unsupported_mcdc_route("dynamic driver packaging", mcdc_mode_text)
-            return 1
         if driver_mode != "dynamic":
             _cli_eprint("Error: Unknown driver mode: {driver_mode}")
             _cli_eprint("Supported driver modes: dynamic")
@@ -604,27 +497,15 @@ fn cli_compile(args: [text]) -> i64:
         return cli_compile_dynamic_driver_library(source_file, output_file, backend, verbose, release, low_memory)
 
     if backend == "vhdl":
-        if mcdc_route_requested:
-            cli_reject_unsupported_mcdc_route("the VHDL backend", mcdc_mode_text)
-            return 1
         return compile_vhdl(source_file, output_file, verbose)
 
     if backend == "cuda" or backend == "ptx":
-        if mcdc_route_requested:
-            cli_reject_unsupported_mcdc_route("the CUDA backend", mcdc_mode_text)
-            return 1
         return compile_cuda(source_file, output_file, verbose)
 
     if backend == "opencl" or backend == "opencl-c" or backend == "opencl-spirv" or backend == "cl":
-        if mcdc_route_requested:
-            cli_reject_unsupported_mcdc_route("the OpenCL backend", mcdc_mode_text)
-            return 1
         return compile_opencl(source_file, output_file, verbose)
 
     if backend == "vulkan" or backend == "spirv":
-        if mcdc_route_requested:
-            cli_reject_unsupported_mcdc_route("the Vulkan backend", mcdc_mode_text)
-            return 1
         var vulkan_output = vulkan_assembly_output
         if vulkan_output == "":
             vulkan_output = output_file
@@ -633,9 +514,6 @@ fn cli_compile(args: [text]) -> i64:
         return cli_compile_pure_simple(source_file, vulkan_output, "vulkan", "vulkan", verbose, release, low_memory, opt_level, profile, _compile_target_opt_ctx, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes)
 
     if backend == "c" or backend == "cpp" or backend == "ccodegen" or emit_c:
-        if mcdc_route_requested:
-            cli_reject_unsupported_mcdc_route("the C backend", mcdc_mode_text)
-            return 1
         return compile_c_backend(source_file, output_file, verbose)
 
     # LLVM and native compilation — route through Pure Simple driver or native pipeline
@@ -653,16 +531,10 @@ fn cli_compile(args: [text]) -> i64:
         return compile_native(source_file, out, verbose, "", false, backend, release, opt_level, use_lto, march_target)
 
     if target.starts_with("baremetal-"):
-        if mcdc_route_requested:
-            cli_reject_unsupported_mcdc_route("the bare-metal target route", mcdc_mode_text)
-            return 1
         return compile_baremetal(source_file, target, emit, output_file, verbose)
 
     # SimpleOS targets — route through Pure Simple compiler (bare-metal ELF)
     if target.contains("simpleos"):
-        if mcdc_route_requested:
-            cli_reject_unsupported_mcdc_route("the SimpleOS target route", mcdc_mode_text)
-            return 1
         return compile_simpleos(source_file, target, emit, output_file, verbose)
 
     if output_format != "":
@@ -673,18 +545,12 @@ fn cli_compile(args: [text]) -> i64:
 
     # WASM targets: emit WAT via the pure-Simple WASM backend (no LLVM needed).
     if _cli_is_wasm_target(target) or backend == "wasm":
-        if mcdc_route_requested:
-            cli_reject_unsupported_mcdc_route("the WASM backend", mcdc_mode_text)
-            return 1
         var wout = output_file
         if wout == "":
             wout = source_file.replace(".spl", ".wat")
         return cli_compile_pure_simple(source_file, wout, output_format, "wasm", verbose, release, low_memory, opt_level, profile, _compile_target_opt_ctx, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes)
 
     if target != "" and not target.starts_with("baremetal-"):
-        if mcdc_route_requested:
-            cli_reject_unsupported_mcdc_route("the external target route", mcdc_mode_text)
-            return 1
         # Route non-baremetal targets through the Rust frontend so wasm and
         # full target triples share the same canonical build path.
         return cli_compile_via_runtime(args)
@@ -705,9 +571,18 @@ fn compile_baremetal(source_file: text, target: text, emit: text, output_file: t
         "i686"
     elif target == "baremetal-x86_64":
         "x86_64"
+    elif target == "baremetal-arm":
+        "armv7"
+    elif target == "baremetal-aarch64":
+        "aarch64"
+    elif target == "baremetal-riscv32":
+        "riscv32"
+    elif target == "baremetal-riscv64":
+        "riscv64"
     else:
         _cli_eprint("Error: Unknown bare-metal target: {target}")
-        _cli_eprint("Supported by this ELF linker facade: baremetal-x86, baremetal-x86_64")
+        _cli_eprint("Supported: baremetal-x86, baremetal-x86_64, baremetal-arm,")
+        _cli_eprint("           baremetal-aarch64, baremetal-riscv32, baremetal-riscv64")
         return 1
 
     if not _cli_dir_create_impl("build/baremetal", true):
@@ -720,21 +595,25 @@ fn compile_baremetal(source_file: text, target: text, emit: text, output_file: t
         print "Compiling Simple -> LLVM IR (pure Simple compiler)..."
         print "  Target triple: {target_triple}"
 
-    val artifacts = cli_compile_source_llvm_artifacts(
-        source_file, target_triple, true, "build/baremetal",
-        "baremetal", emit != "llvm-ir")
+    val (llvm_ir, compile_err, compile_exit) = rt_compile_to_llvm_ir(source_file, target_triple, true)
 
-    if not artifacts.is_success():
+    if compile_exit != 0 or llvm_ir == "":
         _cli_eprint("Error: LLVM IR generation failed")
-        if artifacts.error != "":
-            _cli_eprint(artifacts.error)
+        if compile_err != "":
+            _cli_eprint(compile_err)
         return 1
 
+    # Keep bootstrap-safe: avoid nested method calls on str/text
+    val base_name = "baremetal_stub"
+    val ir_file = "build/baremetal/{base_name}.ll"
+    if not _cli_file_write_impl(ir_file, llvm_ir):
+        _cli_eprint("Error: Failed to write LLVM IR to {ir_file}")
+        return 1
+
+    if verbose:
+        print "  Generated: {ir_file}"
+
     if emit == "llvm-ir":
-        if artifacts.unit_count() != 1:
-            _cli_eprint("Error: --emit=llvm-ir requires a single-module source closure; use ELF output for multi-module programs")
-            return 1
-        val ir_file = artifacts.ir_files[0]
         if output_file != "":
             if not _cli_file_copy_impl(ir_file, output_file):
                 _cli_eprint("Error: Failed to copy to {output_file}")
@@ -744,11 +623,26 @@ fn compile_baremetal(source_file: text, target: text, emit: text, output_file: t
             print "Output: {ir_file}"
         return 0
 
+    if verbose:
+        print "Compiling LLVM IR -> Object file..."
+
+    val obj_file = "build/baremetal/{base_name}.o"
+    val (llc_out, llc_err, llc_exit) = _cli_process_run("llc", [
+        "--filetype=obj",
+        "--relocation-model=static",
+        ir_file,
+        "-o", obj_file
+    ])
+
+    if llc_exit != 0:
+        _cli_eprint("Error: llc compilation failed")
+        _cli_eprint(llc_err)
+        return 1
+
+    if verbose:
+        print "  Generated: {obj_file}"
+
     if emit == "object":
-        if artifacts.unit_count() != 1:
-            _cli_eprint("Error: --emit=object requires a single-module source closure; use ELF output for multi-module programs")
-            return 1
-        val obj_file = artifacts.object_files[0]
         if output_file != "":
             if not _cli_file_copy_impl(obj_file, output_file):
                 _cli_eprint("Error: Failed to copy to {output_file}")
@@ -766,31 +660,23 @@ fn compile_baremetal(source_file: text, target: text, emit: text, output_file: t
     else:
         "build/baremetal/kernel.elf"
 
-    if not artifacts.entry_symbol_defined:
-        _cli_eprint("Error: bare-metal ELF output requires a source-defined _start entry function")
-        return 1
-
     val linker_script = "build/baremetal/linker.ld"
-    val fmt = if arch == "i686": "elf32-i386" else: "elf64-x86-64"
-    val script = "OUTPUT_FORMAT(" + fmt + ")\nENTRY(_start)\nSECTIONS {\n  . = 0x00100000;\n  .text : { *(.text*) }\n  .rodata : { *(.rodata*) }\n  .data : { *(.data*) }\n  .bss : { *(.bss*) *(COMMON) }\n}\n"
-    if not _cli_file_write_impl(linker_script, script):
-        _cli_eprint("Error: Failed to write linker script {linker_script}")
-        return 1
+    if not _cli_file_exists_impl(linker_script):
+        val fmt = if arch == "i686": "elf32-i386" else: "elf64-x86-64"
+        val script = "OUTPUT_FORMAT(" + fmt + ")\nENTRY(_start)\nSECTIONS {\n  . = 0x00100000;\n  .text : { *(.text*) }\n  .rodata : { *(.rodata*) }\n  .data : { *(.data*) }\n  .bss : { *(.bss*) *(COMMON) }\n}\n"
+        if not _cli_file_write_impl(linker_script, script):
+            _cli_eprint("Error: Failed to write linker script {linker_script}")
+            return 1
 
-    var linker_args: [text] = [""; artifacts.object_files.len() + 8]
-    linker_args[0] = "-T"
-    linker_args[1] = linker_script
-    linker_args[2] = "-nostdlib"
-    linker_args[3] = "--entry=_start"
-    linker_args[4] = "-m"
-    linker_args[5] = if arch == "i686": "elf_i386" else: "elf64_x86_64"
-    var object_index = 0
-    while object_index < artifacts.object_files.len():
-        linker_args[object_index + 6] = artifacts.object_files[object_index]
-        object_index = object_index + 1
-    linker_args[artifacts.object_files.len() + 6] = "-o"
-    linker_args[artifacts.object_files.len() + 7] = elf_file
-    val (ld_out, ld_err, ld_exit) = _cli_process_run("ld", linker_args)
+    val (ld_out, ld_err, ld_exit) = _cli_process_run("ld", [
+        "-T", linker_script,
+        "-nostdlib",
+        "--entry=_start",
+        # Force 32-bit output for i686 target
+        "-m", if arch == "i686": "elf_i386" else: "elf64_x86_64",
+        obj_file,
+        "-o", elf_file
+    ])
 
     if ld_exit != 0:
         _cli_eprint("Error: Linking failed")

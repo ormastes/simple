@@ -19,7 +19,7 @@ use std.gc_async_mut.slang.model_executor.model_loader.manifest.{serialize_manif
 use std.gc_async_mut.slang.nvfs_client.{ObjClass, CreateFlags, OpenMode}
 use std.gc_async_mut.slang.nvfs_client.std_fs.{StdFsNvfsClient, publish_staged}
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
-use app.io.mod.{process_run, dir_create}
+use app.io.mod.{process_run}
 
 # Exit codes (kept as named constants for readability; see module-header docs).
 val EXIT_OK: i32 = 0
@@ -28,13 +28,15 @@ val EXIT_USAGE: i32 = 2
 val PACK_CHUNK_ALIGN: i64 = 4096
 val PACK_PREFERRED_CHUNK_BYTES: i64 = 2097152
 
-use std.io_runtime.{file_exists, file_read_bytes}
+extern fn rt_file_read_bytes(path: text) -> [u8]
+use std.io_runtime.{file_exists}
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
 
-# Coerce the runtime's Option<[u8]>-vs-[u8] return into plain [u8].
+# Coerce rt_file_read_bytes' Option<[u8]>-vs-[u8] return into plain [u8].
 # The interpreter sometimes wraps extern [u8] returns as Option::Some(...);
-# the shared facade preserves the empty fallback.
+# `?? []` forces unwrap with an empty fallback.
 fn _read_file_bytes(path: text) -> [u8]:
-    file_read_bytes(path)
+    rt_file_read_bytes(path) ?? []
 
 fn _usage() -> ():
     print("slang-pack — convert upstream safetensors into a sealed tensor_pack")
@@ -58,7 +60,7 @@ fn _slang_pack_slice_bytes(src: [u8], start: i64, len: i64) -> [u8]:
 # Convert a text string (e.g. serialized manifest) into its UTF-8 byte array.
 # Uses `char_code_at` which works under the Rust-seed interpreter (the
 # `byte_at` method is self-hosted-only); manifest text is ASCII-only.
-fn _slang_pack_text_to_bytes(s: text) -> [u8]:
+fn _svllm_pack_text_to_bytes(s: text) -> [u8]:
     var out: [u8] = []
     var i = 0
     while i < s.len():
@@ -88,7 +90,7 @@ fn _tensors_from_header(h: SafetensorsHeader) -> [TensorInfo]:
 fn _ensure_dir(path: text) -> bool:
     if file_exists(path):
         return true
-    dir_create(path, true)
+    rt_dir_create(path, true)
 
 # The core packer. Returns Ok(()) or Err with a user-facing message.
 fn _do_pack(in_path: text, out_dir: text) -> Result<(), text>:
@@ -181,7 +183,7 @@ fn _do_pack(in_path: text, out_dir: text) -> Result<(), text>:
         c = c + 1
     # Serialize the manifest.
     val manifest_text = serialize_manifest(pack)
-    val manifest_bytes = _slang_pack_text_to_bytes(manifest_text)
+    val manifest_bytes = _svllm_pack_text_to_bytes(manifest_text)
     val manifest_staging = out_dir + "/manifest.sdn.tmp"
     val mobj_r = client.create(manifest_staging, ObjClass.Manifest, CreateFlags.defaults())
     if mobj_r.is_err():

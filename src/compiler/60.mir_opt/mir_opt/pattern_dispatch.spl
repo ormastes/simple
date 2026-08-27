@@ -1,8 +1,10 @@
-# Pattern-Idiom candidate engine and quarantined production adapters
+# Pattern-Idiom Pass Dispatch — Wave K4 MIR rewriter
 #
-# Production entry points are exact identities while PatternIdiom is Disabled.
-# Explicitly named candidate functions simulate capability-gated Call-to-
-# Intrinsic rewriting for backend and semantic parity fixtures only.
+# Module-level pass entry point that the canonical optimisation pipeline calls
+# under dispatch key "pattern_idiom" (see mod.spl pipeline_optimize).
+#
+# Replaces recognised software cipher Call sites with MirInstKind.Intrinsic,
+# gated on TargetCapsKind capability flags (multi-arch: x86, AArch64, RV64).
 #
 # See:
 #   src/compiler/60.mir_opt/mir_opt/pattern/rules_crypto.spl (rule table)
@@ -188,7 +190,7 @@ For each Call instruction:
 Increments stats.visited_calls for every Call seen, and stats.cipher_hits
 for every successful rewrite.
 """
-fn rewrite_block(block: MirBlock, caps: X86Caps, mut stats: PatternIdiomStats) -> MirBlock:
+fn rewrite_block(block: MirBlock, caps: X86Caps, stats: PatternIdiomStats) -> MirBlock:
     var new_insts: [MirInst] = []
     for inst in block.instructions:
         match inst.kind:
@@ -196,16 +198,13 @@ fn rewrite_block(block: MirBlock, caps: X86Caps, mut stats: PatternIdiomStats) -
                 stats.visited_calls = stats.visited_calls + 1
                 var rewritten = false
                 val maybe_callee = extract_callee_name(func_op)
-                if maybe_callee.?:
-                    val callee = maybe_callee.unwrap()
+                if val callee = maybe_callee:
                     val maybe_rule = lookup_rule_for_callee(callee)
-                    if maybe_rule.?:
-                        val rule = maybe_rule.unwrap()
+                    if val rule = maybe_rule:
                         val maybe_idiom = idiom_for_intrinsic(rule.intrinsic)
-                        if maybe_idiom.?:
-                            val idiom = maybe_idiom.unwrap()
+                        if val idiom = maybe_idiom:
                             if caps.supports(idiom):
-                                val new_inst = MirInst(
+                                var new_inst = MirInst(
                                     kind: MirInstKind.Intrinsic(dest, rule.intrinsic, args),
                                     span: inst.span
                                 )
@@ -231,15 +230,16 @@ fn rewrite_block(block: MirBlock, caps: X86Caps, mut stats: PatternIdiomStats) -
 # Pass entry points
 # ============================================================================
 
-"""Simulate the pattern-idiom rewrite with explicit X86Caps.
+"""Run the pattern-idiom rewrite pass with explicit X86Caps.
 
 Walks every function x block x instruction.  Recognised software cipher
 Call sites are replaced with MirInstKind.Intrinsic when caps.supports the
-required idiom. Stats counters are updated for each visit and each hit. This
-candidate engine is retained for semantic/backend parity fixtures; production
-pass adapters below preserve MIR until that proof is complete.
+required idiom.  Stats counters are updated for each visit and each hit.
+
+The dispatcher in mod.spl invokes run_pattern_idiom_pass (the no-caps
+wrapper below) under the "vectorization" pass name.
 """
-fn run_pattern_idiom_candidate_pass_x86(module: MirModule, caps: X86Caps, cipher_remark: bool) -> MirModule:
+fn run_pattern_idiom_pass_x86(module: MirModule, caps: X86Caps, cipher_remark: bool) -> MirModule:
     if not cipher_remark and not x86_caps_supports_any_pattern_idiom(caps):
         return module
     var stats = pattern_idiom_stats_zero()
@@ -283,23 +283,32 @@ fn run_pattern_idiom_candidate_pass_x86(module: MirModule, caps: X86Caps, cipher
         )
     result
 
-fn run_pattern_idiom_pass_x86(module: MirModule, caps: X86Caps, cipher_remark: bool) -> MirModule:
-    """Preserve MIR while PatternIdiom lacks complete backend parity."""
-    module
+"""Run the pattern-idiom pass on a module using baseline (no-extension) caps.
 
-"""Preserve MIR while PatternIdiom is disabled.
-
-This entry point is wired in mod.spl and is deliberately an identity, including
-for direct callers.
+This is the entry point wired in mod.spl.  It delegates to
+run_pattern_idiom_pass_x86 with all-false X86Caps so that no rewrites
+happen in the default pipeline until an explicit caps-aware caller is wired.
+Existing tests continue to pass unchanged.
 """
 fn run_pattern_idiom_pass(module: MirModule) -> MirModule:
-    module
+    val default_caps = X86Caps(
+        has_aes: false,
+        has_sha_ni: false,
+        has_sse42: false,
+        has_popcnt: false,
+        has_pclmul: false,
+        has_avx: false,
+        has_avx2: false,
+        has_avx512: false,
+        has_bmi1: false
+    )
+    run_pattern_idiom_pass_x86(module, default_caps, false)
 
 # ============================================================================
 # Multi-arch generic entry points (Phase 1)
 # ============================================================================
 
-fn rewrite_block_generic(block: MirBlock, caps_kind: TargetCapsKind, mut stats: PatternIdiomStats) -> MirBlock:
+fn rewrite_block_generic(block: MirBlock, caps_kind: TargetCapsKind, stats: PatternIdiomStats) -> MirBlock:
     var new_insts: [MirInst] = []
     val target_name = caps_kind_target_name(caps_kind)
     for inst in block.instructions:
@@ -308,18 +317,15 @@ fn rewrite_block_generic(block: MirBlock, caps_kind: TargetCapsKind, mut stats: 
                 stats.visited_calls = stats.visited_calls + 1
                 var rewritten = false
                 val maybe_callee = extract_callee_name(func_op)
-                if maybe_callee.?:
-                    val callee = maybe_callee.unwrap()
+                if val callee = maybe_callee:
                     val maybe_rule = lookup_rule_for_callee(callee)
-                    if maybe_rule.?:
-                        val rule = maybe_rule.unwrap()
+                    if val rule = maybe_rule:
                         val maybe_idiom = idiom_for_intrinsic(rule.intrinsic)
-                        if maybe_idiom.?:
-                            val idiom = maybe_idiom.unwrap()
+                        if val idiom = maybe_idiom:
                             if caps_kind_supports(caps_kind, idiom):
                                 val hw_cost = caps_kind_cost(caps_kind, idiom)
                                 if should_rewrite_default(hw_cost, rule.software_cost):
-                                    val new_inst = MirInst(
+                                    var new_inst = MirInst(
                                         kind: MirInstKind.Intrinsic(dest, rule.intrinsic, args),
                                         span: inst.span
                                     )
@@ -352,7 +358,7 @@ fn run_narrow_form_pass(module: MirModule, caps_kind: TargetCapsKind) -> MirModu
     """
     module
 
-fn run_pattern_idiom_candidate_pass_generic(module: MirModule, caps_kind: TargetCapsKind, cipher_remark: bool) -> MirModule:
+fn run_pattern_idiom_pass_generic(module: MirModule, caps_kind: TargetCapsKind, cipher_remark: bool) -> MirModule:
     if not cipher_remark and not caps_kind_supports_any_pattern_idiom(caps_kind):
         return module
     var stats = pattern_idiom_stats_zero()
@@ -395,7 +401,3 @@ fn run_pattern_idiom_candidate_pass_generic(module: MirModule, caps_kind: Target
             verification_contract:    func.verification_contract
         )
     result
-
-fn run_pattern_idiom_pass_generic(module: MirModule, caps_kind: TargetCapsKind, cipher_remark: bool) -> MirModule:
-    """Preserve MIR while generic target lowering/parity remains incomplete."""
-    module

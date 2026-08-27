@@ -1,6 +1,30 @@
 # Widget Panel Text Divider Specification
 
-> Tests covering Panel Widget, Text Widget, Divider Widget, Widget Integration.
+> <details>
+
+<!-- sdn-diagram:id=widget_panel_text_divider_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=widget_panel_text_divider_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+widget_panel_text_divider_spec -> common
+widget_panel_text_divider_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=widget_panel_text_divider_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,18 +43,13 @@
 
 #### creates a panel with kind panel and vbox layout
 
-- creates a panel with kind panel and vbox layout
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("creates a panel with kind panel and vbox layout")
 val p = panel("panel_create_1", "Title", [])
 expect p.kind to_equal "panel"
 expect p.layout to_equal "vbox"
@@ -42,18 +61,17 @@ expect p.focused to_equal false
 
 #### stores the title as a prop
 
-- stores the title as a prop
+1. expect p get prop
+2. expect p has prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("stores the title as a prop")
 val p = panel("panel_title_2", "My Title", [])
 expect p.get_prop("title") to_equal "My Title"
 expect p.has_prop("title") to_equal true
@@ -63,18 +81,13 @@ expect p.has_prop("title") to_equal true
 
 #### assigns the given id
 
-- assigns the given id
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("assigns the given id")
 val p = panel("panel_id_3", "T", [])
 expect p.id to_equal "panel_id_3"
 ```
@@ -85,18 +98,16 @@ expect p.id to_equal "panel_id_3"
 
 #### has correct child count with two text children
 
-- has correct child count with two text children
+1. expect p child count
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("has correct child count with two text children")
 val t1 = text_widget("panel_child_t1_4", "A")
 val t2 = text_widget("panel_child_t2_4", "B")
 val p = panel("panel_children_4", "P", [t1, t2])
@@ -107,18 +118,16 @@ expect p.child_count() to_equal 2
 
 #### retrieves children in order
 
-- retrieves children in order
+1. expect kids len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("retrieves children in order")
 val t1 = text_widget("panel_order_t1_5", "First")
 val t2 = text_widget("panel_order_t2_5", "Second")
 val p = panel("panel_order_5", "P", [t1, t2])
@@ -132,18 +141,16 @@ expect kids[1].id to_equal "panel_order_t2_5"
 
 #### has zero children when created empty
 
-- has zero children when created empty
+1. expect p child count
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("has zero children when created empty")
 val p = panel("panel_empty_6", "Empty", [])
 expect p.child_count() to_equal 0
 ```
@@ -154,18 +161,17 @@ expect p.child_count() to_equal 0
 
 #### changes layout from vbox to hbox via set_layout
 
-- changes layout from vbox to hbox via set_layout
+1. var p = panel
+2. p = p set layout
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("changes layout from vbox to hbox via set_layout")
 var p = panel("panel_layout_7", "P", [])
 p = p.set_layout("hbox")
 expect p.layout to_equal "hbox"
@@ -175,18 +181,17 @@ expect p.layout to_equal "hbox"
 
 #### preserves other fields after set_layout
 
-- preserves other fields after set_layout
+1. var p = panel
+2. p = p set layout
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("preserves other fields after set_layout")
 var p = panel("panel_layout_keep_8", "Keep", [])
 p = p.set_layout("grid")
 expect p.kind to_equal "panel"
@@ -200,18 +205,16 @@ expect p.visible to_equal true
 
 #### sets flex prop via with_flex
 
-- sets flex prop via with_flex
+1. expect p2 get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("sets flex prop via with_flex")
 val p = panel("panel_flex_9", "F", [])
 val p2 = with_flex(p, 2)
 expect p2.get_prop("flex") to_equal "2"
@@ -221,18 +224,16 @@ expect p2.get_prop("flex") to_equal "2"
 
 #### sets width prop via with_width
 
-- sets width prop via with_width
+1. expect p2 get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("sets width prop via with_width")
 val p = panel("panel_width_10", "W", [])
 val p2 = with_width(p, 200)
 expect p2.get_prop("width") to_equal "200"
@@ -242,18 +243,16 @@ expect p2.get_prop("width") to_equal "200"
 
 #### sets height prop via with_height
 
-- sets height prop via with_height
+1. expect p2 get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("sets height prop via with_height")
 val p = panel("panel_height_11", "H", [])
 val p2 = with_height(p, 100)
 expect p2.get_prop("height") to_equal "100"
@@ -265,18 +264,17 @@ expect p2.get_prop("height") to_equal "100"
 
 #### hides panel with set_visible false
 
-- hides panel with set_visible false
+1. var p = panel
+2. p = p set visible
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("hides panel with set_visible false")
 var p = panel("panel_vis_12", "V", [])
 p = p.set_visible(false)
 expect p.visible to_equal false
@@ -286,18 +284,18 @@ expect p.visible to_equal false
 
 #### shows panel with set_visible true
 
-- shows panel with set_visible true
+1. var p = panel
+2. p = p set visible
+3. p = p set visible
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("shows panel with set_visible true")
 var p = panel("panel_vis_show_13", "V", [])
 p = p.set_visible(false)
 p = p.set_visible(true)
@@ -310,18 +308,16 @@ expect p.visible to_equal true
 
 #### supports panel containing panel
 
-- supports panel containing panel
+1. expect outer child count
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("supports panel containing panel")
 val inner = panel("panel_inner_14", "Inner", [])
 val outer = panel("panel_outer_14", "Outer", [inner])
 expect outer.child_count() to_equal 1
@@ -334,18 +330,17 @@ expect child.kind to_equal "panel"
 
 #### supports deeply nested panels
 
-- supports deeply nested panels
+1. expect top child count
+2. expect mid child child count
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("supports deeply nested panels")
 val deep = panel("panel_deep_15", "Deep", [])
 val mid = panel("panel_mid_15", "Mid", [deep])
 val top = panel("panel_top_15", "Top", [mid])
@@ -362,18 +357,13 @@ expect deep_child.id to_equal "panel_deep_15"
 
 #### contains widget-panel class
 
-- contains widget-panel class
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("contains widget-panel class")
 val p = panel("panel_html_16", "TestTitle", [])
 val tree = build_tree(p)
 val state = init_state(tree)
@@ -385,18 +375,13 @@ expect html to_contain "widget-panel"
 
 #### contains panel-title with title text
 
-- contains panel-title with title text
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("contains panel-title with title text")
 val p = panel("panel_html_title_17", "MyTitle", [])
 val tree = build_tree(p)
 val state = init_state(tree)
@@ -409,18 +394,13 @@ expect html to_contain "MyTitle"
 
 #### contains layout-vbox class for vbox layout
 
-- contains layout-vbox class for vbox layout
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("contains layout-vbox class for vbox layout")
 val p = panel("panel_html_vbox_18", "V", [])
 val tree = build_tree(p)
 val state = init_state(tree)
@@ -432,18 +412,17 @@ expect html to_contain "layout-vbox"
 
 #### contains layout-hbox class for hbox layout
 
-- contains layout-hbox class for hbox layout
+1. var p = panel
+2. p = p set layout
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("contains layout-hbox class for hbox layout")
 var p = panel("panel_html_hbox_19", "H", [])
 p = p.set_layout("hbox")
 val tree = build_tree(p)
@@ -456,18 +435,13 @@ expect html to_contain "layout-hbox"
 
 #### contains focused class when focused
 
-- contains focused class when focused
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("contains focused class when focused")
 val p = panel("panel_html_focus_20", "F", [])
 val tree = build_tree(p)
 val state = UIState(
@@ -484,18 +458,13 @@ expect html to_contain "focused"
 
 #### does not contain focused class when not focused
 
-- does not contain focused class when not focused
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("does not contain focused class when not focused")
 val p = panel("panel_html_nofocus_21", "NF", [])
 val tree = build_tree(p)
 val state = UIState(
@@ -513,18 +482,13 @@ expect has_focused to_equal false
 
 #### renders children inside panel-content
 
-- renders children inside panel-content
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("renders children inside panel-content")
 val t = text_widget("panel_html_child_t_22", "ChildText")
 val p = panel("panel_html_child_22", "P", [t])
 val tree = build_tree(p)
@@ -538,18 +502,13 @@ expect html to_contain "ChildText"
 
 #### renders empty panel correctly
 
-- renders empty panel correctly
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("renders empty panel correctly")
 val p = panel("panel_html_empty_23", "Empty", [])
 val tree = build_tree(p)
 val state = init_state(tree)
@@ -562,18 +521,13 @@ expect html to_contain "Empty"
 
 #### includes widget id attribute
 
-- includes widget id attribute
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("includes widget id attribute")
 val p = panel("panel_html_id_24", "IdTest", [])
 val tree = build_tree(p)
 val state = init_state(tree)
@@ -585,18 +539,13 @@ expect html to_contain "panel_html_id_24"
 
 #### includes flex style when flex is set
 
-- includes flex style when flex is set
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("includes flex style when flex is set")
 val p = panel("panel_html_flex_25", "Flex", [])
 val p2 = with_flex(p, 3)
 val tree = build_tree(p2)
@@ -609,18 +558,13 @@ expect html to_contain "flex: 3"
 
 #### includes width style when width is set
 
-- includes width style when width is set
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("includes width style when width is set")
 val p = panel("panel_html_width_26", "W", [])
 val p2 = with_width(p, 250)
 val tree = build_tree(p2)
@@ -635,18 +579,13 @@ expect html to_contain "width: 250px"
 
 #### computes inner area with 1-char border
 
-- computes inner area with 1-char border
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("computes inner area with 1-char border")
 val t = text_widget("panel_layout_t_27", "Content")
 val p = panel("panel_layout_27", "P", [t])
 val rects = compute_layout(p, 0, 0, 80, 24)
@@ -670,18 +609,16 @@ expect child_rect.h to_equal 22
 
 #### returns only panel rect when panel has no children
 
-- returns only panel rect when panel has no children
+1. expect rects len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("returns only panel rect when panel has no children")
 val p = panel("panel_layout_empty_28", "E", [])
 val rects = compute_layout(p, 5, 10, 40, 20)
 expect rects.len() to_equal 1
@@ -701,18 +638,13 @@ expect r.h to_equal 20
 
 #### creates a text widget with kind text
 
-- creates a text widget with kind text
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("creates a text widget with kind text")
 val t = text_widget("text_create_30", "Hello")
 expect t.kind to_equal "text"
 expect t.id to_equal "text_create_30"
@@ -723,18 +655,17 @@ expect t.visible to_equal true
 
 #### stores content as a prop
 
-- stores content as a prop
+1. expect t get prop
+2. expect t has prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("stores content as a prop")
 val t = text_widget("text_content_31", "Hello World")
 expect t.get_prop("content") to_equal "Hello World"
 expect t.has_prop("content") to_equal true
@@ -746,18 +677,13 @@ expect t.has_prop("content") to_equal true
 
 #### returns content via get_prop
 
-- returns content via get_prop
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("returns content via get_prop")
 val t = text_widget("text_getprop_32", "Some text here")
 val content = t.get_prop("content")
 expect content to_equal "Some text here"
@@ -767,18 +693,16 @@ expect content to_equal "Some text here"
 
 #### handles empty content
 
-- handles empty content
+1. expect t get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("handles empty content")
 val t = text_widget("text_empty_33", "")
 expect t.get_prop("content") to_equal ""
 ```
@@ -787,18 +711,16 @@ expect t.get_prop("content") to_equal ""
 
 #### handles content with special characters
 
-- handles content with special characters
+1. expect t get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("handles content with special characters")
 val t = text_widget("text_special_34", "a < b > c & d")
 expect t.get_prop("content") to_equal "a < b > c & d"
 ```
@@ -807,18 +729,16 @@ expect t.get_prop("content") to_equal "a < b > c & d"
 
 #### handles long content
 
-- handles long content
+1. expect t get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("handles long content")
 val long_text = "This is a much longer piece of text that spans many characters for testing purposes."
 val t = text_widget("text_long_35", long_text)
 expect t.get_prop("content") to_equal long_text
@@ -830,18 +750,16 @@ expect t.get_prop("content") to_equal long_text
 
 #### creates a text widget with label prop
 
-- creates a text widget with label prop
+1. expect l get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("creates a text widget with label prop")
 val l = label("label_create_36", "My Label")
 expect l.kind to_equal "text"
 expect l.get_prop("label") to_equal "My Label"
@@ -851,18 +769,16 @@ expect l.get_prop("label") to_equal "My Label"
 
 #### does not set content prop for label
 
-- does not set content prop for label
+1. expect l get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("does not set content prop for label")
 val l = label("label_nocontent_37", "Label Text")
 expect l.get_prop("content") to_equal ""
 ```
@@ -871,18 +787,17 @@ expect l.get_prop("content") to_equal ""
 
 #### label prop is separate from content prop
 
-- label prop is separate from content prop
+1. expect l has prop
+2. expect l has prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("label prop is separate from content prop")
 val l = label("label_separate_38", "LabelVal")
 expect l.has_prop("label") to_equal true
 expect l.has_prop("content") to_equal false
@@ -894,18 +809,13 @@ expect l.has_prop("content") to_equal false
 
 #### contains widget-text class
 
-- contains widget-text class
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("contains widget-text class")
 val t = text_widget("text_html_39", "Hello")
 val tree = build_tree(t)
 val state = init_state(tree)
@@ -917,18 +827,13 @@ expect html to_contain "widget-text"
 
 #### contains the content text
 
-- contains the content text
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("contains the content text")
 val t = text_widget("text_html_content_40", "Rendered Content")
 val tree = build_tree(t)
 val state = init_state(tree)
@@ -940,18 +845,13 @@ expect html to_contain "Rendered Content"
 
 #### contains focused class when focused
 
-- contains focused class when focused
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("contains focused class when focused")
 val t = text_widget("text_html_focus_41", "Focused")
 val tree = build_tree(t)
 val state = UIState(
@@ -968,18 +868,13 @@ expect html to_contain "focused"
 
 #### does not contain focused class when not focused
 
-- does not contain focused class when not focused
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("does not contain focused class when not focused")
 val t = text_widget("text_html_nofocus_42", "NotFocused")
 val tree = build_tree(t)
 val state = UIState(
@@ -997,18 +892,13 @@ expect has_focused to_equal false
 
 #### uses label when content is empty
 
-- uses label when content is empty
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("uses label when content is empty")
 val l = label("text_html_label_43", "LabelDisplay")
 val tree = build_tree(l)
 val state = init_state(tree)
@@ -1020,18 +910,17 @@ expect html to_contain "LabelDisplay"
 
 #### prefers content over label
 
-- prefers content over label
+1. var t = text widget
+2. t = t set prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("prefers content over label")
 var t = text_widget("text_html_prefer_44", "ContentVal")
 t = t.set_prop("label", "LabelVal")
 val tree = build_tree(t)
@@ -1044,18 +933,13 @@ expect html to_contain "ContentVal"
 
 #### includes widget id attribute
 
-- includes widget id attribute
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("includes widget id attribute")
 val t = text_widget("text_html_id_45", "IdCheck")
 val tree = build_tree(t)
 val state = init_state(tree)
@@ -1067,18 +951,13 @@ expect html to_contain "text_html_id_45"
 
 #### renders empty content as empty div
 
-- renders empty content as empty div
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("renders empty content as empty div")
 val t = text_widget("text_html_empty_46", "")
 val tree = build_tree(t)
 val state = init_state(tree)
@@ -1093,18 +972,18 @@ expect html to_contain "text_html_empty_46"
 
 #### updates content via set_prop
 
-- updates content via set_prop
+1. var t = text widget
+2. t = t set prop
+3. expect t get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("updates content via set_prop")
 var t = text_widget("text_setprop_47", "Original")
 t = t.set_prop("content", "Updated")
 expect t.get_prop("content") to_equal "Updated"
@@ -1114,18 +993,19 @@ expect t.get_prop("content") to_equal "Updated"
 
 #### adds custom props
 
-- adds custom props
+1. var t = text widget
+2. t = t set prop
+3. expect t get prop
+4. expect t has prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("adds custom props")
 var t = text_widget("text_customprop_48", "Text")
 t = t.set_prop("style", "bold")
 expect t.get_prop("style") to_equal "bold"
@@ -1140,18 +1020,13 @@ expect t.has_prop("style") to_equal true
 
 #### creates a divider with kind divider
 
-- creates a divider with kind divider
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("creates a divider with kind divider")
 val d = divider("divider_create_50")
 expect d.kind to_equal "divider"
 expect d.id to_equal "divider_create_50"
@@ -1161,18 +1036,13 @@ expect d.id to_equal "divider_create_50"
 
 #### is visible by default
 
-- is visible by default
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("is visible by default")
 val d = divider("divider_visible_51")
 expect d.visible to_equal true
 ```
@@ -1181,18 +1051,13 @@ expect d.visible to_equal true
 
 #### is not focused by default
 
-- is not focused by default
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("is not focused by default")
 val d = divider("divider_focused_52")
 expect d.focused to_equal false
 ```
@@ -1201,18 +1066,13 @@ expect d.focused to_equal false
 
 #### has vbox as default layout
 
-- has vbox as default layout
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("has vbox as default layout")
 val d = divider("divider_layout_53")
 expect d.layout to_equal "vbox"
 ```
@@ -1223,18 +1083,16 @@ expect d.layout to_equal "vbox"
 
 #### has no custom properties by default
 
-- has no custom properties by default
+1. expect keys len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("has no custom properties by default")
 val d = divider("divider_noprops_54")
 val keys = d.prop_keys()
 expect keys.len() to_equal 0
@@ -1244,18 +1102,18 @@ expect keys.len() to_equal 0
 
 #### can accept custom props via set_prop
 
-- can accept custom props via set_prop
+1. var d = divider
+2. d = d set prop
+3. expect d get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("can accept custom props via set_prop")
 var d = divider("divider_customprop_55")
 d = d.set_prop("orientation", "horizontal")
 expect d.get_prop("orientation") to_equal "horizontal"
@@ -1267,18 +1125,13 @@ expect d.get_prop("orientation") to_equal "horizontal"
 
 #### contains widget-divider class
 
-- contains widget-divider class
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("contains widget-divider class")
 val d = divider("divider_html_56")
 val tree = build_tree(d)
 val state = init_state(tree)
@@ -1290,18 +1143,13 @@ expect html to_contain "widget-divider"
 
 #### renders as an hr tag
 
-- renders as an hr tag
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("renders as an hr tag")
 val d = divider("divider_html_hr_57")
 val tree = build_tree(d)
 val state = init_state(tree)
@@ -1313,18 +1161,13 @@ expect html to_contain "<hr"
 
 #### includes the widget id
 
-- includes the widget id
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("includes the widget id")
 val d = divider("divider_html_id_58")
 val tree = build_tree(d)
 val state = init_state(tree)
@@ -1336,18 +1179,13 @@ expect html to_contain "divider_html_id_58"
 
 #### is a self-closing tag
 
-- is a self-closing tag
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("is a self-closing tag")
 val d = divider("divider_html_close_59")
 val tree = build_tree(d)
 val state = init_state(tree)
@@ -1361,18 +1199,16 @@ expect html to_end_with "/>"
 
 #### can be placed between text widgets in a panel
 
-- can be placed between text widgets in a panel
+1. expect p child count
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("can be placed between text widgets in a panel")
 val t1 = text_widget("divider_panel_t1_60", "Above")
 val sep = divider("divider_panel_sep_60")
 val t2 = text_widget("divider_panel_t2_60", "Below")
@@ -1388,18 +1224,13 @@ expect kids[2].kind to_equal "text"
 
 #### renders inside panel HTML output
 
-- renders inside panel HTML output
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("renders inside panel HTML output")
 val t1 = text_widget("divider_inpanel_t_61", "Content")
 val sep = divider("divider_inpanel_sep_61")
 val p = panel("divider_inpanel_61", "Panel", [t1, sep])
@@ -1419,18 +1250,16 @@ expect html to_contain "widget-panel"
 
 #### builds a tree with panel, text, and divider
 
-- builds a tree with panel, text, and divider
+1. expect ids len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("builds a tree with panel, text, and divider")
 val header = text_widget("integ_header_70", "Header")
 val sep = divider("integ_sep_70")
 val body = text_widget("integ_body_70", "Body")
@@ -1445,18 +1274,13 @@ expect ids.len() to_be_greater_than 3
 
 #### renders full tree with all widget types in HTML
 
-- renders full tree with all widget types in HTML
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("renders full tree with all widget types in HTML")
 val title = text_widget("integ_title_71", "Welcome")
 val sep = divider("integ_div_71")
 val content = text_widget("integ_content_71", "Main content")
@@ -1477,18 +1301,16 @@ expect html to_contain "Main content"
 
 #### computes layout for panel with text and divider children
 
-- computes layout for panel with text and divider children
+1. expect rects len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("computes layout for panel with text and divider children")
 val t = text_widget("integ_layout_t_72", "Text")
 val d = divider("integ_layout_d_72")
 val p = panel("integ_layout_p_72", "P", [t, d])
@@ -1509,18 +1331,16 @@ expect div_rect != nil to_equal true
 
 #### row creates hbox panel with children
 
-- row creates hbox panel with children
+1. expect r child count
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("row creates hbox panel with children")
 val t1 = text_widget("integ_row_t1_73", "Left")
 val t2 = text_widget("integ_row_t2_73", "Right")
 val r = row("integ_row_73", [t1, t2])
@@ -1533,18 +1353,16 @@ expect r.child_count() to_equal 2
 
 #### column creates vbox panel with children
 
-- column creates vbox panel with children
+1. expect c child count
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("column creates vbox panel with children")
 val t1 = text_widget("integ_col_t1_74", "Top")
 val t2 = text_widget("integ_col_t2_74", "Bottom")
 val c = column("integ_col_74", [t1, t2])
@@ -1559,18 +1377,13 @@ expect c.child_count() to_equal 2
 
 #### creates state with focused id set to root
 
-- creates state with focused id set to root
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("creates state with focused id set to root")
 val root = panel("integ_state_75", "Root", [])
 val tree = build_tree(root)
 val state = init_state(tree)
@@ -1581,18 +1394,13 @@ expect state.focused_id to_equal "integ_state_75"
 
 #### creates state in normal mode
 
-- creates state in normal mode
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("creates state in normal mode")
 val root = panel("integ_state_mode_76", "Root", [])
 val tree = build_tree(root)
 val state = init_state(tree)
@@ -1606,18 +1414,13 @@ expect mode_name to_equal "NORMAL"
 
 #### finds nested widget by id
 
-- finds nested widget by id
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("finds nested widget by id")
 val deep_text = text_widget("integ_find_deep_77", "Deep")
 val inner = panel("integ_find_inner_77", "Inner", [deep_text])
 val outer = panel("integ_find_outer_77", "Outer", [inner])
@@ -1630,18 +1433,13 @@ expect found.kind to_equal "text"
 
 #### returns nil for non-existent id
 
-- returns nil for non-existent id
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("returns nil for non-existent id")
 val p = panel("integ_find_none_78", "P", [])
 val found = p.find_by_id("no_such_widget")
 expect found to_be_nil
@@ -1656,12 +1454,12 @@ expect found to_be_nil
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/widget_panel_text_divider_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Panel Widget, Text Widget, Divider Widget, Widget Integration.
+Tests covering:
 - Panel Widget
 - Text Widget
 - Divider Widget
@@ -1679,57 +1477,3 @@ Tests covering Panel Widget, Text Widget, Divider Widget, Widget Integration.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-APP`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `7abf0dbcfb1dae8259ef5b35d21d094d7eea25e7d7844218bab2599707a96530`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `7abf0dbcfb1dae8259ef5b35d21d094d7eea25e7d7844218bab2599707a96530`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `7abf0dbcfb1dae8259ef5b35d21d094d7eea25e7d7844218bab2599707a96530`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **91/100**; effective score: **91/100**; blockers: **0**.
-
-SSpec documentization score: 91/100
-source: test/01_unit/app/ui/widget_panel_text_divider_spec.spl
-mirror: doc/06_spec/01_unit/app/ui/widget_panel_text_divider_spec.md (current)
-findings: 7 blockers: 0
-  narrative=100 structure=90 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/ui/widget_panel_text_divider_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/ui/widget_panel_text_divider_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/ui/widget_panel_text_divider_spec.spl:30:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates a panel with kind panel and vbox layout' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui/widget_panel_text_divider_spec.spl:39:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'stores the title as a prop' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui/widget_panel_text_divider_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'assigns the given id' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui/widget_panel_text_divider_spec.spl:521:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can accept custom props via set_prop' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/app/ui/widget_panel_text_divider_spec.spl:566:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can be placed between text widgets in a panel' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-<!-- sspec-maintain:scorecard:end -->

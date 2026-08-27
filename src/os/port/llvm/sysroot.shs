@@ -39,7 +39,6 @@ echo "[sysroot] Building SimpleOS sysroot at $SYSROOT ..."
 mkdir -p "$SYSROOT/include"
 mkdir -p "$SYSROOT/lib"
 mkdir -p "$SYSROOT/share/simpleos"
-printf '%s\n' "$TRIPLE" > "$SYSROOT/share/simpleos/target-triple.txt"
 
 # -- Headers ----------------------------------------------------------------
 
@@ -49,56 +48,13 @@ cp "$LIBC_DIR/simpleos_libc.h" "$SYSROOT/include/"
 if [ -d "$LIBC_DIR/include" ]; then
     cp -R "$LIBC_DIR/include/"* "$SYSROOT/include/"
     # Ensure subdirectories are present
-    for subdir in sys netinet c++; do
+    for subdir in sys c++; do
         if [ -d "$LIBC_DIR/include/$subdir" ]; then
             mkdir -p "$SYSROOT/include/$subdir"
             cp -R "$LIBC_DIR/include/$subdir/"* "$SYSROOT/include/$subdir/"
         fi
     done
 fi
-
-if [ -d "$LLVM_SRC/libcxx/include" ]; then
-    mkdir -p "$SYSROOT/include/c++/v1"
-    cp -R "$LLVM_SRC/libcxx/include/"* "$SYSROOT/include/c++/v1/"
-    cat > "$SYSROOT/include/c++/v1/__config_site" << 'CONFIGEOF'
-#define _LIBCPP_HAS_THREADS 1
-#define _LIBCPP_HAS_CLOCK_GETTIME 1
-#define _LIBCPP_HAS_MONOTONIC_CLOCK 1
-#define _LIBCPP_HAS_THREAD_API_PTHREAD 1
-#define _LIBCPP_HAS_THREAD_API_EXTERNAL 0
-#define _LIBCPP_HAS_THREAD_API_WIN32 0
-#define _LIBCPP_HAS_RANDOM_DEVICE 1
-#define _LIBCPP_HAS_LOCALIZATION 0
-#define _LIBCPP_HAS_WIDE_CHARACTERS 1
-#define _LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE 1
-#define _LIBCPP_PSTL_BACKEND_SERIAL 1
-#define _LIBCPP_HARDENING_MODE_DEFAULT (1 << 1)
-CONFIGEOF
-    if [ -f "$LLVM_SRC/libcxx/vendor/llvm/default_assertion_handler.in" ]; then
-        cp "$LLVM_SRC/libcxx/vendor/llvm/default_assertion_handler.in" "$SYSROOT/include/c++/v1/__assertion_handler"
-    fi
-    echo "[sysroot] Installed libc++ headers"
-else
-    echo "[sysroot] NOTE: libc++ headers not found at $LLVM_SRC/libcxx/include"
-fi
-
-install_compiler_builtins_seed() {
-    case "$TRIPLE" in
-        aarch64-*)
-            for candidate in \
-                /usr/lib/android-sdk/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/lib/clang/*/lib/baremetal/libclang_rt.builtins-aarch64.a \
-                /usr/lib/gcc-cross/aarch64-linux-gnu/*/libgcc.a
-            do
-                if [ -f "$candidate" ]; then
-                    cp "$candidate" "$SYSROOT/lib/libclang_rt.builtins-aarch64.a"
-                    echo "[sysroot] Installed aarch64 compiler builtins seed"
-                    return
-                fi
-            done
-            echo "[sysroot] NOTE: aarch64 compiler builtins seed not found"
-            ;;
-    esac
-}
 
 # Count headers for verification
 HEADER_COUNT=$(find "$SYSROOT/include" -name "*.h" -o -name "*.hpp" 2>/dev/null | wc -l | tr -d ' ')
@@ -214,7 +170,7 @@ build_libc_runtime() {
                 simpleos_fs_walk.c simpleos_glob_stub.c simpleos_pwd_stub.c \
                 simpleos_strfmon.c simpleos_fork.c simpleos_ipc.c \
                 simpleos_socket.c simpleos_filelock.c simpleos_statvfs.c \
-                simpleos_utsname.c simpleos_termios.c
+                simpleos_utsname.c
             do
                 "$CC" $CFLAGS -c "$LIBC_DIR/$src" -o "$LIBC_BUILD/${src%.c}.o"
             done
@@ -381,9 +337,6 @@ ASMEOF
 
 build_libc_runtime
 echo "[sysroot] Installed libsimpleos_c.a"
-cp "$SYSROOT/lib/libsimpleos_c.a" "$SYSROOT/lib/libm.a"
-echo "[sysroot] Installed libm.a"
-install_compiler_builtins_seed
 
 # -- libc++ runtime ----------------------------------------------------------
 
@@ -512,7 +465,12 @@ build_libunwind_runtime
 
 # -- CRT objects ------------------------------------------------------------
 
-echo "[sysroot] Installed crt0.o"
+if [ -f "$LIBC_DIR/simpleos_crt0.o" ]; then
+    cp "$LIBC_DIR/simpleos_crt0.o" "$SYSROOT/lib/crt0.o"
+    echo "[sysroot] Installed crt0.o"
+else
+    echo "[sysroot] WARNING: simpleos_crt0.o not found — build libc first"
+fi
 
 # -- Compiler-rt builtins (if available) ------------------------------------
 
@@ -528,19 +486,13 @@ fi
 cat > "$SYSROOT/share/simpleos/simpleos.ld" << 'LDEOF'
 /* SimpleOS x86_64 userspace linker script
  *
- * Text starts at 0x40000000 (1 GiB). Relocated out of [0x08000000,~0x16400000)
- * so the ring-3 payload never overlaps the kernel .bss band when the kernel is
- * linked at the 128 MiB base required for GRUB-EFI/OVMF boot (the large merged
- * ring-3 kernel has a ~211 MiB NOBITS .bss reaching ~0x16400000 at that base).
- * 1 GiB stays in canonical low-half user space and inside PML4[0] (< 512 GiB),
- * so the private-low clone + copy-on-map path is unchanged. QEMU `-kernel`
- * lanes (kernel at 1 MiB) are unaffected — payload is simply higher.
- * Static linking only.
+ * Text starts at 0x10000000 — matches kernel bump allocator base.
+ * Static linking only (no GOT/PLT).
  */
 ENTRY(_start)
 
 SECTIONS {
-    . = 0x40000000;
+    . = 0x10000000;
 
     .text : {
         *(.text.entry)
@@ -552,42 +504,10 @@ SECTIONS {
         *(.rodata .rodata.*)
     }
 
-    /* C++ exception unwinding tables. libunwind (built with
-     * _LIBUNWIND_IS_BAREMETAL) locates these via the boundary symbols below
-     * for static SimpleOS ELF executables — there is no dynamic loader / no
-     * dl_iterate_phdr, so the sections must be KEPT (not discarded). */
-    . = ALIGN(8);
-    .eh_frame_hdr : {
-        __eh_frame_hdr_start = .;
-        KEEP(*(.eh_frame_hdr))
-        __eh_frame_hdr_end = .;
-    }
-
-    . = ALIGN(8);
-    .eh_frame : {
-        __eh_frame_start = .;
-        KEEP(*(.eh_frame))
-        __eh_frame_end = .;
-    }
-
     . = ALIGN(4096);
     .data : {
         *(.data .data.*)
         *(.sdata .sdata.*)
-    }
-
-    /* Non-relaxable GOTPCREL loads (e.g. cmov <ptr>@GOTPCREL(%rip)) need a
-     * correctly-based GOT even in a static -no-pie link. Place .got/.got.plt
-     * here (NOT in /DISCARD/) so the slots have valid load addresses and lld
-     * bakes the absolute target VAs into them. */
-    . = ALIGN(8);
-    .got : {
-        *(.got) *(.got.*)
-    }
-
-    . = ALIGN(8);
-    .got.plt : {
-        *(.got.plt)
     }
 
     . = ALIGN(16);
@@ -630,6 +550,10 @@ SECTIONS {
     /DISCARD/ : {
         *(.comment)
         *(.note .note.*)
+        *(.eh_frame)
+        *(.eh_frame_hdr)
+        *(.got)
+        *(.got.plt)
         *(.plt)
         *(.rela.plt)
     }

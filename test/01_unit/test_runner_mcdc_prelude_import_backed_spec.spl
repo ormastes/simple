@@ -1,0 +1,66 @@
+use std.spec.*
+use std.io_runtime.{read_file}
+
+# Regression guard for the directory-run blocker fixed 2026-08-27.
+#
+# `build_coverage_wrapper` (src/lib/nogc_sync_mut/test_runner/
+# test_executor_parsing.spl) emits an MC/DC prelude for the per-file wrapper it
+# compiles IN MEMORY (strace: no wrapper file is ever opened for read or write).
+# A `use` inside an in-memory unit resolves ONLY against modules the runner's
+# own module graph has already loaded. The prelude line
+#
+#   use std.nogc_sync_mut.mcdc.dynamic_probe.{mcdc_dynamic_probe_controller_load_builtin_current_owner}
+#
+# matched nothing already loaded (there is no __init__.spl in
+# src/lib/nogc_sync_mut/mcdc/, and dynamic_probe.spl was never opened), so it
+# bound NOTHING SILENTLY and every `bin/simple test <directory>` run aborted at
+# the call site with:
+#
+#   error: semantic: variable `mcdc_dynamic_probe_controller_load_builtin_current_owner` not found
+#
+# Fix: a real top-level `use` in test_executor_parsing.spl, which puts the
+# module in the runner's graph so the in-memory prelude's `use` can bind.
+#
+# DISCRIMINATION (honest assessment): this is a SOURCE-STRUCTURE spec, not a
+# behavioural one. It genuinely fails before the fix and passes after, because
+# the missing top-level `use` line IS the defect. It cannot be written as an
+# ordinary in-function assertion: the defect lives in the module graph of a
+# *child* compilation unit that only exists during a directory run, and the
+# failure is a hard abort of the runner process itself -- there is no surviving
+# runner to report a spec failure, so a spec that "runs" can never observe it.
+# The narrow scope (this one symbol, not every prelude import) is deliberate:
+# the other prelude imports resolve today because the runner's graph already
+# loads them transitively, so a blanket "every prelude import must be top-level
+# imported" rule would be red both before and after the fix and would therefore
+# discriminate nothing.
+
+val parsing_path = "src/lib/nogc_sync_mut/test_runner/test_executor_parsing.spl"
+val symbol = "mcdc_dynamic_probe_controller_load_builtin_current_owner"
+
+fn parsing_source() -> text:
+    read_file(parsing_path) ?? ""
+
+fn prelude_emits_symbol(src: text) -> bool:
+    var found = false
+    for line in src.split("\n"):
+        if line.contains("lines.push(") and line.contains(symbol):
+            found = true
+    found
+
+fn has_top_level_import(src: text) -> bool:
+    var found = false
+    for line in src.split("\n"):
+        if line.starts_with("use ") and line.contains(symbol):
+            found = true
+    found
+
+describe "test-runner MC/DC prelude imports are backed by a real module load":
+    it "reads the executor parsing source":
+        expect(parsing_source().len() > 0).to_be(true)
+
+    it "still emits the dynamic-probe symbol into the in-memory wrapper prelude":
+        # Non-vacuity: if this stops being true the guard below is meaningless.
+        expect(prelude_emits_symbol(parsing_source())).to_be(true)
+
+    it "declares a top-level use for that symbol so the prelude use can bind":
+        expect(has_top_level_import(parsing_source())).to_be(true)

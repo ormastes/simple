@@ -1,6 +1,29 @@
 # Persistent Dict Intensive Specification
 
-> Tests covering PersistentDict, Core operations, Immutability, Bulk operations, Conversion, Edge cases, Array helpers.
+> 1. assert dict len
+
+<!-- sdn-diagram:id=persistent_dict_intensive_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=persistent_dict_intensive_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+persistent_dict_intensive_spec -> spipe
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=persistent_dict_intensive_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,18 +42,17 @@
 
 #### creates an empty dict
 
-- creates an empty dict
+1. assert dict len
+2. assert dict is empty
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates an empty dict")
 val dict = PersistentDict.new()
 assert dict.len() == 0
 assert dict.is_empty()
@@ -40,18 +62,17 @@ assert dict.is_empty()
 
 #### inserts and retrieves a value
 
-- inserts and retrieves a value
+1. assert dict len
+2. assert dict get
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("inserts and retrieves a value")
 val dict = PersistentDict.new().set("key", 42)
 assert dict.len() == 1
 assert dict.get("key") == Some(42)
@@ -61,18 +82,17 @@ assert dict.get("key") == Some(42)
 
 #### updates an existing key
 
-- updates an existing key
+1. assert dict1 get
+2. assert dict2 get
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("updates an existing key")
 val dict1 = PersistentDict.new().set("key", 1)
 val dict2 = dict1.set("key", 2)
 assert dict1.get("key") == Some(1)
@@ -83,18 +103,19 @@ assert dict2.get("key") == Some(2)
 
 #### removes a key
 
-- removes a key
+1. assert dict1 len
+2. assert dict2 len
+3. assert dict2 get
+4. assert dict2 get
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("removes a key")
 val dict1 = PersistentDict.new().set("a", 1).set("b", 2)
 val dict2 = dict1.remove("a")
 assert dict1.len() == 2
@@ -109,18 +130,18 @@ assert dict2.get("b") == Some(2)
 
 #### keeps earlier versions unchanged
 
-- keeps earlier versions unchanged
+1. assert base get
+2. assert next get
+3. assert final get
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("keeps earlier versions unchanged")
 val base = PersistentDict.new().set("a", 1)
 val next = base.set("b", 2)
 val final = next.remove("a")
@@ -133,18 +154,20 @@ assert final.get("a") == None
 
 #### supports a small version chain
 
-- supports a small version chain
+1. var dict = PersistentDict new
+2. dict = dict set
+3. assert versions[0] len
+4. assert versions[10] len
+5. assert dict len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("supports a small version chain")
 var versions: [PersistentDict] = []
 var dict = PersistentDict.new()
 for i in 0..25:
@@ -162,18 +185,19 @@ assert dict.len() == 25
 
 #### merge combines dicts
 
-- merge combines dicts
+1. assert merged len
+2. assert merged get
+3. assert merged get
+4. assert merged get
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("merge combines dicts")
 val dict1 = PersistentDict.new().set("a", 1).set("b", 2)
 val dict2 = PersistentDict.new().set("b", 20).set("c", 3)
 val merged = dict1.merge(dict2)
@@ -187,18 +211,21 @@ assert merged.get("c") == Some(3)
 
 #### filter keeps matching entries
 
-- filter keeps matching entries
+1. var dict = PersistentDict new
+2. dict = dict set
+3. assert evens len
+4. assert evens get
+5. assert evens get
+6. assert evens get
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("filter keeps matching entries")
 var dict = PersistentDict.new()
 for i in 0..12:
     dict = dict.set("key_{i}", i)
@@ -214,18 +241,20 @@ assert evens.get("key_10") == Some(10)
 
 #### map_values transforms values
 
-- map_values transforms values
+1.  set
+2.  set
+3.  map values
+4. assert doubled get
+5. assert doubled get
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("map_values transforms values")
 val doubled = PersistentDict.new()
     .set("a", 1)
     .set("b", 2)
@@ -240,18 +269,23 @@ assert doubled.get("b") == Some(4)
 
 #### round-trips through entries
 
-- round-trips through entries
+1.
+2.
+3.
+4. assert dict len
+5. assert entries len
+6. assert entries has
+7. assert entries has
+8. assert entries has
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("round-trips through entries")
 val dict = PersistentDict.from_entries([
     ("a", 1),
     ("b", 2),
@@ -269,18 +303,23 @@ assert entries_has(entries, "c", 3)
 
 #### returns keys and values
 
-- returns keys and values
+1.
+2.
+3. assert keys len
+4. assert values len
+5. assert keys contains
+6. assert keys contains
+7. assert values contains
+8. assert values contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns keys and values")
 val dict = PersistentDict.from_entries([
     ("a", 1),
     ("b", 2)
@@ -301,18 +340,16 @@ assert values.contains(2)
 
 #### handles empty string keys
 
-- handles empty string keys
+1. assert dict get
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles empty string keys")
 val dict = PersistentDict.new().set("", 42)
 assert dict.get("") == Some(42)
 ```
@@ -321,18 +358,21 @@ assert dict.get("") == Some(42)
 
 #### handles unicode keys
 
-- handles unicode keys
+1.  set
+2.  set
+3.  set
+4. assert dict get
+5. assert dict get
+6. assert dict get
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles unicode keys")
 val dict = PersistentDict.new()
     .set("héllo", 1)
     .set("世界", 2)
@@ -348,18 +388,18 @@ assert dict.get("🚀") == Some(3)
 
 #### inserts, updates, and removes at the expected position
 
-- inserts, updates, and removes at the expected position
+1. assert array insert
+2. assert array update
+3. assert array remove
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("inserts, updates, and removes at the expected position")
 val arr = [1, 2, 3]
 assert array_insert(arr, 1, 99) == [1, 99, 2, 3]
 assert array_update(arr, 1, 99) == [1, 99, 3]
@@ -370,18 +410,13 @@ assert array_remove(arr, 1) == [1, 3]
 
 #### leaves the original array unchanged
 
-- leaves the original array unchanged
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("leaves the original array unchanged")
 val arr = [1, 2, 3]
 val _ = array_insert(arr, 1, 99)
 val _ = array_update(arr, 1, 99)
@@ -398,12 +433,12 @@ assert arr == [1, 2, 3]
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/interpreter/collections/persistent_dict_intensive_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering PersistentDict, Core operations, Immutability, Bulk operations, Conversion, Edge cases, Array helpers.
+Tests covering:
 - PersistentDict
 - Core operations
 - Immutability
@@ -424,51 +459,3 @@ Tests covering PersistentDict, Core operations, Immutability, Bulk operations, C
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `c9879e129248f1dfbc2177919e5c8d5c1f7fa511d925ccc570f4544312d818d0`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `c9879e129248f1dfbc2177919e5c8d5c1f7fa511d925ccc570f4544312d818d0`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `c9879e129248f1dfbc2177919e5c8d5c1f7fa511d925ccc570f4544312d818d0`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/interpreter/collections/persistent_dict_intensive_spec.spl
-mirror: doc/06_spec/01_unit/app/interpreter/collections/persistent_dict_intensive_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/interpreter/collections/persistent_dict_intensive_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/interpreter/collections/persistent_dict_intensive_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/interpreter/collections/persistent_dict_intensive_spec.spl:183:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates an empty dict' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/interpreter/collections/persistent_dict_intensive_spec.spl:190:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'inserts and retrieves a value' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/interpreter/collections/persistent_dict_intensive_spec.spl:197:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'updates an existing key' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

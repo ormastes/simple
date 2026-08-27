@@ -10,9 +10,6 @@ use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
 use std.gc_async_mut.gpu.engine2d.opencl_session.{OpenClSession}
 use std.gpu.engine2d.sffi_opencl.{OpenClFfi}
 use std.gpu.engine2d.helpers_text.{text_blit_buffer, text_transparent_blit_buffer}
-use std.common.gpu.font_atlas_composite.{font_atlas_composite_opencl_source, font_atlas_composite_program_version_valid, font_atlas_composite_cache_identity}
-use std.common.crypto.sha256.{sha256_text}
-use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, font_render_batch_atlas_owner_identity}
 use std.gpu.engine2d.backend_emu.{
     emu_draw_ellipse, emu_draw_ellipse_filled,
     emu_draw_arc, emu_draw_bezier,
@@ -29,29 +26,25 @@ use std.gpu.engine2d.backend_emu.{
 
 extern fn rt_alloc(size: i64) -> i64
 extern fn rt_free(ptr: i64)
-@unsafe(reason: "nonnull raw read; OpenCL host allocation and bounds are caller-owned", capabilities: [ffi, raw_ptr])
 extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
-@unsafe(reason: "nonnull caller-owned host buffer with checked byte offset", capabilities: [ffi, raw_ptr])
-extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64)
-@unsafe(reason: "nonnull caller-owned host buffer with checked eight-byte offset", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64) -> i64
 extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
 
 fn opencl_host_alloc(size: i64) -> i64:
     rt_alloc(size)
 
 fn opencl_host_free(ptr: i64, size: i64):
-    rt_free(ptr)
+    rt_free(ptr, size)
 
 fn opencl_host_read_i32(addr: i64, offset: i64) -> i32:
     rt_ptr_read_i32(addr, offset)
 
-fn opencl_host_write_u8(addr: i64, offset: i64, value: i64):
-    unsafe(capabilities: [ffi, raw_ptr]):
-        rt_ptr_write_u8(addr, offset, value)
+fn opencl_host_write_u8(addr: i64, offset: i64, value: i64) -> i64:
+    rt_ptr_write_u8(addr, offset, value)
 
+@unsafe(reason: "private OpenCL host-word write with caller-owned allocation and checked offset", capabilities: [ffi, raw_ptr])
 fn opencl_host_write_i64(addr: i64, offset: i64, value: i64):
-    unsafe(capabilities: [ffi, raw_ptr]):
-        rt_ptr_write_i64(addr, offset, value)
+    rt_ptr_write_i64(addr, offset, value)
 
 val OPENCL_2D_CLEAR_ARG_BYTES: i64 = 32
 
@@ -227,25 +220,7 @@ fn opencl_2d_generated_source() -> text:
     "    long px = x + dx;\n" +
     "    long py = y + dy;\n" +
     "    if (px >= 0 && py >= 0 && px < surface_width && py < surface_height) { dst[py * surface_width + px] = pixel; }\n" +
-    "}\n" +
-    "__kernel void simple_2d_blit_alpha_u32(__global uint* dst, __global const uint* src, long x, long y, long w, long h, long surface_width, long surface_height) {\n" +
-    "    long i = get_global_id(0);\n" +
-    "    if (i >= w * h) { return; }\n" +
-    "    long px = x + i % w;\n" +
-    "    long py = y + i / w;\n" +
-    "    if (px < 0 || py < 0 || px >= surface_width || py >= surface_height) { return; }\n" +
-    "    uint s = src[i];\n" +
-    "    uint a = s >> 24;\n" +
-    "    if (a == 0) { return; }\n" +
-    "    if (a == 255) { dst[py * surface_width + px] = s; return; }\n" +
-    "    uint d = dst[py * surface_width + px];\n" +
-    "    uint inv = 255 - a;\n" +
-    "    uint r = (((s >> 16) & 255) * a + ((d >> 16) & 255) * inv) / 255;\n" +
-    "    uint g = (((s >> 8) & 255) * a + ((d >> 8) & 255) * inv) / 255;\n" +
-    "    uint b = ((s & 255) * a + (d & 255) * inv) / 255;\n" +
-    "    uint oa = a + (((d >> 24) & 255) * inv) / 255;\n" +
-    "    dst[py * surface_width + px] = (oa << 24) | (r << 16) | (g << 8) | b;\n" +
-    "}\n" + font_atlas_composite_opencl_source()
+    "}\n"
 
 fn _i64(v: i32) -> i64:
     v as i64
@@ -253,22 +228,8 @@ fn _i64(v: i32) -> i64:
 fn _i64_from_u32(v: u32) -> i64:
     v as i64
 
-fn opencl_font_atlas_dirty_upload_bytes(batch: FontRenderBatch, current_generation: i64, allocated: bool) -> i64:
-    if allocated or current_generation + 1 != batch.atlas_generation or batch.dirty_rects.len() == 0:
-        return 0
-    var bytes: i64 = 0
-    for rect in batch.dirty_rects:
-        if rect.width <= 0 or rect.height <= 0 or rect.atlas_x < 0 or rect.atlas_y < 0:
-            return 0
-        if rect.atlas_x > batch.atlas_width or rect.atlas_y > batch.atlas_height:
-            return 0
-        if rect.width > batch.atlas_width - rect.atlas_x or rect.height > batch.atlas_height - rect.atlas_y:
-            return 0
-        bytes = bytes + _i64(rect.width) * _i64(rect.height) * 4
-    bytes
-
 fn _read_u32_pixels_from_host(ptr: i64, count: i32) -> [u32]:
-    var out: [u32] = [0u32; count]
+    var out: [u32] = []
     var idx = 0
     while idx < count:
         out[idx] = opencl_host_read_i32(ptr, _i64(idx) * 4) as u32
@@ -322,14 +283,7 @@ class OpenClBackend:
     clear_args_ptr: i64
     readback_ptr: i64
     host_staging_ptr: i64
-    font_atlas_buffer: i64
-    font_atlas_host_ptr: i64
-    font_atlas_bytes: i64
-    font_atlas_generation: i64
-    font_atlas_owner_identity: text
-    font_artifact_sha256: text
     device_current: bool
-    mirror_current: bool
     last_probe: BackendProbeResult
 
     static fn create() -> OpenClBackend:
@@ -343,21 +297,11 @@ class OpenClBackend:
             clear_args_ptr: 0,
             readback_ptr: 0,
             host_staging_ptr: 0,
-            font_atlas_buffer: 0,
-            font_atlas_host_ptr: 0,
-            font_atlas_bytes: 0,
-            font_atlas_generation: -1,
-            font_atlas_owner_identity: "",
-            font_artifact_sha256: "",
             device_current: false,
-            mirror_current: true,
             last_probe: BackendProbeResult.unavailable("opencl", "not probed")
         )
 
     me init_with_session(width: i32, height: i32, session: OpenClSession) -> bool:
-        if self.initialized or self.owns_session:
-            self.last_probe = _opencl_probe_failure("OpenCL backend already owns an active session", "opencl_context")
-            return false
         if width <= 0 or height <= 0:
             self.last_probe = _opencl_probe_failure("invalid OpenCL framebuffer dimensions", "opencl_surface")
             self.initialized = false
@@ -403,7 +347,6 @@ class OpenClBackend:
         self.last_probe = _opencl_render_ready()
         self.initialized = true
         self.device_current = false
-        self.mirror_current = true
         true
 
     me _cleanup_opencl_surface():
@@ -419,36 +362,11 @@ class OpenClBackend:
         if self.host_staging_ptr != 0:
             opencl_host_free(self.host_staging_ptr, self.framebuffer_bytes)
             self.host_staging_ptr = 0
-        if self.font_atlas_buffer != 0:
-            self.session.free(self.font_atlas_buffer)
-            self.font_atlas_buffer = 0
-        if self.font_atlas_host_ptr != 0:
-            opencl_host_free(self.font_atlas_host_ptr, self.font_atlas_bytes)
-            self.font_atlas_host_ptr = 0
-        self.font_atlas_bytes = 0
-        self.font_atlas_generation = -1
-        self.font_atlas_owner_identity = ""
-        self.font_artifact_sha256 = ""
         self.framebuffer_bytes = 0
         self.device_current = false
-        self.mirror_current = true
-
-    me _ensure_mirror_current() -> bool:
-        if self.mirror_current:
-            return true
-        if not self.initialized or self.d_framebuffer == 0 or self.readback_ptr == 0:
-            return false
-        self.session.synchronize()
-        if not self.session.read_buffer(self.d_framebuffer, self.readback_ptr, self.framebuffer_bytes):
-            return false
-        self.mirror.buf = _read_u32_pixels_from_host(self.readback_ptr, self.width() * self.height())
-        self.mirror_current = true
-        true
 
     me _copy_mirror_to_device() -> bool:
         if not self.initialized or self.d_framebuffer == 0 or self.host_staging_ptr == 0 or self.framebuffer_bytes <= 0:
-            return false
-        if not self._ensure_mirror_current():
             return false
         val pixels = self.mirror.read_pixels()
         if pixels.len() != self.width() * self.height():
@@ -486,8 +404,6 @@ class OpenClBackend:
                 var rc = 1
                 if kernel_name == "simple_2d_blit_nonzero_u32":
                     rc = self.session.launch_blit_nonzero_u32(self.d_framebuffer, d_pixels, _i64(x), _i64(y), _i64(w), _i64(h), _i64(self.width()), _i64(self.height()))
-                else if kernel_name == "simple_2d_blit_alpha_u32":
-                    rc = self.session.launch_blit_alpha_u32(self.d_framebuffer, d_pixels, _i64(x), _i64(y), _i64(w), _i64(h), _i64(self.width()), _i64(self.height()))
                 else:
                     rc = self.session.launch_blit_image_u32(self.d_framebuffer, d_pixels, _i64(x), _i64(y), _i64(w), _i64(h), _i64(self.width()), _i64(self.height()))
                 if rc == 0:
@@ -504,136 +420,6 @@ class OpenClBackend:
             if d_pixels != 0:
                 self.session.free(d_pixels)
         false
-
-    me _write_font_atlas_dirty_rects(batch: FontRenderBatch) -> bool:
-        for rect in batch.dirty_rects:
-            val row_bytes = _i64(rect.width) * 4
-            var row = 0
-            while row < rect.height:
-                val pixel_offset = _i64(rect.atlas_y + row) * _i64(batch.atlas_width) + _i64(rect.atlas_x)
-                val byte_offset = pixel_offset * 4
-                if not self.session.write_buffer_at(
-                    self.font_atlas_buffer,
-                    self.font_atlas_host_ptr + byte_offset,
-                    row_bytes,
-                    byte_offset
-                ):
-                    self.font_atlas_generation = -1
-                    self.font_atlas_owner_identity = ""
-                    return false
-                row = row + 1
-        true
-
-    me _upload_font_atlas(batch: FontRenderBatch) -> bool:
-        if not batch.valid or batch.atlas_width <= 0 or batch.atlas_height <= 0:
-            return false
-        val pixel_count_i64 = _i64(batch.atlas_width) * _i64(batch.atlas_height)
-        if pixel_count_i64 <= 0 or pixel_count_i64 > 2147483647 or batch.atlas_pixels.len() != pixel_count_i64:
-            return false
-        val pixel_count = pixel_count_i64 as i32
-        val required_bytes = pixel_count_i64 * 4
-        val device_features = if self.session.platform > 0:
-            "platform=" + self.session.platform.to_string()
-        else: ""
-        if self.font_artifact_sha256 == "" and self.session.program > 0:
-            val source_sha256 = sha256_text(opencl_2d_generated_source())
-            if source_sha256.len() == 64:
-                self.font_artifact_sha256 = source_sha256
-        val artifact_identity = if self.session.program > 0 and self.font_artifact_sha256.len() == 64:
-            "source-sha256=" + self.font_artifact_sha256 + ";program=" + self.session.program.to_string()
-        else: ""
-        val dependency_identity = if self.session.context > 0 and self.session.queue > 0 and self.session.generation > 0:
-            "context=" + self.session.context.to_string() + ";queue=" + self.session.queue.to_string() +
-                ";generation=" + self.session.generation.to_string()
-        else: ""
-        val owner_identity = font_atlas_composite_cache_identity(
-            font_render_batch_atlas_owner_identity(batch), "opencl", device_features,
-            artifact_identity, dependency_identity)
-        if owner_identity == "":
-            return false
-        var allocated = false
-        if self.font_atlas_buffer == 0 or self.font_atlas_host_ptr == 0 or self.font_atlas_bytes != required_bytes:
-            val new_host = opencl_host_alloc(required_bytes)
-            if new_host == 0:
-                return false
-            val new_buffer = self.session.alloc(required_bytes)
-            if new_buffer == 0:
-                opencl_host_free(new_host, required_bytes)
-                return false
-            if self.font_atlas_buffer != 0:
-                self.session.free(self.font_atlas_buffer)
-            if self.font_atlas_host_ptr != 0:
-                opencl_host_free(self.font_atlas_host_ptr, self.font_atlas_bytes)
-            self.font_atlas_buffer = new_buffer
-            self.font_atlas_host_ptr = new_host
-            self.font_atlas_bytes = required_bytes
-            self.font_atlas_generation = -1
-            self.font_atlas_owner_identity = ""
-            allocated = true
-        val owner_matches = self.font_atlas_owner_identity == owner_identity
-        if owner_matches and self.font_atlas_generation == batch.atlas_generation:
-            return true
-        _write_u32_pixels_to_host(self.font_atlas_host_ptr, batch.atlas_pixels, pixel_count)
-        val dirty_upload_bytes = opencl_font_atlas_dirty_upload_bytes(batch, self.font_atlas_generation, allocated or not owner_matches)
-        if dirty_upload_bytes > 0:
-            if self._write_font_atlas_dirty_rects(batch):
-                self.font_atlas_generation = batch.atlas_generation
-                self.font_atlas_owner_identity = owner_identity
-                return true
-            return false
-        if not self.session.write_buffer(self.font_atlas_buffer, self.font_atlas_host_ptr, required_bytes):
-            self.font_atlas_generation = -1
-            self.font_atlas_owner_identity = ""
-            return false
-        self.font_atlas_generation = batch.atlas_generation
-        self.font_atlas_owner_identity = owner_identity
-        true
-
-    me invalidate_font_atlas():
-        self.font_atlas_generation = -1
-        self.font_atlas_owner_identity = ""
-
-    me draw_font_batch(origin_x: i32, origin_y: i32, batch: FontRenderBatch) -> i64:
-        if not font_atlas_composite_program_version_valid(batch.program_version):
-            return 0
-        if not batch.valid or batch.quads.len() == 0:
-            return 0
-        if not self._can_use_device_draw():
-            return 0
-        if not self._ensure_device_current() or not self._ensure_mirror_current():
-            return 0
-        if not self._upload_font_atlas(batch):
-            return 0
-        var submitted: i64 = 0
-        while submitted < batch.quads.len():
-            val quad = batch.quads[submitted]
-            val rc = self.session.launch_font_atlas_composite_u32(
-                self.font_atlas_buffer,
-                self.d_framebuffer,
-                _i64(batch.atlas_width),
-                _i64(batch.atlas_height),
-                batch.atlas_pixels.len(),
-                _i64(quad.atlas_x),
-                _i64(quad.atlas_y),
-                _i64(quad.width),
-                _i64(quad.height),
-                _i64(self.width()),
-                _i64(self.height()),
-                _i64(self.width()) * _i64(self.height()),
-                _i64(origin_x) + _i64(quad.dst_x),
-                _i64(origin_y) + _i64(quad.dst_y),
-                _i64_from_u32(quad.color)
-            )
-            if rc != 0:
-                return submitted
-            submitted = submitted + 1
-            self.device_current = true
-            self.mirror_current = false
-        if self.session.synchronize() != 0:
-            self.device_current = false
-            self.mirror_current = true
-            return 0
-        submitted
 
 impl RenderBackend for OpenClBackend:
     fn name() -> text:
@@ -668,11 +454,8 @@ impl RenderBackend for OpenClBackend:
             if rc == 0:
                 self.device_current = true
                 self.mirror.clear(color)
-                self.mirror_current = true
                 return
-        self._ensure_mirror_current()
         self.mirror.clear(color)
-        self.mirror_current = true
         self.device_current = false
 
     me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
@@ -680,10 +463,8 @@ impl RenderBackend for OpenClBackend:
             val rc = self.session.launch_rect_outline_u32(self.d_framebuffer, _i64(self.width()), _i64(self.height()), _i64(x), _i64(y), _i64(w), _i64(h), _i64_from_u32(color))
             if rc == 0:
                 self.device_current = true
-                if self.mirror_current:
-                    self.mirror.draw_rect(x, y, w, h, color)
+                self.mirror.draw_rect(x, y, w, h, color)
                 return
-        self._ensure_mirror_current()
         self.mirror.draw_rect(x, y, w, h, color)
         self.device_current = false
 
@@ -692,10 +473,8 @@ impl RenderBackend for OpenClBackend:
             val rc = self.session.launch_rect_filled_u32(self.d_framebuffer, _i64(self.width()), _i64(self.height()), _i64(x), _i64(y), _i64(w), _i64(h), _i64_from_u32(color))
             if rc == 0:
                 self.device_current = true
-                if self.mirror_current:
-                    self.mirror.draw_rect_filled(x, y, w, h, color)
+                self.mirror.draw_rect_filled(x, y, w, h, color)
                 return
-        self._ensure_mirror_current()
         self.mirror.draw_rect_filled(x, y, w, h, color)
         self.device_current = false
 
@@ -704,10 +483,8 @@ impl RenderBackend for OpenClBackend:
             val rc = self.session.launch_line_u32(self.d_framebuffer, _i64(self.width()), _i64(self.height()), _i64(x1), _i64(y1), _i64(x2), _i64(y2), _i64_from_u32(color), _i64(thickness))
             if rc == 0:
                 self.device_current = true
-                if self.mirror_current:
-                    self.mirror.draw_line(x1, y1, x2, y2, color, thickness)
+                self.mirror.draw_line(x1, y1, x2, y2, color, thickness)
                 return
-        self._ensure_mirror_current()
         self.mirror.draw_line(x1, y1, x2, y2, color, thickness)
         self.device_current = false
 
@@ -721,10 +498,8 @@ impl RenderBackend for OpenClBackend:
             val rc = self.session.launch_circle_u32(self.d_framebuffer, _i64(self.width()), _i64(self.height()), _i64(cx), _i64(cy), _i64(r), _i64_from_u32(color), false)
             if rc == 0:
                 self.device_current = true
-                if self.mirror_current:
-                    self.mirror.draw_circle(cx, cy, r, color)
+                self.mirror.draw_circle(cx, cy, r, color)
                 return
-        self._ensure_mirror_current()
         self.mirror.draw_circle(cx, cy, r, color)
         self.device_current = false
 
@@ -738,10 +513,8 @@ impl RenderBackend for OpenClBackend:
             val rc = self.session.launch_circle_u32(self.d_framebuffer, _i64(self.width()), _i64(self.height()), _i64(cx), _i64(cy), _i64(r), _i64_from_u32(color), true)
             if rc == 0:
                 self.device_current = true
-                if self.mirror_current:
-                    self.mirror.draw_circle_filled(cx, cy, r, color)
+                self.mirror.draw_circle_filled(cx, cy, r, color)
                 return
-        self._ensure_mirror_current()
         self.mirror.draw_circle_filled(cx, cy, r, color)
         self.device_current = false
 
@@ -759,10 +532,8 @@ impl RenderBackend for OpenClBackend:
             val rc = self.session.launch_rounded_rect_u32(self.d_framebuffer, _i64(self.width()), _i64(self.height()), _i64(x), _i64(y), _i64(w), _i64(h), _i64(r), _i64_from_u32(color))
             if rc == 0:
                 self.device_current = true
-                if self.mirror_current:
-                    self.mirror.draw_rounded_rect(x, y, w, h, radius, color)
+                self.mirror.draw_rounded_rect(x, y, w, h, radius, color)
                 return
-        self._ensure_mirror_current()
         self.mirror.draw_rounded_rect(x, y, w, h, radius, color)
         self.device_current = false
 
@@ -771,10 +542,8 @@ impl RenderBackend for OpenClBackend:
             val rc = self.session.launch_triangle_filled_u32(self.d_framebuffer, _i64(self.width()), _i64(self.height()), _i64(x1), _i64(y1), _i64(x2), _i64(y2), _i64(x3), _i64(y3), _i64_from_u32(color))
             if rc == 0:
                 self.device_current = true
-                if self.mirror_current:
-                    self.mirror.draw_triangle_filled(x1, y1, x2, y2, x3, y3, color)
+                self.mirror.draw_triangle_filled(x1, y1, x2, y2, x3, y3, color)
                 return
-        self._ensure_mirror_current()
         self.mirror.draw_triangle_filled(x1, y1, x2, y2, x3, y3, color)
         self.device_current = false
 
@@ -785,16 +554,13 @@ impl RenderBackend for OpenClBackend:
             val rc = self.session.launch_gradient_rect_u32(self.d_framebuffer, _i64(self.width()), _i64(self.height()), _i64(x), _i64(y), _i64(w), _i64(h), _i64_from_u32(top_color), _i64_from_u32(bottom_color))
             if rc == 0:
                 self.device_current = true
-                if self.mirror_current:
-                    self.mirror.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
+                self.mirror.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
                 return
-        self._ensure_mirror_current()
         self.mirror.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
         self.device_current = false
 
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
         if not self._can_use_device_draw():
-            self._ensure_mirror_current()
             self.mirror.draw_text(x, y, text_val, color, font_size)
             self.device_current = false
             return
@@ -802,10 +568,8 @@ impl RenderBackend for OpenClBackend:
         if text_buf.is_empty():
             return
         if self._draw_image_kernel("simple_2d_blit_nonzero_u32", x, y, text_buf.width, text_buf.height, text_buf.pixels):
-            if self.mirror_current:
-                self.mirror.draw_text(x, y, text_val, color, font_size)
+            self.mirror.draw_text(x, y, text_val, color, font_size)
             return
-        self._ensure_mirror_current()
         self.mirror.draw_text(x, y, text_val, color, font_size)
         self.device_current = false
 
@@ -813,38 +577,22 @@ impl RenderBackend for OpenClBackend:
         if w <= 0 or h <= 0:
             return
         if self._draw_image_kernel("simple_2d_blit_image_u32", x, y, w, h, pixels):
-            if self.mirror_current:
-                self.mirror.draw_image(x, y, w, h, pixels)
+            self.mirror.draw_image(x, y, w, h, pixels)
             return
-        self._ensure_mirror_current()
         self.mirror.draw_image(x, y, w, h, pixels)
         self.device_current = false
 
-    me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
-        if self._draw_image_kernel("simple_2d_blit_alpha_u32", x, y, w, h, pixels):
-            self.mirror_current = false
-            return
-        self._ensure_mirror_current()
-        self.mirror.draw_image_blend(x, y, w, h, pixels)
-        self.device_current = false
-
     me set_clip(x: i32, y: i32, w: i32, h: i32):
-        self._ensure_mirror_current()
         self.mirror.set_clip(x, y, w, h)
 
     me clear_clip():
         self.mirror.clear_clip()
 
     me set_mask(mask_pixels: [u8], w: i32, h: i32):
-        self._ensure_mirror_current()
         self.mirror.set_mask(mask_pixels, w, h)
 
     me clear_mask():
         self.mirror.clear_mask()
-
-    me submit_batch() -> bool:
-        # Immediate-mode backend: nothing buffered to flush.
-        true
 
     me present():
         if self.initialized:
@@ -870,7 +618,6 @@ impl RenderBackend for OpenClBackend:
 impl Engine2DExtended for OpenClBackend:
     me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
         if not self._can_use_device_draw():
-            self._ensure_mirror_current()
             self.mirror.draw_text_bg(x, y, text_val, fg, bg, font_size)
             self.device_current = false
             return
@@ -916,12 +663,7 @@ impl Engine2DExtended for OpenClBackend:
         emu_draw_rect_blend(self, x, y, w, h, color)
 
     me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
-        if self._draw_image_kernel("simple_2d_blit_alpha_u32", x, y, w, h, pixels):
-            self.mirror_current = false
-            return
-        self._ensure_mirror_current()
-        self.mirror.draw_image_blend(x, y, w, h, pixels)
-        self.device_current = false
+        emu_draw_image_blend(self, x, y, w, h, pixels)
 
     me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
         emu_draw_image_scaled(self, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)

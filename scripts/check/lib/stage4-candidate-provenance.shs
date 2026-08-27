@@ -49,6 +49,49 @@ stage4_source_revision() (
   bootstrap_stage3_hash_file "$work/snapshot"
 )
 
+# Lightweight source-matched admission used by post-build runtime ABI gates.
+# The full Stage4 producer uses stage4_verify_candidate_provenance below and
+# additionally binds the Stage3 parent, build transcript, and smoke log.  A
+# deployed-candidate check must not require those producer-only paths, but it
+# must still reject a copied/stale binary or a receipt from another checkout.
+stage4_verify_source_provenance() (
+  [ "$#" -eq 3 ] || [ "$#" -eq 4 ] || exit 1
+  binary="$(bootstrap_stage3_canonical_file "$1")" || exit 1
+  provenance="$(bootstrap_stage3_canonical_file "$2")" || exit 1
+  root="$(CDPATH= cd -- "$3" && pwd -P)" || exit 1
+  # A caller that already obtained the canonical Stage4 source revision during
+  # this admission may pass it as argument four.  This avoids a second
+  # full-tree hash without accepting a different source authority: it is
+  # still syntax-checked and must equal the candidate's signed-in-build
+  # provenance value.  Normal gate callers omit it and derive independently.
+  current_revision=${4:-}
+  if [ -z "$current_revision" ]; then
+    current_revision="$(stage4_source_revision "$root")" || exit 1
+  fi
+  printf '%s\n' "$current_revision" | awk '/^[0-9a-f]{64}$/ { ok=1 } END { exit(ok ? 0 : 1) }' || exit 1
+  [ "$provenance" = "${binary}.provenance.env" ] || exit 1
+  for key in schema status artifact_kind output_path output_sha256 \
+      source_revision_kind source_revision source_roots; do
+    bootstrap_stage3_manifest_value "$key" "$provenance" >/dev/null || exit 1
+  done
+  [ "$(bootstrap_stage3_manifest_value schema "$provenance")" = \
+    simple-bootstrap-stage4-provenance-v1 ] || exit 1
+  [ "$(bootstrap_stage3_manifest_value status "$provenance")" = pass ] || exit 1
+  [ "$(bootstrap_stage3_manifest_value artifact_kind "$provenance")" = \
+    pure-simple-full-cli ] || exit 1
+  [ "$(bootstrap_stage3_manifest_value output_path "$provenance")" = \
+    "$binary" ] || exit 1
+  [ "$(bootstrap_stage3_manifest_value output_sha256 "$provenance")" = \
+    "$(bootstrap_stage3_hash_file "$binary")" ] || exit 1
+  [ "$(bootstrap_stage3_manifest_value source_revision_kind "$provenance")" = \
+    content-sha256 ] || exit 1
+  [ "$(bootstrap_stage3_manifest_value source_roots "$provenance")" = \
+    src/compiler:src/lib:src/app:src/runtime:examples/10_tooling ] || exit 1
+  recorded="$(bootstrap_stage3_manifest_value source_revision "$provenance")" || exit 1
+  printf '%s\n' "$recorded" | awk '/^[0-9a-f]{64}$/ { ok=1 } END { exit(ok ? 0 : 1) }' || exit 1
+  [ "$recorded" = "$current_revision" ] || exit 1
+)
+
 stage4_validate_candidate_lane() (
   binary="$1"
   stage3_manifest="$2"
@@ -115,13 +158,20 @@ stage4_write_candidate_provenance() (
     [ "$(tr -d '[:space:]' <"$bootstrap_lock/pid")" = "$recorded_pid" ] || exit 1
   fi
   stage4_validate_candidate_lane "$binary" "$stage3_manifest" "$root" "$build_log" "$smoke_log" || exit 1
-  source_after="$(stage4_source_revision "$root")" || exit 1
+  identity="${provenance}.current-tree.$$"
+  tmp="${provenance}.tmp.$$"
+  trap 'rm -f "$tmp" "$identity"' EXIT INT TERM
+  stage4_write_current_tree_identity "$identity" "$root" || exit 1
+  stage4_verify_stage3_identity_fields "$identity" "$stage3_manifest" "$root" || exit 1
+  if [ -n "${STAGE4_CONTINUATION_RECEIPT:-}" ]; then
+    stage4_verify_current_tree_identity "$continuation" "$root" || exit 1
+    stage4_verify_stage3_identity_fields "$continuation" "$stage3_manifest" "$root" || exit 1
+  fi
+  source_after="$(bootstrap_stage3_manifest_value source_revision "$identity")" || exit 1
   [ "$source_after" = "$source_before" ] || exit 1
   [ "$(bootstrap_stage3_hash_file "$producer")" = "$producer_sha_before" ] || exit 1
   [ "$(bootstrap_stage3_hash_file "$helper")" = "$helper_sha_before" ] || exit 1
 
-  tmp="${provenance}.tmp.$$"
-  trap 'rm -f "$tmp"' EXIT INT TERM
   umask 077
   {
     echo "schema=simple-bootstrap-stage4-provenance-v1"
@@ -132,6 +182,13 @@ stage4_write_candidate_provenance() (
     echo "source_revision_kind=content-sha256"
     echo "source_revision=$source_after"
     echo "source_roots=src/compiler:src/lib:src/app:src/runtime:examples/10_tooling"
+    echo "repository_root=$root"
+    echo "stage3_source_snapshot_sha256=$(bootstrap_stage3_manifest_value stage3_source_snapshot_sha256 "$identity")"
+    echo "git_state_sha256=$(bootstrap_stage3_manifest_value git_state_sha256 "$identity")"
+    echo "git_head=$(bootstrap_stage3_manifest_value git_head "$identity")"
+    echo "git_dirty_fingerprint=$(bootstrap_stage3_manifest_value git_dirty_fingerprint "$identity")"
+    echo "stage3_producer_path=$(bootstrap_stage3_manifest_value stage3_producer_path "$identity")"
+    echo "stage3_producer_sha256=$(bootstrap_stage3_manifest_value stage3_producer_sha256 "$identity")"
     echo "producer_path=$producer"
     echo "producer_sha256=$producer_sha_before"
     echo "provenance_helper_path=$helper"
@@ -160,6 +217,9 @@ stage4_verify_candidate_provenance() (
   for key in schema status artifact_kind output_path output_sha256 \
       source_revision_kind source_revision source_roots producer_path \
       producer_sha256 provenance_helper_path provenance_helper_sha256 \
+      repository_root stage3_source_snapshot_sha256 git_state_sha256 \
+      git_head git_dirty_fingerprint stage3_producer_path \
+      stage3_producer_sha256 \
       parent_compiler_path parent_compiler_sha256 stage3_provenance_path \
       stage3_provenance_sha256 build_log_path build_log_sha256 \
       essential_tools_log_path essential_tools_log_sha256 completed_gate; do
@@ -172,7 +232,7 @@ stage4_verify_candidate_provenance() (
   [ "$(bootstrap_stage3_manifest_value output_sha256 "$provenance")" = "$(bootstrap_stage3_hash_file "$binary")" ] || exit 1
   [ "$(bootstrap_stage3_manifest_value source_revision_kind "$provenance")" = content-sha256 ] || exit 1
   [ "$(bootstrap_stage3_manifest_value source_roots "$provenance")" = src/compiler:src/lib:src/app:src/runtime:examples/10_tooling ] || exit 1
-  [ "$(bootstrap_stage3_manifest_value source_revision "$provenance")" = "$(stage4_source_revision "$root")" ] || exit 1
+  stage4_verify_current_tree_identity "$provenance" "$root" || exit 1
   [ "$(bootstrap_stage3_manifest_value producer_path "$provenance")" = "$producer" ] || exit 1
   [ "$(bootstrap_stage3_manifest_value producer_sha256 "$provenance")" = "$(bootstrap_stage3_hash_file "$producer")" ] || exit 1
   [ "$(bootstrap_stage3_manifest_value provenance_helper_path "$provenance")" = "$helper" ] || exit 1
@@ -183,6 +243,7 @@ stage4_verify_candidate_provenance() (
   stage3_manifest="$(bootstrap_stage3_canonical_file "$(bootstrap_stage3_manifest_value stage3_provenance_path "$provenance")")" || exit 1
   [ "$(bootstrap_stage3_manifest_value stage3_provenance_sha256 "$provenance")" = "$(bootstrap_stage3_hash_file "$stage3_manifest")" ] || exit 1
   bootstrap_stage3_verify_manifest "$stage3_manifest" "$root" "$parent_compiler" || exit 1
+  stage4_verify_stage3_identity_fields "$provenance" "$stage3_manifest" "$root" || exit 1
   build_log="$(bootstrap_stage3_canonical_file "$(bootstrap_stage3_manifest_value build_log_path "$provenance")")" || exit 1
   [ "$(bootstrap_stage3_manifest_value build_log_sha256 "$provenance")" = "$(bootstrap_stage3_hash_file "$build_log")" ] || exit 1
   smoke_log="$(bootstrap_stage3_canonical_file "$(bootstrap_stage3_manifest_value essential_tools_log_path "$provenance")")" || exit 1

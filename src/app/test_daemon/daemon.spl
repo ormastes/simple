@@ -10,9 +10,7 @@ use std.daemon_sdk.types.{
     daemon_response_new
 }
 use app.test_daemon.types.{
-    TestDaemonConfig, test_daemon_config_default
-}
-use app.test_daemon.{
+    TestDaemonConfig, test_daemon_config_default,
     TREQ_RUN_SINGLE, TREQ_RUN_ALL, TREQ_CLEAN_RUN, TREQ_STATUS, TREQ_STOP,
     TREQ_AGENT_REGISTER, TREQ_AGENT_CLAIM_BATCH,
     TREQ_AGENT_REPORT_RESULT, TREQ_AGENT_DEREGISTER,
@@ -32,9 +30,9 @@ use app.test_daemon.resource_snapshot.{test_daemon_resource_snapshot}
 use app.test_daemon.session_broker.{SessionBroker, session_broker_new}
 use app.test_daemon.session_types.{
     TestSessionMeta, test_session_meta_default,
-    session_kind_from_name, reuse_mode_from_name, reset_policy_from_name
+    session_kind_from_name, reuse_mode_from_name, reset_policy_from_name,
+    SESSION_KIND_LOCAL
 }
-use app.test_daemon.{SESSION_KIND_LOCAL}
 use app.test_daemon.adapters.qemu_adapter.{QemuAdapter, qemu_adapter_new}
 use app.test_daemon.adapters.container_adapter.{ContainerAdapter, container_adapter_new}
 use app.test_daemon.adapters.service_adapter.{ServiceAdapter, service_adapter_new}
@@ -45,7 +43,8 @@ use std.io_runtime.{time_now_unix_micros}
 use std.io_runtime.{hash_text}
 use std.io_runtime.{dir_list}
 use std.io_runtime.{file_exists}
-use std.io_runtime.{mkdir_p}
+extern fn rt_mkdir_p(path: text) -> bool
+
 # ============================================================================
 # Test Daemon
 # ============================================================================
@@ -86,9 +85,9 @@ impl TestDaemon:
             if state.cycle_count % 20 == 0:
                 self.incremental_state.save()
 
-            use std.io_runtime.{thread_sleep}
+            extern fn rt_sleep_ms(ms: i64)
             val snap = self.current_resource_snapshot()
-            thread_sleep(test_daemon_poll_sleep_ms(self.config.resource_policy, snap, 0))
+            rt_sleep_ms(test_daemon_poll_sleep_ms(self.config.resource_policy, snap, 0))
 
     # --- Request handler ---
 
@@ -151,7 +150,7 @@ impl TestDaemon:
             return resp
 
         # Dedup check
-        val dedup_key = hash_text(test_path)
+        val dedup_key = rt_hash_text(test_path)
         val existing = self.active_requests["{dedup_key}"]
         if existing.? and existing != req.id:
             var resp = daemon_response_new(req.id, TRESP_QUEUED)
@@ -170,9 +169,9 @@ impl TestDaemon:
                 resp.fields["test_path"] = test_path
                 resp.fields["passed"] = "{cached.passed}"
                 resp.fields["failed"] = "{cached.failed}"
-                resp.fields["skipped"] = "{cached.skipped}"
-                resp.fields["duration_ms"] = "{cached.duration_ms}"
-                resp.fields["output"] = cached.output
+                resp.fields["skipped"] = "{cached.result_skipped}"
+                resp.fields["duration_ms"] = "{cached.result_duration_ms}"
+                resp.fields["output"] = cached.result_output
                 resp.fields["cached"] = "true"
                 return resp
 
@@ -194,7 +193,7 @@ impl TestDaemon:
         var total_failed: i64 = 0
         var total_skipped: i64 = 0
         var total_cached: i64 = 0
-        val start_time = time_now_unix_micros()
+        val start_time = rt_time_now_unix_micros()
 
         var i = 0
         while i < test_files.len():
@@ -204,7 +203,7 @@ impl TestDaemon:
             if cached.test_path != "":
                 total_passed = total_passed + cached.passed
                 total_failed = total_failed + cached.failed
-                total_skipped = total_skipped + cached.skipped
+                total_skipped = total_skipped + cached.result_skipped
                 total_cached = total_cached + 1
             else:
                 self.execute_test(test_path)
@@ -212,10 +211,10 @@ impl TestDaemon:
                 if entry.test_path != "":
                     total_passed = total_passed + entry.passed
                     total_failed = total_failed + entry.failed
-                    total_skipped = total_skipped + entry.skipped
+                    total_skipped = total_skipped + entry.result_skipped
             i = i + 1
 
-        val elapsed = (time_now_unix_micros() - start_time) / 1000
+        val elapsed = (rt_time_now_unix_micros() - start_time) / 1000
 
         var resp = daemon_response_new(req.id, TRESP_COMPLETED)
         resp.fields["passed"] = "{total_passed}"
@@ -418,18 +417,18 @@ impl TestDaemon:
     # --- Execute a test ---
 
     fn execute_test(test_path: text) -> DaemonResponse:
-        # Shell out to the local child runner; the daemon owns scheduling.
+        # Shell out to bin/simple test
         extern fn rt_shell_exec(cmd: text) -> text
         extern fn rt_shell_exit_code() -> i64
 
-        val setup_start = time_now_unix_micros()
+        val setup_start = rt_time_now_unix_micros()
         val cmd = "bin/simple test {test_path} --no-session-daemon --sequential 2>&1"
-        val setup_ms = (time_now_unix_micros() - setup_start) / 1000
+        val setup_ms = (rt_time_now_unix_micros() - setup_start) / 1000
 
-        val test_start = time_now_unix_micros()
+        val test_start = rt_time_now_unix_micros()
         val output = rt_shell_exec(cmd)
         val exit_code = rt_shell_exit_code()
-        val duration_ms = (time_now_unix_micros() - test_start) / 1000
+        val duration_ms = (rt_time_now_unix_micros() - test_start) / 1000
 
         val status = if exit_code == 0: TRESP_COMPLETED else: TRESP_FAILED
         val passed = if exit_code == 0: 1 else: 0
@@ -471,7 +470,7 @@ impl TestDaemon:
 # ============================================================================
 
 fn test_daemon_start(config: TestDaemonConfig) -> TestDaemon:
-    mkdir_p(".build/test_daemon")
+    rt_mkdir_p(".build/test_daemon")
 
     val runner = daemon_runner_start(config.daemon)
     val incremental_state = incremental_test_state_load(config.cache_path, config.dep_graph_path, true)
@@ -518,10 +517,10 @@ fn discover_test_files(filter: text) -> [text]:
     files
 
 fn discover_test_files_in_dir(dir: text, filter: text, files: [text]):
-    if not file_exists(dir):
+    if not rt_file_exists(dir):
         return
 
-    val entries = dir_list(dir)
+    val entries = rt_dir_list(dir)
     var i = 0
     while i < entries.len():
         val entry = entries[i]

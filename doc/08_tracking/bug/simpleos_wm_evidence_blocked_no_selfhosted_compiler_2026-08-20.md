@@ -56,3 +56,53 @@ Drag lane guest contract probes: `guest_entry_mouse_poll_status=pass` but
 `guest_entry_keyboard_poll_status=missing` in
 `examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl` — re-check
 once the lane can actually build.
+
+## Update 2026-08-26 (goal-6 x86_64/riscv status pass, worktree /mnt/data/worktrees/lane-os9)
+
+Re-ran the readiness gate with no `SIMPLEOS_KERNEL_ELF` set — still confirms
+the skip verdict above is unchanged:
+
+```
+$ sh scripts/check/check-simpleos-x86-64-wm-qemu-readiness.shs
+x86_64_wm_qemu_readiness: skip
+boot_verification_skipped: SIMPLEOS_KERNEL_ELF not set or file missing (arg-parse pre-check passed, but no kernel was booted)
+```
+Exit code: 0.
+
+A stale, out-of-tree `kernel.elf` was found at
+`/mnt/data/.simple/qemu/x86_64/kernel.elf` (mtime 2026-08-13, not produced by
+this session, not tracked in the repo — a leftover from an earlier lane's
+fs-exec probe build, not the WM desktop entry). Pointing
+`SIMPLEOS_KERNEL_ELF` at it for one exploratory run (does not change the
+verdict above, which is the correct no-kernel report) shows the OVMF
+real-firmware chain itself DOES work on this host: `grub-uefi` loads
+`/boot/kernel.elf` via multiboot, `[BOOT32] entry` -> `[BOOT64] entry` ->
+`[BOOT64] call _start` all fire, and the guest prints `SimpleOS x86_64 boot
+OK` — i.e. OVMF pflash -> GRUB -> multiboot -> kernel entry is proven
+mechanically sound. It then fails past that point because this particular
+kernel is the wrong artifact (an fs-exec probe kernel, not
+`gui_entry_desktop.spl`'s desktop build): `[x86_64-nvfs] image read failed` /
+`TEST FAILED`, so it never reaches the `[desktop-gui] spl_start` boot marker
+the readiness gate requires (`reason: kernel did not print boot marker within
+60s`, exit 1, `grub_efi_ran: true`, `kernel_start_reached: true`,
+`boot_verified: false`).
+
+This narrows the blocker: it is not that OVMF/GRUB/multiboot boot is unproven
+on this host (it now is, at least for a differently-built kernel) — it is
+still, as above, that no current build can produce
+`gui_entry_desktop.spl`'s own kernel.elf without a working self-hosted
+`bin/simple`, which remains blocked on the bootstrap redeploy (Stage 3 dies at
+module 261/713, per `.claude/memory` and this session's own check — not
+re-attempted here per task constraints: a bootstrap costs hours and is
+explicitly out of scope for this pass).
+
+riscv64: `scripts/check/check-simpleos-riscv64-opensbi-real-firmware-boot.shs`
+PASSes (`PASS — OpenSBI real-firmware boot verified, 56 serial line(s)
+captured`, exit 0), proving the OpenSBI `-bios` real-firmware proxy boots on
+this host. Per the gate's own header comment this proves only the firmware
+proxy, not a SimpleOS/Vulkan-relevant riscv64 guest — no SimpleOS riscv64
+kernel-boot gate exists in `scripts/check/` at all (searched
+`ls scripts/check/ | grep -i simpleos` plus `riscv`/`rv64` — only the
+FPGA-preflight and OpenSBI-alone gates exist). That remains a **NO GATE
+EXISTS** state for an actual SimpleOS riscv64 boot, same root blocker (no
+self-hosted compiler to build a riscv64 SimpleOS kernel) as x86_64.

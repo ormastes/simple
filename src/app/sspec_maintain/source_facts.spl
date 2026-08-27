@@ -8,62 +8,15 @@ fn _quoted_name(line: text) -> text:
         return parts[1].trim()
     line.trim()
 
-fn _is_standalone_assertion(line: text) -> bool:
-    val lower = line.lower()
-    # assert_eq/assert_ne are std.spec's short aliases of assert_equal/
-    # assert_not_equal (src/lib/nogc_sync_mut/spec.spl) — the scorer read every
-    # assert_eq spec as assertion-less until 2026-08-27.
-    lower.contains("assert_eq(") or lower.contains("assert_ne(") or
-        lower.contains("assert_equal(") or lower.contains("assert_not_equal(") or
-        lower.contains("assert_true(") or lower.contains("assert_false(") or
-        lower.contains("assert_contains(") or lower.contains("assert_nil(") or
-        lower.contains("assert_not_nil(")
-
-fn _is_quoted_literal(value: text) -> bool:
-    val trimmed = value.trim()
-    trimmed.len() > 1 and trimmed.starts_with("\"") and trimmed.ends_with("\"") and
-        not trimmed.substring(1, trimmed.len() - 1).contains("\"")
-
-fn _comparison_tautology(line: text) -> bool:
-    """True when a comparison call compares two literals; asserts nothing about the system."""
-    val lower = line.lower()
-    val start = lower.find("(")
-    if start < 0:
-        return false
-    var body = line.substring(start + 1).trim()
-    if body.ends_with(")"):
-        body = body.substring(0, body.len() - 1).trim()
-    for op in ["==", "!=", ">=", "<=", ">", "<"]:
-        val index = body.find(op)
-        if index > 0:
-            val left = body.substring(0, index).trim()
-            val right = body.substring(index + op.len()).trim()
-            return (_is_numeric_literal(left) or _is_quoted_literal(left)) and
-                (_is_numeric_literal(right) or _is_quoted_literal(right))
-    false
-
 fn _is_real_assertion(line: text) -> bool:
     val lower = line.lower()
-    val trimmed = lower.trim()
     val assertion = lower.contains("expect(") or lower.contains("assert(") or
         lower.contains("expect_compile") or lower.contains("assert_compile") or
-        lower.contains("check(") or lower.contains("check_msg(") or
-        _is_standalone_assertion(line) or
-        # Parenless statement forms: `expect test_initial_build()`,
-        # `expect not (x in y)`, bare `assert cond` (2026-08-22),
-        # `check cond` — the usage-spec family asserts via parenless check.
-        trimmed.starts_with("expect ") or trimmed.starts_with("assert ") or
-        trimmed.starts_with("expect_not ") or trimmed.starts_with("check ")
+        _is_standalone_assertion(line)
     if not assertion:
         return false
     if lower.contains("assert(true)") or lower.contains("assert(false)") or
-            lower.contains("assert_true(true)") or lower.contains("assert_false(false)") or
-            lower.contains("check(true)") or trimmed == "check true":
-        return false
-    # T4a (2026-08-27): a comparison whose BOTH sides are literals —
-    # check(1 == 1), check("a" == "a"), check(2 > 0) — is compiler
-    # knowledge, not a system oracle; same class as assert(true) above.
-    if _comparison_tautology(line):
+            lower.contains("assert_true(true)") or lower.contains("assert_false(false)"):
         return false
     val expect_start = lower.index_of("expect(")
     val equal_start = lower.index_of(").to_equal(")
@@ -80,57 +33,6 @@ fn _is_real_assertion(line: text) -> bool:
                 (_is_quoted_literal(actual) and _is_quoted_literal(expected)):
             return false
     true
-
-fn _count_unescaped_triple(raw: text) -> i64:
-    # Count `"""` occurrences NOT preceded by a backslash. A naive count
-    # misreads the escaped `\"\"\"` inside single-line string fixtures (e.g.
-    # tag_parsing_spec.spl) as real docstring fences, flipping the scanner
-    # into in_triple_string for the rest of the file and hiding every
-    # scenario below the fixture (0-scenario ORA-001 false blocker).
-    var count: i64 = 0
-    var i: i64 = 0
-    while i >= 0:
-        val index = raw.index_of("\"\"\"", i)
-        if index < 0:
-            return count
-        if index == 0 or raw.substring(index - 1, index) != "\\":
-            count = count + 1
-        i = index + 3
-    count
-
-fn _count_sub(haystack: text, needle: text) -> i64:
-    # Non-overlapping occurrence count; needle is never empty at call sites.
-    if needle == "" or haystack == "":
-        return 0
-
-    var count: i64 = 0
-    var rest = haystack
-    val needle_len = needle.len()
-    while rest != "":
-        val index = rest.index_of(needle)
-        if index < 0:
-            return count
-        count = count + 1
-        if index + needle_len >= rest.len():
-            return count
-        rest = rest.substring(index + needle_len)
-    count
-
-fn _calls_skip(trimmed_lower: text) -> bool:
-    # A pending scaffold is a CALL to skip(...) — `test_env_gate_skip(` and
-    # other *_skip(name) helpers are real oracles, not skips (2026-08-22).
-    var rest = trimmed_lower
-    while rest != "":
-        val index = rest.index_of("skip(")
-        if index < 0:
-            return false
-        if index == 0:
-            return true
-        val before = rest[index - 1]
-        if before == " " or before == "\t" or before == "(" or before == "=":
-            return true
-        rest = rest.substring(index + 4)
-    false
 
 fn _is_pending(line: text) -> bool:
     # ORA-001 pending detection must fire only on a pending STATEMENT, not on
@@ -197,11 +99,8 @@ fn _is_numeric_literal(value: text) -> bool:
 
 fn _assignment(line: text) -> (text, text):
     val trimmed = line.trim()
-    # Only immutable `val` bindings feed the tautology heuristic: a `var`
-    # initialized to a literal is typically a flag mutated inside a loop
-    # (`var found = false` ... `expect(found).to_equal(false)`), where the
-    # binding's initial text says nothing about the asserted value.
-    if not trimmed.starts_with("val ") or not trimmed.contains("="):
+    if not (trimmed.starts_with("val ") or trimmed.starts_with("var ")) or
+            not trimmed.contains("="):
         return ("", "")
     val pieces = trimmed.split("=")
     if pieces.len() < 2: return ("", "")
@@ -231,53 +130,9 @@ fn _finish_scenario(name: text, start_line: i64, end_line: i64,
         local_arithmetic_oracle: local_arithmetic,
         magic_expected_count: magic_expected)
 
-# Pre-pass: module-level fns whose bodies contain real executed assertions.
-# A scenario that calls such a helper is executing a real oracle even though
-# the assertion text lives outside the it-block (common `fn assert_offsets`
-# shape); ORA-001 must not fire on it.
-fn _asserting_helper_names(lines: [text]) -> [text]:
-    var names: [text] = []
-    var current = ""
-    var has_assertion = false
-    for line in lines:
-        val trimmed = line.trim()
-        if trimmed.starts_with("fn "):
-            var nm = trimmed.substring(3)
-            val paren = nm.index_of("(")
-            val named = paren > 0
-            if named:
-                nm = nm.substring(0, paren)
-            if current != "" and named:
-                if has_assertion and not names.contains(current):
-                    names.push(current)
-                current = ""
-                has_assertion = false
-            if named and nm != "main" and nm != "check" and nm != "expect":
-                current = nm
-                has_assertion = false
-        if current != "" and (trimmed.contains("expect(") or trimmed.contains("assert(") or
-                trimmed.contains("check(") or trimmed.contains("check_msg(") or
-                trimmed.contains("assert_true(") or trimmed.contains("assert_equal(")):
-            has_assertion = true
-    if current != "" and has_assertion and not names.contains(current):
-        names.push(current)
-    names
-
-fn _calls_asserting_helper(line: text, helper_names: [text]) -> bool:
-    if helper_names.len() == 0:
-        return false
-    val trimmed = line.trim()
-    if trimmed.starts_with("#") or trimmed.starts_with("fn "):
-        return false
-    for name in helper_names:
-        if trimmed.contains(name + "("):
-            return true
-    false
-
 fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
     val lines = source.split("\n")
     val lower = source.lower()
-    val asserting_helper_names = _asserting_helper_names(lines)
     var scenarios: [SspecScenarioFacts] = []
     var current_name = ""
     var current_line: i64 = 0
@@ -307,36 +162,11 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
     var requirements: i64 = 0
     var line_number: i64 = 0
     var has_bare_step = false
-    # T4b (2026-08-27): the exact same narrative-bearing comment line repeated
-    # verbatim 3+ times is bulk-stuffed boilerplate, not authored voice.
-    var narrative_comment_counts: Dict<text, i64> = {}
-    var has_duplicated_narrative = false
-    # Triple-quoted fixture strings often contain column-0 lines; without
-    # string-state tracking those lines END the current scenario early and
-    # every assertion after the fixture lands outside any scenario (2026-08-22).
-    var in_triple_string = false
     for raw in lines:
         line_number = line_number + 1
-        if in_triple_string:
-            if _count_unescaped_triple(raw) > 0:
-                in_triple_string = false
-            # Narrative docstrings still DECLARE requirements (the manual voice
-            # carries REQ ids per the scoring spec's dangling-req oracle);
-            # collect ids but no scenario/assertion facts from string content.
-            if _contains_requirement(raw):
-                for requirement_id in _requirement_ids(raw):
-                    if not all_requirement_ids.contains(requirement_id):
-                        all_requirement_ids.push(requirement_id)
-                    if raw.lower().contains("planned") and
-                            not planned_requirement_ids.contains(requirement_id):
-                        planned_requirement_ids.push(requirement_id)
-                requirements = all_requirement_ids.len()
-            continue
         val line = raw.trim()
         val line_lower = line.lower()
         val indent = _indent_width(raw)
-        if _count_unescaped_triple(raw) % 2 == 1:
-            in_triple_string = true
         if current_line > 0 and line != "" and indent <= current_indent:
             scenarios.push(_finish_scenario(current_name, current_line,
                 line_number - 1, scenario_steps, scenario_assertions,
@@ -396,13 +226,7 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
             scenario_steps = scenario_steps + 1
         if current_line > 0 and (line_lower.contains("expect(") or line_lower.contains("assert(") or
                 line_lower.contains("expect_compile") or line_lower.contains("assert_compile") or
-                line_lower.contains("check(") or line_lower.contains("check_msg(") or
-                _calls_asserting_helper(line, asserting_helper_names) or
-                _is_standalone_assertion(line) or
-                line_lower.trim().starts_with("expect ") or
-                line_lower.trim().starts_with("assert ") or
-                line_lower.trim().starts_with("expect_not ") or
-                line_lower.trim().starts_with("check ")):
+                _is_standalone_assertion(line)):
             assertions = assertions + 1
             if current_line > 0: scenario_assertions = scenario_assertions + 1
             val (actual, expected) = _assertion_parts(line)
@@ -413,22 +237,11 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
                     not line_lower.contains("# explained:") and
                     not line_lower.contains("# oracle:"):
                 scenario_magic_expected = scenario_magic_expected + 1
-            if (_is_real_assertion(line) or _calls_asserting_helper(line, asserting_helper_names)) and not local_arithmetic:
+            if _is_real_assertion(line) and not local_arithmetic:
                 real_assertions = real_assertions + 1
                 if current_line > 0: scenario_real = scenario_real + 1
-        # Typed-evidence surface: the modern stack captures via
-        # compare_evidence(...)/evidence_manifest(...)/render_manual(...) and
-        # per-kind modules (terminal_grid, gui_image/action_trace,
-        # binary_layout/bit_table) or a `<spec>.evidence.sdn` sidecar — none of
-        # which contain the literal `capture_`/`evidence(` substrings.
         if current_line > 0 and (line_lower.contains("capture_") or
-                line_lower.contains("@capture") or line_lower.contains("evidence(") or
-                line_lower.contains("evidence_manifest(") or
-                line_lower.contains("render_manual(") or
-                line_lower.contains("terminal_grid") or line_lower.contains("tui_grid") or
-                line_lower.contains("gui_image") or line_lower.contains("action_trace") or
-                line_lower.contains("bit_table") or line_lower.contains("binary_layout") or
-                line_lower.contains(".evidence.sdn")):
+                line_lower.contains("@capture") or line_lower.contains("evidence(")):
             captures = captures + 1
             scenario_captures = scenario_captures + 1
         if _contains_requirement(line):
@@ -445,21 +258,11 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
             requirements = all_requirement_ids.len()
             scenario_requirements = scenario_requirement_ids.len()
         if current_line > 0 and _is_pending(line): scenario_pending = true
-        # Source-text inspection is not system evidence, but reading a
-        # GENERATED artifact (build output, tmp root) IS runtime observation
-        # (2026-08-22): only flag when the read/assert targets src/ source or
-        # an explicit source.contains oracle.
-        var reads_source_var = false
-        for source_var in scenario_source_vars:
-            if line_lower.contains("expect(" + source_var + ".contains(") or
-                    line_lower.contains("assert(" + source_var + ".contains("):
-                reads_source_var = true
-        if current_line > 0 and (line_lower.contains("expect(source.contains(") or
+        if current_line > 0 and (line_lower.contains("expect(file_read(") or
+                line_lower.contains("expect(source.contains(") or
+                line_lower.contains("assert(file_read(") or
                 line_lower.contains("assert(source.contains(") or
-                line_lower.contains("source text oracle") or reads_source_var or
-                ((line_lower.contains("expect(file_read(") or
-                    line_lower.contains("assert(file_read(")) and
-                    line_lower.contains("src/"))):
+                line_lower.contains("source text oracle")):
             scenario_source_only = true
     if current_line > 0:
         scenarios.push(_finish_scenario(current_name, current_line, lines.len(),
@@ -535,40 +338,19 @@ fn extract_sspec_manual_facts(path: text, content: text) -> SspecManualFacts:
     var visible_steps: i64 = 0
     var evidence_blocks: i64 = 0
     var trace_links: i64 = 0
-    # The canonical SPipe generator renders an executable `step("...")` call as
-    # a plain `- <label>` bullet under the `## Scenarios` section (pinned by
-    # test/01_unit/app/tooling/spipe_docgen_scenario_body_spec.spl, which
-    # asserts the ordered `1. ` form is NOT emitted). Counting only
-    # `step `/`1. `/`data-step=` therefore scored every stepped manual as
-    # having zero visible steps. Same principle as the evidence-block matching
-    # below: match what the generator actually emits, and scope the bullet rule
-    # to the scenarios region so unrelated prose bullets are not counted.
-    var in_scenarios = false
     for raw in lines:
         val line = raw.trim()
         val folded = line.lower()
         if line.starts_with("#"): headings = headings + 1
-        if line.starts_with("## "):
-            in_scenarios = folded.starts_with("## scenarios")
         if (
             folded.starts_with("step ") or
             folded.starts_with("1. ") or
-            folded.contains("data-step=") or
-            (in_scenarios and line.starts_with("- "))
+            folded.contains("data-step=")
         ): visible_steps = visible_steps + 1
-        # Matches what manual_render.spl actually emits: terminal_grid renders
-        # as a ```text fence (not ```textgrid), unknown kinds as
-        # ```unknown-block:, plus ## Provenance and markdown images. The old
-        # ```textgrid/```protocol fences are kept for manuals generated by
-        # older tooling.
         if (
             folded.contains("evidence") or
-            folded.contains("```text") or
             folded.contains("```textgrid") or
-            folded.contains("```protocol") or
-            folded.contains("```unknown-block") or
-            folded.contains("## provenance") or
-            folded.contains("![")
+            folded.contains("```protocol")
         ): evidence_blocks = evidence_blocks + 1
         if _contains_requirement(line): trace_links = trace_links + 1
     var missing_sections: [text] = []

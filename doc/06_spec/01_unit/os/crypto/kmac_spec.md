@@ -1,6 +1,30 @@
 # Kmac Specification
 
-> Tests covering KMAC-128 — NIST SP 800-185 known-answer vectors.
+> <details>
+
+<!-- sdn-diagram:id=kmac_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=kmac_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+kmac_spec -> std
+kmac_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=kmac_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,23 +41,13 @@
 
 #### Sample #1: KMAC128(K, 00010203, 256, \
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- Sample #1: KMAC128(K, 00010203, 256, \
-   - Expected: hex.starts_with("e5780b0d") is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("Sample #1: KMAC128(K, 00010203, 256, \")
 val out = kmac128(_make_key(), _make_data_short(), 256, _empty())
 val hex = _bytes_hex(out)
 expect(hex.starts_with("e5780b0d")).to_equal(true)
@@ -43,19 +57,13 @@ expect(hex.starts_with("e5780b0d")).to_equal(true)
 
 #### Sample #1: KMAC128 output length is 32 bytes
 
-- Sample #1: KMAC128 output length is 32 bytes
-   - Expected: out.len() equals `32`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("Sample #1: KMAC128 output length is 32 bytes")
 val out = kmac128(_make_key(), _make_data_short(), 256, _empty())
 expect(out.len()).to_equal(32)
 ```
@@ -64,19 +72,13 @@ expect(out.len()).to_equal(32)
 
 #### Sample #1: full KMAC128 digest matches NIST vector
 
-- Sample #1: full KMAC128 digest matches NIST vector
-   - Expected: _bytes_hex(out) equals `e5780b0d3ea6f7d3a429c5706aa43a00fadbd7d49628839e3187243f456ee14e`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("Sample #1: full KMAC128 digest matches NIST vector")
 val out = kmac128(_make_key(), _make_data_short(), 256, _empty())
 expect(_bytes_hex(out)).to_equal("e5780b0d3ea6f7d3a429c5706aa43a00fadbd7d49628839e3187243f456ee14e")
 ```
@@ -85,19 +87,13 @@ expect(_bytes_hex(out)).to_equal("e5780b0d3ea6f7d3a429c5706aa43a00fadbd7d4962883
 
 #### Sample #2: KMAC128(K, 00010203, 256, \
 
-- Sample #2: KMAC128(K, 00010203, 256, \
-   - Expected: _bytes_hex(out) equals `3b1fba963cd8b0b59e8c1a6d71888b7143651af8ba0a7070c0979e2811324aa5`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("Sample #2: KMAC128(K, 00010203, 256, \")
 val out = kmac128(_make_key(), _make_data_short(), 256, _make_custom())
 expect(_bytes_hex(out)).to_equal("3b1fba963cd8b0b59e8c1a6d71888b7143651af8ba0a7070c0979e2811324aa5")
 ```
@@ -106,19 +102,13 @@ expect(_bytes_hex(out)).to_equal("3b1fba963cd8b0b59e8c1a6d71888b7143651af8ba0a70
 
 #### Sample #3: KMAC128(K, 00..C7, 256, \
 
-- Sample #3: KMAC128(K, 00..C7, 256, \
-   - Expected: _bytes_hex(out) equals `1f5b4e6cca02209e0dcb5ca635b89a15e271ecc760071dfd805faa38f9729230`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("Sample #3: KMAC128(K, 00..C7, 256, \")
 val out = kmac128(_make_key(), _make_data_200(), 256, _make_custom())
 expect(_bytes_hex(out)).to_equal("1f5b4e6cca02209e0dcb5ca635b89a15e271ecc760071dfd805faa38f9729230")
 ```
@@ -132,12 +122,12 @@ expect(_bytes_hex(out)).to_equal("1f5b4e6cca02209e0dcb5ca635b89a15e271ecc760071d
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/crypto/kmac_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering KMAC-128 — NIST SP 800-185 known-answer vectors.
+Tests covering:
 - KMAC-128 — NIST SP 800-185 known-answer vectors
 
 ## Scenario Summary
@@ -152,54 +142,3 @@ Tests covering KMAC-128 — NIST SP 800-185 known-answer vectors.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-OS`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `6fec2e0449fd5937c89028d345a510fcadb23c2eb7b4be5ab676c40f76737d49`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `6fec2e0449fd5937c89028d345a510fcadb23c2eb7b4be5ab676c40f76737d49`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `6fec2e0449fd5937c89028d345a510fcadb23c2eb7b4be5ab676c40f76737d49`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
-
-SSpec documentization score: 90/100
-source: test/01_unit/os/crypto/kmac_spec.spl
-mirror: doc/06_spec/01_unit/os/crypto/kmac_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=90
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/os/crypto/kmac_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/crypto/kmac_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/os/crypto/kmac_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/os/crypto/kmac_spec.spl:129:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'Sample #1: KMAC128(K, 00010203, 256, \' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/os/crypto/kmac_spec.spl:136:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'Sample #1: KMAC128 output length is 32 bytes' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/os/crypto/kmac_spec.spl:142:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'Sample #1: full KMAC128 digest matches NIST vector' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

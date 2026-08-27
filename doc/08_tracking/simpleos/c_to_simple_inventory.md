@@ -18,21 +18,6 @@ Priority port targets:
 | 3 | `src/os/libc/simpleos_crt0.S` | Replace with `HalCstart` implementation per target. | `src/os/kernel/arch/*/cstart.spl` |
 | 4 | `src/os/libc/simpleos_setjmp.S` | Replace with `HalCstart.setjmp/longjmp` implementation per target. | `src/os/kernel/arch/*/cstart.spl` |
 
-### RV32 kernel boot slice
-
-`src/os/kernel/arch/riscv32/boot/baremetal_stubs.c` is reduced to one include
-of the shared RISC-V freestanding runtime. The RV32 linker-counter accessor is
-now a naked Simple assembly boundary in `smp_provider.spl`; its polling decision
-is in `smp_policy.spl`. Optional NVMe firmware selection is a Pure-Simple
-composition provider, not a weak C hook. The include wrapper remains in a
-separate foreign-runtime denominator because minimal native-build currently
-discovers the conventional `boot/baremetal_stubs.c` filename; removing it
-without changing that manifest would drop the shared runtime ABI closure.
-
-Exact authored-but-unexecuted coverage scope is recorded in
-`test/fixtures/os/kernel/arch/riscv32/rv32_hal_coverage_scope.sdn`. It does not
-claim coverage for the retained shared C runtime.
-
 ## Residual allow-list
 
 The production gate for owned C is zero residual owned `.c` files in the
@@ -58,3 +43,18 @@ reduced to a thin arch shim with an explicit justification.
   `HalCstart` replacement work is auditable.
 - The generated owned-code audit is emitted at
   `build/multiarch/owned_c_report.json`.
+
+## RV32 SMP provider migration (2026-08-22)
+
+The RV32-specific `rt_rv32_smp_online_count` C accessor has moved to
+`src/os/kernel/arch/riscv32/smp_provider.spl`. The provider reads the aligned,
+linker-owned `.smp` word through a fixed-register naked RV32 leaf because the
+bootstrap compiler does not yet retain operand-bound inline-assembly
+constraints. Both QEMU and FPGA boot paths share this provider and the
+Pure-Simple wait policy. The hot polling state remains scalar `u32` on RV32;
+only its public display result widens to `u64`, so the migration adds no heap
+allocation or 64-bit loop-state traffic. `baremetal_stubs.c` now retains only the shared
+freestanding runtime include and the weak optional-firmware definition; the
+weak/strong override ABI has no supported Pure-Simple equivalent and remains an
+explicit transitional shim. The test-only C policy oracle is pinned to baseline
+revision `eb939043b9639e7e9bd8710fb9c6f859c1f727dc` and is never product-linked.

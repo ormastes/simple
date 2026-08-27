@@ -65,12 +65,7 @@ fn _mp_shr56(x: i64) -> i64:
     (x >> 56) & 0xFF
 
 fn _mp_read_u8(data: [u8], pos: i64) -> i64:
-    if pos < 0 or pos >= data.len():
-        return 0
     data[pos].to_i64() & 0xFF
-
-fn _mp_has(data: [u8], pos: i64, length: i64) -> bool:
-    pos >= 0 and length >= 0 and pos + length <= data.len()
 
 # ============================================================================
 # Internal big-endian integer helpers
@@ -137,20 +132,12 @@ fn _mp_decode_i32_signed(v: i64) -> i64:
     else:
         v
 
-fn _mp_append(dest: [u8], src: [u8]) -> [u8]:
-    """Append all bytes from src and return the grown array.
-
-    Returns (not in-place): the interpreter loses array-arg mutation
-    write-back when a cross-module helper is invoked from inside a BDD
-    it-block closure, so callers must reassign: `dest = _mp_append(dest, src)`.
-    See doc/08_tracking/bug for the closure write-back divergence.
-    """
-    var d = dest
+fn _mp_append(dest: [u8], src: [u8]):
+    """Append all bytes from src into dest in-place."""
     var i = 0
     while i < src.len():
-        d.push(src[i])
+        dest.push(src[i])
         i = i + 1
-    d
 
 # ============================================================================
 # Public encoder functions
@@ -200,15 +187,15 @@ fn msgpack_encode_int(n: i64) -> [u8]:
     elif n >= 256 and n <= 65535:
         # uint16
         result.push(0xCD)
-        result = _mp_append(result, _mp_encode_u16_be(n))
+        _mp_append(result, _mp_encode_u16_be(n))
     elif n >= 65536 and n <= 4294967295:
         # uint32
         result.push(0xCE)
-        result = _mp_append(result, _mp_encode_u32_be(n))
+        _mp_append(result, _mp_encode_u32_be(n))
     elif n > 4294967295:
         # uint64
         result.push(0xCF)
-        result = _mp_append(result, _mp_encode_u64_be(n))
+        _mp_append(result, _mp_encode_u64_be(n))
     elif n >= -128 and n <= -33:
         # int8
         result.push(0xD0)
@@ -217,16 +204,16 @@ fn msgpack_encode_int(n: i64) -> [u8]:
         # int16: store two's complement big-endian
         result.push(0xD1)
         val u16 = n + 65536
-        result = _mp_append(result, _mp_encode_u16_be(u16))
+        _mp_append(result, _mp_encode_u16_be(u16))
     elif n >= -2147483648 and n <= -32769:
         # int32
         result.push(0xD2)
         val u32 = n + 4294967296
-        result = _mp_append(result, _mp_encode_u32_be(u32))
+        _mp_append(result, _mp_encode_u32_be(u32))
     else:
         # int64 (n < -2147483648)
         result.push(0xD3)
-        result = _mp_append(result, _mp_encode_u64_be(n))
+        _mp_append(result, _mp_encode_u64_be(n))
     result
 
 fn msgpack_encode_str(s: text) -> [u8]:
@@ -247,10 +234,7 @@ fn msgpack_encode_str(s: text) -> [u8]:
     var i = 0
     while i < slen:
         val ch = s[i]
-        val code = ch.ord()
-        if code < 0 or code > 255:
-            return []
-        body.push(_mp_mask8(code))
+        body.push(_mp_mask8(ch.ord()))
         i = i + 1
     val blen = body.len()
     var result: [u8] = []
@@ -264,12 +248,12 @@ fn msgpack_encode_str(s: text) -> [u8]:
     elif blen <= 65535:
         # str16
         result.push(0xDA)
-        result = _mp_append(result, _mp_encode_u16_be(blen))
+        _mp_append(result, _mp_encode_u16_be(blen))
     else:
         # str32
         result.push(0xDB)
-        result = _mp_append(result, _mp_encode_u32_be(blen))
-    result = _mp_append(result, body)
+        _mp_append(result, _mp_encode_u32_be(blen))
+    _mp_append(result, body)
     result
 
 fn msgpack_encode_bin(data: [u8]) -> [u8]:
@@ -287,11 +271,11 @@ fn msgpack_encode_bin(data: [u8]) -> [u8]:
         result.push(_mp_mask8(dlen))
     elif dlen <= 65535:
         result.push(0xC5)
-        result = _mp_append(result, _mp_encode_u16_be(dlen))
+        _mp_append(result, _mp_encode_u16_be(dlen))
     else:
         result.push(0xC6)
-        result = _mp_append(result, _mp_encode_u32_be(dlen))
-    result = _mp_append(result, data)
+        _mp_append(result, _mp_encode_u32_be(dlen))
+    _mp_append(result, data)
     result
 
 fn msgpack_encode_array_header(count: i64) -> [u8]:
@@ -303,16 +287,14 @@ fn msgpack_encode_array_header(count: i64) -> [u8]:
       larger     → array32   (0xDD + 4-byte BE count)
     """
     var result: [u8] = []
-    if count < 0 or count > 4294967295:
-        return result
     if count <= 15:
         result.push(_mp_mask8(0x90 | count))
     elif count <= 65535:
         result.push(0xDC)
-        result = _mp_append(result, _mp_encode_u16_be(count))
+        _mp_append(result, _mp_encode_u16_be(count))
     else:
         result.push(0xDD)
-        result = _mp_append(result, _mp_encode_u32_be(count))
+        _mp_append(result, _mp_encode_u32_be(count))
     result
 
 fn msgpack_encode_map_header(count: i64) -> [u8]:
@@ -324,16 +306,14 @@ fn msgpack_encode_map_header(count: i64) -> [u8]:
       larger     → map32    (0xDF + 4-byte BE count)
     """
     var result: [u8] = []
-    if count < 0 or count > 4294967295:
-        return result
     if count <= 15:
         result.push(_mp_mask8(0x80 | count))
     elif count <= 65535:
         result.push(0xDE)
-        result = _mp_append(result, _mp_encode_u16_be(count))
+        _mp_append(result, _mp_encode_u16_be(count))
     else:
         result.push(0xDF)
-        result = _mp_append(result, _mp_encode_u32_be(count))
+        _mp_append(result, _mp_encode_u32_be(count))
     result
 
 # ============================================================================
@@ -351,7 +331,7 @@ fn msgpack_decode_type(data: [u8], pos: i64) -> list:
     new_pos: position after consuming the header (not the payload).
     On error, returns [0xFF, -1, pos] (0xFF is not a valid msgpack format byte)."""
     var result = []
-    if pos < 0 or pos >= data.len():
+    if pos >= data.len():
         result.push(0xFF)
         result.push(-1)
         result.push(pos)
@@ -384,93 +364,34 @@ fn msgpack_decode_type(data: [u8], pos: i64) -> list:
         result.push(pos + 1)
     elif fb == 0xCC:
         # uint8
-        if not _mp_has(data, pos, 2):
-            result.push(0xFF)
-            result.push(-1)
-            result.push(pos)
-            return result
         result.push(fb)
         result.push(_mp_read_u8(data, pos + 1))
         result.push(pos + 2)
     elif fb == 0xCD:
         # uint16
-        if not _mp_has(data, pos, 3):
-            result.push(0xFF)
-            result.push(-1)
-            result.push(pos)
-            return result
         result.push(fb)
         result.push(_mp_decode_u16_be(data, pos + 1))
         result.push(pos + 3)
     elif fb == 0xCE:
         # uint32
-        if not _mp_has(data, pos, 5):
-            result.push(0xFF)
-            result.push(-1)
-            result.push(pos)
-            return result
         result.push(fb)
         result.push(_mp_decode_u32_be(data, pos + 1))
         result.push(pos + 5)
-    elif fb == 0xCF:
-        # uint64
-        if not _mp_has(data, pos, 9):
-            result.push(0xFF)
-            result.push(-1)
-            result.push(pos)
-            return result
-        val hi = _mp_decode_u32_be(data, pos + 1)
-        val lo = _mp_decode_u32_be(data, pos + 5)
-        if hi >= 2147483648:
-            result.push(0xFF)
-            result.push(-1)
-            result.push(pos)
-            return result
-        result.push(fb)
-        result.push((hi << 32) | lo)
-        result.push(pos + 9)
     elif fb == 0xD0:
         # int8
-        if not _mp_has(data, pos, 2):
-            result.push(0xFF)
-            result.push(-1)
-            result.push(pos)
-            return result
         result.push(fb)
         result.push(_mp_decode_i8_signed(_mp_read_u8(data, pos + 1)))
         result.push(pos + 2)
     elif fb == 0xD1:
         # int16
-        if not _mp_has(data, pos, 3):
-            result.push(0xFF)
-            result.push(-1)
-            result.push(pos)
-            return result
         result.push(fb)
         result.push(_mp_decode_i16_signed(_mp_decode_u16_be(data, pos + 1)))
         result.push(pos + 3)
     elif fb == 0xD2:
         # int32
-        if not _mp_has(data, pos, 5):
-            result.push(0xFF)
-            result.push(-1)
-            result.push(pos)
-            return result
         result.push(fb)
         result.push(_mp_decode_i32_signed(_mp_decode_u32_be(data, pos + 1)))
         result.push(pos + 5)
-    elif fb == 0xD3:
-        # int64
-        if not _mp_has(data, pos, 9):
-            result.push(0xFF)
-            result.push(-1)
-            result.push(pos)
-            return result
-        val hi64 = _mp_decode_u32_be(data, pos + 1)
-        val lo64 = _mp_decode_u32_be(data, pos + 5)
-        result.push(fb)
-        result.push((hi64 << 32) | lo64)
-        result.push(pos + 9)
     elif fb >= 0xA0 and fb <= 0xBF:
         # fixstr
         val slen = fb & 0x1F
@@ -479,64 +400,24 @@ fn msgpack_decode_type(data: [u8], pos: i64) -> list:
         result.push(pos + 1)
     elif fb == 0xD9:
         # str8
-        if not _mp_has(data, pos, 2):
-            result.push(0xFF)
-            result.push(-1)
-            result.push(pos)
-            return result
         result.push(fb)
         result.push(_mp_read_u8(data, pos + 1))
         result.push(pos + 2)
     elif fb == 0xDA:
         # str16
-        if not _mp_has(data, pos, 3):
-            result.push(0xFF)
-            result.push(-1)
-            result.push(pos)
-            return result
         result.push(fb)
         result.push(_mp_decode_u16_be(data, pos + 1))
         result.push(pos + 3)
-    elif fb == 0xDB:
-        # str32
-        if not _mp_has(data, pos, 5):
-            result.push(0xFF)
-            result.push(-1)
-            result.push(pos)
-            return result
-        result.push(fb)
-        result.push(_mp_decode_u32_be(data, pos + 1))
-        result.push(pos + 5)
     elif fb == 0xC4:
         # bin8
-        if not _mp_has(data, pos, 2):
-            result.push(0xFF)
-            result.push(-1)
-            result.push(pos)
-            return result
         result.push(fb)
         result.push(_mp_read_u8(data, pos + 1))
         result.push(pos + 2)
     elif fb == 0xC5:
         # bin16
-        if not _mp_has(data, pos, 3):
-            result.push(0xFF)
-            result.push(-1)
-            result.push(pos)
-            return result
         result.push(fb)
         result.push(_mp_decode_u16_be(data, pos + 1))
         result.push(pos + 3)
-    elif fb == 0xC6:
-        # bin32
-        if not _mp_has(data, pos, 5):
-            result.push(0xFF)
-            result.push(-1)
-            result.push(pos)
-            return result
-        result.push(fb)
-        result.push(_mp_decode_u32_be(data, pos + 1))
-        result.push(pos + 5)
     elif fb >= 0x90 and fb <= 0x9F:
         # fixarray
         val acnt = fb & 0x0F
@@ -545,24 +426,9 @@ fn msgpack_decode_type(data: [u8], pos: i64) -> list:
         result.push(pos + 1)
     elif fb == 0xDC:
         # array16
-        if not _mp_has(data, pos, 3):
-            result.push(0xFF)
-            result.push(-1)
-            result.push(pos)
-            return result
         result.push(fb)
         result.push(_mp_decode_u16_be(data, pos + 1))
         result.push(pos + 3)
-    elif fb == 0xDD:
-        # array32
-        if not _mp_has(data, pos, 5):
-            result.push(0xFF)
-            result.push(-1)
-            result.push(pos)
-            return result
-        result.push(fb)
-        result.push(_mp_decode_u32_be(data, pos + 1))
-        result.push(pos + 5)
     elif fb >= 0x80 and fb <= 0x8F:
         # fixmap
         val mcnt = fb & 0x0F
@@ -571,24 +437,9 @@ fn msgpack_decode_type(data: [u8], pos: i64) -> list:
         result.push(pos + 1)
     elif fb == 0xDE:
         # map16
-        if not _mp_has(data, pos, 3):
-            result.push(0xFF)
-            result.push(-1)
-            result.push(pos)
-            return result
         result.push(fb)
         result.push(_mp_decode_u16_be(data, pos + 1))
         result.push(pos + 3)
-    elif fb == 0xDF:
-        # map32
-        if not _mp_has(data, pos, 5):
-            result.push(0xFF)
-            result.push(-1)
-            result.push(pos)
-            return result
-        result.push(fb)
-        result.push(_mp_decode_u32_be(data, pos + 1))
-        result.push(pos + 5)
     else:
         # unknown / unsupported format byte
         result.push(0xFF)
@@ -603,7 +454,7 @@ fn msgpack_decode_int(data: [u8], pos: i64) -> list:
     uint64 is limited to values that fit in i64 (positive range).
     On error, returns [-1, pos]."""
     var result = []
-    if pos < 0 or pos >= data.len():
+    if pos >= data.len():
         result.push(-1)
         result.push(pos)
         return result
@@ -618,72 +469,36 @@ fn msgpack_decode_int(data: [u8], pos: i64) -> list:
         result.push(pos + 1)
     elif fb == 0xCC:
         # uint8
-        if not _mp_has(data, pos, 2):
-            result.push(-1)
-            result.push(pos)
-            return result
         result.push(_mp_read_u8(data, pos + 1))
         result.push(pos + 2)
     elif fb == 0xCD:
         # uint16
-        if not _mp_has(data, pos, 3):
-            result.push(-1)
-            result.push(pos)
-            return result
         result.push(_mp_decode_u16_be(data, pos + 1))
         result.push(pos + 3)
     elif fb == 0xCE:
         # uint32
-        if not _mp_has(data, pos, 5):
-            result.push(-1)
-            result.push(pos)
-            return result
         result.push(_mp_decode_u32_be(data, pos + 1))
         result.push(pos + 5)
     elif fb == 0xCF:
         # uint64 — read 8 bytes as i64 (positive values only)
-        if not _mp_has(data, pos, 9):
-            result.push(-1)
-            result.push(pos)
-            return result
         val hi = _mp_decode_u32_be(data, pos + 1)
         val lo = _mp_decode_u32_be(data, pos + 5)
-        if hi >= 2147483648:
-            result.push(-1)
-            result.push(pos)
-            return result
         result.push((hi << 32) | lo)
         result.push(pos + 9)
     elif fb == 0xD0:
         # int8
-        if not _mp_has(data, pos, 2):
-            result.push(-1)
-            result.push(pos)
-            return result
         result.push(_mp_decode_i8_signed(_mp_read_u8(data, pos + 1)))
         result.push(pos + 2)
     elif fb == 0xD1:
         # int16
-        if not _mp_has(data, pos, 3):
-            result.push(-1)
-            result.push(pos)
-            return result
         result.push(_mp_decode_i16_signed(_mp_decode_u16_be(data, pos + 1)))
         result.push(pos + 3)
     elif fb == 0xD2:
         # int32
-        if not _mp_has(data, pos, 5):
-            result.push(-1)
-            result.push(pos)
-            return result
         result.push(_mp_decode_i32_signed(_mp_decode_u32_be(data, pos + 1)))
         result.push(pos + 5)
     elif fb == 0xD3:
         # int64 — read 8 bytes as two's complement i64
-        if not _mp_has(data, pos, 9):
-            result.push(-1)
-            result.push(pos)
-            return result
         val hi64 = _mp_decode_u32_be(data, pos + 1)
         val lo64 = _mp_decode_u32_be(data, pos + 5)
         result.push((hi64 << 32) | lo64)
@@ -700,7 +515,7 @@ fn msgpack_decode_str(data: [u8], pos: i64) -> list:
     Decodes bytes as ASCII characters (b.chr()). Multi-byte UTF-8 is deferred.
     On error, returns ["", pos]."""
     var result = []
-    if pos < 0 or pos >= data.len():
+    if pos >= data.len():
         result.push("")
         result.push(pos)
         return result
@@ -713,33 +528,17 @@ fn msgpack_decode_str(data: [u8], pos: i64) -> list:
         payload_pos = pos + 1
     elif fb == 0xD9:
         # str8
-        if not _mp_has(data, pos, 2):
-            result.push("")
-            result.push(pos)
-            return result
         blen = _mp_read_u8(data, pos + 1)
         payload_pos = pos + 2
     elif fb == 0xDA:
         # str16
-        if not _mp_has(data, pos, 3):
-            result.push("")
-            result.push(pos)
-            return result
         blen = _mp_decode_u16_be(data, pos + 1)
         payload_pos = pos + 3
     elif fb == 0xDB:
         # str32
-        if not _mp_has(data, pos, 5):
-            result.push("")
-            result.push(pos)
-            return result
         blen = _mp_decode_u32_be(data, pos + 1)
         payload_pos = pos + 5
     else:
-        result.push("")
-        result.push(pos)
-        return result
-    if not _mp_has(data, payload_pos, blen):
         result.push("")
         result.push(pos)
         return result

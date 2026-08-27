@@ -38,8 +38,11 @@ use std.common.crypto.sha256.{sha256_text}
 use std.io.{file_lock, file_unlock, file_write}
 use std.nogc_sync_mut.io_runtime.{file_exists, file_read_nullable}
 use compiler.driver.driver_source_pipeline_parsing.{driver_parse_shard_hash}
+use compiler.driver.cache.surface_interface.{surface_interface_encode}
 
 extern fn rt_env_get(key: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_hash_sha256(path: text) -> text
 extern fn rt_dir_create_all(path: text) -> bool
@@ -53,6 +56,19 @@ val HIR_CACHE_ENTRY_VERSION: text = "spl-hircache-v2"
 var _hir_cache_hits: i64 = 0
 var _hir_cache_misses: i64 = 0
 var _hir_cache_stores: i64 = 0
+# A store the CODEC refused (hir_module_encode returned ""), and the reason the
+# codec gave for the most recent one. Refusals are silent by construction --
+# "a cache that cannot store is a slow build, not a wrong one" -- and that
+# silence is exactly why a cache that stored NOTHING for a 688-module closure
+# looked like a cache with a poor hit rate for weeks. A refusal is now counted
+# and named in the receipt, so zero stores is always attributable.
+var _hir_cache_store_refusals: i64 = 0
+var _hir_cache_last_refusal: text = ""
+# Stores that failed for an I/O reason (write or rename), which is a different
+# defect from a codec refusal and must not be conflated with one.
+var _hir_cache_store_io_failures: i64 = 0
+# Surfaces that fell back to their content hash on the last closure digest.
+var _hir_cache_iface_fallbacks: i64 = 0
 # Recovered (warning-level) lowering diagnostics of the last loaded entry, so
 # a hit replays exactly what the in-process lowering would have reported.
 var _hir_cache_last_warnings: [text] = []
@@ -76,12 +92,41 @@ fn hir_cache_dir() -> text:
 # that identify a surface's content: its canonical path and content hash plus
 # the names it is registered under (an alias change moves what a sibling
 # resolves to without changing any file hash).
+fn hir_cache_iface_key_enabled() -> bool:
+    """Interface-keying is ON by default. The switch exists as a kill switch for
+    a suspected stale hit -- setting it to 0 restores the old content-hash key,
+    which over-invalidates and is therefore always SAFE. It deliberately cannot
+    be used to make the cache accept MORE than the default does."""
+    (rt_env_get("SIMPLE_HIR_CACHE_IFACE_KEY") ?? "") != "0"
+
+fn hir_cache_iface_fallback_count() -> i64:
+    """Surfaces whose interface could not be encoded on the last digest, and
+    which therefore fell back to their raw content hash. Reported so that a
+    build that silently degraded to the old behaviour is ATTRIBUTABLE rather
+    than looking like a merely cold cache -- the same reason
+    `_hir_cache_store_refusals` is counted."""
+    _hir_cache_iface_fallbacks
+
 fn hir_cache_closure_digest(surfaces: ModuleSurfacesByName) -> text:
+    # Each surface contributes EITHER its canonical interface encoding, or --
+    # when that cannot be computed -- its raw content hash. Falling back is
+    # always safe: the content hash over-invalidates. Skipping a surface would
+    # not be, so there is no third branch.
+    val iface_keyed = hir_cache_iface_key_enabled()
+    _hir_cache_iface_fallbacks = 0
     var parts: [text] = ["{surfaces.surfaces.len()}\n"]
     var i = 0
     while i < surfaces.surfaces.len():
         val s = surfaces.surfaces[i]
-        parts = parts.push(s.canonical_path + "|" + "{s.content_hash}" + "|" + "{s.content_length}" + "|" + s.module_name + "|" + s.logical_name + "\n")
+        val iface = if iface_keyed: surface_interface_encode(s) else: ""
+        if iface == "":
+            if iface_keyed:
+                _hir_cache_iface_fallbacks = _hir_cache_iface_fallbacks + 1
+            parts = parts.push(s.canonical_path + "|H|" + "{s.content_hash}" + "|" + "{s.content_length}" + "|" + s.module_name + "|" + s.logical_name + "\n")
+        else:
+            # The tag distinguishes the two encodings so an interface encoding
+            # can never collide with a content-hash line for the same path.
+            parts = parts.push(s.canonical_path + "|I|" + iface + "\n")
         i = i + 1
     sha256_text(parts.join(""))
 
@@ -95,7 +140,7 @@ fn _hir_cache_env_switches() -> text:
     out
 
 fn hir_cache_key(source_path: text, closure_digest: text, is_entry: bool) -> text:
-    if closure_digest == "" or not file_exists(source_path):
+    if closure_digest == "" or not rt_file_exists(source_path):
         return ""
     val source_digest = rt_file_hash_sha256(source_path)
     if source_digest.len() != 64:
@@ -110,7 +155,7 @@ fn hir_cache_header() -> text:
     HIR_CACHE_ENTRY_VERSION + " " + hir_codec_header() + " " + frontend_parse_cache_scope()
 
 fn hir_cache_has(key: text) -> bool:
-    key != "" and hir_cache_enabled() and file_exists(hir_cache_path(key))
+    key != "" and hir_cache_enabled() and rt_file_exists(hir_cache_path(key))
 
 # nil for a miss, a foreign/corrupt entry, or a truncated one: every one of
 # those is "lower it in process", and the caller must not need to tell them
@@ -119,10 +164,10 @@ fn hir_cache_load(key: text) -> HirModule?:
     if key == "" or not hir_cache_enabled():
         return nil
     val path = hir_cache_path(key)
-    if not file_exists(path):
+    if not rt_file_exists(path):
         _hir_cache_misses = _hir_cache_misses + 1
         return nil
-    val raw = file_read_nullable(path) ?? ""
+    val raw = rt_file_read_text(path) ?? ""
     val nl = raw.index_of("\n")
     if raw == "" or nl < 0 or raw.substring(0, nl) != hir_cache_header():
         _hir_cache_misses = _hir_cache_misses + 1
@@ -359,7 +404,7 @@ fn hir_shard_summary(levels: i64, lowered: i64) -> text:
     "[hir-shard] done shard={hir_shard_spec()} lowered={lowered} claimed={_hir_shard_claimed} levels={levels}"
 
 export HIR_CACHE_ENTRY_VERSION
-export hir_cache_enabled, hir_cache_dir, hir_cache_closure_digest, hir_cache_key
+export hir_cache_enabled, hir_cache_dir, hir_cache_closure_digest, hir_cache_key, hir_cache_iface_fallback_count, hir_cache_iface_key_enabled
 export hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_last_warnings
 export hir_cache_hits, hir_cache_misses, hir_cache_stores, hir_cache_summary
 export hir_shard_spec, hir_shard_active, hir_shard_claimed, hir_shard_owns

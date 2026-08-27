@@ -1,6 +1,29 @@
 # Js Audit Extended Specification
 
-> Tests covering Chromium M9 js_audit_extended_subset, Chromium M9 Test262Runner on extended subset, Chromium M9 Test262Report.extended_subset_today.
+> _Row 5 follow-up: ~20 hand-transcribed test262-shaped cases._
+
+<!-- sdn-diagram:id=js_audit_extended_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=js_audit_extended_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+js_audit_extended_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=js_audit_extended_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -14,21 +37,17 @@
 ## Scenarios
 
 ### Chromium M9 js_audit_extended_subset
+_Row 5 follow-up: ~20 hand-transcribed test262-shaped cases._
 
 #### exposes exactly twenty cases
-
-- exposes exactly twenty cases
-
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("exposes exactly twenty cases")
 val subset = js_audit_extended_subset()
 expect(subset.len() == 20).to_be_true()
 ```
@@ -37,18 +56,13 @@ expect(subset.len() == 20).to_be_true()
 
 #### every case has a non-empty name
 
-- every case has a non-empty name
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("every case has a non-empty name")
 val subset = js_audit_extended_subset()
 var ok = true
 for c in subset:
@@ -61,18 +75,13 @@ expect(ok).to_be_true()
 
 #### every case has a non-empty source
 
-- every case has a non-empty source
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("every case has a non-empty source")
 val subset = js_audit_extended_subset()
 var ok = true
 for c in subset:
@@ -85,18 +94,13 @@ expect(ok).to_be_true()
 
 #### contains exactly one negative case
 
-- contains exactly one negative case
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("contains exactly one negative case")
 val subset = js_audit_extended_subset()
 var negatives = 0
 for c in subset:
@@ -109,18 +113,13 @@ expect(negatives == 1).to_be_true()
 
 #### names are namespaced under ext/
 
-- names are namespaced under ext/
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("names are namespaced under ext/")
 val subset = js_audit_extended_subset()
 var ok = true
 for c in subset:
@@ -137,18 +136,13 @@ _The runner's tally contract is stable across subset size._
 
 #### fresh runner against extended subset starts empty
 
-- fresh runner against extended subset starts empty
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("fresh runner against extended subset starts empty")
 val subset = js_audit_extended_subset()
 val r = Test262Runner.new("interpreter")
 expect(r.total() == 0).to_be_true()
@@ -159,18 +153,16 @@ expect(subset.len() == 20).to_be_true()
 
 #### driving 20 synthetic passes yields 20/0/0/0
 
-- driving 20 synthetic passes yields 20/0/0/0
+1. var r = Test262Runner new
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("driving 20 synthetic passes yields 20/0/0/0")
 var r = Test262Runner.new("interpreter")
 val subset = js_audit_extended_subset()
 for c in subset:
@@ -185,18 +177,16 @@ expect(r.pass_rate_pct() == 100).to_be_true()
 
 #### classify still flips the single negative case
 
-- classify still flips the single negative case
+1. var r = Test262Runner new
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("classify still flips the single negative case")
 var r = Test262Runner.new("interpreter")
 val subset = js_audit_extended_subset()
 var flipped = 0
@@ -212,18 +202,19 @@ expect(flipped == 1).to_be_true()
 
 #### driving the documented outcomes matches the extended snapshot
 
-- driving the documented outcomes matches the extended snapshot
+1. var r = Test262Runner new
+2. r record
+3. r record
+4. r record
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("driving the documented outcomes matches the extended snapshot")
 # The report doc inventories 10 pass / 6 fail / 4 crash / 0 skip
 # once the negative case has been classified. We feed the runner
 # the pre-classified outcomes here so the tally matches the
@@ -256,18 +247,13 @@ _Checked-in pass-rate snapshot for the M9 extended subset._
 
 #### is tagged interpreter / m9-extended
 
-- is tagged interpreter / m9-extended
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("is tagged interpreter / m9-extended")
 val rep = Test262Report.extended_subset_today()
 expect(rep.backend == "interpreter").to_be_true()
 expect(rep.subset == "m9-extended").to_be_true()
@@ -277,18 +263,13 @@ expect(rep.subset == "m9-extended").to_be_true()
 
 #### totals twenty cases
 
-- totals twenty cases
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("totals twenty cases")
 val rep = Test262Report.extended_subset_today()
 expect(rep.total() == 20).to_be_true()
 ```
@@ -297,18 +278,13 @@ expect(rep.total() == 20).to_be_true()
 
 #### pass rate is 50 percent
 
-- pass rate is 50 percent
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("pass rate is 50 percent")
 # 10 pass / 20 total = 50.
 val rep = Test262Report.extended_subset_today()
 expect(rep.pass_rate_pct() == 50).to_be_true()
@@ -318,18 +294,13 @@ expect(rep.pass_rate_pct() == 50).to_be_true()
 
 #### crash bucket is non-zero (array methods gap)
 
-- crash bucket is non-zero (array methods gap)
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("crash bucket is non-zero (array methods gap)")
 val rep = Test262Report.extended_subset_today()
 expect(rep.crash_count > 0).to_be_true()
 ```
@@ -343,12 +314,12 @@ expect(rep.crash_count > 0).to_be_true()
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui.chromium/js_audit_extended_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Chromium M9 js_audit_extended_subset, Chromium M9 Test262Runner on extended subset, Chromium M9 Test262Report.extended_subset_today.
+Tests covering:
 - Chromium M9 js_audit_extended_subset
 - Chromium M9 Test262Runner on extended subset
 - Chromium M9 Test262Report.extended_subset_today
@@ -365,51 +336,3 @@ Tests covering Chromium M9 js_audit_extended_subset, Chromium M9 Test262Runner o
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `238c43173203dbe8eb667f436b03425acd9d7a5fb32bc62c96e25996b5203169`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `238c43173203dbe8eb667f436b03425acd9d7a5fb32bc62c96e25996b5203169`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `238c43173203dbe8eb667f436b03425acd9d7a5fb32bc62c96e25996b5203169`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/ui.chromium/js_audit_extended_spec.spl
-mirror: doc/06_spec/01_unit/app/ui.chromium/js_audit_extended_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/ui.chromium/js_audit_extended_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/ui.chromium/js_audit_extended_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/ui.chromium/js_audit_extended_spec.spl:47:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'exposes exactly twenty cases' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui.chromium/js_audit_extended_spec.spl:53:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'every case has a non-empty name' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui.chromium/js_audit_extended_spec.spl:63:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'every case has a non-empty source' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -2,11 +2,131 @@
 
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.parser_types.*
+# These helpers live in parser_types_expr; parser_types' plain glob is not a
+# transitive export, so native HIR workers need the owner import explicitly.
+use compiler.frontend.parser_types_expr.{parser_type_kind_named_name, parser_type_kind_array_element_name}
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceCallable, ModuleSurfaceComposite, ModuleSurfaceCompositeIndex, ModuleSurfaceConst, ModuleSurfaceEnum, ModuleSurfaceField, ModuleSurfaceImpl, ModuleSurfaceParam, ModuleSurfaceTrait, ModuleSurfaceTypeAlias, module_surface_export_origin_index_empty, module_surface_export_origin_index_put}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_module_name, module_surface_canonical_path, module_surface_logical_name_from_path, module_surface_package_name_from_name}
-use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_semantic_projection, module_surface_semantic_hex_limb}
 
 extern fn rt_hash_text(content: text) -> i64
+
+class ModuleSurfaceSignatureBuilder:
+    names: [text]
+    owner_kinds: [text]
+    owner_names: [text]
+    type_param_counts: [i64]
+    has_return_types: [bool]
+    is_static: [bool]
+    param_offsets: [i64]
+    param_counts: [i64]
+    return_shapes: [text]
+    return_type_names: [text]
+    dependency_offsets: [i64]
+    dependency_counts: [i64]
+    param_names: [text]
+    param_has_types: [bool]
+    param_shapes: [text]
+    param_type_names: [text]
+    dependency_names: [text]
+
+    static fn empty() -> ModuleSurfaceSignatureBuilder:
+        ModuleSurfaceSignatureBuilder(
+            names: [], owner_kinds: [], owner_names: [],
+            type_param_counts: [], has_return_types: [], is_static: [],
+            param_offsets: [], param_counts: [], return_shapes: [],
+            return_type_names: [], dependency_offsets: [],
+            dependency_counts: [], param_names: [], param_has_types: [],
+            param_shapes: [], param_type_names: [], dependency_names: [])
+
+fn module_surface_projected_type_shape(type_: Type) -> text:
+    val named_name = parser_type_kind_named_name(type_.kind)
+    if named_name != "":
+        if parser_type_kind_named_args(type_.kind).len() == 0:
+            return "named"
+        return "unsupported"
+    val array_name = parser_type_kind_array_element_name(type_.kind)
+    if array_name != "":
+        val fallback = Type(kind: TypeKind.Infer, span: type_.span)
+        val element = parser_type_kind_array_element(type_.kind, fallback)
+        if parser_type_kind_named_args(element.kind).len() == 0:
+            return "named_array"
+    "unsupported"
+
+fn module_surface_projected_type_name(type_: Type, shape: text) -> text:
+    if shape == "named":
+        return parser_type_kind_named_name(type_.kind)
+    if shape == "named_array":
+        return parser_type_kind_array_element_name(type_.kind)
+    ""
+
+fn module_surface_signature_append(
+    builder: ModuleSurfaceSignatureBuilder,
+    callable: ModuleSurfaceCallable,
+    owner_kind: text,
+    owner_name: text
+):
+    builder.names = builder.names.push(callable.name)
+    builder.owner_kinds = builder.owner_kinds.push(owner_kind)
+    builder.owner_names = builder.owner_names.push(owner_name)
+    builder.type_param_counts = builder.type_param_counts.push(
+        callable.type_params.len())
+    builder.has_return_types = builder.has_return_types.push(
+        callable.has_return_type)
+    builder.is_static = builder.is_static.push(callable.is_static)
+    builder.param_offsets = builder.param_offsets.push(
+        builder.param_names.len())
+    builder.param_counts = builder.param_counts.push(callable.params.len())
+    builder.dependency_offsets = builder.dependency_offsets.push(
+        builder.dependency_names.len())
+    val dependency_start = builder.dependency_names.len()
+    for param in callable.params:
+        val shape = if param.has_type_:
+            module_surface_projected_type_shape(param.type_)
+        else:
+            "unsupported"
+        builder.param_names = builder.param_names.push(param.name)
+        builder.param_has_types = builder.param_has_types.push(param.has_type_)
+        builder.param_shapes = builder.param_shapes.push(shape)
+        builder.param_type_names = builder.param_type_names.push(
+            module_surface_projected_type_name(param.type_, shape))
+        if param.has_type_:
+            for dependency in parser_type_named_dependencies(param.type_):
+                builder.dependency_names = builder.dependency_names.push(
+                    dependency)
+    val return_shape = if callable.has_return_type:
+        module_surface_projected_type_shape(callable.return_type)
+    else:
+        "unsupported"
+    builder.return_shapes = builder.return_shapes.push(return_shape)
+    builder.return_type_names = builder.return_type_names.push(
+        module_surface_projected_type_name(callable.return_type, return_shape))
+    if callable.has_return_type:
+        for dependency in parser_type_named_dependencies(callable.return_type):
+            builder.dependency_names = builder.dependency_names.push(dependency)
+    builder.dependency_counts = builder.dependency_counts.push(
+        builder.dependency_names.len() - dependency_start)
+
+fn module_surface_composite_projection_append(
+    index: ModuleSurfaceCompositeIndex,
+    kind: text,
+    fields: [ParserField]
+):
+    index.kinds = index.kinds.push(kind)
+    index.field_offsets = index.field_offsets.push(index.field_names.len())
+    index.field_counts = index.field_counts.push(fields.len())
+    index.dependency_offsets = index.dependency_offsets.push(
+        index.dependency_names.len())
+    val dependency_start = index.dependency_names.len()
+    for field in fields:
+        val shape = module_surface_projected_type_shape(field.type_)
+        index.field_names = index.field_names.push(field.name)
+        index.field_shapes = index.field_shapes.push(shape)
+        index.field_type_names = index.field_type_names.push(
+            module_surface_projected_type_name(field.type_, shape))
+        for dependency in parser_type_named_dependencies(field.type_):
+            index.dependency_names = index.dependency_names.push(dependency)
+    index.dependency_counts = index.dependency_counts.push(
+        index.dependency_names.len() - dependency_start)
 
 fn module_surface_callable_from_function(function_: ParserFunction) -> ModuleSurfaceCallable:
     var params: [ModuleSurfaceParam] = []
@@ -107,26 +227,6 @@ fn module_surface_impl_from_impl(impl_: Impl) -> ModuleSurfaceImpl:
         methods: methods
     )
 
-fn module_surface_projected_type_shape(type_: Type) -> text:
-    """Scalar shape class of one composite-field type for the frozen
-    composite projection: ``named`` / ``array`` / ``other``.
-
-    Mirrors the ``type_name`` / ``array_element_name`` scalar pair on
-    ``ModuleSurfaceField`` so import registration can project fields from
-    the scalar index without reopening the retained ``ModuleSurfaceField``
-    payload (50feb3ba227 landed only the callers of this pair).
-    """
-    if parser_type_kind_named_name(type_.kind) != "": return "named"
-    if parser_type_kind_array_element_name(type_.kind) != "": return "array"
-    "other"
-
-fn module_surface_projected_type_name(type_: Type, shape: text) -> text:
-    """Scalar type name paired with ``module_surface_projected_type_shape``:
-    the named type for ``named``, the element type for ``array``, else ``""``."""
-    if shape == "named": return parser_type_kind_named_name(type_.kind)
-    if shape == "array": return parser_type_kind_array_element_name(type_.kind)
-    ""
-
 fn module_surface_export_origin_hints(
     source: SourceFile, origins: ModuleSurfaceExportOriginIndex
 ) -> Result<bool, text>:
@@ -174,18 +274,25 @@ pub class ModuleSurfaceParserOwner:
     static fn new(value: ParserModule) -> ModuleSurfaceParserOwner:
         ModuleSurfaceParserOwner(value: value)
 
+pub class ModuleSurfaceProjectionOwner:
+    # Nil is the preallocated caller-owned "not produced" state. Keep the
+    # production carrier as a direct class reference: wrapping a transient
+    # class in Some adds an enum allocation and an unsafe value boundary.
+    surface: ModuleSurface
+    error: text
+
+    static fn new() -> ModuleSurfaceProjectionOwner:
+        ModuleSurfaceProjectionOwner(surface: nil, error: "")
+
 pub fn module_surface_from_owner(
     owner: ModuleSurfaceParserOwner, source: SourceFile, source_index: i64
 ) -> Result<ModuleSurface, text>:
-    # Compute while the complete ParserModule owner is alive; only four flat
-    # limbs cross into persistent surface storage.
-    val semantic_hex = module_surface_semantic_projection(owner.value)
-    val semantic_cacheable = semantic_hex.len() == 64
     var callables: Dict<text, ModuleSurfaceCallable> = {}
     var callable_names: [text] = []
     for name in owner.value.functions.keys():
-        val callable = if owner.value.function_headers.contains_key(name):
-            module_surface_callable_from_header(owner.value.function_headers[name])
+        if owner.value.function_headers.contains_key(name):
+            callables[name] = module_surface_callable_from_header(
+                owner.value.function_headers[name])
         else:
             # Compatibility for parser producers without the compact header
             # index.
@@ -194,8 +301,13 @@ pub fn module_surface_from_owner(
         callable_names = callable_names.push(name)
 
     var composites: Dict<text, ModuleSurfaceComposite> = {}
+    var composite_names: [text] = []
+    val composite_index = ModuleSurfaceCompositeIndex.empty()
     for name in owner.value.classes.keys():
         val class_ = owner.value.classes[name]
+        composite_names = composite_names.push(name)
+        module_surface_composite_projection_append(
+            composite_index, "class", class_.fields)
         var fields: [ModuleSurfaceField] = []
         for field in class_.fields:
             fields = fields.push(ModuleSurfaceField(
@@ -206,6 +318,9 @@ pub fn module_surface_from_owner(
         composites[name] = ModuleSurfaceComposite(name: class_.name, kind: "class", type_params: class_.type_params, fields: fields, visibility: class_.visibility, is_public: class_.is_public, span: class_.span)
     for name in owner.value.actors.keys():
         val actor = owner.value.actors[name]
+        composite_names = composite_names.push(name)
+        module_surface_composite_projection_append(
+            composite_index, "actor", actor.fields)
         var fields: [ModuleSurfaceField] = []
         for field in actor.fields:
             fields = fields.push(ModuleSurfaceField(
@@ -216,6 +331,9 @@ pub fn module_surface_from_owner(
         composites[name] = ModuleSurfaceComposite(name: actor.name, kind: "actor", type_params: actor.type_params, fields: fields, visibility: actor.visibility, is_public: actor.is_public, span: actor.span)
     for name in owner.value.structs.keys():
         val struct_ = owner.value.structs[name]
+        composite_names = composite_names.push(name)
+        module_surface_composite_projection_append(
+            composite_index, "struct", struct_.fields)
         var fields: [ModuleSurfaceField] = []
         for field in struct_.fields:
             fields = fields.push(ModuleSurfaceField(
@@ -232,11 +350,32 @@ pub fn module_surface_from_owner(
 
     var traits: Dict<text, ModuleSurfaceTrait> = {}
     for name in owner.value.traits.keys():
-        traits[name] = module_surface_trait_from_trait(owner.value.traits[name])
+        val surface_trait = module_surface_trait_from_trait(
+            owner.value.traits[name])
+        traits[name] = surface_trait
+        for method in surface_trait.methods:
+            module_surface_signature_append(
+                signature_builder, method, "trait", name)
 
     var impls: [ModuleSurfaceImpl] = []
+    var impl_owner_names: [text] = []
+    var impl_has_traits: [bool] = []
+    var impl_trait_names: [text] = []
     for impl_ in owner.value.impls:
-        impls = impls.push(module_surface_impl_from_impl(impl_))
+        val surface_impl = module_surface_impl_from_impl(impl_)
+        impls = impls.push(surface_impl)
+        val impl_owner_name = parser_type_kind_named_name(impl_.type_.kind)
+        val impl_trait_name = if impl_.has_trait_:
+            parser_type_kind_named_name(impl_.trait_.kind)
+        else:
+            ""
+        impl_owner_names = impl_owner_names.push(impl_owner_name)
+        impl_has_traits = impl_has_traits.push(impl_.has_trait_)
+        impl_trait_names = impl_trait_names.push(impl_trait_name)
+        for method_name in surface_impl.methods.keys():
+            module_surface_signature_append(
+                signature_builder, surface_impl.methods[method_name],
+                "impl", impl_owner_name)
 
     var type_aliases: Dict<text, ModuleSurfaceTypeAlias> = {}
     for name in owner.value.type_aliases.keys():
@@ -298,40 +437,9 @@ pub fn module_surface_from_owner(
             composite_index.dependency_names.len() - dependency_start)
     val enum_names = enums.keys()
     val trait_names = traits.keys()
+    val callable_names = callables.keys()
     val type_alias_names = type_aliases.keys()
     val constant_names = constants.keys()
-    var composite_values: [ModuleSurfaceComposite] = []
-    for name in composite_names:
-        composite_values = composite_values.push(composites[name])
-    var enum_values: [ModuleSurfaceEnum] = []
-    for name in enum_names:
-        enum_values = enum_values.push(enums[name])
-    var trait_values: [ModuleSurfaceTrait] = []
-    for name in trait_names:
-        trait_values = trait_values.push(traits[name])
-    var callable_values: [ModuleSurfaceCallable] = []
-    for name in callable_names:
-        callable_values = callable_values.push(callables[name])
-    var type_alias_values: [ModuleSurfaceTypeAlias] = []
-    for name in type_alias_names:
-        type_alias_values = type_alias_values.push(type_aliases[name])
-    var constant_values: [ModuleSurfaceConst] = []
-    for name in constant_names:
-        constant_values = constant_values.push(constants[name])
-    # Flatten nested parser import items while this file's parser payload is
-    # still alive. Freeze will clone these retained scalars into its own scope;
-    # it must never traverse ParserImport.items after the file scope ends.
-    var import_item_offsets: [i64] = [0]
-    var import_item_names: [text] = []
-    var import_item_aliases: [text] = []
-    var import_item_has_alias: [bool] = []
-    for import_decl in owner.value.imports:
-        for import_item in import_decl.items:
-            import_item_names = import_item_names.push(import_item.name)
-            val import_alias = if import_item.has_alias: import_item.alias else: ""
-            import_item_aliases = import_item_aliases.push(import_alias)
-            import_item_has_alias = import_item_has_alias.push(import_item.has_alias)
-        import_item_offsets = import_item_offsets.push(import_item_names.len())
     Ok(ModuleSurface(
         physical_index: source_index,
         generation: 0,
@@ -346,11 +454,6 @@ pub fn module_surface_from_owner(
         preferred_registry_name: "",
         content_length: source.content.len(),
         content_hash: rt_hash_text(source.content),
-        semantic_hash0: module_surface_semantic_hex_limb(semantic_hex, 0),
-        semantic_hash1: module_surface_semantic_hex_limb(semantic_hex, 1),
-        semantic_hash2: module_surface_semantic_hex_limb(semantic_hex, 2),
-        semantic_hash3: module_surface_semantic_hex_limb(semantic_hex, 3),
-        semantic_cacheable: semantic_cacheable,
         imports: owner.value.imports,
         exports: owner.value.exports,
         import_target_indices: [],
@@ -365,7 +468,6 @@ pub fn module_surface_from_owner(
         export_route_target_names: [],
         export_route_is_glob: [],
         composite_names: composite_names,
-        composite_index: composite_index,
         enum_names: enum_names,
         trait_names: trait_names,
         callable_names: callable_names,
@@ -385,8 +487,23 @@ pub fn module_surface_from_owner(
         type_aliases: type_aliases,
         constants: constants,
         export_origins: origin_hints.origins,
-        export_origin_index: origin_hints
-    ))
+        export_origin_index: origin_hints,
+        declaration_authority_index: declaration_authorities
+    )
+    output.surface != nil
+
+pub fn module_surface_from_parser_owner(
+    parser_owner: ParserModuleOwner,
+    source: SourceFile,
+    source_index: i64
+) -> Result<ModuleSurface, text>:
+    val output = ModuleSurfaceProjectionOwner.new()
+    if not module_surface_from_parser_owner_into(
+        parser_owner, source, source_index, output):
+        return Err(output.error)
+    if output.surface == nil:
+        return Err("module surface projection succeeded without a surface")
+    Ok(output.surface)
 
 pub(package) fn module_surface_from_module(
     module: ParserModule, source: SourceFile, source_index: i64

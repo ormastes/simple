@@ -1,170 +1,280 @@
-# Backend-agnostic multiscale damage tiles for retained DrawIR rendering.
-# PropertyTrees remains the invalidation owner; this module indexes its exact
-# rectangles for bounded CPU/GPU iteration without changing DrawIR.
+# Multiscale damage tiles for the canonical retained DrawIR lane (O2).
+#
+# Backend-ignorant by contract: profile-selected tile sizes are supplied by
+# the caller, so CPU raster, GPU upload/binning, web, GUI, and WM consume the
+# same damage without putting backend names or transient cache state in DrawIR.
+# Epoch stamps make begin_frame O(levels), not O(all viewport tiles).
 
-use common.ui.render_opt.property_trees.{PropertyTrees}
+use common.ui.render_opt.property_trees.PropertyTrees
+
+val DAMAGE_NONE: i64 = 0
+val DAMAGE_LOCAL: i64 = 1
+val DAMAGE_FULL: i64 = 2
 
 class DirtyTilePyramid:
-    viewport_w: i64
-    viewport_h: i64
-    tile_w: [i64]
-    tile_h: [i64]
-    cols: [i64]
-    rows: [i64]
-    level_offset: [i64]
-    level_capacity: [i64]
-    tile_epoch: [i64]
-    dirty_id: [i64]
-    dirty_len: [i64]
-    frame_epoch: i64
-    valid: bool
+    viewport_w: u32
+    viewport_h: u32
+    tile_w: [u32]
+    tile_h: [u32]
+    cols: [u32]
+    rows: [u32]
+    level_offset: [u32]
+    level_capacity: [u32]
+    level_row_offset: [u32]
+    dirty_start: [u32]
+    dirty_len: [u32]
+    tile_epoch: [u32]
+    dirty_id: [u32]
+    row_epoch: [u32]
+    row_min_tx: [u32]
+    row_max_tx: [u32]
+    level_count: i64
+    frame_epoch: u32
 
-    static fn create(viewport_w: i64, viewport_h: i64,
-                     tile_ws: [i64], tile_hs: [i64]) -> DirtyTilePyramid:
-        var widths: [i64] = []
-        var heights: [i64] = []
-        var grid_cols: [i64] = []
-        var grid_rows: [i64] = []
-        var offsets: [i64] = []
-        var capacities: [i64] = []
-        var lengths: [i64] = []
+    static fn create(viewport_w: u32, viewport_h: u32,
+                     tile_widths: [u32], tile_heights: [u32]) -> DirtyTilePyramid:
+        var widths: [u32] = []
+        var heights: [u32] = []
+        var grid_cols: [u32] = []
+        var grid_rows: [u32] = []
+        var offsets: [u32] = []
+        var capacities: [u32] = []
+        var starts: [u32] = []
+        var lengths: [u32] = []
+        var row_offsets: [u32] = []
         var total: i64 = 0
-        var ok = viewport_w > 0 and viewport_h > 0
-        if tile_ws.len() == 0 or tile_ws.len() != tile_hs.len():
-            ok = false
+        var total_rows: i64 = 0
+        var levels = tile_widths.len()
+        if tile_heights.len() < levels:
+            levels = tile_heights.len()
         var level: i64 = 0
-        while level < tile_ws.len() and ok:
-            val tw = tile_ws[level]
-            val th = tile_hs[level]
-            if tw <= 0 or th <= 0:
-                ok = false
-            else:
-                val c = (viewport_w - 1) / tw + 1
-                val r = (viewport_h - 1) / th + 1
-                if c <= 0 or r <= 0 or c > 2147483647 / r:
-                    ok = false
-                else:
-                    val capacity = c * r
-                    if capacity > 16777216 - total:
-                        ok = false
-                        level += 1
-                        continue
-                    widths.push(tw)
-                    heights.push(th)
-                    grid_cols.push(c)
-                    grid_rows.push(r)
-                    offsets.push(total)
-                    capacities.push(capacity)
-                    lengths.push(0)
-                    total += capacity
-            level += 1
-        var epochs: [i64] = []
-        var ids: [i64] = []
-        var i: i64 = 0
-        while i < total:
-            epochs.push(0)
-            ids.push(0)
-            i += 1
+        while level < levels:
+            val tw = tile_widths[level]
+            val th = tile_heights[level]
+            if tw > 0 and th > 0:
+                val c = (((viewport_w as i64) + (tw as i64) - 1) / (tw as i64)) as u32
+                val r = (((viewport_h as i64) + (th as i64) - 1) / (th as i64)) as u32
+                val capacity = (c as i64) * (r as i64)
+                widths.push(tw)
+                heights.push(th)
+                grid_cols.push(c)
+                grid_rows.push(r)
+                offsets.push(total as u32)
+                capacities.push(capacity as u32)
+                row_offsets.push(total_rows as u32)
+                starts.push(total as u32)
+                lengths.push(0)
+                total = total + capacity
+                total_rows = total_rows + (r as i64)
+            level = level + 1
         DirtyTilePyramid(
             viewport_w: viewport_w, viewport_h: viewport_h,
-            tile_w: widths, tile_h: heights, cols: grid_cols,
-            rows: grid_rows, level_offset: offsets,
-            level_capacity: capacities, tile_epoch: epochs,
-            dirty_id: ids, dirty_len: lengths, frame_epoch: 1,
-            valid: ok)
-
-    me level_count() -> i64:
-        self.tile_w.len()
+            tile_w: widths, tile_h: heights,
+            cols: grid_cols, rows: grid_rows,
+            level_offset: offsets, level_capacity: capacities,
+            level_row_offset: row_offsets,
+            dirty_start: starts, dirty_len: lengths,
+            tile_epoch: [0; total], dirty_id: [0; total],
+            row_epoch: [0; total_rows],
+            row_min_tx: [0; total_rows], row_max_tx: [0; total_rows],
+            level_count: widths.len(), frame_epoch: 1)
 
     me begin_frame():
-        if self.frame_epoch == 9223372036854775807:
+        if self.frame_epoch == 4294967295:
             var i: i64 = 0
             while i < self.tile_epoch.len():
                 self.tile_epoch[i] = 0
-                i += 1
+                i = i + 1
+            i = 0
+            while i < self.row_epoch.len():
+                self.row_epoch[i] = 0
+                i = i + 1
             self.frame_epoch = 1
         else:
             self.frame_epoch = self.frame_epoch + 1
         var level: i64 = 0
-        while level < self.dirty_len.len():
+        while level < self.level_count:
             self.dirty_len[level] = 0
-            level += 1
+            level = level + 1
 
+    # Mark a half-open device-space rect. It is clamped before tile math;
+    # empty and fully off-viewport rects cost no tile writes.
     me mark_rect(x: i64, y: i64, w: i64, h: i64):
-        if not self.valid or w <= 0 or h <= 0:
-            return
-        if x > 9223372036854775807 - w or y > 9223372036854775807 - h:
+        if w <= 0 or h <= 0 or self.viewport_w == 0 or self.viewport_h == 0:
             return
         var x0 = x
         var y0 = y
         var x1 = x + w
         var y1 = y + h
-        if x1 <= 0 or y1 <= 0 or x0 >= self.viewport_w or y0 >= self.viewport_h:
-            return
-        if x0 < 0: x0 = 0
-        if y0 < 0: y0 = 0
-        if x1 > self.viewport_w: x1 = self.viewport_w
-        if y1 > self.viewport_h: y1 = self.viewport_h
-        if x0 >= x1 or y0 >= y1:
+        if x0 < 0:
+            x0 = 0
+        if y0 < 0:
+            y0 = 0
+        if x1 > self.viewport_w as i64:
+            x1 = self.viewport_w as i64
+        if y1 > self.viewport_h as i64:
+            y1 = self.viewport_h as i64
+        if x1 <= x0 or y1 <= y0:
             return
         var level: i64 = 0
-        while level < self.tile_w.len():
-            val tx0 = x0 / self.tile_w[level]
-            val ty0 = y0 / self.tile_h[level]
-            val tx1 = (x1 - 1) / self.tile_w[level]
-            val ty1 = (y1 - 1) / self.tile_h[level]
+        while level < self.level_count:
+            val tw = self.tile_w[level] as i64
+            val th = self.tile_h[level] as i64
+            val tx0 = x0 / tw
+            val ty0 = y0 / th
+            val tx1 = (x1 - 1) / tw
+            val ty1 = (y1 - 1) / th
             var ty = ty0
             while ty <= ty1:
+                val row_id = (self.level_row_offset[level] as i64) + ty
+                if self.row_epoch[row_id] != self.frame_epoch:
+                    self.row_epoch[row_id] = self.frame_epoch
+                    self.row_min_tx[row_id] = tx0 as u32
+                    self.row_max_tx[row_id] = tx1 as u32
+                else:
+                    if tx0 < self.row_min_tx[row_id] as i64:
+                        self.row_min_tx[row_id] = tx0 as u32
+                    if tx1 > self.row_max_tx[row_id] as i64:
+                        self.row_max_tx[row_id] = tx1 as u32
                 var tx = tx0
                 while tx <= tx1:
-                    val local_id = ty * self.cols[level] + tx
-                    val slot = self.level_offset[level] + local_id
-                    if self.tile_epoch[slot] != self.frame_epoch:
-                        self.tile_epoch[slot] = self.frame_epoch
-                        val out = self.level_offset[level] + self.dirty_len[level]
-                        self.dirty_id[out] = local_id
+                    val local_id = ty * (self.cols[level] as i64) + tx
+                    val global_id = (self.level_offset[level] as i64) + local_id
+                    if self.tile_epoch[global_id] != self.frame_epoch:
+                        self.tile_epoch[global_id] = self.frame_epoch
+                        val write_at = (self.dirty_start[level] as i64) + (self.dirty_len[level] as i64)
+                        self.dirty_id[write_at] = local_id as u32
                         self.dirty_len[level] = self.dirty_len[level] + 1
-                    tx += 1
-                ty += 1
-            level += 1
+                    tx = tx + 1
+                ty = ty + 1
+            level = level + 1
+
+    me dirty_row_active(level: i64, ty: i64) -> bool:
+        if level < 0 or level >= self.level_count or ty < 0:
+            return false
+        if ty >= self.rows[level] as i64:
+            return false
+        val row_id = (self.level_row_offset[level] as i64) + ty
+        self.row_epoch[row_id] == self.frame_epoch
+
+    me dirty_row_min_tx(level: i64, ty: i64) -> i64:
+        if not self.dirty_row_active(level, ty):
+            return -1
+        val row_id = (self.level_row_offset[level] as i64) + ty
+        self.row_min_tx[row_id] as i64
+
+    me dirty_row_max_tx(level: i64, ty: i64) -> i64:
+        if not self.dirty_row_active(level, ty):
+            return -1
+        val row_id = (self.level_row_offset[level] as i64) + ty
+        self.row_max_tx[row_id] as i64
 
     me dirty_count(level: i64) -> i64:
-        if level < 0 or level >= self.dirty_len.len():
+        if level < 0 or level >= self.level_count:
             return 0
-        self.dirty_len[level]
+        self.dirty_len[level] as i64
 
+    me dirty_tile_id(level: i64, index: i64) -> i64:
+        if level < 0 or level >= self.level_count:
+            return -1
+        if index < 0 or index >= self.dirty_len[level] as i64:
+            return -1
+        self.dirty_id[(self.dirty_start[level] as i64) + index] as i64
+
+    me is_dirty(level: i64, tx: i64, ty: i64) -> bool:
+        if level < 0 or level >= self.level_count or tx < 0 or ty < 0:
+            return false
+        if tx >= self.cols[level] as i64 or ty >= self.rows[level] as i64:
+            return false
+        val local_id = ty * (self.cols[level] as i64) + tx
+        val global_id = (self.level_offset[level] as i64) + local_id
+        self.tile_epoch[global_id] == self.frame_epoch
+
+    # Exact union area of dirty tiles at one level. Tiles are disjoint and
+    # ragged right/bottom edges are clipped to the viewport.
+    me dirty_pixels(level: i64) -> i64:
+        if level < 0 or level >= self.level_count:
+            return 0
+        val tw = self.tile_w[level] as i64
+        val th = self.tile_h[level] as i64
+        val c = self.cols[level] as i64
+        var pixels: i64 = 0
+        var i: i64 = 0
+        while i < self.dirty_len[level] as i64:
+            val id = self.dirty_tile_id(level, i)
+            val tx = id % c
+            val ty = id / c
+            val x0 = tx * tw
+            val y0 = ty * th
+            var x1 = x0 + tw
+            var y1 = y0 + th
+            if x1 > self.viewport_w as i64:
+                x1 = self.viewport_w as i64
+            if y1 > self.viewport_h as i64:
+                y1 = self.viewport_h as i64
+            pixels = pixels + (x1 - x0) * (y1 - y0)
+            i = i + 1
+        pixels
+
+    # Exact clipped device rectangles for the selected CPU/GPU planning
+    # scale, encoded as flat [x, y, w, h] i64 tuples. Iteration is O(dirty)
+    # and preserves first-mark order; consumers may coalesce later without
+    # changing this canonical damage ownership.
     me dirty_rects(level: i64) -> [i64]:
-        var rects: [i64] = []
-        if level < 0 or level >= self.dirty_len.len():
-            return rects
-        var local_id: i64 = 0
-        while local_id < self.level_capacity[level]:
-            val slot = self.level_offset[level] + local_id
-            if self.tile_epoch[slot] != self.frame_epoch:
-                local_id += 1
-                continue
-            val tx = local_id % self.cols[level]
-            val ty = local_id / self.cols[level]
-            val x = tx * self.tile_w[level]
-            val y = ty * self.tile_h[level]
-            var w = self.tile_w[level]
-            var h = self.tile_h[level]
-            if x + w > self.viewport_w: w = self.viewport_w - x
-            if y + h > self.viewport_h: h = self.viewport_h - y
-            rects.push(x)
-            rects.push(y)
-            rects.push(w)
-            rects.push(h)
-            local_id += 1
-        rects
+        var out: [i64] = []
+        if level < 0 or level >= self.level_count:
+            return out
+        val tw = self.tile_w[level] as i64
+        val th = self.tile_h[level] as i64
+        val c = self.cols[level] as i64
+        var i: i64 = 0
+        while i < self.dirty_len[level] as i64:
+            val id = self.dirty_tile_id(level, i)
+            val tx = id % c
+            val ty = id / c
+            val x0 = tx * tw
+            val y0 = ty * th
+            var x1 = x0 + tw
+            var y1 = y0 + th
+            if x1 > self.viewport_w as i64:
+                x1 = self.viewport_w as i64
+            if y1 > self.viewport_h as i64:
+                y1 = self.viewport_h as i64
+            out.push(x0)
+            out.push(y0)
+            out.push(x1 - x0)
+            out.push(y1 - y0)
+            i = i + 1
+        out
 
+    # FULL is a policy decision expressed as a percentage, using i64 math so
+    # 8K area comparisons cannot overflow i32.
+    me damage_class(level: i64, full_threshold_percent: i64) -> i64:
+        val dirty = self.dirty_pixels(level)
+        if dirty == 0:
+            return DAMAGE_NONE
+        var threshold = full_threshold_percent
+        if threshold <= 0:
+            threshold = 100
+        if threshold > 100:
+            threshold = 100
+        val surface = (self.viewport_w as i64) * (self.viewport_h as i64)
+        if surface > 0 and dirty * 100 >= surface * threshold:
+            return DAMAGE_FULL
+        DAMAGE_LOCAL
+
+# Bridge the retained property-tree owner into every configured damage scale.
+# Damage remains owned by PropertyTrees until its frame owner clears it; this
+# function deliberately does not consume/clear the source rectangles.
 fn damage_tiles_mark_property_damage(pyramid: DirtyTilePyramid,
-                                     trees: PropertyTrees):
+                                     trees: PropertyTrees) -> i64:
     var i: i64 = 0
     while i < trees.damage_len:
         pyramid.mark_rect(
             trees.damage_x[i] as i64, trees.damage_y[i] as i64,
             trees.damage_w[i] as i64, trees.damage_h[i] as i64)
-        i += 1
+        i = i + 1
+    trees.damage_len
 
 export DirtyTilePyramid, damage_tiles_mark_property_damage
+export DAMAGE_NONE, DAMAGE_LOCAL, DAMAGE_FULL

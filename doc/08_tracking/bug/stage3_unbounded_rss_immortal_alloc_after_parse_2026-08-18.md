@@ -1,7 +1,7 @@
 # Stage 3 native-build RSS is unbounded: every heap object allocated outside a
 # transient parse scope is process-immortal and never freed (2026-08-18)
 
-Status: OPEN (analysis; no build run -- resource embargo, Stage-3 bootstrap live)
+Status: CLAIMED (Codex `/root`, 2026-08-22; measured Stage-3 HIR import fix in progress)
 
 ## Measured
 
@@ -80,3 +80,83 @@ No build was run (resource embargo). The retention mechanism is established from
 source and from the call-site census above; the attribution of the specific
 doubling steps to the immortal registry rather than to a caller-side buffer is
 inference from the 2x step pattern, not measurement.
+
+## Fresh canonical evidence (2026-08-22, `codex/session-01a023a8`)
+
+A source-bound four-core Stage 2 build completed and admitted successfully from
+commit `d1414723ef0`; the canonical planner-admission-v2 producer then authorized
+the required one-thread Stage 3 recovery lane. Stage 3 parsed, promoted, and
+released all 687 module surfaces in 458,677 ms, entered HIR, and completed the
+first HIR module. RSS rose from 638,492 KiB during late surface parsing to
+3,599,144 KiB at HIR 1/687, then to 7,341 MiB. At 13:08:44 UTC, host `earlyoom`
+sent SIGTERM because available memory fell below 10%; the compiler exited 143
+without a product diagnostic or candidate. The retained log is
+`build/bootstrap/logs/x86_64-unknown-linux-gnu/stage3-native-build.log`.
+
+This fresh measurement confirms the open blocker on current source: surface
+lifecycle is now stable, but HIR retention remains unbounded enough to prevent
+Stage 3 admission under shared-host load. Stage 4, deployment, the optimizer,
+SPipe/docgen, and bootstrap-ledger PASS publication remain unavailable. The
+unblock condition is unchanged: bound the Pure-Simple per-module HIR/MIR/codegen
+owner lifetime, preserve behavior/API, and rerun one provenance-bound Stage 3
+transaction with the canonical peak-RSS gate.
+
+## Qualified-index follow-up (2026-08-22)
+
+The reviewed Pure-Simple qualified-symbol index change from commit
+`d1d2e652818` was integrated as `18738b4323b`. Its retained focused evidence
+changes qualified lookup from a linear scan with a temporary concatenated key
+to an average O(1) chained scalar index with exact collision checks. The prior
+focused run passed 6/6 examples and measured 10.00x and 17.68x lookup speedups
+at 256 and 512 entries respectively; behavior for id zero, misses,
+first-write-wins duplicates, reset, rebind, and collisions was preserved.
+
+A source-matched four-core bootstrap transaction was started with strict
+fallback disabled. All Rust authority components rebuilt, then Stage 2 remained
+CPU-active at 362-396% with `stall_streak=0` and roughly 0.28-0.48 GiB tree RSS.
+It had not produced a Stage 2 terminal receipt after 4,362 seconds total
+transaction time (the Stage 2 substep was about 46 minutes), while unrelated
+worktrees occupied most host memory. The repository wall-clock/runaway guard
+therefore required terminating this owned transaction; the monitor recorded
+`exit-130`. Stage 3 was deliberately not launched under less than 2 GiB free
+physical memory, because an earlyoom result would not be a valid comparison
+against the 7,341 MiB baseline.
+
+Consequently the index change has direct algorithmic/correctness evidence but
+does **not** yet have source-matched Stage 3 timing or peak-RSS admission.
+Stage 4, the Simple optimizer, SPipe/docgen, and final ledger publication remain
+blocked. Do not report this bug fixed until one clean-host Stage 2/3 transaction
+reaches a terminal receipt and the canonical RSS sampler records the result.
+
+## Four-core producer and Stage 3 safety stop (2026-08-22)
+
+A later source-matched retry completed the canonical receipt-free Stage 2
+producer with `--full-bootstrap --stop-after-stage2 --mode=dynload --jobs=4`.
+It exited 0 after 1:11:20 wall time, averaged 322% CPU, peaked at 2,794,780 KiB
+RSS, and used no swap. The Stage 2 sanity and struct-receiver/runtime capability
+proofs passed and the compiler was admitted. A fresh planner-admission-v2
+receipt bound to that compiler also passed the read-only policy validator.
+
+The canonical one-thread Stage 3 resume then released all 687 surfaces and
+entered `phase3:hir:imports:start` for `src/compiler/driver/driver.spl`. RSS was
+11,404,492 KiB at HIR 1/687, 19,520,888 KiB 39 seconds later, and 25,736,636
+KiB shortly afterward without advancing past that import step. To protect the
+shared host, only this owned compiler child was sent SIGTERM. `/usr/bin/time`
+recorded exit 143 after 7:03.55 and a 26,419,744 KiB peak, with no swap.
+
+This is not evidence that the qualified-symbol index itself added 19 GiB. Its
+two 256-head bucket arrays and per-binding scalar/reference arrays are bounded
+to a few MiB even across 687 retained module tables; it also changes qualified
+bind from aggregate O(n^2) to O(n) and lookup from O(n) to average O(1). The
+earlier 7,341 MiB observation was an earlyoom interruption, not a completed
+peak, so the two termination points are not an A/B regression comparison.
+
+The evidence instead tightens the existing root cause to recursive promotion
+of the closure-wide `SymbolTable` embedded in the first `HirModule`, with the
+no-GC/immortal owner retaining imported symbols and auxiliary lookup state.
+The next bounded Pure-Simple fix must instrument symbol cardinality and promoted
+nodes/bytes immediately around each HIR-module promotion, then retain only the
+downstream-required snapshot or rebuild lowering-only accelerators. Preserve
+the public `SymbolTable` API and run an identical-parent A/B before changing the
+qualified index. Stage 3, Stage 4, optimizer, SPipe/docgen, and ledger PASS stay
+blocked until that measured fix converges.

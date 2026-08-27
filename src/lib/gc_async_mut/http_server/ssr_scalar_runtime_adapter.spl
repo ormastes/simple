@@ -1,0 +1,202 @@
+"""Native scalar lease facade for the SSR service boundary.
+
+``runtime_ssr.c`` owns every copied request, command, claim, result, and
+response blob.  This adapter never gives that runtime an aggregate Simple
+value: an input byte array is lowered to a temporary pointer/length loan only
+for ``*_lease_new``.  The native call copies the bytes before it returns, so
+the pointer is neither retained nor transported.  All later operations use
+generation-checked ``i64`` leases and scalar fields.
+
+This is deliberately a transport facade, not an HTTP worker or renderer.  In
+particular, it does not start a service task, claim work on behalf of a
+renderer, or turn a receipt into an HTTP response.  A later lifecycle owner
+must supply those actions with bounded ports, cancellation, and a structured
+join receipt.
+"""
+
+extern fn rt_array_data_ptr_u8(value: [u8]) -> i64
+extern fn rt_ssr_payload_lease_new(bytes_ptr: i64, length: i64) -> i64
+extern fn rt_ssr_payload_lease_get(lease: i64, field: i64) -> i64
+extern fn rt_ssr_payload_lease_byte(lease: i64, index: i64) -> i64
+extern fn rt_ssr_payload_lease_release(lease: i64) -> i64
+extern fn rt_ssr_blob_lease_new(bytes_ptr: i64, length: i64) -> i64
+extern fn rt_ssr_blob_lease_get(lease: i64, field: i64) -> i64
+extern fn rt_ssr_blob_lease_byte(lease: i64, index: i64) -> i64
+extern fn rt_ssr_blob_lease_release(lease: i64) -> i64
+extern fn rt_ssr_command_port_new() -> i64
+extern fn rt_ssr_completion_port_new() -> i64
+extern fn rt_ssr_command_port_submit(port: i64, completion_port: i64, request_id: i64,
+    payload_lease: i64, deadline: i64) -> i64
+extern fn rt_ssr_command_port_pending_count(port: i64) -> i64
+extern fn rt_ssr_command_port_claim(port: i64) -> i64
+extern fn rt_ssr_command_port_receipt_take(port: i64) -> i64
+extern fn rt_ssr_command_claim_get(claim: i64, field: i64) -> i64
+extern fn rt_ssr_command_claim_payload_byte(claim: i64, index: i64) -> i64
+extern fn rt_ssr_command_port_cancel(port: i64, command_id: i64,
+    status: i64) -> i64
+extern fn rt_ssr_command_claim_complete(claim: i64, status: i64,
+    blob_lease: i64) -> i64
+extern fn rt_ssr_command_claim_abort(claim: i64, status: i64) -> i64
+extern fn rt_ssr_command_receipt_get(receipt: i64, field: i64) -> i64
+extern fn rt_ssr_command_receipt_blob_byte(receipt: i64, index: i64) -> i64
+extern fn rt_ssr_command_receipt_release(receipt: i64) -> i64
+extern fn rt_ssr_command_port_release(port: i64) -> i64
+
+val SSR_SCALAR_RUNTIME_PAYLOAD_MAX_BYTES: i64 = 65536
+val SSR_SCALAR_RUNTIME_BLOB_MAX_BYTES: i64 = 262144
+val SSR_SCALAR_RUNTIME_PORT_DEPTH: i64 = 32
+
+val SSR_SCALAR_LEASE_FIELD_LENGTH: i64 = 0
+val SSR_SCALAR_LEASE_FIELD_HASH: i64 = 1
+val SSR_SCALAR_COMMAND_FIELD_ID: i64 = 0
+val SSR_SCALAR_COMMAND_FIELD_REQUEST_ID: i64 = 1
+val SSR_SCALAR_COMMAND_FIELD_DEADLINE: i64 = 2
+val SSR_SCALAR_COMMAND_FIELD_PAYLOAD_LENGTH: i64 = 3
+val SSR_SCALAR_COMMAND_FIELD_PAYLOAD_HASH: i64 = 4
+val SSR_SCALAR_RECEIPT_FIELD_COMMAND_ID: i64 = 0
+val SSR_SCALAR_RECEIPT_FIELD_REQUEST_ID: i64 = 1
+val SSR_SCALAR_RECEIPT_FIELD_STATUS: i64 = 2
+val SSR_SCALAR_RECEIPT_FIELD_BLOB_LENGTH: i64 = 3
+val SSR_SCALAR_RECEIPT_FIELD_BLOB_HASH: i64 = 4
+
+struct SsrScalarRuntimeClaimV1:
+    """Copied scalar observation of a runtime-owned command claim."""
+    command_id: i64
+    request_id: i64
+    deadline: i64
+    payload_bytes: i64
+    payload_hash: i64
+
+struct SsrScalarRuntimeReceiptV1:
+    """Copied scalar observation of a runtime-owned completion receipt."""
+    command_id: i64
+    request_id: i64
+    status: i64
+    blob_bytes: i64
+    blob_hash: i64
+
+fn ssr_scalar_payload_lease_from_bytes(bytes: [u8]) -> i64:
+    """Copy a bounded local payload into the native owner and return its lease."""
+    val length = bytes.len()
+    if length < 0 or length > SSR_SCALAR_RUNTIME_PAYLOAD_MAX_BYTES:
+        return 0
+    rt_ssr_payload_lease_new(rt_array_data_ptr_u8(bytes), length)
+
+fn ssr_scalar_blob_lease_from_bytes(bytes: [u8]) -> i64:
+    """Copy a bounded local result blob into the native owner and return its lease."""
+    val length = bytes.len()
+    if length < 0 or length > SSR_SCALAR_RUNTIME_BLOB_MAX_BYTES:
+        return 0
+    rt_ssr_blob_lease_new(rt_array_data_ptr_u8(bytes), length)
+
+fn ssr_scalar_claim_snapshot(claim: i64) -> SsrScalarRuntimeClaimV1?:
+    if claim <= 0: return nil
+    val command_id = rt_ssr_command_claim_get(claim, SSR_SCALAR_COMMAND_FIELD_ID)
+    val request_id = rt_ssr_command_claim_get(claim, SSR_SCALAR_COMMAND_FIELD_REQUEST_ID)
+    val deadline = rt_ssr_command_claim_get(claim, SSR_SCALAR_COMMAND_FIELD_DEADLINE)
+    val payload_bytes = rt_ssr_command_claim_get(claim,
+        SSR_SCALAR_COMMAND_FIELD_PAYLOAD_LENGTH)
+    val payload_hash = rt_ssr_command_claim_get(claim,
+        SSR_SCALAR_COMMAND_FIELD_PAYLOAD_HASH)
+    if command_id <= 0 or request_id <= 0 or payload_bytes < 0:
+        return nil
+    Some(SsrScalarRuntimeClaimV1(command_id: command_id,
+        request_id: request_id, deadline: deadline, payload_bytes: payload_bytes,
+        payload_hash: payload_hash))
+
+fn ssr_scalar_receipt_snapshot(receipt: i64) -> SsrScalarRuntimeReceiptV1?:
+    if receipt <= 0: return nil
+    val command_id = rt_ssr_command_receipt_get(receipt,
+        SSR_SCALAR_RECEIPT_FIELD_COMMAND_ID)
+    val request_id = rt_ssr_command_receipt_get(receipt,
+        SSR_SCALAR_RECEIPT_FIELD_REQUEST_ID)
+    val status = rt_ssr_command_receipt_get(receipt,
+        SSR_SCALAR_RECEIPT_FIELD_STATUS)
+    val blob_bytes = rt_ssr_command_receipt_get(receipt,
+        SSR_SCALAR_RECEIPT_FIELD_BLOB_LENGTH)
+    val blob_hash = rt_ssr_command_receipt_get(receipt,
+        SSR_SCALAR_RECEIPT_FIELD_BLOB_HASH)
+    if command_id <= 0 or request_id <= 0 or blob_bytes < 0:
+        return nil
+    Some(SsrScalarRuntimeReceiptV1(command_id: command_id,
+        request_id: request_id, status: status, blob_bytes: blob_bytes,
+        blob_hash: blob_hash))
+
+class SsrScalarRuntimePortV1:
+    """One role-bound native port token; caller owns release and no task lifecycle."""
+    port_token: i64
+    is_completion_port: bool
+    released: bool
+
+    static fn create() -> SsrScalarRuntimePortV1?:
+        val token = rt_ssr_command_port_new()
+        if token <= 0: return nil
+        Some(SsrScalarRuntimePortV1(port_token: token,
+            is_completion_port: false, released: false))
+
+    static fn create_completion() -> SsrScalarRuntimePortV1?:
+        val token = rt_ssr_completion_port_new()
+        if token <= 0: return nil
+        Some(SsrScalarRuntimePortV1(port_token: token,
+            is_completion_port: true, released: false))
+
+    fn submit(completion_port: i64, request_id: i64, payload_lease: i64,
+            deadline: i64) -> i64:
+        if self.released or self.is_completion_port or completion_port <= 0 or request_id <= 0 or
+                payload_lease <= 0: return 0
+        rt_ssr_command_port_submit(self.port_token, completion_port, request_id,
+            payload_lease, deadline)
+
+    fn pending_count() -> i64:
+        if self.released or self.is_completion_port: return -1
+        rt_ssr_command_port_pending_count(self.port_token)
+
+    fn claim_next() -> i64:
+        if self.released or self.is_completion_port: return 0
+        rt_ssr_command_port_claim(self.port_token)
+
+    fn receipt_take() -> i64:
+        """Transfer one FIFO completion receipt; caller must release its token."""
+        if self.released or not self.is_completion_port: return 0
+        rt_ssr_command_port_receipt_take(self.port_token)
+
+    fn cancel(command_id: i64, status: i64) -> i64:
+        if self.released or self.is_completion_port or command_id <= 0: return 0
+        rt_ssr_command_port_cancel(self.port_token, command_id, status)
+
+    me release() -> bool:
+        if self.released: return false
+        val released = rt_ssr_command_port_release(self.port_token) > 0
+        if released: self.released = true
+        released
+
+fn ssr_scalar_claim_complete(claim: i64, status: i64, blob_lease: i64) -> i64:
+    if claim <= 0 or blob_lease < 0: return 0
+    rt_ssr_command_claim_complete(claim, status, blob_lease)
+
+fn ssr_scalar_claim_abort(claim: i64, status: i64) -> i64:
+    if claim <= 0: return 0
+    rt_ssr_command_claim_abort(claim, status)
+
+fn ssr_scalar_receipt_release(receipt: i64) -> bool:
+    receipt > 0 and rt_ssr_command_receipt_release(receipt) > 0
+
+fn ssr_scalar_payload_release(lease: i64) -> bool:
+    lease > 0 and rt_ssr_payload_lease_release(lease) > 0
+
+fn ssr_scalar_blob_release(lease: i64) -> bool:
+    lease > 0 and rt_ssr_blob_lease_release(lease) > 0
+
+export SSR_SCALAR_RUNTIME_PAYLOAD_MAX_BYTES, SSR_SCALAR_RUNTIME_BLOB_MAX_BYTES
+export SSR_SCALAR_RUNTIME_PORT_DEPTH, SSR_SCALAR_LEASE_FIELD_LENGTH
+export SSR_SCALAR_LEASE_FIELD_HASH, SSR_SCALAR_COMMAND_FIELD_ID
+export SSR_SCALAR_COMMAND_FIELD_REQUEST_ID, SSR_SCALAR_COMMAND_FIELD_DEADLINE
+export SSR_SCALAR_COMMAND_FIELD_PAYLOAD_LENGTH, SSR_SCALAR_COMMAND_FIELD_PAYLOAD_HASH
+export SSR_SCALAR_RECEIPT_FIELD_COMMAND_ID, SSR_SCALAR_RECEIPT_FIELD_REQUEST_ID
+export SSR_SCALAR_RECEIPT_FIELD_STATUS, SSR_SCALAR_RECEIPT_FIELD_BLOB_LENGTH
+export SSR_SCALAR_RECEIPT_FIELD_BLOB_HASH
+export SsrScalarRuntimeClaimV1, SsrScalarRuntimeReceiptV1, SsrScalarRuntimePortV1
+export ssr_scalar_payload_lease_from_bytes, ssr_scalar_blob_lease_from_bytes
+export ssr_scalar_claim_snapshot, ssr_scalar_receipt_snapshot
+export ssr_scalar_claim_complete, ssr_scalar_claim_abort, ssr_scalar_receipt_release
+export ssr_scalar_payload_release, ssr_scalar_blob_release

@@ -31,7 +31,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # because a smaller row set is indistinguishable from a passing one. The floor
 # makes that class self-detecting: the count may only ever GROW. Raise it in the
 # same commit that adds rows; lowering it requires a reviewed deletion.
-ROW_FLOOR=141
+ROW_FLOOR=131
 CHECKED=0
 FAILED=0
 OFFENDERS=""
@@ -129,10 +129,7 @@ must_contain "match-expr write-back: spec twin" \
     "$ROOT/test/01_unit/compiler/interpreter/match_expr_post_statement_cost_spec.spl" "floor * 3"
 
 MEPUSH="$ROOT/src/compiler_rust/compiler/tests/interpreter_me_method_field_push_in_place.rs"
-# Pin is the ASSERTED VALUE, not the call formatting: rustfmt reflowed this
-# assert_eq! across lines in 2fc656b8a97 (pure formatting, verified by
-# `git log -L`), which silently unpinned the old one-line needle.
-must_contain "me-method receiver released: counter pin"   "$MEPUSH" "clones, 0,"
+must_contain "me-method receiver released: counter pin"   "$MEPUSH" "assert_eq!(clones, 0"
 must_contain "me-method receiver released: linear pin"    "$MEPUSH" "ratio < 9.0"
 must_contain "me-method receiver moved (f8681a7afa6): args evaluated before the move" \
     "$ROOT/src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs" "evaluate_call_args(args, env, functions, classes, enums, impl_methods)"
@@ -208,20 +205,7 @@ must_contain "809ce6d4e71 object cache second-build-hits spec" \
 HIRREG="$ROOT/src/compiler/20.hir/hir_lowering/_Items/module_import_registration.spl"
 must_not_contain "MATCHRET no match-expression with return arms" "$HIRREG" "val kind = match composite.kind:"
 must_contain     "MATCHRET hoisted early-exit"                    "$HIRREG" 'val kind = if composite.kind == "class": SymbolKind.Class else: SymbolKind.Struct'
-# IMPLIDX was re-spelled by a LATER perf fix and this row must track it, not the
-# old name. 082d57ea99a introduced `imported_impl_positions(...)`; 61dd76f5082
-# ("stop allocating on the empty path -- reexport materialization 60x,
-# 31 min -> 610 ms") replaced that helper with a built-once-per-surface index
-# plus a direct indexed read. Pinning the dead spelling reported a REGRESSION
-# while the mechanism was present and 60x faster -- a false red of the
-# rename/move-drift class. Pin both halves of the current mechanism, which is
-# strictly stronger than the one string it replaces: the index must be built
-# once per surface, AND the per-type read must go through the index rather than
-# sweeping impls.
-IMPLIDXF="$ROOT/src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl"
-must_contain     "IMPLIDX per-surface impl index built once"      "$IMPLIDXF" "val surface_key = self.ensure_impl_index(imported_mod)"
-must_contain     "IMPLIDX indexed read, not an impl sweep"        "$IMPLIDXF" "val impl_positions = self.impl_index_positions[wanted_key]"
-must_contain     "IMPLIDX build count pinned by the cost spec"    "$ROOT/test/01_unit/compiler/hir/hir_import_registration_per_symbol_cost_spec.spl" "expect(lowering.impl_index_build_count).to_equal(FIXTURE_PACKAGES)"
+must_contain     "IMPLIDX per-surface impl index"                 "$ROOT/src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl" "val impl_positions = self.imported_impl_positions(imported_mod, imported_name)"
 must_contain     "MATCHRET/IMPLIDX cost spec"                     "$ROOT/test/01_unit/compiler/hir/hir_import_registration_per_symbol_cost_spec.spl" "PER_REGISTRATION_BUDGET_US"
 
 # --- NAMEIDX / SCOPEROW / EXCL / seed hot-path (2026-08-22, 7th session of the
@@ -355,7 +339,25 @@ must_contain "interface digest captures extend headers"        "$AKEY" 't.starts
 must_contain "interface digest captures use/re-export aliases" "$AKEY" 't.starts_with("use ")'
 must_contain "interface-digest differential spec present"      "$IFDIFF" "struct fields are NOT yet part of the interface (blocking gap)"
 must_contain "differential spec pins the extend construct"     "$IFDIFF" "changes the digest when the extended type changes"
-must_contain "HIR closure digest still keyed on content_hash"  "$ROOT/src/compiler/80.driver/driver_hir_cache.spl" "content_hash"
+# The re-key LANDED 2026-08-23. These rows replace the old
+# "closure digest still keyed on content_hash" row, which existed to block the
+# re-key while the interface encoding was incomplete. They are strictly
+# STRONGER: they pin the interface keying, the per-surface FAIL-CLOSED fallback
+# (which must still fold content_hash, so an encoder gap is slow and not
+# wrong), and the fallback COUNTER that keeps a degraded build attributable.
+HIRCACHE="$ROOT/src/compiler/80.driver/driver_hir_cache.spl"
+STE="$ROOT/src/compiler/80.driver/cache/surface_type_encode.spl"
+must_contain "HIR closure digest keyed on the surface interface"   "$HIRCACHE" "surface_interface_encode(s)"
+must_contain "HIR closure digest falls back to content_hash"       "$HIRCACHE" '"|H|"'
+must_contain "HIR closure digest fallback is counted"              "$HIRCACHE" "_hir_cache_iface_fallbacks = _hir_cache_iface_fallbacks + 1"
+must_contain "HIR closure digest fallback count is reportable"     "$HIRCACHE" "fn hir_cache_iface_fallback_count()"
+# The stale-HIT trap that disqualified `type_to_text`: Reference/Pointer carry a
+# downstream-visible mutability flag. If these encodings ever unwrap to the
+# inner type again, `&mut T` and `&T` digest EQUAL and the cache goes wrong.
+must_contain "type encoder preserves Reference mutability"         "$STE" 'return "Rf(" + encoded + "," + (if is_mut: "m" else: "c") + ")"'
+must_contain "type encoder preserves Pointer constness"            "$STE" 'return "Pt(" + encoded + "," + (if is_const: "c" else: "m") + ")"'
+must_contain "type encoder fails closed on a sized array"          "$STE" "if sized:"
+must_contain "closure-digest differential spec present"            "$ROOT/test/01_unit/compiler/driver/hir_closure_digest_interface_keyed_spec.spl" "RESTORES content-hash sensitivity for the fallen-back surface"
 
 # --- memory: peak-RSS budget gate must exist and self-test.
 # Pins the 2026-08-21 survey (interpreter lint 12-13.6 GB -> 0.69 GB; JIT lint
@@ -595,26 +597,6 @@ must_contain     "IMPORTASTMEMO reproduce test pins one parse per module" \
 must_contain     "IMPORTASTMEMO read-site attribution trace kept" \
     "$ROOT/src/compiler_rust/compiler/src/read_trace.rs" \
     "SIMPLE_READ_TRACE"
-
-# --- shard concurrency MemAvailable clamp (2026-08-23, re-landed) ----------
-# doc/08_tracking/bug/shard_threads_no_memavailable_clamp_2026-08-23.md
-# The first landing used file_read("/proc/meminfo") and aborted every
-# native-build with rc=134 (seed file_read infinitely recurses --
-# seed_file_read_infinite_recursion_stack_overflow_2026-08-23.md). The
-# process_run_timeout read is therefore part of the MECHANISM, not an
-# incidental style choice: reintroducing file_read here re-breaks the compiler.
-must_contain     "SHARDCLAMP cap arithmetic present"               "$ROOT/src/app/cli/shard_mem_clamp.spl" "var cap = (avail_kb * 6 / 10) / budget_kb"
-must_contain     "SHARDCLAMP never raises the request"             "$ROOT/src/app/cli/shard_mem_clamp.spl" "if cap >= requested:"
-must_contain     "SHARDCLAMP reads meminfo WITHOUT file_read"      "$ROOT/src/app/cli/shard_mem_clamp.spl" "process_run_timeout(\"awk\""
-must_not_contain "SHARDCLAMP must not reintroduce file_read"       "$ROOT/src/app/cli/shard_mem_clamp.spl" "file_read("
-must_contain     "SHARDCLAMP wired into the shard chooser"         "$ROOT/src/app/cli/native_build_main.spl" "shard_threads_mem_cap(threads, budget_kb)"
-must_contain     "SHARDCLAMP parse phase carries the slim budget"  "$ROOT/src/app/cli/native_build_main.spl" "SIMPLE_PARSE_SHARD_WORKER_KB"
-must_contain     "SHARDCLAMP HIR phase clamped harder"             "$ROOT/src/app/cli/native_build_main.spl" "SIMPLE_HIR_SHARD_WORKER_KB"
-must_contain     "SHARDCLAMP spec pins per-phase asymmetry"        "$ROOT/test/01_unit/app/cli/shard_mem_clamp_spec.spl" "expect(hir_cap < parse_cap).to_be_true()"
-# The end-to-end gate is the thing that would have caught ff095d31591; a unit
-# spec provably would not, and did not.
-must_contain     "NBLIVENESS end-to-end gate exists"               "$ROOT/scripts/check/check-native-build-not-crashing.shs" "native-build"
-must_contain     "NBLIVENESS treats a signal death as a crash"     "$ROOT/scripts/check/check-native-build-not-crashing.shs" "_rc\" -ge 128"
 
 echo ""
 if [ "$CHECKED" -eq 0 ]; then

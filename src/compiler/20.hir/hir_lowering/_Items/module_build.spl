@@ -1,5 +1,8 @@
 # HIR item lowering - module, import, and bootstrap-flat lowering.
 use compiler.hir.hir_lowering._Items.module_lowering.*
+use compiler.hir.hir_lowering._Items.destination_publication.*
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfaceEnum}
+use compiler.hir.hir_lowering._Items.lowering_helpers.{bootstrap_hir_modules_add, bootstrap_hir_owner_receipt_take, bootstrap_hir_functions_reset, bootstrap_hir_functions_add, bootstrap_hir_function_count}
 # HIR Lowering - Item Lowering
 #
 # This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
@@ -7,7 +10,7 @@ use compiler.hir.hir_lowering._Items.module_lowering.*
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
-use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
+use compiler.frontend.parser_types.{ParserModuleOwner, ParserFunction, ImportItem, Param}
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
@@ -15,49 +18,178 @@ use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
 use compiler.hir.hir_lowering.expressions.*
-use compiler.hir.hir_lowering.hir_phase_profile.{
-    HIR_PROF_IMPORTS,
-    HIR_PROF_DECLARE,
-    HIR_PROF_ENUMS,
-    HIR_PROF_FUNCTIONS,
-    hir_phase_profile_now,
-    hir_phase_profile_add,
-    hir_phase_profile_module_begin,
-    hir_phase_profile_module_end,
-    hir_phase_profile_count_enum_lowering
-}
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.module_path_naming.{module_logical_name_from_path}
-use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
-use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
+use compiler.core.ast.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type, STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN}
+use compiler.core.ast_stmt.{stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
 
 extern fn rt_enum_discriminant(value: Any) -> i64
 extern fn rt_enum_payload(value: StmtKind) -> Expr
-use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_INTERPOLATED_STRING, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_get_stmts}
+use compiler.core.ast.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_INTERPOLATED_STRING, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN}
+use compiler.core.ast_expr.{expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_get_stmts}
 use compiler.frontend.core._AstExpr.accessors.{expr_get_arg_names}
-use compiler.core.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ}
+use compiler.core.tokens.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ}
 use compiler.frontend.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_TEXT, TYPE_DICT, custom_primitive_bind_symbol, custom_primitive_is_name}
 use compiler.frontend.core.types.{is_dict_tag, dict_tag_to_id, dict_type_get_key, dict_type_get_value}
 use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
-use compiler.core.{int_to_str}
+use compiler.core.types.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use common.facet_abi.{AspectId, FacetInterfaceId, FacetMethodId, FacetBindingId}
+
+# Values that cannot be derived truthfully at parser→HIR lowering remain
+# unmistakably unsealed.  Facet semantic resolution owns the mandatory
+# pre-seal→sealed rewrite and rejects any sentinel that reaches its output.
+val HIR_FACET_UNSEALED: text = "!unsealed"
 
 impl HirLowering:
+    me lower_facet_methods(methods: Dict<text, ParserFunction>) -> [HirFacetMethod]:
+        var lowered: [HirFacetMethod] = []
+        val names = methods.keys()
+        var idx = 0
+        while idx < names.len():
+            val parser_fn = methods[names[idx]]
+            val hir_fn = self.lower_function(parser_fn)
+            lowered = lowered.push(HirFacetMethod(
+                symbol: hir_fn.symbol,
+                name: parser_fn.name,
+                function: hir_fn,
+                method_id: FacetMethodId(value: HIR_FACET_UNSEALED),
+                signature_hash: HIR_FACET_UNSEALED,
+                span: parser_fn.span
+            ))
+            idx = idx + 1
+        lowered
+
+    me lower_facet_interface(decl: ParserFacetInterface) -> HirFacetInterfaceDecl:
+        val symbol = self.symbols.define(decl.name, SymbolKind.Trait, nil,
+            decl.span, decl.visibility, decl.is_public, nil)
+        var type_params: [HirTypeParam] = []
+        for type_param in decl.type_params:
+            type_params = type_params.push(self.lower_type_param(type_param))
+        var composes: [HirType] = []
+        for composed in decl.composes:
+            composes = composes.push(self.lower_type(composed))
+        var attributes: [HirAttribute] = []
+        for attribute in decl.attributes:
+            attributes = attributes.push(HirAttribute(name: attribute.name, args: ""))
+        HirFacetInterfaceDecl(
+            aspect_id: AspectId(value: decl.aspect_id),
+            aspect_version: decl.aspect_version,
+            symbol: symbol,
+            name: decl.name,
+            type_params: type_params,
+            composes: composes,
+            methods: self.lower_facet_methods(decl.methods),
+            visibility: decl.visibility,
+            is_public: decl.is_public,
+            attributes: attributes,
+            interface_id: FacetInterfaceId(value: HIR_FACET_UNSEALED),
+            interface_abi_hash: HIR_FACET_UNSEALED,
+            span: decl.span
+        )
+
+    me lower_facet_impl(decl: ParserFacetImpl) -> HirFacetImplDecl:
+        val symbol = self.symbols.define(decl.name, SymbolKind.Struct, nil,
+            decl.span, Visibility.Private, false, nil)
+        var type_params: [HirTypeParam] = []
+        for type_param in decl.type_params:
+            type_params = type_params.push(self.lower_type_param(type_param))
+        var interfaces: [HirType] = []
+        for interface_type in decl.interfaces:
+            interfaces = interfaces.push(self.lower_type(interface_type))
+        val access_mode = match decl.access_mode:
+            case ParserFacetAccessMode.PublicReadonly: HirFacetAccessMode.PublicReadonly
+            case ParserFacetAccessMode.InspectReadonly: HirFacetAccessMode.InspectReadonly
+        HirFacetImplDecl(
+            aspect_id: AspectId(value: decl.aspect_id),
+            aspect_version: decl.aspect_version,
+            symbol: symbol,
+            name: decl.name,
+            type_params: type_params,
+            base_type: self.lower_type(decl.base_type),
+            interfaces: interfaces,
+            access_mode: access_mode,
+            methods: self.lower_facet_methods(decl.methods),
+            provider_id: HIR_FACET_UNSEALED,
+            implementation_hash: HIR_FACET_UNSEALED,
+            required_base_abi_hash: HIR_FACET_UNSEALED,
+            required_layout_hash: HIR_FACET_UNSEALED,
+            span: decl.span
+        )
+
+    me lower_facet_binding(decl: ParserFacetBinding) -> HirFacetBindingDecl:
+        val mode = match decl.mode:
+            case ParserFacetBindingMode.Attached: HirFacetBindingMode.Attached
+            case ParserFacetBindingMode.NominalStatic: HirFacetBindingMode.NominalStatic
+        HirFacetBindingDecl(
+            aspect_id: AspectId(value: decl.aspect_id),
+            aspect_version: decl.aspect_version,
+            interface_type: self.lower_type(decl.interface_type),
+            # Raw carrier only. Semantic facet resolution parses and
+            # normalizes this spelling before canonical HIR may escape.
+            target_type_rule: HirTypePointcut.TypeName(pattern: decl.pointcut_text),
+            implementation_type: self.lower_type(decl.implementation_type),
+            mode: mode,
+            priority: decl.priority,
+            provider_id: decl.provider_id,
+            binding_id: FacetBindingId(value: HIR_FACET_UNSEALED),
+            span: decl.span
+        )
+
+    me lower_facet_requirement(decl: ParserFacetRequirement) -> HirFacetRequirementDecl:
+        HirFacetRequirementDecl(
+            aspect_id: AspectId(value: decl.aspect_id),
+            aspect_version: decl.aspect_version,
+            interface_type: self.lower_type(decl.interface_type),
+            # Raw carrier only; see lower_facet_binding.
+            target_type_rule: HirTypePointcut.TypeName(pattern: decl.pointcut_text),
+            span: decl.span
+        )
+
+    me lower_module_facet_interfaces(module: ParserModule) -> [HirFacetInterfaceDecl]:
+        var interfaces: [HirFacetInterfaceDecl] = []
+        for decl in module.facet_interfaces:
+            interfaces = interfaces.push(self.lower_facet_interface(decl))
+        interfaces
+
+    me lower_module_facet_impls(module: ParserModule) -> [HirFacetImplDecl]:
+        var impls: [HirFacetImplDecl] = []
+        for decl in module.facet_impls:
+            impls = impls.push(self.lower_facet_impl(decl))
+        impls
+
+    me lower_module_facet_bindings(module: ParserModule) -> [HirFacetBindingDecl]:
+        var bindings: [HirFacetBindingDecl] = []
+        for decl in module.facet_bindings:
+            bindings = bindings.push(self.lower_facet_binding(decl))
+        bindings
+
+    me lower_module_facet_requirements(module: ParserModule) -> [HirFacetRequirementDecl]:
+        var requirements: [HirFacetRequirementDecl] = []
+        for decl in module.facet_requirements:
+            requirements = requirements.push(self.lower_facet_requirement(decl))
+        requirements
+
     me lower_parser_module_unstub(module: ParserModule, is_entry: bool) -> HirModule:
+        self.lower_parser_module_owner_unstub(
+            ParserModuleOwner(value: module), is_entry)
+
+    me lower_parser_module_owner_unstub(
+        owner: ParserModuleOwner, is_entry: bool
+    ) -> HirModule:
         # Trap D (iteration 17): env-GATED eprint probes are mute in the
         # hir_lowering modules — `(hir_*_env_get("X") ?? "") == "1"` evaluates
         # false on stage4 even when X=1 — while UNGATED eprint works fine.
         # Probe builds must use ungated eprint here.
-        val bootstrap_mode = self.ambient_bootstrap_enabled()
+        val bootstrap_mode = (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
         val bootstrap_flat_mode = bootstrap_mode and (hir_module_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"
         val bootstrap_closure = bootstrap_mode and (hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
-        val parser_constants = module.constants.values()
+        val parser_constants = owner.value.constants.values()
         # Keep the aggregate out of the stage4 Any-erasure path. HirModule
         # contains several dictionaries, and the first field access below can
         # otherwise dispatch through a nil Any receiver in bootstrap builds.
-        hir_phase_profile_module_begin()
         var lowered_module: HirModule = self.lower_module(module)
         val focused_future_diag = bootstrap_mode and module.name == "src/lib/nogc_async_mut/async/future.spl"
         if focused_future_diag:
@@ -80,7 +212,7 @@ impl HirLowering:
             lowered_module.constants = recovered_constants
         if focused_future_diag:
             eprint("[hir-finalize] constants done")
-        if bootstrap_flat_mode:
+        if bootstrap_flat_mode and not self.destination_graph_active():
             # Materialize and type each aggregate separately. Passing several
             # Dict.values() aggregates in one mixed call can erase one through
             # Any in the stage4 bootstrap ABI and later produce a nil receiver.
@@ -129,14 +261,22 @@ impl HirLowering:
             val registry_module_name = if is_entry:
                 hir_module_logical_name_from_path(self.module_filename)
             else:
-                module.name
-            bootstrap_hir_modules_add(registry_module_name, is_entry, flat_symbols, flat_functions, flat_constants, flat_enums, flat_structs, flat_classes)
+                owner.value.name
+            # Stage only. The streaming driver pauses the active transient
+            # scope, promotes this owner row once, then commits it.
+            bootstrap_hir_modules_add(registry_module_name, is_entry,
+                flat_symbols, flat_functions, flat_constants, flat_enums,
+                flat_structs, flat_classes)
             if focused_future_diag:
                 eprint("[hir-finalize] cache done")
-        hir_phase_profile_module_end(module.name)
         lowered_module
 
     me lower_module_enum_definitions(module: ParserModule) -> Dict<SymbolId, HirEnum>:
+        self.lower_module_enum_definitions_owner(ParserModuleOwner(value: module))
+
+    me lower_module_enum_definitions_owner(
+        owner: ParserModuleOwner
+    ) -> Dict<SymbolId, HirEnum>:
         var lowered: Dict<SymbolId, HirEnum> = {}
         val imported_names = self.imported_enums.keys()
         var enum_idx = 0
@@ -146,24 +286,26 @@ impl HirLowering:
                 self.error("imported enum `{local_name}` has no declaration owner", Span.empty())
                 enum_idx = enum_idx + 1
                 continue
-            hir_phase_profile_count_enum_lowering()
             val hir_enum = self.lower_enum_with_symbol(self.imported_enums[local_name], self.imported_enum_owners[local_name], local_name)
             lowered[hir_enum.symbol] = hir_enum
             enum_idx = enum_idx + 1
 
-        val local_names = module.enums.keys()
+        val local_names = owner.value.enums.keys()
         enum_idx = 0
         while enum_idx < local_names.len():
             val local_name = local_names[enum_idx]
             if not self.imported_enums.contains_key(local_name):
-                val hir_enum = self.lower_enum(module.enums[local_name], hir_module_logical_name_from_path(module.name))
+                val hir_enum = self.lower_enum(owner.value.enums[local_name], hir_module_logical_name_from_path(owner.value.name))
                 lowered[hir_enum.symbol] = hir_enum
             enum_idx = enum_idx + 1
         lowered
 
     me lower_module(module: ParserModule) -> HirModule:
+        self.lower_module_owner(ParserModuleOwner(value: module))
+
+    me lower_module_owner(owner: ParserModuleOwner) -> HirModule:
         # Probe MUST be eprint AND ungated (Traps A/C/D, bug doc iters 13-17).
-        val bootstrap_mode = self.ambient_bootstrap_enabled()
+        val bootstrap_mode = (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
         # Phase profiling records bounded phase boundaries. Per-item logging
         # allocates one formatted string per expression in the no-GC compiler,
         # so reserve it for explicitly requested verbose diagnostics.
@@ -181,11 +323,18 @@ impl HirLowering:
         # had real cross-module imports to resolve, so this only widens
         # behavior for the closure path.
         val bootstrap_closure = bootstrap_mode and (hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+        # The destination publisher prepares every physical module before the
+        # first visit. Select only its scalar module lease here; flat lowering
+        # keeps the default mode and performs no graph work or allocation.
+        if self.destination_graph_active() and not self.destination_select_module(owner.value.name):
+            self.error("E-HIR-DEST-MODULE-SELECT: destination module selection failed before lowering", Span.empty())
+        if self.destination_graph_active() and not self.destination_begin_module_publication():
+            self.error("E-HIR-DEST-MODULE-BEGIN: destination module transaction failed before lowering", Span.empty())
         if bootstrap_diag:
             # NOTE: parser ParserModule has no `path` field (parser_types.spl) — a
             # `{module.path}` interpolation here aborted the whole worker under
             # SIMPLE_COMPILER_TRACE=1 ("class `ParserModule` has no field named `path`").
-            eprint("[hir-lower] lower_module:start module={module.name}")
+            eprint("[hir-lower] lower_module:start module={owner.value.name}")
         self.lowered_impl_functions = {}
         self.imported_traits = {}
         self.imported_enums = {}
@@ -211,34 +360,32 @@ impl HirLowering:
         # `case Const(a, b, c):` a refutable enum-variant pattern instead of
         # an irrefutable struct-positional pattern
         # (native_const_pattern_lowers_irrefutably bug).
-        val prescan_enum_names = module.enums.keys()
+        val prescan_enum_names = owner.value.enums.keys()
         var prescan_enum_idx = 0
         while prescan_enum_idx < prescan_enum_names.len():
-            val prescan_enum: ParserEnum = module.enums[prescan_enum_names[prescan_enum_idx]]
+            val prescan_enum: ParserEnum = owner.value.enums[prescan_enum_names[prescan_enum_idx]]
             for prescan_variant in prescan_enum.variants:
                 self.enum_variant_names[prescan_variant.name] = true
             prescan_enum_idx = prescan_enum_idx + 1
         # Pass 0: pre-register imported type names so explicit `use` paths win
         # over module load order when two modules export the same short name.
         if not bootstrap_mode or bootstrap_closure:
-            hir_module_phase_probe("phase3:hir:imports:start {module.name}")
+            hir_module_phase_probe("phase3:hir:imports:start {owner.value.name}")
             if bootstrap_diag:
                 eprint("[hir-lower] resolve_import_symbols:start module={module.name}")
-            val prof_imports_started = hir_phase_profile_now()
             self.registering_import_symbols = true
-            self.resolve_import_symbols(module)
-            self.resolve_package_sibling_symbols(module)
+            self.resolve_import_symbols_owner(owner)
+            self.resolve_package_sibling_symbols_owner(owner)
             self.registering_import_symbols = false
-            hir_phase_profile_add(HIR_PROF_IMPORTS, prof_imports_started)
             if bootstrap_diag:
-                eprint("[hir-lower] resolve_import_symbols:done module={module.name}")
-            hir_module_phase_probe("phase3:hir:imports:done {module.name}")
+                eprint("[hir-lower] resolve_import_symbols:done module={owner.value.name}")
+            hir_module_phase_probe("phase3:hir:imports:done {owner.value.name}")
 
         # First pass: declare all top-level symbols
         if bootstrap_diag:
-            eprint("[hir-lower] declare:start module={module.name}")
+            eprint("[hir-lower] declare:start module={owner.value.name}")
         if not bootstrap_mode or bootstrap_closure:
-            hir_module_phase_probe("phase3:hir:declare:start {module.name}")
+            hir_module_phase_probe("phase3:hir:declare:start {owner.value.name}")
             # Under a closure build, a module's own struct/enum/class/trait
             # names must be pre-declared before its functions are lowered --
             # a constructor referencing its own module's struct (e.g.
@@ -248,12 +395,10 @@ impl HirLowering:
             # mode already pre-declares its own function names via the
             # bootstrap_decl_idx loop below, so this only widens declaration
             # coverage to types/consts for the closure path.
-            val prof_declare_started = hir_phase_profile_now()
             self.declare_module_symbols(module)
-            hir_phase_profile_add(HIR_PROF_DECLARE, prof_declare_started)
             hir_module_phase_probe("phase3:hir:declare:done {module.name}")
         if bootstrap_diag:
-            eprint("[hir-lower] declare:done module={module.name}")
+            eprint("[hir-lower] declare:done module={owner.value.name}")
 
         # Pass -1 (relocated): pre-scan struct/class field TYPES (name-keyed) before
         # ANY function body is lowered. Nested-field-access support (see
@@ -281,47 +426,47 @@ impl HirLowering:
         # try_register_local_struct_type (statements.spl) is what actually
         # recovers array-typed fields in practice, and it MERGES into
         # (overwrites) whatever this pass records.
-        val prescan_struct_names = module.structs.keys()
+        val prescan_struct_names = owner.value.structs.keys()
         var prescan_idx = 0
         while prescan_idx < prescan_struct_names.len():
             val prescan_name = prescan_struct_names[prescan_idx]
-            val prescan_struct: ParserStruct = module.structs[prescan_name]
+            val prescan_struct: ParserStruct = owner.value.structs[prescan_name]
             self.prescan_composite_field_types(prescan_name, prescan_struct.fields)
             prescan_idx = prescan_idx + 1
-        val prescan_class_names = module.classes.keys()
+        val prescan_class_names = owner.value.classes.keys()
         prescan_idx = 0
         while prescan_idx < prescan_class_names.len():
             val prescan_name = prescan_class_names[prescan_idx]
-            val prescan_class: ParserClass = module.classes[prescan_name]
+            val prescan_class: ParserClass = owner.value.classes[prescan_name]
             self.prescan_composite_field_types(prescan_name, prescan_class.fields)
             prescan_idx = prescan_idx + 1
 
         # Second pass: lower definitions
         if bootstrap_diag:
-            eprint("[hir-lower] locals:functions:init module={module.name}")
+            eprint("[hir-lower] locals:functions:init module={owner.value.name}")
         var functions: Dict<SymbolId, HirFunction> = {}
         var gpu_function_targets: Dict<text, text> = {}
         var gpu_function_backend_orders: Dict<text, text> = {}
         if bootstrap_diag:
-            eprint("[hir-lower] locals:classes:init module={module.name}")
+            eprint("[hir-lower] locals:classes:init module={owner.value.name}")
         var classes: Dict<SymbolId, HirClass> = {}
         if bootstrap_diag:
-            eprint("[hir-lower] locals:structs:init module={module.name}")
+            eprint("[hir-lower] locals:structs:init module={owner.value.name}")
         var structs: Dict<SymbolId, HirStruct> = {}
         if bootstrap_diag:
-            eprint("[hir-lower] locals:enums:init module={module.name}")
+            eprint("[hir-lower] locals:enums:init module={owner.value.name}")
         var enums: Dict<SymbolId, HirEnum> = {}
         if bootstrap_diag:
-            eprint("[hir-lower] locals:bitfields:init module={module.name}")
+            eprint("[hir-lower] locals:bitfields:init module={owner.value.name}")
         var bitfields: Dict<SymbolId, HirBitfield> = {}
         if bootstrap_diag:
-            eprint("[hir-lower] locals:traits:init module={module.name}")
+            eprint("[hir-lower] locals:traits:init module={owner.value.name}")
         var traits: Dict<SymbolId, HirTrait> = {}
         if bootstrap_diag:
-            eprint("[hir-lower] locals:impls:init module={module.name}")
+            eprint("[hir-lower] locals:impls:init module={owner.value.name}")
         var impls: [HirImpl] = []
         if bootstrap_diag:
-            eprint("[hir-lower] locals:constants:init module={module.name}")
+            eprint("[hir-lower] locals:constants:init module={owner.value.name}")
         var constants: Dict<SymbolId, HirConst> = {}
 
         var lower_idx = 0
@@ -336,10 +481,10 @@ impl HirLowering:
             # functions — which produced an all-stub bootstrap binary that linked
             # cleanly but did nothing (bug
             # bootstrap_stage2_empty_mir_bodies_2026-07-05).
-            val bootstrap_module_functions = module.functions
+            val bootstrap_module_functions = owner.value.functions
             val bootstrap_function_keys = bootstrap_module_functions.keys()
             if bootstrap_diag:
-                eprint("[hir-lower] functions:count module={module.name} count={bootstrap_function_keys.len()}")
+                eprint("[hir-lower] functions:count module={owner.value.name} count={bootstrap_function_keys.len()}")
             # Pre-declare every module-level function name BEFORE lowering any
             # body. declare_module_symbols is skipped under bootstrap, so
             # without this a same-module callee (`check(...)`) hits
@@ -359,12 +504,20 @@ impl HirLowering:
             # (bootstrap_lower_hir_globals_to_mir_module) never qualifies,
             # so qualifying its pre-declared names would break every
             # same-module call in bootstrap_main.spl itself.
-            val bootstrap_decl_qualify = bootstrap_closure and not hir_module_is_bootstrap_entry(module.name)
-            val bootstrap_decl_module_name = hir_module_logical_name_from_path(module.name)
+            val bootstrap_decl_qualify = bootstrap_closure and not hir_module_is_bootstrap_entry(owner.value.name)
+            val bootstrap_decl_module_name = hir_module_logical_name_from_path(owner.value.name)
             var bootstrap_decl_idx = 0
             while bootstrap_decl_idx < bootstrap_function_keys.len():
                 val bootstrap_decl_fn: ParserFunction = bootstrap_module_functions[bootstrap_function_keys[bootstrap_decl_idx]]
-                val bootstrap_decl_sym = self.symbols.define(bootstrap_decl_fn.name, SymbolKind.Function, nil, Span.empty(), false, false, nil)
+                # Preserve the declared callable type during the bootstrap
+                # pre-pass, just like declare_module_symbols does on the
+                # regular path. Recursive value tails (for example
+                # native_build_has_source_arg's terminal else call) resolve
+                # through this symbol before their body is lowered; a nil type
+                # makes that call's result unknown and can erase the enclosing
+                # non-unit tail at MIR lowering.
+                val bootstrap_decl_type = self.declared_callable_type(bootstrap_decl_fn, nil)
+                val bootstrap_decl_sym = self.symbols.define(bootstrap_decl_fn.name, SymbolKind.Function, bootstrap_decl_type, Span.empty(), Visibility.Private, false, nil)
                 # Extern fns must keep their BARE runtime symbol: qualifying
                 # them ("std.nogc_sync_mut.simd.rt_simd_has_avx2") makes every
                 # same-module call emit an undefined module-prefixed symbol at
@@ -377,8 +530,10 @@ impl HirLowering:
             while lower_idx < bootstrap_function_keys.len():
                 val bootstrap_fn: ParserFunction = bootstrap_module_functions[bootstrap_function_keys[lower_idx]]
                 if bootstrap_diag:
-                    eprint("[hir-lower] function:start module={module.name} name={bootstrap_fn.name} idx={lower_idx}")
+                    eprint("[hir-lower] function:start module={owner.value.name} name={bootstrap_fn.name} idx={lower_idx}")
                 val hir_fn = self.lower_function(bootstrap_fn)
+                if bootstrap_hir_owner_receipt_take(0):
+                    eprint("[hir-owner] formed module={owner.value.name} index={lower_idx} fn={hir_fn.name} ret=" + rt_enum_discriminant(hir_fn.return_type.kind).to_text() + " has=" + hir_fn.body.has.to_text() + " stmts=" + hir_fn.body.stmts.len().to_text() + "\n")
                 if hir_fn.is_gpu_kernel:
                     gpu_function_targets[hir_fn.name] = hir_fn.gpu_target
                     gpu_function_backend_orders[hir_fn.name] = hir_fn.gpu_backend_order
@@ -387,18 +542,16 @@ impl HirLowering:
                 functions[fn_key] = hir_fn
                 bootstrap_hir_functions_add(hir_fn)
                 if bootstrap_diag:
-                    eprint("[hir-lower] function:done module={module.name} name={bootstrap_fn.name} idx={lower_idx}")
+                    eprint("[hir-lower] function:done module={owner.value.name} name={bootstrap_fn.name} idx={lower_idx}")
                 lower_idx = lower_idx + 1
         else:
-            val lower_module_functions = module.functions
+            val lower_module_functions = owner.value.functions
             val lower_function_keys = lower_module_functions.keys()
             while lower_idx < lower_function_keys.len():
                 val name = lower_function_keys[lower_idx]
-                hir_module_phase_probe("phase3:hir:function:start {module.name}.{name}")
+                hir_module_phase_probe("phase3:hir:function:start {owner.value.name}.{name}")
                 val fn_: ParserFunction = lower_module_functions[name]
-                val prof_fn_started = hir_phase_profile_now()
                 val hir_fn = self.lower_function(fn_)
-                hir_phase_profile_add(HIR_PROF_FUNCTIONS, prof_fn_started)
                 if hir_fn.is_gpu_kernel:
                     gpu_function_targets[hir_fn.name] = hir_fn.gpu_target
                     gpu_function_backend_orders[hir_fn.name] = hir_fn.gpu_backend_order
@@ -436,7 +589,7 @@ impl HirLowering:
                 val real_id = self.symbols.lookup_or_invalid(name)
                 val fn_key = if real_id.is_valid(): real_id else: SymbolId(id: lower_idx)
                 functions[fn_key] = hir_fn
-                hir_module_phase_probe("phase3:hir:function:done {module.name}.{name}")
+                hir_module_phase_probe("phase3:hir:function:done {owner.value.name}.{name}")
                 lower_idx = lower_idx + 1
 
         if bootstrap_mode:
@@ -454,7 +607,7 @@ impl HirLowering:
             # struct/enum/class types, so these dicts stay empty there and
             # this is additive only.
             if bootstrap_closure:
-                val bootstrap_module_classes = module.classes
+                val bootstrap_module_classes = owner.value.classes
                 val bootstrap_class_keys = bootstrap_module_classes.keys()
                 var bootstrap_class_idx = 0
                 while bootstrap_class_idx < bootstrap_class_keys.len():
@@ -463,7 +616,7 @@ impl HirLowering:
                     classes[bootstrap_hir_class.symbol] = bootstrap_hir_class
                     bootstrap_class_idx = bootstrap_class_idx + 1
 
-                val bootstrap_module_structs = module.structs
+                val bootstrap_module_structs = owner.value.structs
                 val bootstrap_struct_keys = bootstrap_module_structs.keys()
                 var bootstrap_struct_idx = 0
                 while bootstrap_struct_idx < bootstrap_struct_keys.len():
@@ -473,11 +626,9 @@ impl HirLowering:
                     self.register_struct_field_types(bootstrap_hir_struct)
                     bootstrap_struct_idx = bootstrap_struct_idx + 1
 
-                val prof_enums_started = hir_phase_profile_now()
                 enums = self.lower_module_enum_definitions(module)
-                hir_phase_profile_add(HIR_PROF_ENUMS, prof_enums_started)
 
-                val bootstrap_module_bitfields = module.bitfields
+                val bootstrap_module_bitfields = owner.value.bitfields
                 val bootstrap_bitfield_keys = bootstrap_module_bitfields.keys()
                 var bootstrap_bitfield_idx = 0
                 while bootstrap_bitfield_idx < bootstrap_bitfield_keys.len():
@@ -486,7 +637,7 @@ impl HirLowering:
                     bitfields[bootstrap_hir_bf.symbol] = bootstrap_hir_bf
                     bootstrap_bitfield_idx = bootstrap_bitfield_idx + 1
 
-                val bootstrap_module_traits = module.traits
+                val bootstrap_module_traits = owner.value.traits
                 val bootstrap_trait_keys = bootstrap_module_traits.keys()
                 var bootstrap_trait_idx = 0
                 while bootstrap_trait_idx < bootstrap_trait_keys.len():
@@ -496,8 +647,8 @@ impl HirLowering:
                     bootstrap_trait_idx = bootstrap_trait_idx + 1
 
                 var bootstrap_impl_idx = 0
-                while bootstrap_impl_idx < module.impls.len():
-                    impls = impls.push(self.lower_impl(module.impls[bootstrap_impl_idx]))
+                while bootstrap_impl_idx < owner.value.impls.len():
+                    impls = impls.push(self.lower_impl(owner.value.impls[bootstrap_impl_idx]))
                     bootstrap_impl_idx = bootstrap_impl_idx + 1
                 # Native `Dict.len()` always returns -1, which would seed the
                 # synthetic keys at -1 and collide with the real SymbolIds.
@@ -513,17 +664,17 @@ impl HirLowering:
             # native_module_val_globals 2026-07-23). Lower them here exactly
             # like the non-bootstrap path below (line ~1284).
             var bootstrap_constants: Dict<SymbolId, HirConst> = {}
-            val bootstrap_const_names = module.constants.keys()
+            val bootstrap_const_names = owner.value.constants.keys()
             if bootstrap_diag and bootstrap_const_names.len() > 0:
-                eprint("[hir-lower] bootstrap-constants:count module={module.name} count={bootstrap_const_names.len()}")
+                eprint("[hir-lower] bootstrap-constants:count module={owner.value.name} count={bootstrap_const_names.len()}")
             var bootstrap_const_idx = 0
             while bootstrap_const_idx < bootstrap_const_names.len():
-                val bootstrap_const_src: ParserConst = module.constants[bootstrap_const_names[bootstrap_const_idx]]
+                val bootstrap_const_src: ParserConst = owner.value.constants[bootstrap_const_names[bootstrap_const_idx]]
                 val bootstrap_hir_const = self.lower_hir_const_decl(bootstrap_const_src)
                 bootstrap_constants[bootstrap_hir_const.symbol] = bootstrap_hir_const
                 bootstrap_const_idx = bootstrap_const_idx + 1
             if bootstrap_diag:
-                eprint("[hir-lower] bootstrap-functions:count module={module.name} count={_bootstrap_hir_functions.len()}")
+                eprint("[hir-lower] bootstrap-functions:count module={owner.value.name} count={bootstrap_hir_function_count()}")
             # Avoid passing untyped empty aggregate literals through the
             # stage4 constructor ABI. The normal path below materializes these
             # collections with their concrete element types before building
@@ -537,8 +688,12 @@ impl HirLowering:
             val bootstrap_arch_rules: [HirArchRule] = []
             val bootstrap_mock_decls: [HirMockDecl] = []
             val bootstrap_types: [text] = []
+            val bootstrap_facet_interfaces = self.lower_module_facet_interfaces(module)
+            val bootstrap_facet_impls = self.lower_module_facet_impls(module)
+            val bootstrap_facet_bindings = self.lower_module_facet_bindings(module)
+            val bootstrap_facet_requirements = self.lower_module_facet_requirements(module)
             return HirModule(
-                name: module.name,
+                name: owner.value.name,
                 path: self.module_filename,
                 imports: bootstrap_imports,
                 exports: bootstrap_exports,
@@ -559,10 +714,14 @@ impl HirLowering:
                 di_bindings: bootstrap_di_bindings,
                 arch_rules: bootstrap_arch_rules,
                 mock_decls: bootstrap_mock_decls,
-                types: bootstrap_types
+                types: bootstrap_types,
+                facet_interfaces: bootstrap_facet_interfaces,
+                facet_impls: bootstrap_facet_impls,
+                facet_bindings: bootstrap_facet_bindings,
+                facet_requirements: bootstrap_facet_requirements
             )
 
-        val lower_module_classes = module.classes
+        val lower_module_classes = owner.value.classes
         val lower_class_keys = lower_module_classes.keys()
         lower_idx = 0
         while lower_idx < lower_class_keys.len():
@@ -572,7 +731,7 @@ impl HirLowering:
             classes[hir_class.symbol] = hir_class
             lower_idx = lower_idx + 1
 
-        val lower_module_structs = module.structs
+        val lower_module_structs = owner.value.structs
         val lower_struct_keys = lower_module_structs.keys()
         lower_idx = 0
         while lower_idx < lower_struct_keys.len():
@@ -583,11 +742,9 @@ impl HirLowering:
             self.register_struct_field_types(hir_struct)
             lower_idx = lower_idx + 1
 
-        val prof_enums_started = hir_phase_profile_now()
         enums = self.lower_module_enum_definitions(module)
-        hir_phase_profile_add(HIR_PROF_ENUMS, prof_enums_started)
 
-        val lower_module_bitfields = module.bitfields
+        val lower_module_bitfields = owner.value.bitfields
         val lower_bitfield_keys = lower_module_bitfields.keys()
         lower_idx = 0
         while lower_idx < lower_bitfield_keys.len():
@@ -597,7 +754,7 @@ impl HirLowering:
             bitfields[hir_bf.symbol] = hir_bf
             lower_idx = lower_idx + 1
 
-        val lower_module_traits = module.traits
+        val lower_module_traits = owner.value.traits
         val lower_trait_keys = lower_module_traits.keys()
         lower_idx = 0
         while lower_idx < lower_trait_keys.len():
@@ -608,8 +765,8 @@ impl HirLowering:
             lower_idx = lower_idx + 1
 
         lower_idx = 0
-        while lower_idx < module.impls.len():
-            val impl_ = module.impls[lower_idx]
+        while lower_idx < owner.value.impls.len():
+            val impl_ = owner.value.impls[lower_idx]
             impls = impls.push(self.lower_impl(impl_))
             lower_idx = lower_idx + 1
         val lowered_impl_function_keys = self.lowered_impl_functions.keys()
@@ -619,76 +776,61 @@ impl HirLowering:
             functions[sym] = self.lowered_impl_functions[sym]
             lower_idx = lower_idx + 1
 
-        val lower_const_names = module.constants.keys()
+        val lower_const_names = owner.value.constants.keys()
         lower_idx = 0
         while lower_idx < lower_const_names.len():
-            val const_: ParserConst = module.constants[lower_const_names[lower_idx]]
+            val const_: ParserConst = owner.value.constants[lower_const_names[lower_idx]]
             val hir_const = self.lower_hir_const_decl(const_)
             constants[SymbolId(id: lower_idx)] = hir_const
             lower_idx = lower_idx + 1
 
         # Lower static assertions
         var static_asserts: [HirStaticAssert] = []
-        for assert_ in module.static_asserts:
+        for assert_ in owner.value.static_asserts:
             static_asserts = static_asserts.push(self.lower_static_assert(assert_))
 
         # Lower AOP advices
         var aop_advices: [HirAopAdvice] = []
-        for advice in module.aop_advices:
+        for advice in owner.value.aop_advices:
             aop_advices = aop_advices.push(self.lower_aop_advice(advice))
 
         # Lower DI bindings
         var di_bindings: [HirDiBinding] = []
-        for binding in module.di_bindings:
+        for binding in owner.value.di_bindings:
             di_bindings = di_bindings.push(self.lower_di_binding(binding))
 
         # Lower architecture rules
         var arch_rules: [HirArchRule] = []
-        for rule in module.arch_rules:
+        for rule in owner.value.arch_rules:
             arch_rules = arch_rules.push(self.lower_arch_rule(rule))
 
         # Lower mock declarations
         var mock_decls: [HirMockDecl] = []
-        for mock_decl in module.mock_decls:
+        for mock_decl in owner.value.mock_decls:
             mock_decls = mock_decls.push(self.lower_mock_decl(mock_decl))
 
         # Lower imports
         var imports: [HirImport] = []
-        for imp in module.imports:
+        for imp in owner.value.imports:
             imports = imports.push(self.lower_import(imp))
 
         var domain_blocks: [HirDomainBlock] = []
-        for block in module.domain_blocks:
+        for block in owner.value.domain_blocks:
             domain_blocks = domain_blocks.push(self.lower_domain_block(block))
-
-        # D1: `extend <Enum>:` sections, one record per complete:/dyn: subsection.
-        # Copied verbatim -- the frontend already validated the dotted
-        # provider.Name shape, and HIR must not re-key extension identity.
-        var hir_extend_enums: [HirExtendEnum] = []
-        for ext_sec in module.extend_enums:
-            var hir_ctors: [HirExtendConstructor] = []
-            for ctor in ext_sec.constructors:
-                hir_ctors = hir_ctors.push(HirExtendConstructor(
-                    provider: ctor.provider,
-                    name: ctor.name,
-                    payload_types: ctor.payload_types,
-                    span: ctor.span
-                ))
-            hir_extend_enums = hir_extend_enums.push(HirExtendEnum(
-                target: ext_sec.target,
-                closure: ext_sec.closure,
-                constructors: hir_ctors,
-                span: ext_sec.span
-            ))
 
         # Collect exports
         var exports: [text] = []
-        for exp in module.exports:
+        for exp in owner.value.exports:
             for item in exp.items:
                 exports = exports.push(item)
 
+        val hir_facet_interfaces = self.lower_module_facet_interfaces(module)
+        val hir_facet_impls = self.lower_module_facet_impls(module)
+        val hir_facet_bindings = self.lower_module_facet_bindings(module)
+        val hir_facet_requirements = self.lower_module_facet_requirements(module)
+
         HirModule(
-            name: module.name,
+            name: owner.value.name,
             path: self.module_filename,
             imports: imports,
             exports: exports,
@@ -709,6 +851,5 @@ impl HirLowering:
             di_bindings: di_bindings,
             arch_rules: arch_rules,
             mock_decls: mock_decls,
-            types: [],
-            extend_enums: hir_extend_enums
+            types: []
         )

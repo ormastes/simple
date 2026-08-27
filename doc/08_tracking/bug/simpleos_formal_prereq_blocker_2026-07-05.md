@@ -1,29 +1,12 @@
-# SimpleOS mission-critical formal prereq blocker
+# SimpleOS mission-critical release blocked by missing SymbiYosys stack
 
 - **Date:** 2026-07-05
-- **Status:** Closed 2026-07-05
-- **Severity:** Was P1 (release evidence — mission-critical SimpleOS release
-  could not pass the strict RTL proof gate until formal tools were available)
-- **Closing evidence:** OSS CAD Suite is available at
-  `/tmp/simple-oss-cad-suite/oss-cad-suite`; with its `environment` sourced,
-  prereqs, strict RTL/SBY proof, the hardening matrix, and the
-  mission-critical release wrapper all pass.
+- **Severity:** P1 (release evidence — mission-critical SimpleOS release cannot
+  pass strict RTL proof gate)
+- **Repro:** run `sh scripts/check/check-simpleos-mission-critical-prereqs.shs`
+  on this host.
 
 ## Observed
-
-Current evidence:
-
-```text
-simpleos_mission_critical_prereqs_status=ready
-simpleos_mission_critical_prereqs_missing=none
-STATUS: PASS riscv-rtl-sby-proof
-simpleos_hardening_matrix_status=pass
-simpleos_hardening_matrix_passed=26/26
-simpleos_hardening_riscv_rtl_sby_proof_status=pass
-STATUS: PASS simpleos-mission-critical-release matrix_status=pass release_status=pass release_blockers=none prereq_status=ready prereq_missing=none prereq_next_action=none
-```
-
-Previous blocked observation:
 
 The prereq gate reports:
 
@@ -41,13 +24,7 @@ so this session cannot use the documented apt path.
 The host used for mission-critical release evidence has `sby`, `yosys`, and at
 least one supported SMT solver such as `boolector` or `z3` available on `PATH`.
 
-## Reopen If
-
-Reopen only if a fresh mission-critical release host cannot source OSS CAD
-Suite or otherwise provide `sby`, `yosys`, and one SMT solver, and
-`scripts/check/check-simpleos-mission-critical-release.shs` returns nonzero.
-
-## Historical Setup Action
+## Next Action
 
 Run:
 

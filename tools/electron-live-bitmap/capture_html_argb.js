@@ -16,7 +16,6 @@
 const { app, BrowserWindow } = require("electron");
 const crypto = require("crypto");
 const fs = require("fs");
-const http = require("http");
 const net = require("net");
 const path = require("path");
 
@@ -39,14 +38,7 @@ const auditSelectors = (process.env.ELECTRON_CAPTURE_AUDIT_SELECTORS || "")
 const auditOutputPath = process.env.ELECTRON_CAPTURE_AUDIT_OUTPUT || "";
 const geometryOutputPath = process.env.ELECTRON_CAPTURE_GEOMETRY_OUTPUT || "";
 const proofPath = process.env.ELECTRON_CAPTURE_PROOF_PATH || "";
-// Optional, product-specific observation emitted only for the generated
-// Aetheric WM page.  Keeping this opt-in preserves this capture tool as the
-// generic Chromium bitmap/event runner used by the other evidence lanes.
-const aethericObservationPath = process.env.ELECTRON_CAPTURE_AETHERIC_OBSERVATION_PATH || "";
 const remoteDebuggingPort = process.env.ELECTRON_CAPTURE_REMOTE_DEBUGGING_PORT || "";
-const uiAccessPort = Number(process.env.ELECTRON_CAPTURE_UI_ACCESS_PORT || 0);
-const uiAccessReadyPath = process.env.ELECTRON_CAPTURE_UI_ACCESS_READY_PATH || "";
-const uiAccessDonePath = process.env.ELECTRON_CAPTURE_UI_ACCESS_DONE_PATH || "";
 const contrastMinX100 = Number(process.env.ELECTRON_CAPTURE_CONTRAST_MIN_X100 || 450);
 const touchMinPx = Number(process.env.ELECTRON_CAPTURE_TOUCH_MIN_PX || 44);
 const failOnAudit = /^(1|true|yes)$/i.test(process.env.ELECTRON_CAPTURE_FAIL_ON_AUDIT || "");
@@ -70,221 +62,6 @@ function withTimeout(promise, ms, label) {
   return Promise.race([promise, timeout]).finally(() => {
     if (timer) clearTimeout(timer);
   });
-}
-
-function waitForFile(file, timeoutMs, label) {
-  return withTimeout(new Promise(resolve => {
-    const poll = () => fs.existsSync(file) ? resolve() : setTimeout(poll, 25);
-    poll();
-  }), timeoutMs, label);
-}
-
-function jsonResponse(res, status, payload) {
-  const body = JSON.stringify(payload);
-  res.writeHead(status, {
-    "content-type": "application/json",
-    "content-length": Buffer.byteLength(body),
-    "connection": "close",
-  });
-  res.end(body);
-}
-
-async function startCanonicalUiAccessAdapter(win) {
-  let sequence = 0;
-  const events = [];
-  const surface = {
-    surface_id: "main",
-    title: "Aetheric Production Web GUI",
-    active: true,
-    window_id: "electron-aetheric-production",
-    app_id: "aetheric-host-web-gui",
-    root_canonical_id: "main#root",
-  };
-  const record = (widgetId, kind, payload) => {
-    sequence += 1;
-    events.push({
-      surface_id: "main",
-      widget_id: widgetId,
-      canonical_id: `main#${widgetId}`,
-      event_kind: kind,
-      payload,
-      sequence,
-    });
-    if (events.length > 64) events.shift();
-  };
-  const nodes = async () => win.webContents.executeJavaScript(`
-    (() => {
-      const input = document.querySelector('#theme-name');
-      const button = document.querySelector('.widget-button');
-      const active = document.querySelector('.wm-window.focused');
-      const inactive = document.querySelector('.wm-window:not(.focused)');
-      const node = (canonical_id, widget_id, kind, element, child_ids, action_names) => ({
-        canonical_id, surface_id: 'main', widget_id, kind,
-        visible: Boolean(element && element.getClientRects().length),
-        focused: Boolean(element && document.activeElement === element),
-        enabled: Boolean(element && !element.disabled),
-        selected: false,
-        text: element ? String(element.value || element.textContent || '').trim() : '',
-        props: element ? {
-          tag: element.tagName.toLowerCase(),
-          class: element.className,
-          x: String(Math.round(element.getBoundingClientRect().x)),
-          y: String(Math.round(element.getBoundingClientRect().y)),
-          width: String(Math.round(element.getBoundingClientRect().width)),
-          height: String(Math.round(element.getBoundingClientRect().height))
-        } : {},
-        child_ids, action_names
-      });
-      return [
-        node('main#root', 'root', 'surface', document.querySelector('[data-aetheric-production-surface]'),
-          ['main#active-window', 'main#inactive-window'], []),
-        node('main#active-window', 'active-window', 'window', active,
-          ['main#apply-theme', 'main#theme-name'], []),
-        node('main#inactive-window', 'inactive-window', 'window', inactive, [], []),
-        node('main#apply-theme', 'apply-theme', 'button', button, [],
-          ['focus', 'pointer_down', 'pointer_up']),
-        node('main#theme-name', 'theme-name', 'input', input, [],
-          ['focus', 'keyboard_x', 'text_x'])
-      ];
-    })()
-  `);
-  const snapshot = async () => ({
-    protocol_version: 1,
-    snapshot_revision: sequence,
-    mode: "electron",
-    active_surface: "main",
-    surfaces: [surface],
-    nodes: await nodes(),
-    recent_events: events.slice(),
-  });
-  const applyAction = async (canonicalId, action) => {
-    const selector = canonicalId === "main#apply-theme" ? ".widget-button" :
-      canonicalId === "main#theme-name" ? "#theme-name" : "";
-    if (!selector) return false;
-    return win.webContents.executeJavaScript(`
-      (() => {
-        const element = document.querySelector(${JSON.stringify(selector)});
-        const action = ${JSON.stringify(action)};
-        if (!element) return false;
-        if (action === 'focus') element.focus();
-        else if (action === 'pointer_down') element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1, button: 0 }));
-        else if (action === 'pointer_up') element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1, button: 0 }));
-        else if (action === 'keyboard_x') {
-          element.focus();
-          element.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'X', code: 'KeyX' }));
-          element.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'X', code: 'KeyX' }));
-        } else if (action === 'text_x') {
-          element.focus();
-          element.value = String(element.value || '') + 'X';
-          element.dispatchEvent(new InputEvent('input', { bubbles: true, data: 'X', inputType: 'insertText' }));
-        } else return false;
-        return true;
-      })()
-    `);
-  };
-  const server = http.createServer(async (req, res) => {
-    try {
-      const url = new URL(req.url, `http://127.0.0.1:${uiAccessPort}`);
-      if (req.method === "GET" && url.pathname === "/api/test/ui/snapshot") {
-        jsonResponse(res, 200, await snapshot());
-        return;
-      }
-      if (req.method === "GET" && url.pathname === "/api/test/ui/surface") {
-        if (url.searchParams.get("id") !== "main") {
-          jsonResponse(res, 404, { error: "element_not_found", message: "Surface not found" });
-          return;
-        }
-        jsonResponse(res, 200, surface);
-        return;
-      }
-      if (req.method === "GET" && url.pathname === "/api/test/ui/query") {
-        let found = await nodes();
-        const surfaceId = url.searchParams.get("surface_id") || "";
-        const canonicalId = url.searchParams.get("canonical_id") || "";
-        const kind = url.searchParams.get("kind") || "";
-        const text = url.searchParams.get("text") || "";
-        const focusedOnly = url.searchParams.get("focused_only") === "true";
-        const limit = Number(url.searchParams.get("limit") || 50);
-        found = found.filter(node =>
-          (!surfaceId || node.surface_id === surfaceId) &&
-          (!canonicalId || node.canonical_id === canonicalId) &&
-          (!kind || node.kind === kind) &&
-          (!text || node.text.includes(text) || node.widget_id.includes(text)) &&
-          (!focusedOnly || node.focused)
-        ).slice(0, limit);
-        if (canonicalId && found.length === 0) {
-          jsonResponse(res, 404, { error: "element_not_found", message: "Canonical node not found" });
-          return;
-        }
-        jsonResponse(res, 200, {
-          surface_id: surfaceId,
-          canonical_id: canonicalId,
-          kind,
-          text,
-          focused_only: focusedOnly,
-          match_count: found.length,
-          snapshot: {
-            protocol_version: 1,
-            snapshot_revision: sequence,
-            mode: "electron",
-            active_surface: "main",
-            surfaces: [surface],
-            nodes: found,
-            recent_events: [],
-          },
-        });
-        return;
-      }
-      if (req.method === "GET" && url.pathname === "/api/test/ui/history") {
-        const count = Number(url.searchParams.get("count") || 20);
-        jsonResponse(res, 200, events.slice(-count));
-        return;
-      }
-      if (req.method === "POST" && url.pathname === "/api/test/ui/act") {
-        let body = "";
-        req.setEncoding("utf8");
-        for await (const chunk of req) body += chunk;
-        const request = JSON.parse(body || "{}");
-        const widgetId = String(request.canonical_id || "").split("#")[1] || "";
-        const requestId = String(request.request_id || `ui-act-${sequence + 1}`);
-        const observedRevision = sequence;
-        record(widgetId, "access_request", `request_id=${requestId};code=${String(request.action || "")}`);
-        if (Number(request.expected_revision) !== observedRevision) {
-          record(widgetId, "access_result", `request_id=${requestId};code=stale_target`);
-          jsonResponse(res, 409, { error: "stale_target", message: "UI snapshot revision changed", request_id: requestId });
-          return;
-        }
-        if (!await applyAction(String(request.canonical_id || ""), String(request.action || ""))) {
-          record(widgetId, "access_result", `request_id=${requestId};code=target_not_found`);
-          jsonResponse(res, 404, { error: "element_not_found", message: "Canonical node/action not found", request_id: requestId });
-          return;
-        }
-        record(widgetId, "access_result", `request_id=${requestId};code=ok`);
-        jsonResponse(res, 200, {
-          ok: true,
-          surface_id: "main",
-          canonical_id: request.canonical_id,
-          action: request.action,
-          expected_revision: Number(request.expected_revision),
-          applied_revision: sequence,
-          request_id: requestId,
-        });
-        return;
-      }
-      jsonResponse(res, 404, { error: "element_not_found", message: "Route not found" });
-    } catch (error) {
-      jsonResponse(res, 500, { error: "source_unavailable", message: String(error && error.message || error) });
-    }
-  });
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(uiAccessPort, "127.0.0.1", resolve);
-  });
-  if (uiAccessReadyPath) {
-    fs.mkdirSync(path.dirname(uiAccessReadyPath), { recursive: true });
-    fs.writeFileSync(uiAccessReadyPath, `port=${uiAccessPort}\n`);
-  }
-  return server;
 }
 
 function websocketAcceptKey(key) {
@@ -471,165 +248,6 @@ async function applyEmulatedMediaFeatures(win, features) {
   await dbg.sendCommand("Emulation.setEmulatedMedia", { features });
 }
 
-async function collectEventProof(win) {
-  const setup = await win.webContents.executeJavaScript(`
-    (() => {
-      const button = document.querySelector("button");
-      const input = document.querySelector("input, textarea, [contenteditable='true']");
-      const state = {
-        proof_source: "tools/electron-live-bitmap/capture_html_argb.js",
-        focus_count: 0,
-        keyboard_count: 0,
-        input_count: 0,
-        pointer_down_count: 0,
-        pointer_up_count: 0,
-        click_count: 0,
-        sequence: [],
-        button_rect: null,
-        input_rect: null,
-        input_value_before: input ? String(input.value || input.textContent || "") : "",
-        input_value_after: "",
-      };
-      const record = name => {
-        state.sequence.push(name);
-        if (name === "focus") state.focus_count += 1;
-        if (name === "keydown" || name === "keyup") state.keyboard_count += 1;
-        if (name === "input") state.input_count += 1;
-        if (name === "pointerdown" || name === "mousedown") state.pointer_down_count += 1;
-        if (name === "pointerup" || name === "mouseup") state.pointer_up_count += 1;
-        if (name === "click") state.click_count += 1;
-      };
-      for (const name of ["focus", "keydown", "keyup", "input", "pointerdown", "pointerup", "mousedown", "mouseup", "click"]) {
-        document.addEventListener(name, () => record(name), true);
-      }
-      if (button) {
-        const rect = button.getBoundingClientRect();
-        state.button_rect = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, width: rect.width, height: rect.height };
-      }
-      if (input) {
-        const rect = input.getBoundingClientRect();
-        state.input_rect = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, width: rect.width, height: rect.height };
-      }
-      window.__simpleCaptureEventProof = state;
-      return {
-        button_found: Boolean(button),
-        input_found: Boolean(input),
-        button_rect: state.button_rect,
-        input_rect: state.input_rect,
-      };
-    })()
-  `);
-  if (!setup || !setup.button_found || !setup.input_found || !setup.button_rect || !setup.input_rect) {
-    return {
-      status: "fail",
-      reason: "missing-visible-button-or-input",
-      button_found: Boolean(setup && setup.button_found),
-      input_found: Boolean(setup && setup.input_found),
-    };
-  }
-  win.focus();
-  win.webContents.focus();
-  win.webContents.sendInputEvent({ type: "mouseMove", x: Math.round(setup.button_rect.x), y: Math.round(setup.button_rect.y) });
-  win.webContents.sendInputEvent({ type: "mouseDown", x: Math.round(setup.button_rect.x), y: Math.round(setup.button_rect.y), button: "left", clickCount: 1 });
-  win.webContents.sendInputEvent({ type: "mouseUp", x: Math.round(setup.button_rect.x), y: Math.round(setup.button_rect.y), button: "left", clickCount: 1 });
-  await win.webContents.executeJavaScript(`document.querySelector("input, textarea, [contenteditable='true']").focus()`);
-  win.webContents.sendInputEvent({ type: "keyDown", keyCode: "X" });
-  win.webContents.sendInputEvent({ type: "char", keyCode: "X" });
-  win.webContents.sendInputEvent({ type: "keyUp", keyCode: "X" });
-  await win.webContents.insertText("X");
-  await new Promise(r => setTimeout(r, 100));
-  const proof = await win.webContents.executeJavaScript(`
-    (() => {
-      const state = window.__simpleCaptureEventProof || {};
-      const input = document.querySelector("input, textarea, [contenteditable='true']");
-      state.input_value_after = input ? String(input.value || input.textContent || "") : "";
-      return state;
-    })()
-  `);
-  const focusPass = Number(proof.focus_count || 0) >= 1;
-  const keyboardPass = Number(proof.keyboard_count || 0) >= 2;
-  const inputPass = Number(proof.input_count || 0) >= 1 && String(proof.input_value_after || "").includes("X");
-  const pointerPass = Number(proof.pointer_down_count || 0) >= 1 && Number(proof.pointer_up_count || 0) >= 1;
-  const clickPass = Number(proof.click_count || 0) >= 1;
-  return {
-    ...proof,
-    button_found: true,
-    input_found: true,
-    focus_pass: focusPass,
-    keyboard_pass: keyboardPass,
-    input_pass: inputPass,
-    pointer_pass: pointerPass,
-    click_pass: clickPass,
-    status: focusPass && keyboardPass && inputPass && pointerPass && clickPass ? "pass" : "fail",
-    reason: focusPass && keyboardPass && inputPass && pointerPass && clickPass ? "pass" : "event-contract-missing",
-  };
-}
-
-async function collectAethericObservation(win) {
-  return win.webContents.executeJavaScript(`
-    (async () => {
-      const required = selector => document.querySelector(selector);
-      const focused = required('.wm-window.focused');
-      const inactive = required('.wm-window:not(.focused)');
-      const titlebar = focused && focused.querySelector('.wm-titlebar');
-      // .wm-title is intentionally the production titlebar text rule: it
-      // carries the package's 650 weight rather than inheriting body defaults.
-      const typography = focused && focused.querySelector('.wm-title');
-      if (!focused || !inactive || !titlebar || !typography) {
-        return {
-          status: 'fail',
-          reason: 'aetheric-required-production-selectors-missing',
-          focused_window_found: Boolean(focused),
-          inactive_window_found: Boolean(inactive),
-          titlebar_found: Boolean(titlebar),
-          typography_found: Boolean(typography)
-        };
-      }
-      const focusedStyle = window.getComputedStyle(focused);
-      const inactiveStyle = window.getComputedStyle(inactive);
-      const titlebarStyle = window.getComputedStyle(titlebar);
-      const typographyStyle = window.getComputedStyle(typography);
-      const button = required('.widget-button');
-      const buttonStyle = button && window.getComputedStyle(button);
-      const start = performance.now();
-      let frames = 0;
-      await new Promise(resolve => {
-        const tick = () => {
-          frames += 1;
-          if (frames >= 2) resolve();
-          else requestAnimationFrame(tick);
-        };
-        requestAnimationFrame(tick);
-      });
-      const animationCount = document.getAnimations({ subtree: true }).length;
-      const elapsed = performance.now() - start;
-      return {
-        status: frames >= 2 && elapsed > 0 && Boolean(buttonStyle) ? 'pass' : 'fail',
-        reason: frames >= 2 && elapsed > 0 && Boolean(buttonStyle) ? 'pass' : 'raf-or-theme-control-missing',
-        computed_window_background: focusedStyle.backgroundColor,
-        computed_window_border_color: inactiveStyle.borderTopColor,
-        computed_window_border_radius: focusedStyle.borderTopLeftRadius,
-        computed_window_box_shadow: focusedStyle.boxShadow,
-        computed_titlebar_backdrop_filter: titlebarStyle.backdropFilter,
-        computed_titlebar_webkit_backdrop_filter: titlebarStyle.webkitBackdropFilter,
-        computed_typography_family: typographyStyle.fontFamily,
-        computed_typography_weight: typographyStyle.fontWeight,
-        computed_inactive_border: inactiveStyle.borderTopColor,
-        computed_inactive_shadow: inactiveStyle.boxShadow,
-        computed_active_border: focusedStyle.borderTopColor,
-        computed_active_shadow: focusedStyle.boxShadow,
-        computed_button_transition_duration: buttonStyle ? buttonStyle.transitionDuration : '',
-        performance_now_available: typeof performance.now === 'function',
-        performance_now_delta_ms: Math.round(elapsed),
-        animation_frame_available: typeof requestAnimationFrame === 'function',
-        animation_frame_count: frames,
-        css_animation_probe: animationCount > 0,
-        css_animation_count: animationCount
-      };
-    })()
-  `);
-}
-
 function bitmapToLogicalArgb(image) {
   const size = image.getSize();
   const native = image.toBitmap({ scaleFactor: 1 });
@@ -675,10 +293,6 @@ function bitmapToLogicalArgb(image) {
     }
   }
   return { pixels, nativeWidth: nw, nativeHeight: nh, downsampled: true };
-}
-
-function sha256File(filePath) {
-  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
 }
 
 async function collectAudit(win, selectors, mediaFeatures) {
@@ -1067,7 +681,6 @@ async function main() {
   win.setContentSize(width, height);
 
   const absHtml = path.resolve(htmlPath);
-  const htmlSha256 = sha256File(absHtml);
   try {
     if (forceDataUrl) {
       stage("before-load-data-url");
@@ -1112,34 +725,12 @@ async function main() {
   stage("before-settle");
   await new Promise(r => setTimeout(r, settleMs));
   stage("after-settle");
-  if (uiAccessPort > 0) {
-    if (!uiAccessReadyPath || !uiAccessDonePath) {
-      throw new Error("ui-access-ready-and-done-paths-required");
-    }
-    stage("before-ui-access-adapter");
-    const uiAccessServer = await startCanonicalUiAccessAdapter(win);
-    stage("ui-access-adapter-ready");
-    await waitForFile(uiAccessDonePath, 20000, "ui-access-driver");
-    await new Promise(resolve => uiAccessServer.close(resolve));
-    stage("after-ui-access-adapter");
-  }
 
-  stage("before-audit");
   const audit = await collectAudit(win, auditSelectors, emulatedMediaFeatures);
   stage("after-audit");
   stage("before-geometry");
   const geometry = geometryOutputPath ? await collectGeometry(win) : null;
   stage("after-geometry");
-  stage("before-event-proof");
-  const eventProof = await collectEventProof(win);
-  stage("after-event-proof");
-  stage("before-aetheric-observation");
-  const aethericObservation = aethericObservationPath ? await collectAethericObservation(win) : null;
-  if (aethericObservation) {
-    aethericObservation.electron_process_version = process.versions.electron || "";
-    aethericObservation.chrome_process_version = process.versions.chrome || "";
-  }
-  stage("after-aetheric-observation");
   let image = null;
   if (useOffscreenPaint && latestPaintImage) {
     stage("using-offscreen-paint");
@@ -1174,24 +765,15 @@ async function main() {
     height,
     format: "argb-u32",
     producer: "electron-chromium-capture",
-    blur_or_tolerance_used: false,
-    capture_compositor_mode: useOffscreenPaint ? "offscreen-osr-exact-srgb" : "window-capture-page",
-    offscreen_paint: useOffscreenPaint,
     nativeWidth: result.nativeWidth,
     nativeHeight: result.nativeHeight,
     downsampled: result.downsampled,
-    gpuFeatureStatus,
-    gpuInfo,
-    browserTargetGpuInfo,
     pixels: Array.from(result.pixels, v => v >>> 0),
   };
   if (audit) payload.audit = audit;
   if (geometry) payload.geometry = geometry;
-  payload.event_proof = eventProof;
-  if (aethericObservation) payload.aetheric_observation = aethericObservation;
 
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-  stage("before-write-argb");
   fs.writeFileSync(outputPath, JSON.stringify(payload));
   stage("after-write-argb");
   if (pngOutputPath) {
@@ -1206,31 +788,17 @@ async function main() {
     fs.mkdirSync(path.dirname(geometryOutputPath), { recursive: true });
     fs.writeFileSync(geometryOutputPath, JSON.stringify(geometry, null, 2));
   }
-  if (aethericObservationPath) {
-    fs.mkdirSync(path.dirname(aethericObservationPath), { recursive: true });
-    fs.writeFileSync(aethericObservationPath, JSON.stringify(aethericObservation, null, 2));
-  }
   if (proofPath) {
     fs.mkdirSync(path.dirname(proofPath), { recursive: true });
     fs.writeFileSync(proofPath, JSON.stringify({
       status: "pass",
       reason: "pass",
-      proof_source: "tools/electron-live-bitmap/capture_html_argb.js",
-      html_path: absHtml,
-      html_sha256: htmlSha256,
-      captured_argb_path: outputPath,
-      captured_argb_sha256: outputPath ? sha256File(outputPath) : "",
       width,
       height,
       native_width: result.nativeWidth,
       native_height: result.nativeHeight,
       downsampled: result.downsampled,
-      capture_compositor_mode: useOffscreenPaint ? "offscreen-osr-exact-srgb" : "window-capture-page",
-      offscreen_paint: useOffscreenPaint,
       captured_argb_written: Boolean(outputPath),
-      png_output_path: pngOutputPath,
-      png_written: Boolean(pngOutputPath),
-      png_sha256: pngOutputPath ? sha256File(pngOutputPath) : "",
       geometry_written: Boolean(geometryOutputPath && geometry),
       blur_or_tolerance_used: false,
       gpu_feature_status: gpuFeatureStatus,
@@ -1238,28 +806,13 @@ async function main() {
       browser_target_gpu_info: browserTargetGpuInfo,
       browser_target_gpu_info_status: browserTargetGpuInfo && !browserTargetGpuInfo.error ? "pass" : (remoteDebuggingPort ? "fail" : "not-run"),
       remote_debugging_port: remoteDebuggingPort,
-      event_proof: eventProof,
-      event_status: eventProof.status,
-      event_reason: eventProof.reason,
-      event_sequence: Array.isArray(eventProof.sequence) ? eventProof.sequence.join(",") : "",
-      focus_event_count: eventProof.focus_count || 0,
-      keyboard_event_count: eventProof.keyboard_count || 0,
-      input_event_count: eventProof.input_count || 0,
-      pointer_down_event_count: eventProof.pointer_down_count || 0,
-      pointer_up_event_count: eventProof.pointer_up_count || 0,
-      click_event_count: eventProof.click_count || 0,
     }));
   }
   console.log("captured=" + outputPath);
-  if (pngOutputPath) console.log("png=" + pngOutputPath);
   console.log("size=" + width + "x" + height);
   console.log("native=" + result.nativeWidth + "x" + result.nativeHeight);
   console.log("downsampled=" + result.downsampled);
   console.log("pixels=" + result.pixels.length);
-  if (geometry) {
-    console.log("geometry_items=" + geometry.items.length);
-    if (geometryOutputPath) console.log("geometry=" + geometryOutputPath);
-  }
   if (audit) {
     console.log("audit_items=" + audit.items.length);
     console.log("audit_overlaps=" + audit.overlapPairs.length);
@@ -1285,9 +838,7 @@ async function main() {
     }
   }
 
-  stage("before-quit");
   app.quit();
-  stage("after-quit");
 }
 
 main().catch(e => {

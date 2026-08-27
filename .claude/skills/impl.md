@@ -82,12 +82,8 @@ review-team:    explore -> docs          (sequential)
 
 ### Phase 8: Implementation
 1. Implement in `src/**/<feature>.spl`, follow `/coding` rules
-2. Shared-font work follows `.codex/skills/sp_dev/SKILL.md` “Shared multilingual font work”:
-   preserve `FontRenderer`, transient `FontRenderBatch`, `WebIR`,
-   `DrawIrComposition`, and the plan-defined frozen SSpec vocabulary; keep
-   secondary detail steps folded.
-3. **Stub Prevention Gate** (mandatory):
-   - `bin/simple lint <touched .spl files>`
+2. **Stub Prevention Gate** (mandatory):
+   - `bin/simple build lint` on touched files
    - `bin/simple query workspace-symbols --query pass_todo` to find stubs
    - No function ignoring all params (STUB001 = hard fail)
    - Design/spec placeholders must fail explicitly with `assert(false)` or
@@ -106,28 +102,20 @@ review-team:    explore -> docs          (sequential)
 
 ### Phase 14-15: Full Test Suite + VCS Sync
 ```bash
-bin/simple test test --whole --mode=interpreter
-bin/simple lint <touched .spl files>
-bin/simple duplicate-check <owned-dir> --mode token --min-lines 5
+bin/simple test && bin/simple build lint && bin/simple build check
 ```
 Run `/verify` (Claude) for production readiness verification.
 
 All pass -> `/git-jj-sync` -> `doc/09_report/<feature>_complete_<date>.md`
 Add/update guide docs in `doc/07_guide/` if needed.
-When typed compatibility evidence selects full bootstrap, use
-`bootstrap-from-scratch.sh --strategy=normal|full`, require the scheduler's
-qualified lineage receipt, and never use a tainted/recursively invalidated
-descendant. `doc/07_guide/tooling/bootstrap_speculative_scheduler.md` defines
-the lease, quarantine, failure, and legacy `adhoc` boundaries.
 Before verify/sync, workflow, tool-contract, evidence-wrapper, or
 verification-contract changes must refresh matching `doc/07_guide`,
 `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
 `.claude/agents/spipe/`, and `.gemini/commands/` process docs.
 For `simple_context` or context-mode changes, keep the MCP/tooling guide and
 mirrored generated manuals current. SQL-backed context paths must document
-`--sql`/`--db`/`--source-filter`, MCP `source_filter`, the file-optional
-`sql=true` plus non-empty `query` contract, the embedded SQLite facade boundary,
-explicit absence statuses, and the public-absence guard.
+`--sql`/`--db`, the embedded SQLite facade boundary, explicit absence statuses,
+and the public-absence guard.
 For GUI/web/2D RenderDoc+Vulkan work, use
 `scripts/setup/setup-gui-web-2d-vulkan-env.shs --check|--run|--renderdoc-simple|--renderdoc` as
 the macOS top-level readiness/direct-run/capture wrapper. Keep Windows and
@@ -150,9 +138,3 @@ active.
 - Avoid full-tree scans and per-request subprocesses in hot request handlers unless explicitly designed and justified
 - When adding caches or indexes tied to writable files, add invalidation on all relevant mutation paths
 - Add perf smoke checks for startup and representative tool requests when touching performance-sensitive tooling
-
-Changed SSpec/manual pairs require one reviewed
-`simple sspec-maintain scan <spec>`. Inspect all seven dimensions, stable
-findings, blocker/mirror state, and traceability. Preview automatic improvement,
-apply only after exact confirmation with rollback, and keep reference scaffolds
-fail-fast. `documentize` must reuse the SPipe manual owner.

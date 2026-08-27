@@ -1,6 +1,29 @@
 # Naming Specification
 
-> Tests covering Lean Naming Conventions.
+> <details>
+
+<!-- sdn-diagram:id=naming_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=naming_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+naming_spec -> verification
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=naming_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,19 +42,13 @@
 
 #### converts snake case
 
-- converts snake case
-   - Expected: naming.to_pascal_case("ref_capability") equals `RefCapability`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("converts snake case")
 expect(naming.to_pascal_case("ref_capability")).to_equal("RefCapability")
 ```
 
@@ -39,19 +56,13 @@ expect(naming.to_pascal_case("ref_capability")).to_equal("RefCapability")
 
 #### handles empty input
 
-- handles empty input
-   - Expected: naming.to_pascal_case("") equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("handles empty input")
 expect(naming.to_pascal_case("")).to_equal("")
 ```
 
@@ -61,19 +72,13 @@ expect(naming.to_pascal_case("")).to_equal("")
 
 #### converts snake case
 
-- converts snake case
-   - Expected: naming.to_camel_case("get_value") equals `getValue`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("converts snake case")
 expect(naming.to_camel_case("get_value")).to_equal("getValue")
 ```
 
@@ -81,19 +86,13 @@ expect(naming.to_camel_case("get_value")).to_equal("getValue")
 
 #### lowercases the first character
 
-- lowercases the first character
-   - Expected: naming.to_camel_case("UPPER") equals `uPPER`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("lowercases the first character")
 expect(naming.to_camel_case("UPPER")).to_equal("uPPER")
 ```
 
@@ -103,21 +102,13 @@ expect(naming.to_camel_case("UPPER")).to_equal("uPPER")
 
 #### detects Lean keywords
 
-- detects Lean keywords
-   - Expected: naming.is_reserved("let") is true
-   - Expected: naming.is_reserved("forall") is true
-   - Expected: naming.is_reserved("myFunction") is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("detects Lean keywords")
 expect(naming.is_reserved("let")).to_equal(true)
 expect(naming.is_reserved("forall")).to_equal(true)
 expect(naming.is_reserved("myFunction")).to_equal(false)
@@ -127,20 +118,13 @@ expect(naming.is_reserved("myFunction")).to_equal(false)
 
 #### escapes reserved identifiers
 
-- escapes reserved identifiers
-   - Expected: naming.sanitize_lean_ident("def") equals `«def»`
-   - Expected: naming.sanitize_lean_ident("myVar") equals `myVar`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("escapes reserved identifiers")
 expect(naming.sanitize_lean_ident("def")).to_equal("«def»")
 expect(naming.sanitize_lean_ident("myVar")).to_equal("myVar")
 ```
@@ -151,20 +135,13 @@ expect(naming.sanitize_lean_ident("myVar")).to_equal("myVar")
 
 #### converts type names
 
-- converts type names
-   - Expected: naming.to_lean_type_name("my_type") equals `MyType`
-   - Expected: naming.to_lean_type_name("type") equals `«Type»`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("converts type names")
 expect(naming.to_lean_type_name("my_type")).to_equal("MyType")
 expect(naming.to_lean_type_name("type")).to_equal("«Type»")
 ```
@@ -173,20 +150,13 @@ expect(naming.to_lean_type_name("type")).to_equal("«Type»")
 
 #### converts function names
 
-- converts function names
-   - Expected: naming.to_lean_func_name("my_function") equals `myFunction`
-   - Expected: naming.to_lean_func_name("let") equals `«let»`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("converts function names")
 expect(naming.to_lean_func_name("my_function")).to_equal("myFunction")
 expect(naming.to_lean_func_name("let")).to_equal("«let»")
 ```
@@ -195,21 +165,13 @@ expect(naming.to_lean_func_name("let")).to_equal("«let»")
 
 #### converts namespaces and identifiers
 
-- converts namespaces and identifiers
-   - Expected: naming.to_lean_namespace("std.collections") equals `Std.Collections`
-   - Expected: naming.to_lean_ident("my-var") equals `my_var`
-   - Expected: naming.to_lean_ident("123abc") equals `_123abc`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("converts namespaces and identifiers")
 expect(naming.to_lean_namespace("std.collections")).to_equal("Std.Collections")
 expect(naming.to_lean_ident("my-var")).to_equal("my_var")
 expect(naming.to_lean_ident("123abc")).to_equal("_123abc")
@@ -224,12 +186,12 @@ expect(naming.to_lean_ident("123abc")).to_equal("_123abc")
 | Category | Compiler |
 | Status | Active |
 | Source | `test/00_formal_verification/compiler/naming_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Lean Naming Conventions.
+Tests covering:
 - Lean Naming Conventions
 
 ## Scenario Summary
@@ -244,51 +206,3 @@ Tests covering Lean Naming Conventions.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-FORMALVERIFI`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `5673180f0cd7d46afd1d5f82b641cd81d79e0a7852b6b5d671b2c49cc13c156b`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `5673180f0cd7d46afd1d5f82b641cd81d79e0a7852b6b5d671b2c49cc13c156b`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `5673180f0cd7d46afd1d5f82b641cd81d79e0a7852b6b5d671b2c49cc13c156b`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/00_formal_verification/compiler/naming_spec.spl
-mirror: doc/06_spec/00_formal_verification/compiler/naming_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/00_formal_verification/compiler/naming_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/00_formal_verification/compiler/naming_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/00_formal_verification/compiler/naming_spec.spl:14:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'converts snake case' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/00_formal_verification/compiler/naming_spec.spl:19:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles empty input' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/00_formal_verification/compiler/naming_spec.spl:25:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'converts snake case' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

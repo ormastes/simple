@@ -1,8 +1,5 @@
 # MCP `debug_log_tree` tool call produces no matching response for either JSON or LLM-text mode
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
-
 **Date:** 2026-07-20
 **Component:** MCP stdio server `debug_log_tree`/`debug_log_enable` tool
 handlers (source not isolated in this pass — reachable via
@@ -42,17 +39,3 @@ into the tool dispatch table under this server.
 Spec left unmodified — no evidence found that the tool names/params are
 stale; flagged as a genuine gap for someone with more context on the debug
 MCP stdio handler to investigate.
-
-## Re-verification 2026-08-17 (app-rest lane) — dispatch hypothesis REFUTED; behaviour UNVERIFIED
-
-This doc's "not wired into the dispatch table" hypothesis is wrong. Both tools
-are wired in current source:
-- `src/app/mcp/main_dispatch.spl:271` `if name == "debug_log_enable":`
-- `src/app/mcp/main_dispatch.spl:279` `if name == "debug_log_tree":`
-- handlers at `src/app/mcp/debug_log_tools.spl:148` and `:228`
-- schemas at `debug_log_tools.spl:26` and `:102`
-- registry entry in `src/app/mcp/tool_table.spl:459`
-
-Whether the id-`"3"` response is actually emitted still needs the stdio session
-spec, which was not run in this lane. Verdict: root-cause hypothesis refuted;
-symptom UNVERIFIED.

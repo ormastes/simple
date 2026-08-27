@@ -18,7 +18,7 @@ Complete the canonical rendering physical-8K80 plan as an evidence-honest implem
 - R8K-AC-2: the canonical window wrapper has a fail-closed physical mode named `ENGINE2D_VULKAN_PHYSICAL=1`, uses the existing physical X11 display rather than starting Xvfb, requires an EDID-bearing connected output with an active 7680x4320 mode at at least 80 Hz, and validates p95, RSS, checksum, completion, fallback, adapter type, and timed-readback fields.
 - R8K-AC-3: current-host evidence runs each decisive criterion once: shell syntax and repository policy gates pass; the bounded parser self-test accepts EDID+8K80 and rejects missing-EDID/slow-mode fixtures; physical admission records a typed blocker when the host lacks an active 8K80 display; the proxy regression is labeled non-physical and cannot satisfy physical acceptance.
 - R8K-AC-4: every blocked A4-A8 row names the missing prerequisite, exact resume command, retained artifact/report path, owner, and final reviewer; blocked rows remain active and do not become exclusions, skips, or PASS.
-- R8K-AC-5: operator knowledge is current: the canonical `doc/07_guide/` page documents physical versus Xvfb use and non-overclaim rules; the render plan and linked bug/report records agree; feature-expert and layer-expert `skill.md` pages are created or refreshed. Research/architecture/design are N/A because the lane changes evidence admission rather than rendering architecture. `doc/06_spec` is N/A because no executable SSpec/manual pair changes. `.codex/skills`, `.agents/skills`, `.claude/skills`, `.claude/agents/spipe`, and `.gemini/commands` are N/A because the wrapper keeps the same command/API and the contract is owned by the plan, guide, bug, and expert pages. Any newly discovered unfixed gap receives a `doc/08_tracking/bug/` record with file/line and unblock condition.
+- R8K-AC-5: operator knowledge is current: the canonical `doc/07_guide/` page documents physical versus Xvfb use and non-overclaim rules; the render plan and linked bug/report records agree; feature-expert and layer-expert `skill.md` pages are created or refreshed. Research/architecture/design are N/A because the lane changes evidence admission rather than rendering architecture. The focused A1 executable SSpec, mirrored `doc/06_spec` manual, and `doc/03_plan/sys_test` plan are current and explicitly `TEST_BLOCKED` until an admitted pure-Simple CLI can run the spec, all seven `sspec-maintain` scores, and `spipe-docgen`. `.codex/skills`, `.agents/skills`, `.claude/skills`, `.claude/agents/spipe`, and `.gemini/commands` remain N/A because no shared global workflow/API changed. Any newly discovered unfixed gap receives a `doc/08_tracking/bug/` record with file/line and unblock condition.
 - R8K-AC-6: cooperative review evidence identifies the lower-model sidecar findings, merge owner, generated/manual review owner, and a normal/highest-capability reviewer who independently accepts the ledger, guide, exclusions, evidence scope, and done marks.
 - R8K-AC-7: changed files pass stub/placeholder, numbered-artifact, runtime-facade, rendering-source-coupling, whitespace, and `doc/06_spec` layout gates once; any executable spec/manual pair additionally passes all seven `sspec-maintain` component scores and mirror checks.
 - R8K-AC-8: all intentional changes are committed, rebased and pushed through `/tmp/simple-main-restart12-push.lock` without force or a branch, `HEAD` is reachable from `origin/main`, the tree is clean, and the completion marker is written only after that proof. The umbrella 8K80 feature remains incomplete while physical A6/A8 evidence is unavailable; this lane may close only as an implementation handoff/WARN.
@@ -40,11 +40,11 @@ Complete the canonical rendering physical-8K80 plan as an evidence-honest implem
 - Manual flow helpers: `step_inventory_physical_mode`, `step_run_retained_window_receipt`, `step_classify_8k80_result`.
 - Setup/checker helper: `require_physical_8k80_admission`.
 - Placeholder rule: incomplete helpers must call `fail(...)`; silent passes are forbidden.
-- Generated-manual review owner: final highest-capability reviewer; currently N/A unless a new SSpec is introduced.
+- Generated-manual review owner: final highest-capability reviewer after an admitted CLI regenerates the A1 manual; current status `TEST_BLOCKED`.
 
 ## Phase
 
-verify-done
+system-test-authored-test-blocked
 
 ## Log
 
@@ -57,3 +57,4 @@ verify-done
 - implementation cycle 2: Added bounded EDID parser self-test, exact producer/report chain, fail-closed inventory command, and open A7 aggregator bug with unblock contract.
 - highest-review cycle 3: ACCEPTED the corrected ledger, guide/wiki freshness, exact resume chain, bounded EDID parser self-test, exclusions, and implementation-handoff/WARN status.
 - verify: Wrapper syntax/self-test, rendering source coupling, numbered-artifact guard, runtime-facade guard, whitespace, spec-layout, and STUB001 gates passed. No SSpec/manual pair changed, so `sspec-maintain` and docgen are N/A.
+- system-test: Added modern step-based A1 coverage with positive, edge, and error assertions traced to REQ-R8KC-004/006 and NFR-R8KC-004/006; updated the mirrored manual, test plan, guide, and feature expert. Runtime execution, `sspec-maintain`, and `spipe-docgen` are `TEST_BLOCKED` because no admitted pure-Simple CLI is available; the Rust seed remains forbidden.

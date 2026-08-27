@@ -2,6 +2,29 @@
 
 > Tests file extension detection and the prefetch directive in the cli keyword. When a positional argument ends with a recognized file extension (.spl, .json, .csv, etc.), the cli system can auto-detect the type and optionally prefetch the file content before the main function runs.
 
+<!-- sdn-diagram:id=cli_args_file_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=cli_args_file_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+cli_args_file_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=cli_args_file_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 6 | 6 | 0 | 0 |
@@ -21,7 +44,7 @@ Tests file extension detection and the prefetch directive in the cli keyword. Wh
 | Category | Language \| CLI |
 | Status | Draft |
 | Source | `test/03_system/feature/usage/cli_args_file_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -52,18 +75,13 @@ cli:
 
 #### accepts file with matching extension
 
-- accepts file with matching extension
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("accepts file with matching extension")
 # cli:
 #     command run:
 #         positional file: text, ext: [".spl", ".shs"]
@@ -80,19 +98,13 @@ expect(allowed).to_contain(".spl")
 
 #### rejects file with wrong extension
 
-- rejects file with wrong extension
-   - Expected: is_valid is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects file with wrong extension")
 # cli.parse(["run", "data.json"]) should error
 # because .json is not in [".spl", ".shs"]
 val file = "data.json"
@@ -106,19 +118,13 @@ expect(is_valid).to_equal(false)
 
 #### handles file without extension
 
-- handles file without extension
-   - Expected: has_ext is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles file without extension")
 # cli.parse(["run", "Makefile"]) should error
 # when ext filter is specified
 val file = "Makefile"
@@ -132,19 +138,13 @@ expect(has_ext).to_equal(false)
 
 #### prefetches file content when enabled
 
-- prefetches file content when enabled
-   - Expected: prefetch_enabled is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("prefetches file content when enabled")
 # cli:
 #     command run:
 #         positional file: text, ext: [".spl"]
@@ -159,19 +159,13 @@ expect(prefetch_enabled).to_equal(true)
 
 #### skips prefetch when disabled
 
-- skips prefetch when disabled
-   - Expected: prefetch_enabled is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("skips prefetch when disabled")
 # cli:
 #     command run:
 #         positional file: text
@@ -186,18 +180,13 @@ expect(file_content).to_be_nil()
 
 #### handles missing file gracefully
 
-- handles missing file gracefully
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles missing file gracefully")
 # cli.parse(["run", "nonexistent.spl"]) with prefetch: true
 # should produce a clear error about missing file
 val error_msg = "file not found: nonexistent.spl"
@@ -218,51 +207,3 @@ expect(error_msg).to_start_with("file not found")
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `c2159aba88185c344f955e57e90ab79f3753724be1f3d775030ec7f6c2333e19`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `c2159aba88185c344f955e57e90ab79f3753724be1f3d775030ec7f6c2333e19`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `c2159aba88185c344f955e57e90ab79f3753724be1f3d775030ec7f6c2333e19`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/cli_args_file_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/cli_args_file_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/cli_args_file_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/cli_args_file_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/cli_args_file_spec.spl:50:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'accepts file with matching extension' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/cli_args_file_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects file with wrong extension' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/cli_args_file_spec.spl:75:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles file without extension' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

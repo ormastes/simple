@@ -23,7 +23,7 @@
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -44,7 +44,7 @@ expect result == 42
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -65,7 +65,7 @@ expect result == 42
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -86,7 +86,7 @@ expect result == "hello world"
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -109,7 +109,7 @@ expect result == nil
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -131,7 +131,7 @@ expect result == 101
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -155,7 +155,7 @@ expect result == 60
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -179,7 +179,7 @@ expect result == 5
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -205,7 +205,7 @@ h3.join()
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -228,7 +228,7 @@ h.join()
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -251,7 +251,7 @@ handle.join()
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -274,7 +274,7 @@ expect results.len() == 10
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -295,9 +295,9 @@ expect r3 == "third"
 
 </details>
 
-### rt_thread_spawn_isolated_with_args - Explicit-arg Closure
+### rt_thread_spawn_isolated_with_args - Two-arg Closure
 
-#### basic explicit-argument execution
+#### basic two-arg execution
 
 #### adds two numbers
 
@@ -305,7 +305,7 @@ expect r3 == "third"
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -326,7 +326,7 @@ expect result == 8
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -347,7 +347,7 @@ expect result == "hello world"
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -368,7 +368,7 @@ expect result == 42
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -391,7 +391,7 @@ expect result == 99
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -418,7 +418,7 @@ ch.close()
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -441,7 +441,7 @@ ch.close()
 
 </details>
 
-#### multiple explicit-argument spawns
+#### multiple two-arg spawns
 
 #### runs 5 threads with accumulation
 
@@ -449,7 +449,7 @@ ch.close()
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -477,7 +477,7 @@ expect total == 40
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -499,7 +499,7 @@ expect backend == "pure_std"
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -521,7 +521,7 @@ expect rt_get_concurrent_backend() == "pure_std"
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -541,7 +541,7 @@ expect rt_get_concurrent_backend() == "pure_std"
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -563,7 +563,7 @@ expect rt_get_concurrent_backend() == "pure_std"
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -586,7 +586,7 @@ rt_set_concurrent_backend("pure_std")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -611,7 +611,7 @@ rt_set_concurrent_backend("pure_std")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -636,7 +636,7 @@ rt_set_concurrent_backend("pure_std")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -660,7 +660,7 @@ expect handle.join() == "survived"
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -681,7 +681,7 @@ expect cores >= 1
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -707,7 +707,7 @@ rt_set_concurrent_backend("pure_std")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -743,7 +743,7 @@ ch.close()
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -783,7 +783,7 @@ ch.close()
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -810,7 +810,7 @@ expect result == 6
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -838,7 +838,7 @@ expect handle.join() == 55
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -870,7 +870,7 @@ expect h3.join() == "back_to_std"
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -887,13 +887,13 @@ expect results.len() == 50
 
 </details>
 
-#### spawns 50 explicit-argument threads
+#### spawns 50 two-arg threads
 
 - spawns 50 explicit-argument threads
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -919,7 +919,7 @@ expect total == 1275
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -947,7 +947,7 @@ ch.close()
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -980,7 +980,7 @@ for ch in channels:
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1021,7 +1021,7 @@ ch.close()
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1051,7 +1051,7 @@ rt_set_concurrent_backend("pure_std")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1077,7 +1077,7 @@ for i in 0..20:
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1098,7 +1098,7 @@ expect result == [1, 2, 3]
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1119,7 +1119,7 @@ expect result["key"] == "value"
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1143,7 +1143,7 @@ expect result["name"] == "test"
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1165,7 +1165,7 @@ expect handle.join() == nil
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1187,7 +1187,7 @@ ch.close()
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1211,7 +1211,7 @@ expect ch.is_closed()
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1231,7 +1231,7 @@ expect true
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1253,7 +1253,7 @@ expect true
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1275,7 +1275,7 @@ expect h.join() == 99
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1288,26 +1288,6 @@ expect handle.join() == "ok"
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/01_unit/std/perf_optimization_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering rt_thread_spawn_isolated - Closure Execution, rt_thread_spawn_isolated_with_args - Explicit-arg Closure, Concurrent Backend Configuration, Integration - Threads + Channels + Backend, Stress Tests, Edge Cases.
-- rt_thread_spawn_isolated - Closure Execution
-- rt_thread_spawn_isolated_with_args - Explicit-arg Closure
-- Concurrent Backend Configuration
-- Integration - Threads + Channels + Backend
-- Stress Tests
-- Edge Cases
 
 ## Scenario Summary
 

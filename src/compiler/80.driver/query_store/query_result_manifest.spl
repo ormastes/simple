@@ -1,0 +1,137 @@
+# Wrap a query result as a ResultManifest in the CAS (design §14.5).
+#
+# A query result becomes shareable only by being reduced to immutable,
+# canonically serialized content:
+#   1. each artifact's bytes go into the CAS -> ArtifactDigest
+#   2. the ResultManifest records the ORDERED artifact digests plus an
+#      output fingerprint over them
+#   3. the manifest itself goes into the CAS -> ResultManifestDigest
+#   4. only then may an (ActionDigest -> ResultManifestDigest) mapping exist
+#
+# Nothing session-local may enter an artifact. `query_result_is_shareable`
+# rejects the never-globalize classes from §14.1 before anything is written.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.action_key.{canon_field, canon_seq, canon_str}
+use compiler.driver.cache.cas_store.{
+    ResultManifest, cas_put, result_manifest_put, result_manifest_get, result_manifest_digest
+}
+use compiler.driver.cache.action_key.{ResultKind, result_kind_to_text}
+use compiler.driver.cache_integration.key_wiring.{ActionRoots}
+
+val OUTPUT_FINGERPRINT_DOMAIN: text = "simple/output-fingerprint/v2"
+
+# One artifact of a query result, before it is stored.
+struct QueryArtifact:
+    name: text          # canonical, workspace-RELATIVE logical name
+    content: text       # immutable bytes
+
+# Fingerprint over the ORDERED artifact digests. Order is semantic here (an
+# object file list is not a set), so this deliberately does not sort.
+fn output_fingerprint_of(artifact_digests: [text]) -> text:
+    var items: [text] = []
+    for d in artifact_digests:
+        items.push(canon_str(d))
+    sha256_text(canon_field(OUTPUT_FINGERPRINT_DOMAIN, canon_seq(items)))
+
+# ============================================================================
+# Shareability gate (§14.1 never-globalize list)
+# ============================================================================
+
+# Reject anything carrying session identity before it can be stored. A false
+# here means "compute locally, publish nothing" — always a correct outcome.
+fn query_result_is_shareable(artifacts: [QueryArtifact]) -> bool:
+    for a in artifacts:
+        # Non-canonical absolute paths: a machine-specific name inside a
+        # supposedly machine-independent artifact.
+        if a.name.starts_with("/"):
+            return false
+        if a.name.contains(".."):
+            return false
+        # Session-local ids / addresses / handles.
+        if a.name.contains("<session"):
+            return false
+        if a.name.contains("<fd:"):
+            return false
+        if a.name.contains("<jit-addr:"):
+            return false
+    true
+
+# ============================================================================
+# Build + store
+# ============================================================================
+
+struct QueryResultStored:
+    stored: bool
+    result_manifest_digest: text
+    manifest: ResultManifest?
+    reason: text        # why not stored, when stored == false
+
+fn query_result_not_stored(reason: text) -> QueryResultStored:
+    QueryResultStored(stored: false, result_manifest_digest: "", manifest: nil, reason: reason)
+
+# Build the manifest for a computed query result. Pure — no I/O — so it can be
+# used by the shadow comparator to derive the from-scratch identity without
+# touching any cache tier.
+fn query_result_manifest_build(
+    action_digest: text,
+    result_kind: ResultKind,
+    artifact_digests: [text],
+    dependency_manifest: text,
+    roots: ActionRoots,
+    diagnostics_digest: text,
+    producer_schema: i64
+) -> ResultManifest:
+    # pos 19 is a SET of consumed roots; ResultManifest carries a single
+    # block_manifest_root, so an action consuming none records "" (absent) and
+    # an action consuming several records the root over that set. An
+    # uncacheable (ambiguous) root set never reaches here — callers must check
+    # roots.cacheable first, and query_result_store enforces it.
+    var block_root = ""
+    if roots.block_manifest_roots.len() == 1:
+        block_root = roots.block_manifest_roots[0]
+    else:
+        if not roots.block_manifest_roots.is_empty():
+            var items: [text] = []
+            for r in roots.block_manifest_roots:
+                items.push(canon_str(r))
+            block_root = sha256_text(canon_field("simple/block-manifest-root-set/v2", canon_seq(items)))
+    ResultManifest(
+        action_digest: action_digest,
+        result_kind: result_kind_to_text(result_kind),
+        artifact_digests: artifact_digests,
+        output_fingerprint: output_fingerprint_of(artifact_digests),
+        dependency_manifest: dependency_manifest,
+        aop_group_roots: [roots.aop_surface_root],
+        block_manifest_root: block_root,
+        diagnostics_digest: diagnostics_digest,
+        producer_schema: producer_schema
+    )
+
+# Store artifacts + manifest into `cas_root` and return the manifest digest.
+# Refuses (without writing anything) when the result is not shareable or the
+# action is uncacheable — refusing is always safe, since the caller then just
+# computes.
+fn query_result_store(
+    cas_root: text,
+    action_digest: text,
+    result_kind: ResultKind,
+    artifacts: [QueryArtifact],
+    dependency_manifest: text,
+    roots: ActionRoots,
+    diagnostics_digest: text,
+    producer_schema: i64
+) -> QueryResultStored:
+    if not roots.cacheable:
+        return query_result_not_stored("uncacheable: ambiguous block manifest")
+    if not query_result_is_shareable(artifacts):
+        return query_result_not_stored("not shareable: session-local content")
+    var digests: [text] = []
+    for a in artifacts:
+        digests.push(cas_put(cas_root, a.content))
+    val manifest = query_result_manifest_build(
+        action_digest, result_kind, digests, dependency_manifest,
+        roots, diagnostics_digest, producer_schema
+    )
+    val rmd = result_manifest_put(cas_root, manifest)
+    QueryResultStored(stored: true, result_manifest_digest: rmd, manifest: manifest, reason: "")

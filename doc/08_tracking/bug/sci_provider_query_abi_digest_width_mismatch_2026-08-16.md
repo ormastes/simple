@@ -1,145 +1,51 @@
-# SCI/provider-query ABI digest width mismatch blocks exact admission
+# SCI/provider-query ABI digest width mismatch
 
 Date: 2026-08-16
-Status: PARTIALLY FIXED (2026-08-17) — the width mismatch itself is GONE:
-a lossless 256-bit digest now crosses the ABI and the host compares all 256
-bits before invoking (unblock conditions 1-3 and the four fixture classes of
-condition 4 are done, with executed evidence below). **Exact ABI admission is
-still NOT fully signed off**: condition 4's *"one admitted native execution"*
-was NOT performed — no provider `.so`/`.smf` was built and loaded in this pass.
-Per this record's own rule, no native/SMF provider PASS may be claimed yet.
+Status: Fixed in focused slice
 
 ## Impact
 
-SCI interface groups lock `abi_digest` as one canonical lowercase 64-hex
-SHA-256 string, while `SimpleProviderQueryResultV1.abi_digest` is one `u64`.
-`app.simple_core.provider_dispatch` can validate that the SCI value is shaped
-correctly, but it cannot compare the two identities without an invented,
-collision-prone truncation rule. Dynamic activation therefore lacks exact ABI
-identity binding even though artifact bytes, query stability, descriptor size,
-and major/minor compatibility are checked.
+SCI locks one canonical lowercase 64-hex SHA-256 interface identity, while the
+provider query previously returned only one `u64`. Exact admission therefore
+had no lossless comparison and any truncation rule would permit collisions.
 
-Affected source:
+## Resolution
 
-- `src/lib/nogc_sync_mut/composition/types.spl` (`SimpleInterfaceGroupRecordV1`)
-- `src/lib/nogc_sync_mut/composition/provider_contract.spl`
-  (`SimpleProviderQueryResultV1`)
-- `src/app/simple_core/provider_dispatch.spl`
+The query-result wire preserves bytes 0..47, carries the complete digest in
+bytes 48..79, reserves zero bytes 80..83, and requires an exact 84-byte record.
+Pure-Simple producers and consumers use eight ordered `u32` words so no native
+Simple object or text layout crosses the boundary. Loader session query
+compares the complete result with the canonical SCI digest before issuing a
+pin. The host poison-fills all 84 result bytes before invocation, so a legacy
+provider that writes only 60 bytes leaves a nonzero reserved suffix and fails
+closed. Focused fixtures cover canonical parsing, exact match, mismatch,
+partial legacy writes, reserved bytes, and provider round-trip.
 
-## Required decision
+## Explicit exclusion
 
-Freeze one lossless wire representation shared by SCI and provider query. The
-preferred v2-compatible direction is four ordered `u64` SHA-256 words (or one
-fixed 32-byte arena field) with explicit byte order. Do not truncate or hash a
-hash into `u64`, and do not compare display text across the ABI.
+Mutable pathname replacement and same-handle loader TOCTOU protection are not
+part of this fix. They remain a separate loader criterion and must not be
+claimed by this ABI identity result.
 
-## Unblock condition
+## Focused admitted evidence
 
-1. Version the query-result prefix without changing existing v1 offsets.
-2. Encode/decode the complete digest deterministically in provider and host.
-3. Compare the locked SCI ABI digest before publishing a live pin.
-4. Add malformed, mismatch, compatible-prefix, and exact-match fixtures plus
-   one admitted native execution. Until then, exact ABI admission is blocked
-   and no native/SMF provider PASS may be claimed.
-
-## Resolution (2026-08-17)
-
-The frozen wire representation is **four ordered `u64` SHA-256 words**, `w0`
-first, each word big-endian (`w0` = digest bytes 0..7, `w1` = 8..15, `w2` =
-16..23, `w3` = 24..31). Big-endian was chosen so the word tuple reads in the
-same order as the hex text. Nothing is truncated, nothing is re-hashed, and
-display text is never compared across the ABI.
-
-Versioning without moving a V1 field: `SIMPLE_PROVIDER_QUERY_RESULT_V2_SIZE`
-is 92 = the unchanged 60-byte V1 record plus the 32 digest bytes at offsets
-60..91. The host now allocates and **zeroes the full 92 bytes** before the
-call, so a V1-only provider that writes 60 bytes yields an all-zero tail, which
-decodes as *"no digest declared"* and is REJECTED — never treated as a match,
-and never read as stale heap.
-
-Changed files:
-
-- `src/lib/nogc_sync_mut/composition/provider_contract.spl` — `SimpleAbiDigest256V1`,
-  `SimpleProviderQueryResultV2`, `SIMPLE_PROVIDER_QUERY_RESULT_V2_SIZE`.
-- `src/lib/nogc_sync_mut/composition/abi_digest.spl` (new) — the ONLY hex<->words
-  converter; rejects wrong length, uppercase/non-hex, and the all-zero sentinel.
-- `src/os/smf/provider_query_wire.spl` — `encode/decode_provider_query_result_v2`;
-  the V1 prefix is written by the V1 encoder unchanged, so the two versions
-  cannot drift.
-- `src/os/posix/dynlib_sffi.spl` — 92-byte zeroed result buffer, V2 decode,
-  `ProviderQueryCallV1.abi_digest_256`.
-- `src/os/smf/provider_loader.spl` — error-path constructor carries a zero digest.
-- `src/app/simple_core/provider_dispatch.spl` — `simple_core_provider_abi_digest_verdict_v1`
-  compares the locked SCI hex against the provider's 256 bits and, on any
-  disagreement, releases the pin, closes the session, and returns the new
-  `SIMPLE_CORE_PROVIDER_DISPATCH_ABI_DIGEST_MISMATCH` (7) WITHOUT invoking.
-- `src/app/provider_cli/native_provider_v1.spl` — emits the V2 result with a
-  frozen digest (`f173c682…41db`, SHA-256 of the canonical ABI descriptor text).
-  The legacy `abi_digest: u64` field stays at its V1 offset for wire
-  compatibility only and is no longer the ABI identity.
-- `test/01_unit/app/simple_core/provider_abi_digest_admission_spec.spl` (new fixtures).
-
-### Evidence
-
-```
-$ readlink -f bin/simple && stat -c '%s %y' "$(readlink -f bin/simple)"
-/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple
-59537240 2026-08-17 12:58:51.339525019 +0000
-```
-
-`bin/simple --version` prints the bootstrap-seed banner, so this is DIAGNOSTIC
-evidence, not release evidence. No file under `src/runtime/*.c` was touched, so
-`check-c-runtime-compiles-push.shs` was not applicable to this change.
-
-**`bin/simple test` could not be used and is NOT quoted as a pass.** On this
-binary the new spec, `test/01_unit/os/smf/provider_query_wire_spec.spl` and
-`test/01_unit/app/simple_core/provider_dispatch_spec.spl` each printed only
-warning lines (the new spec: 1222 lines on one run and 2483 on a rerun; the two
-existing specs: 19 lines each) with **no `Results:` line** and exited 0 —
-the silent-green mode recorded in `.claude/rules/testing.md` and
-`doc/08_tracking/bug/test_runner_emits_no_result_summary_silent_exit0_2026-08-17.md`.
-
-The identical assertions were therefore executed directly, via a scratch driver
-that calls the same public functions (`<scratch>/abi_check.spl`):
-
-```
-$ bin/simple run <scratch>/abi_check.spl
-PASS codec.roundtrip = f173c682babeca323ed37f1d64e99ae09694ef2a16934c45d57b3c6bfba541db
-PASS codec.short = abi-digest-length-invalid
-PASS codec.uppercase = abi-digest-not-lowercase-hex
-PASS codec.allzero = abi-digest-all-zero
-PASS prefix.w0-collides = yes
-PASS prefix.full-differs = differ
-PASS wire.encode-ok = ok
-PASS wire.size = 92
-PASS wire.tail-32 = 32
-PASS wire.decode-ok = ok
-PASS wire.v1-field-preserved = 1129072945
-PASS wire.digest-lossless = f173c682babeca323ed37f1d64e99ae09694ef2a16934c45d57b3c6bfba541db
-PASS wire.v1-provider-decodes = ok
-PASS wire.v1-provider-handle = 1129072945
-PASS wire.v1-provider-no-digest = 0
-PASS admit.exact =
-PASS admit.prefix-collision-rejected = provider-abi-digest-mismatch
-PASS admit.different-rejected = provider-abi-digest-mismatch
-PASS admit.undeclared-rejected = provider-abi-digest-not-declared
-PASS admit.malformed-lock-rejected = provider-abi-digest-locked-invalid:abi-digest-length-invalid
-PASS dispatch.invalid-activation = 1
-PASS dispatch.absent-artifact = 2
-SUMMARY failures=0
-```
-(exit code 0, taken from the command itself, not through a pipe.)
-
-`prefix.w0-collides = yes` together with `prefix.full-differs = differ` is the
-load-bearing one: the two digests share their entire first `u64`, so the old
-truncate-to-`u64` rule would have called them EQUAL, and the new comparison
-rejects them.
-
-### Remaining blocker
-
-Unblock condition 4 is only partly met. The four fixture classes exist and pass;
-**the "one admitted native execution" does not** — building a provider artifact,
-loading it through `provider_admit_dynamic_v1`, and observing a real
-`rt_provider_query_v1_call` return the 92-byte V2 record was not done in this
-pass. Until that runs, exact ABI admission stays unsigned-off and no native/SMF
-provider PASS may be claimed.
+- Pure-Simple Stage-2 compiler:
+  `/mnt/data/bs2/final-e73-run2/bootstrap/stage3/x86_64-unknown-linux-gnu/stage2-admitted/simple`
+- Compiler SHA-256:
+  `2ec71042dd69cf0001fc3f61640c28038a450048f34e416103988b1627431950`
+- Supported command used: `native-build`; isolated caches and outputs were
+  retained under `/mnt/data/tmp/simple-main-bootstrap-abi-digest-recovery/`.
+- `abi_digest_admission_runner` cycle 2 verifies the poison-filled partial
+  legacy write and an explicit nonzero reserved byte in addition to the exact
+  digest cases: 37 compiled, 0 cached, 0 failed; executable SHA-256
+  `78cc77efc6b334962d29b5146cbeba05f74ead29ad9ccd2d6170016b3dc2f224`;
+  execution printed `abi-digest-admission=pass` and exited 0.
+- `abi_digest_producer_runner` cycle 2: 4 compiled, 0 cached, 0 failed;
+  executable SHA-256 `7cb29699d3de2c1ab90b35f722c2df0150fe21ea2aa65cc163cb992484aadfac`;
+  execution printed `abi-digest-producers=pass` and exited 0.
+- Native provider archive: 4 compiled, 0 cached, 0 failed. Provider dispatch
+  archive: 40 compiled, 0 cached, 0 failed. No Rust-seed, Stage-4, full
+  bootstrap, dynamic-provider activation, or TOCTOU evidence was used.
+- `check-cli-provider-v1-host.shs` passed with the owned 84-byte C producer and
+  84-byte host buffer. Its only compiler warning is the pre-existing ignored
+  `write` return in unrelated `rt_net_http_plain_local_probe`.

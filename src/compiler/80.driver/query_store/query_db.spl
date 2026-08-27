@@ -1,0 +1,207 @@
+# Workspace query DB — the mutable red/green graph. WORKSPACE-LOCAL, ALWAYS.
+#
+# Design §14.1: "Only immutable, canonically serialized values are globally
+# shareable." The query graph is explicitly on the never-globalize list, along
+# with watcher generations, loader generations, session-local IDs and
+# non-canonical absolute paths. This module is therefore built so that the
+# graph has NO serializer to any tier above L1: the only thing that ever
+# crosses the boundary is an (ActionDigest -> ResultManifestDigest) pair, and
+# `query_node_export` is the single, checked place that produces one.
+#
+# Design §17.4 red/green: a node is GREEN when re-execution would provably
+# reproduce the recorded result; RED when an input moved; UNKNOWN before it
+# has ever run. Propagation stops at a green node — that is the entire point
+# of the colour, and `query_db_mark_dirty` implements exactly that stop.
+#
+# NEVER Dict.len() and never .get() on a struct-valued dict (both are broken
+# under native codegen): this file keeps a {text: i64} slot index and reads it
+# with contains_key + bracket-index only.
+
+use compiler.driver.cache.action_key.{action_key_sort_texts}
+
+# ============================================================================
+# Colours
+# ============================================================================
+
+enum QueryColor:
+    Unknown     # never executed in this workspace session
+    Green       # recorded result is valid; propagation STOPS here
+    Red         # an input moved; must re-execute before use
+
+fn query_color_name(c: QueryColor) -> text:
+    match c:
+        case Unknown: "unknown"
+        case Green: "green"
+        case Red: "red"
+
+# ============================================================================
+# Nodes
+# ============================================================================
+
+# One query node. `action_digest` / `result_manifest_digest` are the ONLY two
+# fields that may ever leave the workspace (see query_node_export). Everything
+# else — colour, revision, watcher generation, dependent edges — is mutable
+# session state and is unconditionally workspace-local.
+struct QueryNode:
+    query_id: text                  # workspace-local stable name, e.g. "mir::infer_call"
+    action_digest: text             # "" until the node has a computed key
+    result_manifest_digest: text    # "" until the node has a published result
+    color: QueryColor
+    revision: i64                   # bumped on every colour transition
+    deps: [text]                    # query_ids this node READ (red propagates along these, reversed)
+    watcher_generation: i64         # session-local; NEVER globalized
+
+fn query_node_new(query_id: text) -> QueryNode:
+    QueryNode(
+        query_id: query_id,
+        action_digest: "",
+        result_manifest_digest: "",
+        color: QueryColor.Unknown,
+        revision: 0,
+        deps: [],
+        watcher_generation: 0
+    )
+
+# ============================================================================
+# The DB
+# ============================================================================
+
+# Parallel arrays + a name->slot index. `count` is maintained explicitly
+# because Dict.len() returns -1 under native codegen.
+struct QueryDb:
+    slot_of: {text: i64}
+    nodes: [QueryNode]
+    count: i64
+
+fn query_db_new() -> QueryDb:
+    QueryDb(slot_of: {}, nodes: [], count: 0)
+
+fn query_db_has(db: QueryDb, query_id: text) -> bool:
+    db.slot_of.contains_key(query_id)
+
+fn query_db_slot(db: QueryDb, query_id: text) -> i64:
+    """Slot of `query_id`, or -1. contains_key + bracket-index only."""
+    if not db.slot_of.contains_key(query_id):
+        return -1
+    db.slot_of[query_id]
+
+fn query_db_get(db: QueryDb, query_id: text) -> QueryNode?:
+    val slot = query_db_slot(db, query_id)
+    if slot < 0:
+        return nil
+    db.nodes[slot]
+
+fn query_db_insert(db: QueryDb, node: QueryNode) -> QueryDb:
+    """Insert or replace `node`. Returns the updated DB (value semantics)."""
+    var out = db
+    val slot = query_db_slot(db, node.query_id)
+    if slot >= 0:
+        out.nodes[slot] = node
+        return out
+    out.nodes.push(node)
+    out.slot_of[node.query_id] = out.count
+    out.count = out.count + 1
+    out
+
+fn query_db_ids(db: QueryDb) -> [text]:
+    """All query ids, canonically sorted. Uses keys(), never Dict.len()."""
+    action_key_sort_texts(db.slot_of.keys())
+
+# ============================================================================
+# Red/green transitions (§17.4)
+# ============================================================================
+
+fn query_db_mark_green(db: QueryDb, query_id: text, action_digest: text, result_manifest_digest: text) -> QueryDb:
+    var out = db
+    val slot = query_db_slot(db, query_id)
+    if slot < 0:
+        return out
+    var n = out.nodes[slot]
+    n.action_digest = action_digest
+    n.result_manifest_digest = result_manifest_digest
+    n.color = QueryColor.Green
+    n.revision = n.revision + 1
+    out.nodes[slot] = n
+    out
+
+# Reverse edges: everyone that READ `query_id`.
+fn query_db_dependents(db: QueryDb, query_id: text) -> [text]:
+    var out: [text] = []
+    for n in db.nodes:
+        for d in n.deps:
+            if d == query_id:
+                out.push(n.query_id)
+    action_key_sort_texts(out)
+
+# Mark `query_id` red and propagate to its transitive dependents.
+#
+# PROPAGATION STOPS AT A NODE THAT IS ALREADY RED: re-reddening is a no-op, so
+# the walk terminates even on a cyclic graph. It does NOT stop at green nodes —
+# a green dependent of a red node is exactly what must be re-examined. (§17.4's
+# "propagation stopped before block 23" is the *verify* step deciding a
+# recomputed output was unchanged; that is `query_db_mark_green` being called
+# again with an identical result_manifest_digest, not a skipped traversal.)
+fn query_db_mark_dirty(db: QueryDb, query_id: text) -> QueryDb:
+    var out = db
+    var frontier: [text] = [query_id]
+    while not frontier.is_empty():
+        var next: [text] = []
+        for id in frontier:
+            val slot = query_db_slot(out, id)
+            if slot < 0:
+                continue
+            var n = out.nodes[slot]
+            match n.color:
+                case Red:
+                    continue        # already red — stop, this is the termination guard
+                case Green:
+                    pass_do_nothing("green node becomes red and keeps propagating", "green -> red")
+                case Unknown:
+                    pass_do_nothing("unknown node becomes red and keeps propagating", "unknown -> red")
+            n.color = QueryColor.Red
+            n.revision = n.revision + 1
+            out.nodes[slot] = n
+            for dep in query_db_dependents(out, id):
+                next.push(dep)
+        frontier = next
+    out
+
+fn query_db_is_green(db: QueryDb, query_id: text) -> bool:
+    val node = query_db_get(db, query_id)
+    match node:
+        case Some(n):
+            match n.color:
+                case Green: true
+                case Red: false
+                case Unknown: false
+        case nil: false
+
+# ============================================================================
+# THE BOUNDARY — the only thing that leaves the workspace
+# ============================================================================
+
+# An action mapping: the sole globalizable projection of a query node.
+# Note what is NOT here: query_id, colour, revision, deps, watcher generation.
+struct ExportedActionMapping:
+    action_digest: text
+    result_manifest_digest: text
+
+# A node is exportable only when it is GREEN and carries both digests. An
+# Unknown/Red node has no valid recorded result, and exporting one would
+# publish a mapping to a result that was never verified.
+fn query_node_is_exportable(n: QueryNode) -> bool:
+    match n.color:
+        case Green:
+            (not n.action_digest.is_empty()) and (not n.result_manifest_digest.is_empty())
+        case Red: false
+        case Unknown: false
+
+fn query_node_export(n: QueryNode) -> ExportedActionMapping?:
+    """The ONLY path from the query graph to any tier above workspace-local.
+
+    Returns nil rather than a partial mapping: a caller that cannot get an
+    export simply computes, which is always correct.
+    """
+    if not query_node_is_exportable(n):
+        return nil
+    ExportedActionMapping(action_digest: n.action_digest, result_manifest_digest: n.result_manifest_digest)

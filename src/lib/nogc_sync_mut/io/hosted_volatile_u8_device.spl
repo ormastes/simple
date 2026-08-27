@@ -1,0 +1,142 @@
+# Canonical pure-Simple owner for hosted-interpreter volatile u8 devices.
+#
+# Native MMIO keeps the unchanged rt_volatile_* ABI. The tree-walk
+# interpreter must never dereference an arbitrary process address, so a
+# production caller explicitly admits this bounded device and registers each
+# address before std.io.volatile_ops may select its u8 fallback.
+#
+# Ownership: the private singleton below owns all mutable state. Admission
+# stores a private capability in the runtime's canonical TLS facility. Every
+# state transition reads that slot again, so a copied/guessed public scalar
+# cannot impersonate the creator thread. No address array or mutable slot
+# crosses that execution-domain boundary.
+
+extern fn rt_hosted_volatile_u8_admit() -> bool
+extern fn rt_hosted_volatile_u8_owned() -> bool
+
+pub val HOSTED_VOLATILE_U8_CAPACITY: i64 = 64
+
+pub struct HostedVolatileU8DeviceSnapshot:
+    admitted: bool
+    current_thread_owned: bool
+    generation: i64
+    live_addresses: i64
+    capacity: i64
+
+class HostedVolatileU8Device:
+    var admitted: bool
+    var generation: i64
+    var addresses: [i64]
+    var values: [i64]
+
+var _hosted_volatile_u8_device = HostedVolatileU8Device(
+    admitted: false,
+    generation: 0,
+    addresses: [],
+    values: []
+)
+
+fn _hosted_volatile_u8_current_thread_owned() -> bool:
+    if not _hosted_volatile_u8_device.admitted:
+        return false
+    rt_hosted_volatile_u8_owned()
+
+fn _hosted_volatile_u8_normalize(value: i64) -> i64:
+    value & 255
+
+pub fn hosted_volatile_u8_owner() -> HostedVolatileU8DeviceSnapshot:
+    HostedVolatileU8DeviceSnapshot(
+        admitted: _hosted_volatile_u8_device.admitted,
+        current_thread_owned: _hosted_volatile_u8_current_thread_owned(),
+        generation: _hosted_volatile_u8_device.generation,
+        live_addresses: _hosted_volatile_u8_device.addresses.len(),
+        capacity: HOSTED_VOLATILE_U8_CAPACITY
+    )
+
+pub fn hosted_volatile_u8_current_owner_admitted() -> bool:
+    _hosted_volatile_u8_current_thread_owned()
+
+pub fn hosted_volatile_u8_admit() -> bool:
+    if _hosted_volatile_u8_device.admitted:
+        return false
+    if not rt_hosted_volatile_u8_admit():
+        return false
+    _hosted_volatile_u8_device.addresses = []
+    _hosted_volatile_u8_device.values = []
+    _hosted_volatile_u8_device.generation = 1
+    _hosted_volatile_u8_device.admitted = true
+    true
+
+pub fn hosted_volatile_u8_reset() -> bool:
+    if not _hosted_volatile_u8_current_thread_owned():
+        return false
+    _hosted_volatile_u8_device.addresses = []
+    _hosted_volatile_u8_device.values = []
+    _hosted_volatile_u8_device.generation = _hosted_volatile_u8_device.generation + 1
+    true
+
+pub fn hosted_volatile_u8_register(addr: i64, initial_value: i64) -> bool:
+    if not _hosted_volatile_u8_current_thread_owned():
+        return false
+    if addr <= 0:
+        return false
+    var i = 0
+    while i < _hosted_volatile_u8_device.addresses.len():
+        if _hosted_volatile_u8_device.addresses[i] == addr:
+            return false
+        i = i + 1
+    if _hosted_volatile_u8_device.addresses.len() >= HOSTED_VOLATILE_U8_CAPACITY:
+        return false
+    _hosted_volatile_u8_device.addresses.push(addr)
+    _hosted_volatile_u8_device.values.push(_hosted_volatile_u8_normalize(initial_value))
+    _hosted_volatile_u8_device.generation = _hosted_volatile_u8_device.generation + 1
+    true
+
+pub fn hosted_volatile_u8_unregister(addr: i64) -> bool:
+    if not _hosted_volatile_u8_current_thread_owned():
+        return false
+    var found = false
+    var next_addresses: [i64] = []
+    var next_values: [i64] = []
+    var i = 0
+    while i < _hosted_volatile_u8_device.addresses.len():
+        if _hosted_volatile_u8_device.addresses[i] == addr:
+            found = true
+        else:
+            # Retained entries stay paired and ordered across compaction.
+            next_addresses.push(_hosted_volatile_u8_device.addresses[i])
+            next_values.push(_hosted_volatile_u8_device.values[i])
+        i = i + 1
+    if not found:
+        return false
+    _hosted_volatile_u8_device.addresses = next_addresses
+    _hosted_volatile_u8_device.values = next_values
+    _hosted_volatile_u8_device.generation = _hosted_volatile_u8_device.generation + 1
+    true
+
+pub fn hosted_volatile_u8_try_read(addr: i64) -> i64:
+    if not _hosted_volatile_u8_current_thread_owned():
+        return -1
+    var i = 0
+    while i < _hosted_volatile_u8_device.addresses.len():
+        if _hosted_volatile_u8_device.addresses[i] == addr:
+            return _hosted_volatile_u8_device.values[i]
+        i = i + 1
+    -1
+
+pub fn hosted_volatile_u8_read(addr: i64) -> i64:
+    # -1 is outside the u8 result domain and is the ABI-preserving rejection
+    # sentinel. No raw load occurs for an unowned thread or unknown address.
+    hosted_volatile_u8_try_read(addr)
+
+pub fn hosted_volatile_u8_write(addr: i64, value: i64) -> bool:
+    if not _hosted_volatile_u8_current_thread_owned():
+        return false
+    var i = 0
+    while i < _hosted_volatile_u8_device.addresses.len():
+        if _hosted_volatile_u8_device.addresses[i] == addr:
+            _hosted_volatile_u8_device.values[i] = _hosted_volatile_u8_normalize(value)
+            _hosted_volatile_u8_device.generation = _hosted_volatile_u8_device.generation + 1
+            return true
+        i = i + 1
+    false

@@ -2,6 +2,10 @@
 
 > This planning spec replaces the subset contract with the full pure-Simple target.
 
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 6 | 6 | 0 | 0 |
+
 <details>
 <summary>Full Scenario Manual</summary>
 
@@ -15,8 +19,8 @@ This planning spec replaces the subset contract with the full pure-Simple target
 |-------|-------|
 | Category | Application |
 | Status | Active |
-| Source | `test/system/app/lib/feature/common_compression_framework_spec.spl` |
-| Updated | 2026-08-26 |
+| Source | `test/03_system/app/lib/feature/common_compression_framework_spec.spl` |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 This planning spec replaces the subset contract with the full pure-Simple target.
@@ -142,6 +146,186 @@ Implementation note
   The finished executable spec should group these scenarios into `describe` blocks per requirement family,
   use deterministic fixtures, and assert typed success and failure results without subset-only caveats.
 
+## Scenarios
+
+### common compression framework facade semantics
+
+#### round-trips zstd payloads through the shared facade with auto-detect
+
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- round-trips zstd payloads through the shared facade with auto-detect
+   - Expected: decoded.is_err() is false
+   - Expected: decoded.unwrap() equals `payload`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-COMPRESSION-001
+step("round-trips zstd payloads through the shared facade with auto-detect")
+val payload = _payload(2048)
+val encoded = compress_bytes(payload, default_compression_options(CompressionCodec.zstd))
+val decoded = decompress_bytes(encoded, Option<CompressionCodec>.None())
+expect(decoded.is_err()).to_equal(false)
+expect(decoded.unwrap()).to_equal(payload)
+```
+
+</details>
+
+#### round-trips lz4 payloads with an explicit codec hint
+
+- round-trips lz4 payloads with an explicit codec hint
+   - Expected: decoded.is_err() is false
+   - Expected: decoded.unwrap() equals `payload`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-COMPRESSION-001
+step("round-trips lz4 payloads with an explicit codec hint")
+val payload = _payload(1024)
+val encoded = compress_bytes(payload, default_compression_options(CompressionCodec.lz4))
+val decoded = decompress_bytes(encoded, Some(CompressionCodec.lz4))
+expect(decoded.is_err()).to_equal(false)
+expect(decoded.unwrap()).to_equal(payload)
+```
+
+</details>
+
+#### round-trips gzip payloads through the shared facade
+
+- round-trips gzip payloads through the shared facade
+   - Expected: decoded.is_err() is false
+   - Expected: decoded.unwrap() equals `payload`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-COMPRESSION-001
+step("round-trips gzip payloads through the shared facade")
+val payload = _payload(512)
+val encoded = compress_bytes(payload, default_compression_options(CompressionCodec.gzip))
+val decoded = decompress_bytes(encoded, Option<CompressionCodec>.None())
+expect(decoded.is_err()).to_equal(false)
+expect(decoded.unwrap()).to_equal(payload)
+```
+
+</details>
+
+#### preserves payload bytes across checksum-enabled zstd frames
+
+- preserves payload bytes across checksum-enabled zstd frames
+   - Expected: decoded.is_err() is false
+   - Expected: decoded.unwrap() equals `payload`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-COMPRESSION-003
+step("preserves payload bytes across checksum-enabled zstd frames")
+val payload = _payload(4096)
+val encoded = compress_bytes(payload, _options_with(CompressionCodec.zstd, true))
+val decoded = decompress_bytes(encoded, Some(CompressionCodec.zstd))
+expect(decoded.is_err()).to_equal(false)
+expect(decoded.unwrap()).to_equal(payload)
+```
+
+</details>
+
+#### fails closed on corrupted checksum frames with a typed error
+
+- fails closed on corrupted checksum frames with a typed error
+   - Expected: decoded.is_err() is true
+   - Expected: typed is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-COMPRESSION-005
+step("fails closed on corrupted checksum frames with a typed error")
+val payload = _payload(256)
+var encoded = compress_bytes(payload, _options_with(CompressionCodec.zstd, true))
+encoded[encoded.len() - 1] = encoded[encoded.len() - 1] ^ 0x01u8
+val decoded = decompress_bytes(encoded, Some(CompressionCodec.zstd))
+expect(decoded.is_err()).to_equal(true)
+val err = decoded.unwrap_err()
+val typed = match err:
+    CompressionError.ChecksumMismatch(message): true
+    CompressionError.CorruptStream(message): true
+    CompressionError.TruncatedInput(message): true
+    CompressionError.InvalidHeader(message): true
+    CompressionError.UnsupportedFeature(message): true
+    CompressionError.SizeLimitExceeded(limit): true
+expect(typed).to_equal(true)
+```
+
+</details>
+
+#### fails closed on truncated zstd frames with a typed error
+
+- fails closed on truncated zstd frames with a typed error
+   - Expected: decoded.is_err() is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-COMPRESSION-005
+step("fails closed on truncated zstd frames with a typed error")
+val payload = _payload(1024)
+var encoded = compress_bytes(payload, default_compression_options(CompressionCodec.zstd))
+var truncated: [u8] = []
+var i = 0
+while i < encoded.len() / 2:
+    truncated.push(encoded[i])
+    i = i + 1
+val decoded = decompress_bytes(truncated, Some(CompressionCodec.zstd))
+expect(decoded.is_err()).to_equal(true)
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 6 |
+| Active scenarios | 6 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
 
 </details>
 
@@ -150,7 +334,7 @@ Implementation note
 
 Requirements covered by the scenarios in this manual:
 
-- `REQ-SSPEC-SYSTEM`
+- `REQ-COMPRESSION-001`
 - `REQ-001`
 - `REQ-008A:`
 - `REQ-001/REQ-002/REQ-006/REQ-007:`
@@ -179,42 +363,46 @@ Requirements covered by the scenarios in this manual:
 - `REQ-014A:`
 - `REQ-014B:`
 - `REQ-005/REQ-009/REQ-010/REQ-011/REQ-012`
+- `REQ-COMPRESSION-003`
+- `REQ-COMPRESSION-005`
 <!-- sspec-maintain:traceability:end -->
 
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `e541794df38ac700293120cca34d7b8b80982afca3faf1a4883040a96e598acc`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `43bd438c5be4591145a25aa283aa7475f6f1ef58da5327d7d6d8990e97bef688`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `e541794df38ac700293120cca34d7b8b80982afca3faf1a4883040a96e598acc`.
+Source SHA-256: `43bd438c5be4591145a25aa283aa7475f6f1ef58da5327d7d6d8990e97bef688`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `e541794df38ac700293120cca34d7b8b80982afca3faf1a4883040a96e598acc`  
+Source SHA-256: `43bd438c5be4591145a25aa283aa7475f6f1ef58da5327d7d6d8990e97bef688`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **81/100**; effective score: **49/100**; blockers: **2**.
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
-source: test/system/app/lib/feature/common_compression_framework_spec.spl
-mirror: doc/06_spec/system/app/lib/feature/common_compression_framework_spec.md (current)
-findings: 4 blockers: 2
-  narrative=100 structure=100 oracle=50
-  traceability=60 evidence=100 coverage=100 maintainability=70
+SSpec documentization score: 92/100
+source: test/03_system/app/lib/feature/common_compression_framework_spec.spl
+mirror: doc/06_spec/03_system/app/lib/feature/common_compression_framework_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=81; blocker cap makes effective=49
-doc/06_spec/system/app/lib/feature/common_compression_framework_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+doc/06_spec/03_system/app/lib/feature/common_compression_framework_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/system/app/lib/feature/common_compression_framework_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, recovery/troubleshooting
+doc/06_spec/03_system/app/lib/feature/common_compression_framework_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/system/app/lib/feature/common_compression_framework_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
-  why: A passing-looking document without an oracle is not conformance evidence.
-  improve: Replace placeholders with an observable production assertion.
-test/system/app/lib/feature/common_compression_framework_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/app/lib/feature/common_compression_framework_spec.spl:171:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'round-trips zstd payloads through the shared facade with auto-detect' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/lib/feature/common_compression_framework_spec.spl:180:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'round-trips lz4 payloads with an explicit codec hint' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/lib/feature/common_compression_framework_spec.spl:189:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'round-trips gzip payloads through the shared facade' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

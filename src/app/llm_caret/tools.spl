@@ -11,15 +11,11 @@
 #   write_file  - real FS write, refused outside workspace root
 #   list_dir    - real directory listing
 #   glob        - simple `*` glob within the workspace
-#   mail_list / mail_read / mail_send      - IMAP/SMTP (infra_mail.spl)
-#   storage_ls / storage_get / storage_put - MinIO/FTP (infra_storage.spl)
-#   wiki_search / wiki_read / wiki_write    - Confluence/local markdown (infra_wiki.spl)
 #
 # Permission model:
-#   read-only tools (read_file / list_dir / glob / mail_list / mail_read /
-#   storage_ls / storage_get / wiki_search / wiki_read) are auto-allowed
-#   mutating tools (bash / write_file / mail_send / storage_put / wiki_write) require
-#   explicit allow (allow_list or allow_all). With no grant the policy default is "ask"; in non-interactive
+#   read-only tools (read_file / list_dir / glob) are auto-allowed
+#   mutating tools (bash / write_file) require explicit allow (allow_list or
+#   allow_all). With no grant the policy default is "ask"; in non-interactive
 #   mode "ask" resolves to DENY and the model gets a permission-error tool_result
 #   instead of any execution.
 #
@@ -31,14 +27,12 @@
 # ============================================================================
 
 use app.io.mod.{process_run}
+extern fn rt_file_read_text(path: text) -> text
 use std.io_runtime.{read_file_text}
 use std.io_runtime.{file_write}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{dir_exists}
 use std.io_runtime.{dir_list}
-use app.llm_caret.infra_mail.{mail_tool_schemas, mail_list, mail_read, mail_send}
-use app.llm_caret.infra_storage.{storage_tool_schemas, storage_ls, storage_get, storage_put}
-use app.llm_caret.infra_wiki.{wiki_tool_schemas, wiki_search, wiki_read, wiki_write}
 
 # ============================================================================
 # JSON helpers (inlined - self contained)
@@ -56,7 +50,7 @@ fn _Q() -> text:
 fn _idx(s: text, needle: text) -> i64:
     # NOTE: in the self-hosted interpreter, text.index_of returns a bare i64
     # (-1 sentinel), not an Option. `?? -1` handles both shapes safely.
-    s.index_of(needle)
+    s.index_of(needle) ?? -1
 
 fn _json_wire(s: text) -> text:
     # Safe pass-through for real JSON: any JSON object/array contains real `"`,
@@ -229,28 +223,10 @@ fn _list_contains(items: [text], target: text) -> bool:
     false
 
 fn is_read_only_tool(name: text) -> bool:
-    name == "read_file" or name == "list_dir" or name == "glob" or
-        name == "mail_list" or name == "mail_read" or
-        name == "storage_ls" or name == "storage_get" or
-        name == "wiki_search" or name == "wiki_read"
-
-fn is_mutating_tool(name: text) -> bool:
-    name == "bash" or name == "write_file" or name == "mail_send" or name == "storage_put" or
-        name == "wiki_write"
+    name == "read_file" or name == "list_dir" or name == "glob"
 
 fn is_known_tool(name: text) -> bool:
-    is_read_only_tool(name) or is_mutating_tool(name)
-
-# Anthropic-shape tool definitions (`name` / `description` / `input_schema`)
-# for every tool run_tool can dispatch. Providers may hand this list to the
-# model verbatim.
-fn tool_schemas() -> [text]:
-    val q = _Q()
-    val obj_schema = _LB() + q + "type" + q + ": " + q + "object" + q + ", " + q + "properties" + q + ": " + _LB() + _RB() + _RB()
-    var base: [text] = []
-    for name in ["bash", "read_file", "write_file", "list_dir", "glob"]:
-        base.push(_LB() + q + "name" + q + ": " + q + name + q + ", " + q + "description" + q + ": " + q + "workspace tool " + name + q + ", " + q + "input_schema" + q + ": " + obj_schema + _RB())
-    base + mail_tool_schemas() + storage_tool_schemas() + wiki_tool_schemas()
+    is_read_only_tool(name) or name == "bash" or name == "write_file"
 
 # Returns "allow" | "deny" | "ask".
 fn permission_decision(policy: PermissionPolicy, name: text) -> text:
@@ -340,9 +316,9 @@ fn exec_read_file(policy: PermissionPolicy, input: text) -> ToolResult:
     val (full, err) = guard_path(policy, path)
     if err != "":
         return new_tool_error("", "read_file: " + err)
-    if not file_exists(full):
+    if not rt_file_exists(full):
         return new_tool_error("", "read_file: file not found: " + path)
-    val raw = read_file_text(full)
+    val raw = rt_file_read_text(full) ?? ""
     var offset = _json_get_int(input, "offset", 1)
     if offset < 1:
         offset = 1
@@ -366,7 +342,7 @@ fn exec_write_file(policy: PermissionPolicy, input: text) -> ToolResult:
     if err != "":
         return new_tool_error("", "write_file: " + err)
     val content = _json_get_str(input, "content")
-    val ok = file_write(full, content)
+    val ok = rt_file_write_text(full, content)
     if not ok:
         return new_tool_error("", "write_file: failed to write " + path)
     new_tool_result("", "wrote " + content.len().to_text() + " bytes to " + path)
@@ -378,37 +354,36 @@ fn exec_list_dir(policy: PermissionPolicy, input: text) -> ToolResult:
     val (full, err) = guard_path(policy, path)
     if err != "":
         return new_tool_error("", "list_dir: " + err)
-    if not dir_exists(full):
+    if not rt_dir_exists(full):
         return new_tool_error("", "list_dir: directory not found: " + path)
-    val entries = dir_list(full) ?? []
+    val entries = rt_dir_list(full) ?? []
     new_tool_result("", _truncate(entries.join("\n"), MAX_TOOL_OUTPUT))
 
 # Minimal `*` glob matcher on a single name.
 fn _glob_match(pattern: text, name: text) -> bool:
-    var pattern_i = 0
-    var name_i = 0
-    var last_star = -1
-    var star_match_i = 0
-    while name_i < name.len():
-        if pattern_i < pattern.len() and pattern[pattern_i] == name[name_i]:
-            pattern_i = pattern_i + 1
-            name_i = name_i + 1
-        elif pattern_i < pattern.len() and pattern[pattern_i] == "*":
-            last_star = pattern_i
-            pattern_i = pattern_i + 1
-            star_match_i = name_i
-        elif last_star >= 0:
-            # Retry the pattern segment after the most recent star one byte
-            # later. This is the bounded backtracking needed for suffixes such
-            # as `*a` vs `aa` and repeated segments such as `a*a` vs `aaa`.
-            pattern_i = last_star + 1
-            star_match_i = star_match_i + 1
-            name_i = star_match_i
-        else:
+    if _idx(pattern, "*") < 0:
+        return pattern == name
+    val parts = pattern.split("*")
+    var pos = 0
+    var first = true
+    var idx = 0
+    for part in parts:
+        if part == "":
+            first = false
+            idx = idx + 1
+            continue
+        val rel = _idx(name.substring(pos), part)
+        if rel < 0:
             return false
-    while pattern_i < pattern.len() and pattern[pattern_i] == "*":
-        pattern_i = pattern_i + 1
-    pattern_i == pattern.len()
+        if first and rel != 0:
+            return false
+        pos = pos + rel + part.len()
+        first = false
+        idx = idx + 1
+    # if pattern does not end with '*', require we consumed to the end
+    if not pattern.ends_with("*"):
+        return pos == name.len()
+    true
 
 fn exec_glob(policy: PermissionPolicy, input: text) -> ToolResult:
     val pattern = _json_get_str(input, "pattern")
@@ -420,21 +395,14 @@ fn exec_glob(policy: PermissionPolicy, input: text) -> ToolResult:
     val (full, err) = guard_path(policy, path)
     if err != "":
         return new_tool_error("", "glob: " + err)
-    if not dir_exists(full):
+    if not rt_dir_exists(full):
         return new_tool_error("", "glob: directory not found: " + path)
-    val entries = dir_list(full) ?? []
+    val entries = rt_dir_list(full) ?? []
     var matches: [text] = []
     for e in entries:
         if _glob_match(pattern, e):
             matches = matches + [e]
     new_tool_result("", matches.join("\n"))
-
-# Infra tools report (success, content); map onto ToolResult.
-fn _infra_result(r: (bool, text)) -> ToolResult:
-    val (ok, content) = r
-    if ok:
-        return new_tool_result("", _truncate(content, MAX_TOOL_OUTPUT))
-    new_tool_error("", content)
 
 # ============================================================================
 # The gate - every tool call MUST traverse this function
@@ -463,24 +431,6 @@ fn run_tool(policy: PermissionPolicy, call: ToolCall) -> ToolResult:
         res = exec_list_dir(policy, call.input)
     elif call.name == "glob":
         res = exec_glob(policy, call.input)
-    elif call.name == "mail_list":
-        res = _infra_result(mail_list(_json_get_str(call.input, "mailbox"), _json_get_int(call.input, "limit", 20)))
-    elif call.name == "mail_read":
-        res = _infra_result(mail_read(_json_get_str(call.input, "uid")))
-    elif call.name == "mail_send":
-        res = _infra_result(mail_send(_json_get_str(call.input, "to"), _json_get_str(call.input, "subject"), _json_get_str(call.input, "body")))
-    elif call.name == "storage_ls":
-        res = _infra_result(storage_ls(_json_get_str(call.input, "bucket"), _json_get_str(call.input, "prefix")))
-    elif call.name == "storage_get":
-        res = _infra_result(storage_get(_json_get_str(call.input, "bucket"), _json_get_str(call.input, "key"), _json_get_int(call.input, "max_bytes", 0)))
-    elif call.name == "storage_put":
-        res = _infra_result(storage_put(_json_get_str(call.input, "bucket"), _json_get_str(call.input, "key"), _json_get_str(call.input, "content")))
-    elif call.name == "wiki_search":
-        res = _infra_result(wiki_search(policy.workspace_root, _json_get_str(call.input, "query")))
-    elif call.name == "wiki_read":
-        res = _infra_result(wiki_read(policy.workspace_root, _json_get_str(call.input, "page_id")))
-    elif call.name == "wiki_write":
-        res = _infra_result(wiki_write(policy.workspace_root, _json_get_str(call.input, "page_id"), _json_get_str(call.input, "parent"), _json_get_str(call.input, "title"), _json_get_str(call.input, "body")))
     ToolResult(tool_use_id: call.id, content: res.content, is_error: res.is_error)
 
 # ============================================================================

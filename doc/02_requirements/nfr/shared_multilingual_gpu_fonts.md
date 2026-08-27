@@ -33,3 +33,11 @@ Status: selected NFR A on 2026-07-11
   Promotion requires compiled versioned entry, nonzero handles, payload hash,
   submit/draw, completed fence, device-origin nonblank absolute readback, and
   CPU-oracle comparison.
+
+## Selected GSUB/GPOS NFR — 2026-07-25
+
+NFR A is selected. Validate the entire active layout plan before mutation and
+distinguish a valid empty plan from malformed input. Bound every ScriptTable,
+LangSys, FeatureTable, Lookup, and subtable to its nearest owning sibling or
+parent end. Cap nested lookup work by table and run size. Preserve the existing
+resolved-metrics cache and add no shaping cache without measured need.

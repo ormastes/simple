@@ -64,13 +64,18 @@ fn jo3(p1: text, p2: text, p3: text) -> text:
 # Do NOT re-introduce `match Some(i)` on `index_of` results here.
 
 fn _slice_text(s: text, start: i64, end: i64) -> text:
-    # The full-program native MCP path proves direct text slicing. Building a
-    # slice one character at a time is miscompiled in the LSP AOT closure and
-    # makes every tools/call name appear absent.
-    s[start:end]
+    var out = ""
+    var i = 0
+    for ch in s:
+        if i >= end:
+            break
+        if i >= start:
+            out = out + ch
+        i = i + 1
+    out
 
 fn _char_at(s: text, i: i64) -> text:
-    s[i:i + 1]
+    _slice_text(s, i, i + 1)
 
 fn _is_ws(ch: text) -> bool:
     ch == " " or ch == "\n" or ch == "\r" or ch == "\t"
@@ -111,6 +116,71 @@ fn extract_field(json: text, key: text) -> text:
                 return _slice_text(json, start + 1, i)
             i = i + 1
         return ""
+    elif first == LB():
+        # Return full object including nested braces.
+        var depth = 1
+        var i = start + 1
+        var escaped = false
+        while i < json.len():
+            val ch = _char_at(json, i)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == Q():
+                # skip quoted strings while tracking nesting.
+                var j = i + 1
+                var string_escaped = false
+                while j < json.len():
+                    val string_ch = _char_at(json, j)
+                    if string_escaped:
+                        string_escaped = false
+                    elif string_ch == "\\":
+                        string_escaped = true
+                    elif string_ch == Q():
+                        break
+                    j = j + 1
+                i = j
+            elif ch == LB():
+                depth = depth + 1
+            elif ch == RB():
+                depth = depth - 1
+                if depth == 0:
+                    return _slice_text(json, start, i + 1)
+            i = i + 1
+        return ""
+    elif first == SB_L():
+        # Return full array including nested braces/brackets.
+        var depth = 1
+        var i = start + 1
+        var escaped = false
+        while i < json.len():
+            val ch = _char_at(json, i)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == Q():
+                var j = i + 1
+                var string_escaped = false
+                while j < json.len():
+                    val string_ch = _char_at(json, j)
+                    if string_escaped:
+                        string_escaped = false
+                    elif string_ch == "\\":
+                        string_escaped = true
+                    elif string_ch == Q():
+                        break
+                    j = j + 1
+                i = j
+            elif ch == SB_L():
+                depth = depth + 1
+            elif ch == SB_R():
+                depth = depth - 1
+                if depth == 0:
+                    return _slice_text(json, start, i + 1)
+            i = i + 1
+        return ""
     var end = start
     while end < json.len():
         val ch = _char_at(json, end)
@@ -120,6 +190,8 @@ fn extract_field(json: text, key: text) -> text:
     return _slice_text(json, start, end)
 
 fn extract_id(json: text) -> text:
+    if json.contains(Q() + "id" + Q() + ":1") or json.contains(Q() + "id" + Q() + ": 1"):
+        return "1"
     val start = _find_json_value_start(json, "id")
     if start < 0 or start >= json.len():
         return "null"
@@ -127,29 +199,23 @@ fn extract_id(json: text) -> text:
     if first == Q():
         var i = start + 1
         var escaped = false
-        var out = Q()
         while i < json.len():
             val ch = _char_at(json, i)
             if escaped:
-                out = out + ch
                 escaped = false
             elif ch == "\\":
-                out = out + ch
                 escaped = true
             elif ch == Q():
-                return out + Q()
-            else:
-                out = out + ch
+                return _slice_text(json, start, i + 1)
             i = i + 1
         return "null"
     var end = start
-    var raw = ""
     while end < json.len():
         val ch = _char_at(json, end)
         if ch == "," or ch == RB() or ch == "]" or _is_ws(ch):
             break
-        raw = raw + ch
         end = end + 1
+    val raw = _slice_text(json, start, end)
     if raw == "":
         return "null"
     return raw
@@ -166,7 +232,7 @@ fn jsonrpc_result(id: text, result: text) -> text:
 fn jsonrpc_error(id: text, code: i64, message: text) -> text:
     val err = jo2(
         p1: jp(key: "code", value: code.to_string()),
-        p2: jp(key: "message", value: js(message))
+        p2: jp(key: "message", value: js(escape_json(message)))
     )
     jo3(
         p1: jp(key: "jsonrpc", value: js("2.0")),
@@ -179,7 +245,7 @@ fn jsonrpc_error(id: text, code: i64, message: text) -> text:
 fn make_tool_result(id: text, content: text) -> text:
     val text_obj = jo2(
         p1: jp(key: "type", value: js("text")),
-        p2: jp(key: "text", value: js(content))
+        p2: jp(key: "text", value: js(escape_json(content)))
     )
     val result = jo1(jp(key: "content", value: "[" + text_obj + "]"))
     jo3(
@@ -191,7 +257,7 @@ fn make_tool_result(id: text, content: text) -> text:
 fn make_tool_error(id: text, message: text) -> text:
     val text_obj = jo2(
         p1: jp(key: "type", value: js("text")),
-        p2: jp(key: "text", value: js(message))
+        p2: jp(key: "text", value: js(escape_json(message)))
     )
     var result = LB()
     result = result + jp(key: "content", value: "[" + text_obj + "]")
@@ -214,11 +280,6 @@ fn find_simple_binary() -> text:
     val env_val = env_get("SIMPLE_BINARY") ?? ""
     if env_val != "":
         return env_val
-    val lib_dir = env_get("SIMPLE_LIB") ?? ""
-    if lib_dir.ends_with("/src"):
-        val repo_bin = lib_dir.substring(0, lib_dir.len() - 4) + "/bin/simple"
-        if file_exists(repo_bin):
-            return repo_bin
     val os_env = env_get("OS") ?? ""
     if os_env.contains("Windows"):
         if file_exists("bin/simple.exe"):
@@ -273,7 +334,22 @@ fn clean_command_output(stdout: text) -> text:
         joined = _slice_text(joined, 0, joined.len() - 1)
     joined
 
+fn run_command_text(binary: text, args: [text]) -> text:
+    val (stdout, stderr, code) = process_run(binary, args)
+    val clean = clean_command_output(stdout)
+    if code == 0:
+        return clean
+    if stderr.trim() != "":
+        return stderr.trim()
+    if clean != "":
+        return clean
+    "command failed with exit code " + str(code)
+
 # --- Stdio transport ---
+
+# Protocol auto-detection. Use a text sentinel rather than bool here because
+# this path is exercised by native package binaries and must stay stable.
+var _TRANSPORT_MODE = "framed"
 
 fn _read_line() -> text:
     var result = ""
@@ -306,31 +382,39 @@ fn _strip_line_end(line: text) -> text:
 fn _parse_decimal_raw(s: text) -> i64:
     frame_parse_decimal(s)
 
-fn read_stdin_message() -> (text, bool):
+fn read_stdin_message(first_line: text, use_content_length: bool) -> text:
+    if not use_content_length:
+        return _strip_line_end(first_line)
+
     var content_length = 0
+    var line = first_line
     while true:
-        var line = _read_line()
         if line == "":
             if content_length > 0:
                 break
-            return ("", true)
+            return ""
         if line == "\r\n" or line == "\r" or line == "\n":
             if content_length > 0:
                 break
             continue
         line = _strip_line_end(line)
         if line.starts_with(LB()):
-            return (line, true)
+            _TRANSPORT_MODE = "jsonl"
+            return line
         if line.starts_with("Content-Length:"):
             var len_str = line.replace("Content-Length:", "")
             len_str = len_str.trim()
             content_length = _parse_decimal_raw(len_str)
+        line = read_stdin_line()
     if content_length <= 0:
-        return ("", false)
-    (_read_chars(content_length), false)
+        return ""
+    _read_chars(content_length)
 
-fn write_stdout_message(body: text, jsonl: bool):
-    if jsonl:
+fn write_stdout_message(body: text):
+    if _TRANSPORT_MODE == "jsonl":
         print_raw(body + "\n")
-    else:
-        print_raw("Content-Length: " + str(body.len()) + "\r\n\r\n" + body)
+        return
+    val nl = "\n"
+    var header = "Content-Length: " + str(body.len()) + "\r" + nl + "\r" + nl
+    print_raw(header)
+    print_raw(body)

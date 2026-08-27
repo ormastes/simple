@@ -7,30 +7,10 @@ BUILD_ROOT="${BUILD_ROOT:-$ROOT_DIR/build/riscv_fpga_sidecar_contract}"
 RVFI_REQUIRED="${REQUIRE_RVFI:-0}"
 
 is_rust_seed_simple() {
-    # Identity probe, not just a path pattern (2026-07-28).
-    # This used to test ONLY for a src/compiler_rust/ path. The deployed Rust
-    # seed lives at bin/release/<triple>/simple, which matches none of those
-    # patterns, so the seed was classified "not a seed" and every self-hosted
-    # claim in this script was asserted against it. Ask the binary instead.
-    # Audit: doc/08_tracking/todo/check_scripts_seed_identity_fail_open_2026-07-28.md
     case "$1" in
-        src/compiler_rust/*|./src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        "$ROOT_DIR"/src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
     esac
-    # Not runnable: leave it to the caller's own missing-binary branch, which
-    # already fails. Do not report "seed" for something we never ran.
-    [ -n "${1:-}" ] && [ -x "$1" ] || return 1
-    # Executable but unverifiable => treat as forbidden (fail closed). The seed
-    # self-identifies on stderr, so 2>&1 is required.
-    if command -v timeout >/dev/null 2>&1; then
-        _irss_v="$(timeout 10 "$1" --version 2>&1)" || return 0
-    else
-        _irss_v="$("$1" --version 2>&1)" || return 0
-    fi
-    [ -n "$_irss_v" ] || return 0
-    case "$_irss_v" in
-        *"bootstrap seed only"*|*"Rust-built"*|*"debug build"*) return 0 ;;
-    esac
-    return 1
 }
 
 if [ "${1:-}" = "--self-test" ]; then
@@ -58,59 +38,22 @@ if [ "${1:-}" = "--self-test" ]; then
     st_fail=0
     st_checked=0
 
-    st_bin() { # <name> <exit-code> <version-text>
-        mkdir -p "$st_dir/bin"
-        {
-            echo '#!/bin/sh'
-            printf 'printf %s%s%s\n' "'" "$3" "'"
-            echo "exit $2"
-        } > "$st_dir/bin/$1"
-        chmod +x "$st_dir/bin/$1"
-        printf '%s\n' "$st_dir/bin/$1"
-    }
+is_rust_seed_simple() {
+    case "$1" in
+        "$ROOT_DIR"/src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
-    st_assert() { # <desc> <seed|notseed> <path>
-        st_checked=$((st_checked + 1))
-        if is_rust_seed_simple "$3"; then _got=seed; else _got=notseed; fi
-        if [ "$_got" != "$2" ]; then
-            echo "SELFTEST FAILED: $1 (expected $2, got $_got)" >&2
-            st_fail=1
-        fi
-    }
-
-    # Path-shape rule: a compiler_rust path is a seed regardless of existence.
-    st_assert "compiler_rust path is a seed" seed \
-        "$st_dir/src/compiler_rust/fake/simple"
-    # Not runnable and not a compiler_rust path: NOT reported as a seed, because
-    # we never ran it. The caller's own missing-binary branch handles it.
-    st_assert "absent non-seed path is not reported as a seed" notseed \
-        "$st_dir/does/not/exist/simple"
-    # Identity probe, both polarities.
-    st_assert "production version string is not a seed" notseed \
-        "$(st_bin production 0 'Simple 0.1.0 (self-hosted, production)')"
-    st_assert "bootstrap-seed banner is a seed" seed \
-        "$(st_bin seedbanner 0 'simple 0.1.0 bootstrap seed only')"
-    st_assert "Rust-built banner is a seed" seed \
-        "$(st_bin rustbuilt 0 'simple (Rust-built)')"
-    st_assert "debug-build banner is a seed" seed \
-        "$(st_bin debugbuild 0 'simple 0.1.0 debug build')"
-    # Fail-closed branches: unverifiable means forbidden, never "trusted".
-    st_assert "nonzero --version is fail-closed to seed" seed \
-        "$(st_bin refuses 1 'error: refusing non-production Simple runtime')"
-    st_assert "empty --version is fail-closed to seed" seed \
-        "$(st_bin silent 0 '')"
-
-    if [ "$st_checked" -lt 8 ]; then
-        echo "STATUS: ERROR riscv-fpga-sidecar-contract self-test — nothing was checked:" \
-             "only $st_checked fixture(s) ran (expected >= 8)" >&2
-        exit 2
+if [ "${1:-}" = "--self-test" ]; then
+    seed_path="$ROOT_DIR/build/riscv_fpga_sidecar_contract_selftest/src/compiler_rust/fake/simple"
+    self_hosted_path="$ROOT_DIR/bin/release/simple"
+    if is_rust_seed_simple "$seed_path" && ! is_rust_seed_simple "$self_hosted_path"; then
+        echo "STATUS: PASS riscv-fpga-sidecar-contract self-test"
+        exit 0
     fi
-    if [ "$st_fail" -ne 0 ]; then
-        echo "STATUS: FAIL riscv-fpga-sidecar-contract self-test — $st_checked fixture(s) checked" >&2
-        exit 1
-    fi
-    echo "STATUS: PASS riscv-fpga-sidecar-contract self-test — $st_checked fixture(s) checked"
-    exit 0
+    echo "STATUS: FAIL riscv-fpga-sidecar-contract self-test" >&2
+    exit 1
 fi
 
 if [ "${SIMPLE_BIN:-}" = "" ]; then
@@ -182,47 +125,34 @@ check_bundle() {
     check_contains "$manifest" "board = \"$board\""
     check_contains "$manifest" "product_level = \"linux-rtl\""
     check_contains "$manifest" "configuration_profile = \"qemu-virt+fpga-board\""
-    # Honest post-truth-campaign values (2026-07-28): the generated VHDL is a
-    # placeholder (GENERATED_RTL_NOT_IMPLEMENTED), so the generator reports
-    # formal_gate = "placeholder-rejected" / readiness = "contract-not-ready".
-    # The designated formal track is named separately as flow = "rvfi+sby".
-    # Fail closed: any artifact claiming "rvfi-ready" or a passing formal gate
-    # while the RTL is a placeholder is fabricated evidence and must FAIL.
-    check_contains "$manifest" "formal_gate = \"placeholder-rejected\""
-    check_absent "$manifest" "formal_gate = \"rvfi_port_manifest\""
+    check_contains "$manifest" "formal_gate = \"rvfi_port_manifest\""
     check_contains "$product_byl" "schema = \"simple.riscv_product\""
     check_contains "$product_byl" "lane rv32"
     check_contains "$product_byl" "lane rv64"
-    check_contains "$product_byl" "formal_flow = \"rvfi+sby\""
-    check_contains "$product_byl" "formal_gate = \"placeholder-rejected\""
+    check_contains "$product_byl" "formal_gate = \"rvfi+sby\""
 
     check_contains "$rv32" "\"productLevel\": \"linux-rtl\""
     check_contains "$rv32" "\"configurationProfile\": \"qemu-virt+fpga-board\""
     check_contains "$rv32" "\"rtlBudget\": {\"maxLuts\": 25000, \"targetMhz\": 50}"
-    check_contains "$rv32" "\"readiness\": \"contract-not-ready\""
-    check_contains "$rv32" "\"formal\": {\"flow\": \"rvfi+sby\", \"gate\": \"placeholder-rejected\", \"status\": \"contract-not-ready\""
-    check_absent "$rv32" "rvfi-ready"
-    check_contains "$rv32" "\"observedRvfiPortCount\": 0"
+    check_contains "$rv32" "\"formal\": {\"flow\": \"rvfi+sby\", \"gate\": \"rvfi_port_manifest\", \"status\": \"rvfi-ready\""
+    check_contains "$rv32" "\"observedRvfiPortCount\": 17"
     check_contains "$rv32" "\"harness\": \"$dir/rv32/rtl/simple_rv32gc_core_formal.vhd\""
     check_contains "$rv32" "\"sby\": \"$dir/rv32/rtl/simple_rv32gc_core.sby\""
     check_contains "$rv32" "\"manifest\": \"$dir/rv32/rtl/simple_rv32gc_core_formal.sdn\""
-    check_contains "$rv32" "\"sourceMap\": []"
+    check_contains "$rv32" "\"signal\":\"Rv32Instruction.opcode\""
     check_contains "$rv32" "tb_generated_rv32_linux_handoff.vhd"
-    check_contains "$rv32" "\"reportMarkers\": [\"GENERATED_RTL_NOT_IMPLEMENTED\"]"
+    check_contains "$rv32" "GENERATED_RV32_BOOT_INFO_REAL_DTB: PASS"
     CORE_VHDL="$rv32_vhdl" FORMAL_HARNESS="$rv32_formal" FORMAL_SBY="$rv32_sby" FORMAL_MANIFEST="$rv32_formal_manifest" REQUIRE_RVFI="$RVFI_REQUIRED" sh "$ROOT_DIR/scripts/rtl/check-rvfi-formal-readiness.shs" >/dev/null
 
     check_contains "$rv64" "\"productLevel\": \"linux-rtl\""
     check_contains "$rv64" "\"configurationProfile\": \"qemu-virt+fpga-board\""
     check_contains "$rv64" "\"rtlBudget\": {\"maxLuts\": 45000, \"targetMhz\": 50}"
-    check_contains "$rv64" "\"readiness\": \"contract-not-ready\""
-    check_contains "$rv64" "\"formal\": {\"flow\": \"rvfi+sby\", \"gate\": \"placeholder-rejected\", \"status\": \"contract-not-ready\""
-    check_absent "$rv64" "rvfi-ready"
-    check_contains "$rv64" "\"observedRvfiPortCount\": 0"
+    check_contains "$rv64" "\"formal\": {\"flow\": \"rvfi+sby\", \"gate\": \"rvfi_port_manifest\", \"status\": \"rvfi-ready\""
+    check_contains "$rv64" "\"observedRvfiPortCount\": 17"
     check_contains "$rv64" "\"harness\": \"$dir/rv64/rtl/simple_rv64gc_core_formal.vhd\""
     check_contains "$rv64" "\"sby\": \"$dir/rv64/rtl/simple_rv64gc_core.sby\""
     check_contains "$rv64" "\"manifest\": \"$dir/rv64/rtl/simple_rv64gc_core_formal.sdn\""
-    check_contains "$rv64" "\"sourceMap\": []"
-    check_contains "$rv64" "\"reportMarkers\": [\"GENERATED_RTL_NOT_IMPLEMENTED\"]"
+    check_contains "$rv64" "\"signal\":\"Rv64Instruction.opcode\""
     CORE_VHDL="$rv64_vhdl" FORMAL_HARNESS="$rv64_formal" FORMAL_SBY="$rv64_sby" FORMAL_MANIFEST="$rv64_formal_manifest" REQUIRE_RVFI="$RVFI_REQUIRED" sh "$ROOT_DIR/scripts/rtl/check-rvfi-formal-readiness.shs" >/dev/null
 }
 

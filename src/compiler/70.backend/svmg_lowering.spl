@@ -359,12 +359,10 @@ impl _Lowerer:
                         self.fail("text manipulation beyond literals is not supported in the SVM-G v1 lowering subset (design doc §4.4 exclusion list)")
                     case nil:
                         self.fail("a string literal used outside `print(...)` has no defined SVM-G v1 lowering (only `print` of a string-literal argument is supported)")
-            case HirExprKind.MethodCall(_, _, _, _):
+            case HirExprKind.MethodCall(_, _, _, _, _):
                 self.fail("method calls beyond expect(...).to_equal(...) are not supported in the SVM-G v1 lowering subset (design doc §4.4) -- if the receiver is text, this is the design §4.4 exclusion 'text manipulation beyond literals'")
             case HirExprKind.If(cond, then_, else_):
                 self.lower_if(cond, then_, else_)
-            case HirExprKind.IfChain(arms, else_):
-                self.lower_if_chain(arms, else_)
             case HirExprKind.While(cond, body, _):
                 self.lower_while(cond, body)
             case _:
@@ -428,9 +426,10 @@ impl _Lowerer:
                 self.fail("`print` of a non-string-literal argument (e.g. an integer) is in the design §4.4 subset but is not yet implemented by this D4 lowering pass")
 
     # -- if/elif/else ----------------------------------------------------------
-    # Legacy nested `HirExprKind.If` and flat `HirExprKind.IfChain` are both
-    # accepted. The flat form lowers iteratively below so long elif chains do
-    # not rebuild or recurse through nested expression payloads.
+    # `elif` arrives as an ordinary nested `HirExprKind.If` inside `else_`'s
+    # block (either as a statement or as the block's tail value); no special
+    # elif-chain case is needed beyond structural recursion through
+    # lower_block_stmts.
 
     me lower_if(cond: HirExpr, then_: HirBlock, else_: HirBlock?):
         self.lower_expr(cond)
@@ -449,26 +448,6 @@ impl _Lowerer:
             self.patch_rel16(end_patch, self.code.len())
         else:
             self.patch_rel16(else_patch, self.code.len())
-
-    me lower_if_chain(arms: [HirIfArm], else_: HirBlock?):
-        var end_patches: [i64] = []
-        for arm in arms:
-            self.lower_expr(arm.cond)
-            if not self.ok():
-                return
-            val next_arm_patch = self.emit_jump(OP_JZ)
-            self.lower_block_stmts(arm.then_)
-            if not self.ok():
-                return
-            end_patches.push(self.emit_jump(OP_JMP))
-            self.patch_rel16(next_arm_patch, self.code.len())
-        if val else_block = else_:
-            self.lower_block_stmts(else_block)
-            if not self.ok():
-                return
-        val chain_end = self.code.len()
-        for end_patch in end_patches:
-            self.patch_rel16(end_patch, chain_end)
 
     # -- while <cond>: <body> ---------------------------------------------------
     # No separate iteration cap is added: the SGP step budget (already
@@ -491,7 +470,7 @@ impl _Lowerer:
 
     fn is_expect_to_equal(e: HirExpr) -> bool:
         match e.kind:
-            case HirExprKind.MethodCall(receiver, method, args, _):
+            case HirExprKind.MethodCall(receiver, method, args, _, _):
                 if method == "to_equal" and args.len() == 1:
                     match receiver.kind:
                         case HirExprKind.Call(callee, cargs, _):
@@ -506,7 +485,7 @@ impl _Lowerer:
 
     me lower_expect_to_equal(e: HirExpr):
         match e.kind:
-            case HirExprKind.MethodCall(receiver, _, args, _):
+            case HirExprKind.MethodCall(receiver, _, args, _, _):
                 match receiver.kind:
                     case HirExprKind.Call(_, cargs, _):
                         val actual = cargs[0].value
@@ -584,8 +563,6 @@ impl _Lowerer:
                     # never DROP -- it never pushes a stack value, e.g. an
                     # `elif` chain arriving as a block's tail expression
                     # (rather than a plain statement).
-                    self.lower_expr(block.value)
-                case HirExprKind.IfChain(_, _):
                     self.lower_expr(block.value)
                 case HirExprKind.While(_, _, _):
                     self.lower_expr(block.value)

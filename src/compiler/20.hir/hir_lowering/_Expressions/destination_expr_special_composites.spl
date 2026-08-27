@@ -1,0 +1,498 @@
+# Destination-owner lowering for construction and special composite expressions.
+# Every aggregate stays in the process registry; this module transports indices only.
+use compiler.frontend.parser_types.*
+use compiler.frontend.parser_types_expr.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.assurance.unsafe_capabilities.{is_known_unsafe_capability}
+use compiler.hir.hir_types.{ScopeKind, SymbolKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.hir_destination_graph.*
+use compiler.hir.hir_lowering.hir_destination_registry_writer.*
+use compiler.hir.hir_lowering._Expressions.destination_custom_typed.*
+use compiler.hir.hir_lowering._Expressions.destination_asm_custom.*
+use compiler.hir.hir_lowering._Expressions.destination_types_patterns.*
+
+impl HirLowering:
+    me destination_special_reserve_expr_at(start: i64, end: i64, line: i64,
+                                           col: i64, file: text, length: i64) -> i64:
+        hdw_reserve_expr(self.destination_slot, self.destination_generation,
+            start, end, line, col, file, length)
+
+    me destination_special_reserve_aux_at(start: i64, end: i64, line: i64,
+                                          col: i64, file: text, length: i64) -> i64:
+        hdw_reserve_aux(self.destination_slot, self.destination_generation,
+            start, end, line, col, file, length)
+
+    me destination_special_named_type_at(name: text, span: Span) -> i64:
+        val type_index = hdw_reserve_type(self.destination_slot, self.destination_generation,
+            span.start, span.end, span.line, span.col, span.file, span.length)
+        if type_index < 0: return -1
+        val symbol = self.symbols.lookup_or_invalid(name)
+        if not symbol.is_valid():
+            if not hdw_type_leaf(self.destination_slot, self.destination_generation, type_index, HD_TYPE_ERROR): return -1
+            return type_index
+        val defining_module =
+            self.destination_named_symbol_module(symbol.id, span)
+        if defining_module < 0: return -1
+        if not hdw_type_named(self.destination_slot, self.destination_generation,
+            type_index, defining_module, symbol.id, -1, 0): return -1
+        type_index
+
+    me destination_lower_special_expr(e: Expr) -> i64:
+        match e.kind:
+            case ExprKind.ListComprehension(value, clauses):
+                val parent = self.destination_special_reserve_expr_at(e.span.start, e.span.end, e.span.line, e.span.col, e.span.file, e.span.length)
+                val clause_range = hdw_reserve_range(self.destination_slot,
+                    self.destination_generation, HD_RANGE_AUX,
+                    HD_AUX_RANGE_COMP_CLAUSE, clauses.len())
+                if parent < 0 or clause_range < 0: return -1
+                self.symbols.push_scope(ScopeKind.Block)
+                var failed = false
+                var offset = 0
+                while offset < clauses.len() and not failed:
+                    val clause = clauses[offset]
+                    val aux = self.destination_special_reserve_aux_at(clause.span.start, clause.span.end, clause.span.line, clause.span.col, clause.span.file, clause.span.length)
+                    if aux < 0:
+                        failed = true
+                    else:
+                        match clause.kind:
+                            case ComprehensionKind.For(name, iterable):
+                                val child = self.destination_lower_expr(iterable)
+                                var symbol_id = -1
+                                if child >= 0:
+                                    val symbol = self.symbols.define(name,
+                                        SymbolKind.Variable, nil, clause.span,
+                                        Visibility.Private, false, nil)
+                                    symbol_id = symbol.id
+                                    if not self.destination_publish_local_symbol(
+                                            symbol_id, name, false, -1,
+                                            SymbolKind.Variable, false,
+                                            clause.span): failed = true
+                                if failed or child < 0 or not hdw_comp_for(self.destination_slot,
+                                        self.destination_generation, aux,
+                                        symbol_id, child): failed = true
+                            case ComprehensionKind.If(condition):
+                                val child = self.destination_lower_expr(condition)
+                                if child < 0 or not hdw_comp_if(self.destination_slot,
+                                        self.destination_generation, aux,
+                                        child): failed = true
+                        if not failed and not hdw_set_range_at(self.destination_slot,
+                                self.destination_generation, clause_range,
+                                HD_AUX_RANGE_COMP_CLAUSE, offset, aux): failed = true
+                    offset = offset + 1
+                var value_index = -1
+                if not failed: value_index = self.destination_lower_expr(value)
+                if value_index < 0: failed = true
+                if not failed and not hdw_publish_range(self.destination_slot,
+                        self.destination_generation, clause_range,
+                        HD_RANGE_AUX, HD_AUX_RANGE_COMP_CLAUSE): failed = true
+                if not failed and not hdw_comprehension(self.destination_slot,
+                        self.destination_generation, parent, 0, value_index,
+                        clause_range, clauses.len()): failed = true
+                self.symbols.pop_scope()
+                if failed: -1 else: parent
+            case ExprKind.DictComprehension(key, value, clauses):
+                val parent = self.destination_special_reserve_expr_at(e.span.start, e.span.end, e.span.line, e.span.col, e.span.file, e.span.length)
+                val clause_range = hdw_reserve_range(self.destination_slot,
+                    self.destination_generation, HD_RANGE_AUX,
+                    HD_AUX_RANGE_COMP_CLAUSE, clauses.len())
+                if parent < 0 or clause_range < 0: return -1
+                self.symbols.push_scope(ScopeKind.Block)
+                var failed = false
+                var offset = 0
+                while offset < clauses.len() and not failed:
+                    val clause = clauses[offset]
+                    val aux = self.destination_special_reserve_aux_at(clause.span.start, clause.span.end, clause.span.line, clause.span.col, clause.span.file, clause.span.length)
+                    if aux < 0:
+                        failed = true
+                    else:
+                        match clause.kind:
+                            case ComprehensionKind.For(name, iterable):
+                                val child = self.destination_lower_expr(iterable)
+                                var symbol_id = -1
+                                if child >= 0:
+                                    val symbol = self.symbols.define(name,
+                                        SymbolKind.Variable, nil, clause.span,
+                                        Visibility.Private, false, nil)
+                                    symbol_id = symbol.id
+                                    if not self.destination_publish_local_symbol(
+                                            symbol_id, name, false, -1,
+                                            SymbolKind.Variable, false,
+                                            clause.span): failed = true
+                                if failed or child < 0 or not hdw_comp_for(self.destination_slot,
+                                        self.destination_generation, aux,
+                                        symbol_id, child): failed = true
+                            case ComprehensionKind.If(condition):
+                                val child = self.destination_lower_expr(condition)
+                                if child < 0 or not hdw_comp_if(self.destination_slot,
+                                        self.destination_generation, aux,
+                                        child): failed = true
+                        if not failed and not hdw_set_range_at(self.destination_slot,
+                                self.destination_generation, clause_range,
+                                HD_AUX_RANGE_COMP_CLAUSE, offset, aux): failed = true
+                    offset = offset + 1
+                var key_index = -1
+                var value_index = -1
+                if not failed: key_index = self.destination_lower_expr(key)
+                if key_index < 0: failed = true
+                if not failed: value_index = self.destination_lower_expr(value)
+                if value_index < 0: failed = true
+                if not failed and not hdw_publish_range(self.destination_slot,
+                        self.destination_generation, clause_range,
+                        HD_RANGE_AUX, HD_AUX_RANGE_COMP_CLAUSE): failed = true
+                if not failed and not hdw_dict_comprehension(self.destination_slot,
+                        self.destination_generation, parent, key_index,
+                        value_index, clause_range, clauses.len()): failed = true
+                self.symbols.pop_scope()
+                if failed: -1 else: parent
+            case ExprKind.StructLit(name, fields):
+                val parent = self.destination_special_reserve_expr_at(e.span.start, e.span.end, e.span.line, e.span.col, e.span.file, e.span.length)
+                val range = hdw_reserve_range(self.destination_slot,
+                    self.destination_generation, HD_RANGE_AUX,
+                    HD_AUX_RANGE_NAMED_EXPR, fields.len())
+                val type_index = self.destination_special_named_type_at(name, e.span)
+                if parent < 0 or range < 0 or type_index < 0: return -1
+                var offset = 0
+                while offset < fields.len():
+                    val field = fields[offset]
+                    val aux = self.destination_special_reserve_aux_at(field[1].span.start, field[1].span.end, field[1].span.line, field[1].span.col, field[1].span.file, field[1].span.length)
+                    if aux < 0: return -1
+                    val child = self.destination_lower_expr(field[1])
+                    if child < 0 or not hdw_named_expr(self.destination_slot,
+                            self.destination_generation, aux, field[0], child) or
+                        not hdw_set_range_at(self.destination_slot,
+                            self.destination_generation, range,
+                            HD_AUX_RANGE_NAMED_EXPR, offset, aux): return -1
+                    offset = offset + 1
+                if not hdw_publish_range(self.destination_slot,
+                        self.destination_generation, range, HD_RANGE_AUX,
+                        HD_AUX_RANGE_NAMED_EXPR) or not hdw_struct_lit(
+                        self.destination_slot, self.destination_generation,
+                        parent, type_index, range, fields.len()): -1 else: parent
+            case ExprKind.EnumLit(name, variant, payload):
+                val parent = self.destination_special_reserve_expr_at(e.span.start, e.span.end, e.span.line, e.span.col, e.span.file, e.span.length)
+                val type_index = self.destination_special_named_type_at(name, e.span)
+                if parent < 0 or type_index < 0: return -1
+                var has_payload = false
+                var payload_index = -1
+                var failed = false
+                match payload:
+                    case Some(rooted_payload):
+                        has_payload = true
+                        payload_index = self.destination_special_reserve_aux_at(e.span.start, e.span.end, e.span.line, e.span.col, e.span.file, e.span.length)
+                        if payload_index < 0:
+                            failed = true
+                        else:
+                            match rooted_payload:
+                                case EnumPayload.Tuple(values):
+                                    val range = hdw_reserve_range(self.destination_slot,
+                                        self.destination_generation, HD_RANGE_EXPR,
+                                        HD_AUX_RANGE_NONE, values.len())
+                                    if range < 0: failed = true
+                                    var offset = 0
+                                    while offset < values.len() and not failed:
+                                        val child = self.destination_lower_expr(values[offset])
+                                        if child < 0 or not hdw_set_range_at(
+                                                self.destination_slot,
+                                                self.destination_generation, range,
+                                                HD_AUX_RANGE_NONE, offset, child): failed = true
+                                        offset = offset + 1
+                                    if not failed and not hdw_publish_range(
+                                            self.destination_slot,
+                                            self.destination_generation, range,
+                                            HD_RANGE_EXPR, HD_AUX_RANGE_NONE): failed = true
+                                    if not failed and not hdw_enum_payload_aux(
+                                            self.destination_slot,
+                                            self.destination_generation,
+                                            payload_index, false, range,
+                                            values.len()): failed = true
+                                case EnumPayload.Struct(fields):
+                                    val range = hdw_reserve_range(self.destination_slot,
+                                        self.destination_generation, HD_RANGE_AUX,
+                                        HD_AUX_RANGE_NAMED_EXPR, fields.len())
+                                    if range < 0: failed = true
+                                    var offset = 0
+                                    while offset < fields.len() and not failed:
+                                        val field = fields[offset]
+                                        val aux = self.destination_special_reserve_aux_at(field[1].span.start, field[1].span.end, field[1].span.line, field[1].span.col, field[1].span.file, field[1].span.length)
+                                        if aux < 0:
+                                            failed = true
+                                        else:
+                                            val child = self.destination_lower_expr(field[1])
+                                            if child < 0 or not hdw_named_expr(
+                                                    self.destination_slot,
+                                                    self.destination_generation,
+                                                    aux, field[0], child) or
+                                                not hdw_set_range_at(
+                                                    self.destination_slot,
+                                                    self.destination_generation,
+                                                    range, HD_AUX_RANGE_NAMED_EXPR,
+                                                    offset, aux): failed = true
+                                        offset = offset + 1
+                                    if not failed and not hdw_publish_range(
+                                            self.destination_slot,
+                                            self.destination_generation, range,
+                                            HD_RANGE_AUX,
+                                            HD_AUX_RANGE_NAMED_EXPR): failed = true
+                                    if not failed and not hdw_enum_payload_aux(
+                                            self.destination_slot,
+                                            self.destination_generation,
+                                            payload_index, true, range,
+                                            fields.len()): failed = true
+                    case _: ()
+                if failed or not hdw_enum_lit(self.destination_slot,
+                        self.destination_generation, parent, type_index,
+                        variant, has_payload, payload_index): -1 else: parent
+            case ExprKind.LossBlock(body):
+                val parent = self.destination_special_reserve_expr_at(e.span.start, e.span.end, e.span.line, e.span.col, e.span.file, e.span.length)
+                if parent < 0: return -1
+                val body_index = self.destination_lower_block(body, true)
+                if body_index < 0 or not hdw_block_control(self.destination_slot,
+                        self.destination_generation, parent, HD_EXPR_LOSS,
+                        body_index): -1 else: parent
+            case ExprKind.NogradBlock(body):
+                val parent = self.destination_special_reserve_expr_at(e.span.start, e.span.end, e.span.line, e.span.col, e.span.file, e.span.length)
+                if parent < 0: return -1
+                val body_index = self.destination_lower_block(body, true)
+                if body_index < 0 or not hdw_block_control(self.destination_slot,
+                        self.destination_generation, parent, HD_EXPR_NOGRAD,
+                        body_index): -1 else: parent
+            case ExprKind.UnsafeBlock(body, caps):
+                # `caps` is rooted in the matched AST.  Walk it here instead
+                # of forwarding/copying the array through another method.
+                val parent = self.destination_special_reserve_expr_at(e.span.start, e.span.end, e.span.line, e.span.col, e.span.file, e.span.length)
+                val block_row = hdw_reserve_block(self.destination_slot,
+                    self.destination_generation, body.span.start, body.span.end,
+                    body.span.line, body.span.col, body.span.file, body.span.length)
+                val cap_range = hdw_reserve_range(self.destination_slot,
+                    self.destination_generation, HD_RANGE_AUX,
+                    HD_AUX_RANGE_TEXT, caps.len())
+                if parent < 0 or block_row < 0 or cap_range < 0: return -1
+                var cap_offset = 0
+                while cap_offset < caps.len():
+                    val cap = caps[cap_offset]
+                    if not is_known_unsafe_capability(cap):
+                        self.error("E-HIR-DEST-UNSAFE-CAPABILITY: unknown unsafe capability", e.span)
+                        return -1
+                    val cap_aux = self.destination_special_reserve_aux_at(e.span.start, e.span.end, e.span.line, e.span.col, e.span.file, e.span.length)
+                    if cap_aux < 0 or not hdw_text_aux(self.destination_slot,
+                            self.destination_generation, cap_aux, cap) or
+                        not hdw_set_range_at(self.destination_slot,
+                            self.destination_generation, cap_range,
+                            HD_AUX_RANGE_TEXT, cap_offset, cap_aux): return -1
+                    cap_offset = cap_offset + 1
+                if not hdw_publish_range(self.destination_slot,
+                        self.destination_generation, cap_range,
+                        HD_RANGE_AUX, HD_AUX_RANGE_TEXT): return -1
+                val body_index = self.destination_lower_block_with_cap_range(
+                    body, true, block_row, cap_range, caps.len())
+                if body_index < 0 or not hdw_block_control(self.destination_slot,
+                        self.destination_generation, parent, HD_EXPR_UNSAFE,
+                        body_index): -1 else: parent
+            case ExprKind.CustomBlock(kind, value):
+                # Project synchronously while this AST match frame roots the
+                # source. Arbitrary Custom(type, Any) still requires an owner-
+                # registered codec and fails closed in the typed producer.
+                val parent = self.destination_special_reserve_expr_at(e.span.start, e.span.end, e.span.line, e.span.col, e.span.file, e.span.length)
+                if parent < 0: return -1
+                val block_value = self.destination_lower_custom_value(value, e.span)
+                if block_value < 0 or not hdw_custom_block(self.destination_slot,
+                        self.destination_generation, parent, kind, block_value): -1 else: parent
+            case ExprKind.AsmBlock(asm_node):
+                val parent = self.destination_special_reserve_expr_at(e.span.start, e.span.end, e.span.line, e.span.col, e.span.file, e.span.length)
+                if parent < 0: -1
+                else:
+                    val asm_index = self.destination_lower_asm(asm_node)
+                    if asm_index < 0 or not hdw_inline_asm(self.destination_slot,
+                            self.destination_generation, parent, asm_index): -1 else: parent
+            case ExprKind.AsmMatch(arms):
+                val parent = self.destination_special_reserve_expr_at(e.span.start, e.span.end, e.span.line, e.span.col, e.span.file, e.span.length)
+                val range = hdw_reserve_range(self.destination_slot,
+                    self.destination_generation, HD_RANGE_AUX,
+                    HD_AUX_RANGE_ASM_ARM, arms.len())
+                if parent < 0 or range < 0: return -1
+                var offset = 0
+                while offset < arms.len():
+                    # Keep each arm rooted in the source array; no arm value
+                    # crosses a helper boundary or is copied into a local.
+                    val diagnostic_count = self.diagnostic_messages.len()
+                    val aux = hdw_reserve_aux(self.destination_slot,
+                        self.destination_generation,
+                        arms[offset].span.start, arms[offset].span.end,
+                        arms[offset].span.line, arms[offset].span.col,
+                        arms[offset].span.file, arms[offset].span.length)
+                    if aux < 0: return -1
+                    var spec_row = -1
+                    var body_row = -1
+                    if arms[offset].has_spec:
+                        spec_row = self.destination_lower_asm_spec_unchecked(
+                            arms[offset].spec)
+                        if spec_row < 0: return -1
+                    if arms[offset].has_asm_body:
+                        body_row = self.destination_lower_asm_unchecked(
+                            arms[offset].asm_body)
+                        if body_row < 0: return -1
+                    if not hdw_asm_arm(self.destination_slot,
+                            self.destination_generation, aux,
+                            arms[offset].has_spec, spec_row,
+                            arms[offset].is_wildcard,
+                            arms[offset].has_asm_body, body_row,
+                            arms[offset].is_compile_error,
+                            arms[offset].error_message):
+                        if self.diagnostic_messages.len() == diagnostic_count:
+                            self.error("E-HIR-DEST-ASM-ARM: assembly match arm lowering failed",
+                                arms[offset].span)
+                        return -1
+                    if not hdw_set_range_at(self.destination_slot,
+                            self.destination_generation, range,
+                            HD_AUX_RANGE_ASM_ARM, offset, aux): return -1
+                    offset = offset + 1
+                if not hdw_publish_range(self.destination_slot,
+                        self.destination_generation, range, HD_RANGE_AUX,
+                        HD_AUX_RANGE_ASM_ARM) or not hdw_inline_asm_match(
+                        self.destination_slot, self.destination_generation,
+                        parent, range, arms.len()): -1 else: parent
+            case ExprKind.ArrayLitSuffix(elements, suffix):
+                val parent = self.destination_special_reserve_expr_at(e.span.start, e.span.end, e.span.line, e.span.col, e.span.file, e.span.length)
+                val range = hdw_reserve_range(self.destination_slot,
+                    self.destination_generation, HD_RANGE_EXPR,
+                    HD_AUX_RANGE_NONE, elements.len())
+                val suffix_aux = self.destination_special_reserve_aux_at(e.span.start, e.span.end, e.span.line, e.span.col, e.span.file, e.span.length)
+                if parent < 0 or range < 0 or suffix_aux < 0: return -1
+                var dtype = -1
+                if suffix.has_dtype:
+                    dtype = match suffix.dtype:
+                        case DType.F16: 0
+                        case DType.F32: 1
+                        case DType.F64: 2
+                        case DType.BF16: 3
+                        case DType.I8: 4
+                        case DType.I16: 5
+                        case DType.I32: 6
+                        case DType.I64: 7
+                        case DType.U8: 8
+                        case DType.U16: 9
+                        case DType.U32: 10
+                        case DType.U64: 11
+                var device_kind = -1
+                var device_id = -1
+                if suffix.has_device:
+                    match suffix.device:
+                        case Device.CPU: device_kind = 0
+                        case Device.CUDA(id): device_kind = 1; device_id = id
+                var backend = -1
+                if suffix.has_backend:
+                    backend = match suffix.backend:
+                        case Backend.Native: 0
+                        case Backend.PyTorch: 1
+                if not hdw_tensor_suffix(self.destination_slot,
+                        self.destination_generation, suffix_aux,
+                        suffix.has_dtype, dtype, suffix.has_device,
+                        device_kind, device_id, suffix.trainable, suffix.pinned,
+                        suffix.has_backend, backend, suffix.raw): return -1
+                var offset = 0
+                while offset < elements.len():
+                    val child = self.destination_lower_expr(elements[offset])
+                    if child < 0 or not hdw_set_range_at(self.destination_slot,
+                            self.destination_generation, range,
+                            HD_AUX_RANGE_NONE, offset, child): return -1
+                    offset = offset + 1
+                if not hdw_publish_range(self.destination_slot,
+                        self.destination_generation, range, HD_RANGE_EXPR,
+                        HD_AUX_RANGE_NONE) or not hdw_array_suffix(
+                        self.destination_slot, self.destination_generation,
+                        parent, range, elements.len(), suffix_aux): -1 else: parent
+            case ExprKind.KernelLaunch(kernel, grid, block, args):
+                val parent = self.destination_special_reserve_expr_at(e.span.start, e.span.end, e.span.line, e.span.col, e.span.file, e.span.length)
+                val arg_range = hdw_reserve_range(self.destination_slot,
+                    self.destination_generation, HD_RANGE_AUX,
+                    HD_AUX_RANGE_CALL_ARG, args.len())
+                if parent < 0 or arg_range < 0: return -1
+                val kernel_index = self.destination_lower_expr(kernel)
+                val grid_index = if kernel_index >= 0: self.destination_lower_expr(grid) else: -1
+                val block_index = if grid_index >= 0: self.destination_lower_expr(block) else: -1
+                if kernel_index < 0 or grid_index < 0 or block_index < 0: return -1
+                var offset = 0
+                while offset < args.len():
+                    val arg = args[offset]
+                    val aux = self.destination_special_reserve_aux_at(arg.span.start, arg.span.end, arg.span.line, arg.span.col, arg.span.file, arg.span.length)
+                    if aux < 0: return -1
+                    val child = self.destination_lower_expr(arg.value)
+                    if child < 0 or not hdw_call_arg(self.destination_slot,
+                            self.destination_generation, aux, arg.has_name,
+                            arg.name, child) or not hdw_set_range_at(
+                            self.destination_slot, self.destination_generation,
+                            arg_range, HD_AUX_RANGE_CALL_ARG, offset, aux): return -1
+                    offset = offset + 1
+                if not hdw_publish_range(self.destination_slot,
+                        self.destination_generation, arg_range, HD_RANGE_AUX,
+                        HD_AUX_RANGE_CALL_ARG) or not hdw_kernel_launch(
+                        self.destination_slot, self.destination_generation,
+                        parent, kernel_index, grid_index, block_index,
+                        arg_range, args.len()): -1 else: parent
+            case ExprKind.GpuIntrinsic(kind, args):
+                val parent = self.destination_special_reserve_expr_at(e.span.start, e.span.end, e.span.line, e.span.col, e.span.file, e.span.length)
+                val range = hdw_reserve_range(self.destination_slot,
+                    self.destination_generation, HD_RANGE_EXPR,
+                    HD_AUX_RANGE_NONE, args.len())
+                if parent < 0 or range < 0: return -1
+                var offset = 0
+                while offset < args.len():
+                    val child = self.destination_lower_expr(args[offset])
+                    if child < 0 or not hdw_set_range_at(self.destination_slot,
+                            self.destination_generation, range,
+                            HD_AUX_RANGE_NONE, offset, child): return -1
+                    offset = offset + 1
+                if not hdw_publish_range(self.destination_slot,
+                        self.destination_generation, range, HD_RANGE_EXPR,
+                        HD_AUX_RANGE_NONE): return -1
+                var dimension = -1
+                val shape = match kind:
+                    case GpuIntrinsicKind.GlobalId(dim): dimension = dim; 0
+                    case GpuIntrinsicKind.LocalId(dim): dimension = dim; 1
+                    case GpuIntrinsicKind.BlockId(dim): dimension = dim; 2
+                    case GpuIntrinsicKind.BlockDim(dim): dimension = dim; 3
+                    case GpuIntrinsicKind.GridDim(dim): dimension = dim; 4
+                    case GpuIntrinsicKind.Sync: 5
+                    case GpuIntrinsicKind.Barrier: 6
+                    case GpuIntrinsicKind.MemFence: 7
+                    case GpuIntrinsicKind.AtomicAdd: 8
+                    case GpuIntrinsicKind.AtomicSub: 9
+                    case GpuIntrinsicKind.AtomicMin: 10
+                    case GpuIntrinsicKind.AtomicMax: 11
+                    case GpuIntrinsicKind.AtomicAnd: 12
+                    case GpuIntrinsicKind.AtomicOr: 13
+                    case GpuIntrinsicKind.AtomicXor: 14
+                    case GpuIntrinsicKind.AtomicExchange: 15
+                    case GpuIntrinsicKind.AtomicCas: 16
+                    case GpuIntrinsicKind.LaneId: 17
+                    case GpuIntrinsicKind.WarpId: 18
+                    case GpuIntrinsicKind.WarpSize: 19
+                    case GpuIntrinsicKind.WarpShuffle: 20
+                    case GpuIntrinsicKind.WarpShuffleDown: 21
+                    case GpuIntrinsicKind.WarpShuffleUp: 22
+                    case GpuIntrinsicKind.WarpShuffleXor: 23
+                    case GpuIntrinsicKind.WarpBallot: 24
+                    case GpuIntrinsicKind.WarpReduceAdd: 25
+                    case GpuIntrinsicKind.WarpBroadcast: 26
+                    case GpuIntrinsicKind.WarpScanAdd: 27
+                    case GpuIntrinsicKind.SpecConst: 28
+                    case GpuIntrinsicKind.Vec4LoadF32: 29
+                    case GpuIntrinsicKind.Vec4StoreF32: 30
+                    case GpuIntrinsicKind.Vec2LoadF32: 31
+                    case GpuIntrinsicKind.Vec2StoreF32: 32
+                if not hdw_gpu_intrinsic(self.destination_slot,
+                        self.destination_generation, parent, shape, shape <= 4,
+                        dimension, range, args.len()): -1 else: parent
+            case ExprKind.Spawn(child):
+                val parent = self.destination_special_reserve_expr_at(e.span.start, e.span.end, e.span.line, e.span.col, e.span.file, e.span.length)
+                if parent < 0: return -1
+                val child_index = self.destination_lower_expr(child)
+                if child_index < 0 or not hdw_single_expr(self.destination_slot,
+                        self.destination_generation, parent, HD_EXPR_SPAWN,
+                        child_index): -1 else: parent
+            case _:
+                -1
+
+export HirLowering

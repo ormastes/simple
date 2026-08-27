@@ -1,0 +1,289 @@
+# Receipt-owning production executor for the seven frozen FV2 RV64 product rows.
+#
+# Commands are supplied as argv, never shell text.  The runner hashes every
+# executable and declared input immediately before a bounded execution, retains
+# the complete stdout/stderr in a reversible whitespace-free encoding, and
+# feeds its receipts directly to the typed Gate-6 reducer.
+
+use app.io.mod.{file_exists, file_hash_sha256, file_read, process_run_timeout}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.base_encoding.base64.{base64_encode}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use compiler.common.assurance.formal_delivery_gates.{FormalDeliveryReceiptFileV1}
+use compiler.tools.verify.formal_gate_collectors.{FormalGateCollectionV1}
+use compiler.tools.verify.formal_product_gate_collectors.{Rv64ProductIdentityV1,
+    collect_executed_rv64_privilege_mmu_linux_gate_v1}
+
+pub struct Rv64ObservedInputV1:
+    path: text
+    expected_sha256: text
+
+pub struct Rv64ProductCommandV1:
+    executable_path: text
+    expected_executable_sha256: text
+    args: [text]
+    timeout_ms: i64
+    policy_name: text
+    observed_inputs: [Rv64ObservedInputV1]
+    # Rows 0..4 require one textual proof/certificate.  Validation rows 5..6
+    # must leave this empty and cannot impersonate proof evidence.
+    proof_material_path: text
+
+pub struct Rv64ProductRunnerConfigV1:
+    identity: Rv64ProductIdentityV1
+    rows: [Rv64ProductCommandV1]
+
+pub struct Rv64ProductExecutionV1:
+    collection: FormalGateCollectionV1
+    executed_receipts: [text]
+    proof_material: [FormalDeliveryReceiptFileV1]
+    diagnostic: text
+
+fn rv64_runner_failed_collection_v1(
+    identity: Rv64ProductIdentityV1
+) -> FormalGateCollectionV1:
+    collect_executed_rv64_privilege_mmu_linux_gate_v1(identity, [], [])
+
+fn rv64_runner_failure_v1(
+    identity: Rv64ProductIdentityV1,
+    diagnostic: text
+) -> Rv64ProductExecutionV1:
+    Rv64ProductExecutionV1(rv64_runner_failed_collection_v1(identity), [], [],
+        diagnostic)
+
+fn rv64_runner_frame_v1(value: text) -> text:
+    value.len().to_string() + ":" + value
+
+fn rv64_runner_args_policy_v1(command: Rv64ProductCommandV1) -> text:
+    var framed_args: [text] = []
+    for arg in command.args: framed_args.push(rv64_runner_frame_v1(arg))
+    var framed_inputs: [text] = []
+    for input in command.observed_inputs:
+        framed_inputs.push(rv64_runner_frame_v1(input.path) +
+            rv64_runner_frame_v1(input.expected_sha256))
+    "Rv64ProductCommandPolicy-v1" +
+        rv64_runner_frame_v1(command.policy_name) +
+        rv64_runner_frame_v1(command.executable_path) +
+        rv64_runner_frame_v1(command.expected_executable_sha256) +
+        command.args.len().to_string() + ":[" + framed_args.join("") + "]" +
+        command.observed_inputs.len().to_string() + ":[" +
+            framed_inputs.join("") + "]" +
+        rv64_runner_frame_v1(command.proof_material_path) +
+        rv64_runner_frame_v1(command.timeout_ms.to_string())
+
+fn rv64_output_encode_v1(output: text) -> text:
+    # RFC 4648 preserves the exact UTF-8 bytes while satisfying the frozen
+    # receipt parser's single-token field contract.
+    "base64-v1:" + base64_encode(output)
+
+fn rv64_receipt_schema_v1(index: i64) -> text:
+    match index:
+        case 0: "fv2-rv64-shared-xlen-refinement-receipt-v1"
+        case 1: "fv2-rv64-privilege-csr-proof-receipt-v1"
+        case 2: "fv2-rv64-mmu-page-walk-proof-receipt-v1"
+        case 3: "fv2-rv64-precise-trap-interrupt-proof-receipt-v1"
+        case 4: "fv2-rv64-post-synthesis-equivalence-receipt-v1"
+        case 5: "fv2-rv64-linux-boot-validation-receipt-v1"
+        case _: "fv2-rv64-architectural-compatibility-validation-receipt-v1"
+
+fn rv64_receipt_authority_v1(index: i64) -> text:
+    match index:
+        case 0: "kernel-replayed-shared-xlen"
+        case 1: "kernel-replayed-privilege-csr"
+        case 2: "kernel-replayed-mmu-page-walk"
+        case 3: "kernel-replayed-precise-trap-interrupt"
+        case 4: "independent-rtl-netlist-equivalence"
+        case 5: "bounded-linux-boot-execution"
+        case _: "independent-isa-oracle-execution"
+
+fn rv64_expected_output_witness_v1(index: i64) -> text:
+    match index:
+        case 0: "FV2-RV64-SHARED-XLEN: PASS"
+        case 1: "FV2-RV64-PRIVILEGE-CSR: PASS"
+        case 2: "FV2-RV64-MMU-PAGE-WALK: PASS"
+        case 3: "FV2-RV64-PRECISE-TRAP-INTERRUPT: PASS"
+        case 4: "FV2-RV64-POST-SYNTHESIS-EQUIVALENCE: PASS"
+        case 5: "FV2-RV64-LINUX-BOOT: PASS"
+        case _: "FV2-RV64-INDEPENDENT-ISA-ORACLE: PASS"
+
+fn rv64_canonical_executable_v1(index: i64) -> text:
+    match index:
+        case 0: "scripts/check/check-riscv-shared-xlen-refinement.shs"
+        case 1: "scripts/check/check-riscv64-privilege-csr-proof.shs"
+        case 2: "scripts/check/check-riscv64-mmu-page-walk-proof.shs"
+        case 3: "scripts/check/check-riscv64-trap-interrupt-proof.shs"
+        case 4: "scripts/check/check-riscv64-post-synthesis-equivalence.shs"
+        case 5: "scripts/check/check-riscv-rtl-linux-smoke.shs"
+        case _: "scripts/check/check-riscv-gen2-zca-oracle.shs"
+
+fn rv64_canonical_policy_v1(index: i64) -> text:
+    "fv2-rv64-authority-row-" + index.to_string() + "-v1"
+
+pub fn rv64_product_runner_row_contract_error_v1(
+    index: i64,
+    row: Rv64ProductCommandV1
+) -> text:
+    if index < 0 or index >= 7:
+        return "FV2-E-RV64-RUNNER-ROW: row index is outside the frozen schedule"
+    if row.executable_path == "":
+        return "FV2-E-RV64-RUNNER-TOOL: executable path is required"
+    if not sha256_lower_hex_valid(row.expected_executable_sha256):
+        return "FV2-E-RV64-RUNNER-TOOL-IDENTITY: pinned executable SHA-256 is required"
+    if row.timeout_ms <= 0:
+        return "FV2-E-RV64-RUNNER-TIMEOUT: every row requires a positive timeout"
+    if row.policy_name == "":
+        return "FV2-E-RV64-RUNNER-POLICY: policy identity is required"
+    if row.observed_inputs.len() == 0:
+        return "FV2-E-RV64-RUNNER-INPUT: every execution row must bind observed product input"
+    if index < 5 and row.proof_material_path == "":
+        return "FV2-E-RV64-RUNNER-PROOF: proof rows require material"
+    if index >= 5 and row.proof_material_path != "":
+        return "FV2-E-RV64-RUNNER-VALIDATION: validation rows cannot claim proof material"
+    for input in row.observed_inputs:
+        if input.path == "" or not sha256_lower_hex_valid(
+                input.expected_sha256):
+            return "FV2-E-RV64-RUNNER-INPUT: exact input identities are required"
+    ""
+
+pub fn rv64_product_runner_config_error_v1(
+    config: Rv64ProductRunnerConfigV1
+) -> text:
+    if not sha256_lower_hex_valid(config.identity.hwir_hash) or
+            not sha256_lower_hex_valid(config.identity.rtl_hash) or
+            not sha256_lower_hex_valid(config.identity.netlist_hash) or
+            not sha256_lower_hex_valid(config.identity.os_image_hash) or
+            not sha256_lower_hex_valid(config.identity.platform_profile_hash) or
+            not sha256_lower_hex_valid(config.identity.assumption_manifest_hash):
+        return "FV2-E-RV64-RUNNER-IDENTITY: complete product identities are required"
+    if config.rows.len() != 7:
+        return "FV2-E-RV64-RUNNER-COUNT: exactly seven row commands are required"
+    for index in 0..config.rows.len():
+        val row = config.rows[index]
+        val row_contract_error = rv64_product_runner_row_contract_error_v1(
+            index, row)
+        if row_contract_error != "": return row_contract_error
+    for index in 0..config.rows.len():
+        val row = config.rows[index]
+        if row.executable_path != rv64_canonical_executable_v1(index) or
+                row.policy_name != rv64_canonical_policy_v1(index):
+            return "FV2-E-RV64-RUNNER-AUTHORITY: row " + index.to_string() +
+                " must use its reviewed repository authority and frozen policy"
+        if not file_exists(row.executable_path):
+            return "FV2-E-RV64-RUNNER-TOOL: row " + index.to_string() +
+                " executable is absent"
+        var required_hashes = if index == 0:
+            [config.identity.hwir_hash, config.identity.platform_profile_hash,
+                config.identity.assumption_manifest_hash]
+        elif index >= 1 and index <= 3:
+            [config.identity.hwir_hash, config.identity.rtl_hash,
+                config.identity.assumption_manifest_hash]
+        elif index == 4:
+            [config.identity.rtl_hash, config.identity.netlist_hash,
+                config.identity.assumption_manifest_hash]
+        elif index == 5:
+            [config.identity.rtl_hash, config.identity.os_image_hash,
+                config.identity.platform_profile_hash]
+        else:
+            [config.identity.hwir_hash, config.identity.os_image_hash,
+                config.identity.platform_profile_hash,
+                config.identity.assumption_manifest_hash]
+        for required_hash in required_hashes:
+            var observed = false
+            for input in row.observed_inputs:
+                if input.expected_sha256 == required_hash: observed = true
+            if not observed:
+                return "FV2-E-RV64-RUNNER-BINDING: row " + index.to_string() +
+                    " does not observe every required product identity"
+    ""
+
+pub fn rv64_product_runner_observed_inputs_error_v1(
+    command: Rv64ProductCommandV1
+) -> text:
+    for input in command.observed_inputs:
+        if not file_exists(input.path):
+            return "FV2-E-RV64-RUNNER-INPUT-MISSING: declared input is absent"
+        val observed = file_hash_sha256(input.path)
+        if observed == "" or observed != input.expected_sha256:
+            return "FV2-E-RV64-RUNNER-INPUT-DRIFT: declared input changed before execution"
+    ""
+
+pub fn rv64_product_runner_process_result_error_v1(
+    index: i64,
+    output: text,
+    exit_code: i64
+) -> text:
+    if index < 0 or index >= 7:
+        return "FV2-E-RV64-RUNNER-ROW: row index is outside the frozen schedule"
+    if exit_code == -1 and output.contains("[TIMEOUT:"):
+        return "FV2-E-RV64-RUNNER-TIMEOUT: row exceeded its bounded runtime"
+    if exit_code != 0:
+        return "FV2-E-RV64-RUNNER-REJECTED: row command did not accept the product"
+    if output == "" or not output.contains(
+            rv64_expected_output_witness_v1(index)):
+        return "FV2-E-RV64-RUNNER-WITNESS: accepted execution witness is absent"
+    ""
+
+fn rv64_run_product_row_v1(
+    identity: Rv64ProductIdentityV1,
+    index: i64,
+    command: Rv64ProductCommandV1
+) -> Result<(text, FormalDeliveryReceiptFileV1?), text>:
+    val input_error = rv64_product_runner_observed_inputs_error_v1(command)
+    if input_error != "": return Err(input_error)
+    val tool_hash = file_hash_sha256(command.executable_path)
+    if not sha256_lower_hex_valid(tool_hash) or
+            tool_hash != command.expected_executable_sha256:
+        return Err("FV2-E-RV64-RUNNER-TOOL-HASH: pinned executable identity changed before execution")
+    var proof_hash = "none"
+    var proof_file: FormalDeliveryReceiptFileV1? = nil
+    if index < 5:
+        if not file_exists(command.proof_material_path):
+            return Err("FV2-E-RV64-RUNNER-PROOF-MISSING: proof/certificate material is absent")
+        val proof_content = file_read(command.proof_material_path)
+        if proof_content == "":
+            return Err("FV2-E-RV64-RUNNER-PROOF-EMPTY: proof/certificate material is empty")
+        proof_hash = sha256_text(proof_content)
+        if file_hash_sha256(command.proof_material_path) != proof_hash:
+            return Err("FV2-E-RV64-RUNNER-PROOF-ENCODING: proof material must be exact textual evidence")
+        proof_file = FormalDeliveryReceiptFileV1(proof_hash, proof_content)
+    val (stdout, stderr, exit_code) = process_run_timeout(
+        command.executable_path, command.args, command.timeout_ms)
+    val output = stdout + stderr
+    val process_error = rv64_product_runner_process_result_error_v1(
+        index, output, exit_code)
+    if process_error != "": return Err(process_error)
+    val encoded_output = rv64_output_encode_v1(output)
+    val policy_hash = sha256_text(rv64_runner_args_policy_v1(command))
+    val receipt = "schema " + rv64_receipt_schema_v1(index) + "\n" +
+        "authority " + rv64_receipt_authority_v1(index) + "\n" +
+        "product_identity_sha256 " + identity.hash() + "\n" +
+        "proof_or_certificate_sha256 " + proof_hash + "\n" +
+        "tool_identity_sha256 " + tool_hash + "\n" +
+        "command_policy_sha256 " + policy_hash + "\n" +
+        "output_evidence " + encoded_output + "\n" +
+        "output_sha256 " + sha256_text(encoded_output) + "\n" +
+        "status passed\n"
+    Ok((receipt, proof_file))
+
+pub fn run_rv64_product_evidence_v1(
+    config: Rv64ProductRunnerConfigV1
+) -> Rv64ProductExecutionV1:
+    val config_error = rv64_product_runner_config_error_v1(config)
+    if config_error != "": return rv64_runner_failure_v1(
+        config.identity, config_error)
+    var receipts: [text] = []
+    var proof_material: [FormalDeliveryReceiptFileV1] = []
+    for index in 0..config.rows.len():
+        match rv64_run_product_row_v1(config.identity, index,
+                config.rows[index]):
+            case Err(message):
+                return rv64_runner_failure_v1(config.identity, message)
+            case Ok(result):
+                receipts.push(result.0)
+                if val material = result.1: proof_material.push(material)
+    val collection = collect_executed_rv64_privilege_mmu_linux_gate_v1(
+        config.identity, receipts, proof_material)
+    if collection.gate_evidence.status.name() != "passed":
+        return Rv64ProductExecutionV1(collection, receipts, proof_material,
+            collection.gate_evidence.diagnostic)
+    Rv64ProductExecutionV1(collection, receipts, proof_material, "")

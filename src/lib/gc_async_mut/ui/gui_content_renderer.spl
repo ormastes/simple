@@ -71,6 +71,164 @@ fn gui_content_frame_clear_color() -> u32:
     """The canonical widget composition owns its first theme-derived seed."""
     0u32
 
+fn _gui_content_next_use() -> i64:
+    _gui_content_use_clock = _gui_content_use_clock + 1
+    _gui_content_use_clock
+
+fn _gui_content_target_pixels(target: GuiContentPersistentTarget) -> i64:
+    target.width.to_i64() * target.height.to_i64()
+
+fn _gui_content_target_live_pixels() -> i64:
+    var total: i64 = 0
+    for target in _gui_content_targets:
+        total = total + _gui_content_target_pixels(target)
+    total
+
+fn _gui_content_target_index(window_id: text, width: i32, height: i32,
+                             backend: text) -> i64:
+    var index: i64 = 0
+    while index < _gui_content_targets.len():
+        val target = _gui_content_targets[index]
+        if (target.window_id == window_id and target.width == width and
+            target.height == height and target.backend == backend):
+            return index
+        index = index + 1
+    -1
+
+fn _gui_content_target_oldest_valid() -> i64:
+    var oldest: i64 = -1
+    var index: i64 = 0
+    while index < _gui_content_targets.len():
+        if oldest < 0 or _gui_content_targets[index].last_use < _gui_content_targets[oldest].last_use:
+            oldest = index
+        index = index + 1
+    oldest
+
+fn _gui_content_target_evict(index: i64):
+    if index < 0 or index >= _gui_content_targets.len():
+        return
+    val retired = _gui_content_targets[index]
+    retired.engine.shutdown()
+    var retained: [GuiContentPersistentTarget] = []
+    var cursor: i64 = 0
+    while cursor < _gui_content_targets.len():
+        if cursor != index:
+            retained.push(_gui_content_targets[cursor])
+        cursor = cursor + 1
+    _gui_content_targets = retained
+
+fn _gui_content_target_evict_other_sizes(window_id: text, width: i32,
+                                          height: i32, backend: text):
+    var index: i64 = _gui_content_targets.len() - 1
+    while index >= 0:
+        val target = _gui_content_targets[index]
+        if target.window_id == window_id and
+           (target.width != width or target.height != height or target.backend != backend):
+            _gui_content_target_evict(index)
+        index = index - 1
+
+fn _gui_content_target_acquire(window_id: text, width: i32, height: i32,
+                               backend: text, composition: DrawIrComposition) -> i64:
+    val required_pixels = width.to_i64() * height.to_i64()
+    if required_pixels <= 0 or required_pixels > GUI_CONTENT_TARGET_PIXEL_BUDGET:
+        return -1
+    _gui_content_target_evict_other_sizes(window_id, width, height, backend)
+    while (_gui_content_targets.len() >= GUI_CONTENT_TARGET_MAX_ENTRIES or
+           _gui_content_target_live_pixels() + required_pixels > GUI_CONTENT_TARGET_PIXEL_BUDGET):
+        val oldest = _gui_content_target_oldest_valid()
+        if oldest < 0:
+            return -1
+        _gui_content_target_evict(oldest)
+    val engine = Engine2D.create_with_backend(width, height, backend)
+    _gui_content_targets.push(GuiContentPersistentTarget(
+        window_id: window_id, width: width, height: height, backend: backend,
+        engine: engine, packed_store: engine2d_packed_v3_store(1u64),
+        content_revision: -1, composition: composition,
+        last_use: _gui_content_next_use()))
+    _gui_content_targets.len() - 1
+
+fn _gui_content_damage_rects_are_local(rects: [i64], width: i32, height: i32) -> bool:
+    if rects.len() == 0 or rects.len() % 4 != 0:
+        return false
+    val surface = width.to_i64() * height.to_i64()
+    var planned: i64 = 0
+    var index: i64 = 0
+    while index < rects.len():
+        val x = rects[index]
+        val y = rects[index + 1]
+        val rect_w = rects[index + 2]
+        val rect_h = rects[index + 3]
+        if x < 0 or y < 0 or rect_w <= 0 or rect_h <= 0 or
+           x > width.to_i64() - rect_w or y > height.to_i64() - rect_h:
+            return false
+        if planned > surface - rect_w * rect_h:
+            return false
+        planned = planned + rect_w * rect_h
+        var prior: i64 = 0
+        while prior < index:
+            val prior_x = rects[prior]
+            val prior_y = rects[prior + 1]
+            val prior_w = rects[prior + 2]
+            val prior_h = rects[prior + 3]
+            if not (x + rect_w <= prior_x or prior_x + prior_w <= x or
+                    y + rect_h <= prior_y or prior_y + prior_h <= y):
+                return false
+            prior = prior + 4
+        index = index + 4
+    planned < surface
+
+fn _gui_content_damage_plan(rects: [i64]) -> DamageFramePlan:
+    DamageFramePlan(
+        rects: rects, mode: DAMAGE_PLAN_LOCAL,
+        source_tile_count: rects.len() / 4,
+        output_rect_count: rects.len() / 4, merged_tile_count: 0,
+        dirty_pixels: 0, planned_pixels: 0, tiles_examined: 0,
+        vertical_candidates_examined: 0, run_workspace_allocations: 0,
+        full_fallback_count: 0, fallback_reason: 0)
+
+fn _gui_content_target_frame(target: GuiContentPersistentTarget,
+                             window_id: text, parent_window_id: text,
+                             offset_x: i32, offset_y: i32,
+                             scene_revision: i64, content_revision: i64) -> WmContentFrame:
+    wm_gui_content_frame_from_pixels(
+        window_id, parent_window_id, offset_x, offset_y, target.width,
+        target.height, target.engine.read_pixels(), scene_revision,
+        content_revision)
+
+fn gui_content_frame_cache_clear():
+    while _gui_content_targets.len() > 0:
+        _gui_content_target_evict(_gui_content_targets.len() - 1)
+    _gui_content_cache_hits = 0
+    _gui_content_rendered = 0
+    _gui_content_local_replays = 0
+    _gui_content_damage_mode = DAMAGE_PLAN_FULL
+    _gui_content_damage_rects = []
+
+fn gui_content_frame_invalidate(window_id: text):
+    var index: i64 = _gui_content_targets.len() - 1
+    while index >= 0:
+        if _gui_content_targets[index].window_id == window_id:
+            _gui_content_target_evict(index)
+        index = index - 1
+
+fn gui_content_frame_cache_hit_count() -> i64:
+    _gui_content_cache_hits
+
+fn gui_content_frame_render_count() -> i64:
+    _gui_content_rendered
+
+fn gui_content_frame_cache_pixels() -> i64:
+    _gui_content_target_live_pixels()
+
+fn gui_content_frame_local_replay_count() -> i64:
+    _gui_content_local_replays
+
+fn gui_content_frame_damage_mode() -> i64:
+    _gui_content_damage_mode
+
+fn gui_content_frame_damage_rects() -> [i64]:
+    _gui_content_damage_rects
+
 fn gui_session_content_frame(
     session: UISession,
     window_id: text,
@@ -90,14 +248,11 @@ fn gui_session_content_frame(
         )
     val composition = session.submit_widget_draw_ir(width, height, "cpu")
     var engine = Engine2D.create_with_backend(width, height, "cpu")
-    # The canonical widget Draw IR begins with its package-derived opaque
-    # surface initializer. Keep the renderer neutral so it cannot shadow or
-    # compete with the selected ThemeRenderSnapshot.
-    engine.clear(gui_content_frame_clear_color())
+    engine.clear(0xff10151du32)
     val rendered = engine2d_draw_ir_adv_composition_with_images(
-        engine, composition, false, images
+        packed.0, composition, false, images
     )
-    engine.shutdown()
+    packed.0.shutdown()
     if (rendered.fallback_required or rendered.skipped_command_count != 0 or
         rendered.pixels.len() != width * height):
         return wm_gui_content_frame_from_pixels(

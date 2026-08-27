@@ -1,10 +1,33 @@
 # Workspace Root Write Guard Specification
 
-> Tests covering Workspace root write guard implementation.
+> <details>
+
+<!-- sdn-diagram:id=workspace_root_write_guard_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=workspace_root_write_guard_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+workspace_root_write_guard_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=workspace_root_write_guard_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -17,104 +40,124 @@
 
 #### ships the root guard script
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- ships the root guard script
-   - Expected: file_exists("scripts/check-workspace-root-guard.shs") is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("ships the root guard script")
 expect(file_exists("scripts/check-workspace-root-guard.shs")).to_equal(true)
 ```
 
 </details>
 
-#### flags misplaced root entries and passes clean trees in audit mode
-
-- flags misplaced root entries and passes clean trees in audit mode
-   - Expected: bad_rc equals `1`
-   - Expected: bad_out contains `WRG001`
-   - Expected: good_rc equals `0`
-   - Expected: good_out contains `OK`
-
+#### supports audit fix lock unlock modes
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("flags misplaced root entries and passes clean trees in audit mode")
-write_file("/tmp/wrg_bad_paths.txt", "stray_root_file.txt\n")
-write_file("/tmp/wrg_good_paths.txt", "src/lib/foo.spl\n")
-# oracle: a root entry not allowed by FILE.md is a WRG001 violation (exit 1)
-val (bad_out, bad_rc) = run_guard(["audit", "--path-file", "/tmp/wrg_bad_paths.txt"])
-expect(bad_rc).to_equal(1)
-expect(bad_out.contains("WRG001")).to_equal(true)
-# oracle: an allowed tree path audits clean (exit 0)
-val (good_out, good_rc) = run_guard(["audit", "--path-file", "/tmp/wrg_good_paths.txt"])
-expect(good_rc).to_equal(0)
-expect(good_out.contains("OK")).to_equal(true)
+val source = read_file("scripts/check-workspace-root-guard.shs")
+expect(source.contains("audit|fix|lock|unlock")).to_equal(true)
+expect(source.contains("--apply")).to_equal(true)
+expect(source.contains("run_audit")).to_equal(true)
+expect(source.contains("run_fix")).to_equal(true)
+expect(source.contains("run_lock_preview")).to_equal(true)
+expect(source.contains("run_lock_apply")).to_equal(true)
+expect(source.contains("run_unlock_apply")).to_equal(true)
+expect(source.contains("load_builtin_allowed_root")).to_equal(true)
+expect(source.contains("FILE.md not found at repository root")).to_equal(false)
 ```
 
 </details>
 
-#### runs its own parser and path-classification self-tests
-
-- runs its own parser and path-classification self-tests
-   - Expected: rc equals `0`
-   - Expected: out contains `self-test OK`
-
+#### does not delete by default
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("runs its own parser and path-classification self-tests")
-# oracle: the built-in self-test suite must pass
-val (out, rc) = run_guard(["--self-test"])
-expect(rc).to_equal(0)
-expect(out.contains("self-test OK")).to_equal(true)
+val source = read_file("scripts/check-workspace-root-guard.shs")
+expect(source.contains("does not delete files")).to_equal(true)
+expect(source.contains("rm -rf \"$TMP_DIR\"")).to_equal(true)
+expect(source.contains("rm -rf \"$rel\"")).to_equal(false)
 ```
 
 </details>
 
-#### rejects unknown arguments instead of guessing a mode
-
-- rejects unknown arguments instead of guessing a mode
-   - Expected: rc equals `2`
-   - Expected: (out + err) contains `unknown argument`
-
+#### documents Windows ACL locking
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("rejects unknown arguments instead of guessing a mode")
-# oracle: a bogus mode fails closed with exit 2 and a diagnostic
-val (out, err, rc) = run_guard_all(["bogus"])
-expect(rc).to_equal(2)
-expect((out + err).contains("unknown argument")).to_equal(true)
+val source = read_file("scripts/check-workspace-root-guard.shs")
+expect(source.contains("icacls")).to_equal(true)
+expect(source.contains("Administrator")).to_equal(true)
+expect(source.contains("protected_lock_dirs")).to_equal(true)
+expect(source.contains("MUTABLE_ROOT_DIRS")).to_equal(true)
+```
+
+</details>
+
+#### wires lint entrypoints to the staged audit helper
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val lint = read_file("src/app/io/cli_lint_commands.spl")
+val lint_entry = read_file("src/app/cli/lint_entry.spl")
+expect(lint.contains("_cli_run_workspace_root_guard()")).to_equal(true)
+expect(lint_entry.contains("_cli_run_workspace_root_guard()")).to_equal(true)
+```
+
+</details>
+
+#### wires tracked CLI lint to staged audit
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ops = read_file("src/app/io/cli_ops.spl")
+val lint = read_file("src/app/io/cli_lint_commands.spl")
+val lint_entry = read_file("src/app/cli/lint_entry.spl")
+expect(ops.contains("_cli_run_workspace_root_guard")).to_equal(true)
+expect(ops.contains("check-workspace-root-guard.shs")).to_equal(true)
+expect(lint.contains("_cli_run_workspace_root_guard()")).to_equal(true)
+expect(lint_entry.contains("_cli_run_workspace_root_guard()")).to_equal(true)
+```
+
+</details>
+
+#### wires tracked repo hygiene to staged audit
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source = read_file("scripts/check/check-repo-hygiene.shs")
+expect(source.contains("check-workspace-root-guard.shs audit --staged")).to_equal(true)
 ```
 
 </details>
@@ -126,74 +169,23 @@ expect((out + err).contains("unknown argument")).to_equal(true)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/workspace_root_write_guard_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Workspace root write guard implementation.
+Tests covering:
 - Workspace root write guard implementation
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-APP`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `fb28777992b857d3faead3d10017834b17e2cfcfe4a9b5114cc74a5ec9315ead`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `fb28777992b857d3faead3d10017834b17e2cfcfe4a9b5114cc74a5ec9315ead`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `fb28777992b857d3faead3d10017834b17e2cfcfe4a9b5114cc74a5ec9315ead`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/01_unit/app/workspace_root_write_guard_spec.spl
-mirror: doc/06_spec/01_unit/app/workspace_root_write_guard_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/workspace_root_write_guard_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/workspace_root_write_guard_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/workspace_root_write_guard_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 4 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/app/workspace_root_write_guard_spec.spl:22:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'ships the root guard script' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/workspace_root_write_guard_spec.spl:27:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'flags misplaced root entries and passes clean trees in audit mode' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/workspace_root_write_guard_spec.spl:41:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'runs its own parser and path-classification self-tests' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

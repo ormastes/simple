@@ -1,0 +1,129 @@
+# Canonical pure-Simple NVFS boot root transaction.
+#
+# NVFS superblock selection and DBFS-backing validation precede driver open.
+# VFS root readiness and SOSIX positioned routing are then published as one
+# rollback-capable transaction shared by hosted and freestanding boot lanes.
+
+use os.services.block_device.{BlockDevice}
+use os.kernel.abi.syscall_shim_positioned.{
+    shim_positioned_install_backend_route_v1
+}
+use os.sosix.fs.positioned_backend_composition_v1.{
+    SosixPositionedBackendKindV1
+}
+use os.kernel.boot.dbfs_root_mount_transaction.{
+    DBFS_BOOT_ARENA_BASE_LBA_V1,
+    DBFS_BOOT_MAX_ARENA_BLOCK_COUNT_V1
+}
+use os.services.vfs.vfs_nvfs_root_transaction.{
+    vfs_nvfs_root_mount_stage_v1,
+    vfs_nvfs_root_mount_commit_v1,
+    vfs_nvfs_root_mount_abort_v1
+}
+use std.fs_driver.nvfs_superblock.{
+    NvfsSuperblock,
+    NVFS_MAGIC,
+    nvfs_superblock_read_from_bytes
+}
+use std.db.dbfs_engine.superblock.{
+    dbfs_superblock_set_device,
+    dbfs_superblock_probe_disk,
+    dbfs_superblock_read_from_disk,
+    dbfs_superblock_validate
+}
+use std.fs_driver.nvfs_driver.{NvfsDriver}
+
+pub val NVFS_BOOT_ARENA_BASE_LBA_V1: i64 = DBFS_BOOT_ARENA_BASE_LBA_V1
+pub val NVFS_BOOT_MAX_ARENA_BLOCK_COUNT_V1: u64 = DBFS_BOOT_MAX_ARENA_BLOCK_COUNT_V1
+pub val NVFS_BOOT_DBFS_BACKED_PROVIDER_V1: text = "nvfs-dbfs-backed-v1"
+
+fn _nvfs_boot_magic_present_v1(bytes: [u8]) -> bool:
+    if bytes.len() < 4: return false
+    val magic = (bytes[0] as u32) |
+        ((bytes[1] as u32) << 8) |
+        ((bytes[2] as u32) << 16) |
+        ((bytes[3] as u32) << 24)
+    magic == NVFS_MAGIC
+
+fn _nvfs_boot_parsed_replica_v1(bytes: [u8]) -> NvfsSuperblock?:
+    val parsed = nvfs_superblock_read_from_bytes(bytes)
+    if parsed.is_err(): return nil
+    Some(parsed.unwrap())
+
+fn _nvfs_boot_select_superblock_v1(dev: BlockDevice) -> Result<NvfsSuperblock, text>:
+    """Classify absent, invalid, and conflicting media without collapsing them."""
+    val read_a = dev.read_sector(0u64)
+    val read_b = dev.read_sector(1u64)
+    val bytes_a = if read_a.is_ok(): read_a.unwrap() else: []
+    val bytes_b = if read_b.is_ok(): read_b.unwrap() else: []
+    val parsed_a = _nvfs_boot_parsed_replica_v1(bytes_a)
+    val parsed_b = _nvfs_boot_parsed_replica_v1(bytes_b)
+    if parsed_a.? and parsed_a.unwrap().replica_id != 0u8:
+        return Err("nvfs-root: invalid-superblock-replica-id")
+    if parsed_b.? and parsed_b.unwrap().replica_id != 1u8:
+        return Err("nvfs-root: invalid-superblock-replica-id")
+    val replica_a = parsed_a
+    val replica_b = parsed_b
+    if replica_a.? and replica_b.?:
+        val a = replica_a.unwrap()
+        val b = replica_b.unwrap()
+        if a.uuid_hi != b.uuid_hi or a.uuid_lo != b.uuid_lo:
+            return Err("nvfs-root: conflicting-superblocks")
+        if a.mount_generation == b.mount_generation and
+            (a.feature_bits != b.feature_bits or
+             a.checkpoint_root != b.checkpoint_root or
+             a.version != b.version or a.compat_v1 != b.compat_v1):
+            return Err("nvfs-root: conflicting-superblocks")
+        if b.mount_generation > a.mount_generation: return Ok(b)
+        return Ok(a)
+    if replica_a.?: return Ok(replica_a.unwrap())
+    if replica_b.?: return Ok(replica_b.unwrap())
+    if read_a.is_err() or read_b.is_err():
+        return Err("nvfs-root: superblock-read-failed")
+    if (_nvfs_boot_magic_present_v1(bytes_a) or
+        _nvfs_boot_magic_present_v1(bytes_b)):
+        return Err("nvfs-root: invalid-superblock")
+    Err("nvfs-root: no-superblock")
+
+pub fn boot_nvfs_root_mount_transaction_v1(
+    dev: BlockDevice,
+    max_arena_blocks: u64
+) -> Result<NvfsDriver, text>:
+    """Validate and publish one DBFS-backed NVFS root within an LBA bound."""
+    if (max_arena_blocks < 4u64 or
+        max_arena_blocks > NVFS_BOOT_MAX_ARENA_BLOCK_COUNT_V1):
+        return Err("nvfs-root: invalid-arena-bound")
+
+    val selected = _nvfs_boot_select_superblock_v1(dev)
+    if selected.is_err(): return Err(selected.unwrap_err())
+
+    dbfs_superblock_set_device(dev)
+    if not dbfs_superblock_probe_disk():
+        return Err("nvfs-root: no-backing-superblock")
+    val backing_sb = dbfs_superblock_read_from_disk()
+    if not dbfs_superblock_validate(backing_sb):
+        return Err("nvfs-root: invalid-backing-superblock")
+    if (backing_sb.block_count < 4u64 or
+        backing_sb.block_count > max_arena_blocks or
+        backing_sb.block_count > NVFS_BOOT_MAX_ARENA_BLOCK_COUNT_V1):
+        return Err("nvfs-root: backing-arena-out-of-bounds")
+
+    val opened = NvfsDriver.new_on_device(
+        NVFS_BOOT_DBFS_BACKED_PROVIDER_V1, dev,
+        NVFS_BOOT_ARENA_BASE_LBA_V1, backing_sb.block_count.to_i64())
+    if opened.is_err():
+        return Err("nvfs-root: driver-open-failed")
+    val staged = vfs_nvfs_root_mount_stage_v1(opened.unwrap())
+    if staged.is_err():
+        return Err("nvfs-root: " + staged.unwrap_err())
+    val route = shim_positioned_install_backend_route_v1(
+        SosixPositionedBackendKindV1.Nvfs)
+    if not route.accepted:
+        val aborted = vfs_nvfs_root_mount_abort_v1(staged.unwrap())
+        if aborted.is_err():
+            return Err("nvfs-root: positioned-route-failed:" + aborted.unwrap_err())
+        return Err("nvfs-root: positioned-route-failed")
+    val committed = vfs_nvfs_root_mount_commit_v1(staged.unwrap())
+    if committed.is_err():
+        return Err("nvfs-root: " + committed.unwrap_err())
+    Ok(committed.unwrap())

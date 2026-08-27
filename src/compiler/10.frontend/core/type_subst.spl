@@ -9,10 +9,20 @@
 #   Substitute: T → i64
 #   Result: fn identity__i64(x: i64) -> i64: x
 
-use compiler.core.ast.{expr_get, stmt_get, decl_get}
-use compiler.core.ast.{EXPR_IDENT}
-use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL}
+use compiler.core.ast.{
+    expr_get, stmt_get, decl_get, decl_set_param_types, decl_set_ret_type,
+    decl_set_field_types
+}
+use compiler.core.ast.{EXPR_IF_CHAIN, STMT_IF_CHAIN}
+use compiler.core.ast_stmt.{stmt_get_type, stmt_set_type}
+use compiler.core.ast_clone.{ast_clone_decl}
+use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_NAMED_BASE}
+use compiler.core.types.{named_type_find}
 use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
+use compiler.frontend.core.if_chain_nodes.{flat_if_chain_first_arm_get, flat_if_chain_arm_count_get}
+use compiler.frontend.core.if_chain_nodes.{flat_if_chain_else_expr_get, flat_if_chain_else_stmt_count_get, flat_if_chain_else_stmt_at}
+use compiler.frontend.core.if_chain_nodes.{flat_if_arm_next_get, flat_if_arm_head_get, flat_if_arm_init_get}
+use compiler.frontend.core.if_chain_nodes.{flat_if_arm_then_expr_get, flat_if_arm_body_count_get, flat_if_arm_body_at}
 
 # ===== Substitution State =====
 # Maps type parameter names to concrete type tags
@@ -57,13 +67,12 @@ fn subst_type_in_expr(eid: i64):
 
     val e = expr_get(eid)
 
-    # For identifiers, check if it's a type parameter
-    if e.tag == EXPR_IDENT:
-        val concrete_type = type_subst_lookup(e.s_val)
-        if concrete_type >= 0:
-            # Found a type param - this should be rare in expressions
-            # Most type substitution happens in type annotations
-            pass_do_nothing
+    # EXTRA is a linked-chain owner id for this tag, not an expression id.
+    # Dispatch before the generic child walk so the arena id is never treated
+    # as an AST node.
+    if e.tag == EXPR_IF_CHAIN:
+        subst_type_in_if_chain(e.extra)
+        return
 
     # Recurse into children
     subst_type_in_expr(e.left)
@@ -87,10 +96,17 @@ fn subst_type_in_stmt(sid: i64):
 
     val s = stmt_get(sid)
 
+    # TYPE stores the linked-chain owner id for this tag, not a type tag.
+    # Dispatch before annotation substitution for the same reason that expr
+    # chains must dispatch before generic EXTRA recursion.
+    if s.tag == STMT_IF_CHAIN:
+        subst_type_in_if_chain(s.type_tag)
+        return
+
     # Substitute in type annotations (s.type_tag)
-    val concrete_type = type_subst_lookup_by_tag(s.type_tag)
+    val concrete_type = type_subst_lookup_by_tag(stmt_get_type(sid))
     if concrete_type >= 0:
-        s.type_tag = concrete_type
+        stmt_set_type(sid, concrete_type)
 
     # Recurse into child expressions
     subst_type_in_expr(s.target)
@@ -114,13 +130,40 @@ fn subst_type_in_stmt(sid: i64):
         for stmt_id in branch_stmts:
             subst_type_in_stmt(stmt_id)
 
-fn type_subst_lookup_by_tag(type_tag: i64) -> i64:
-    """Look up substitution for a type tag
+fn subst_type_in_if_chain(chain_id: i64):
+    """Substitute actual linked if-chain children without exposing owner ids"""
+    var arm_id = flat_if_chain_first_arm_get(chain_id)
+    var remaining = flat_if_chain_arm_count_get(chain_id)
+    while arm_id >= 0 and remaining > 0:
+        # Keep each arm's head/init and successful branch together. This
+        # preserves branch boundaries for binding and pattern-binding arms;
+        # no branch-local child is folded into the following arm or else.
+        subst_type_in_expr(flat_if_arm_head_get(arm_id))
+        subst_type_in_expr(flat_if_arm_init_get(arm_id))
+        subst_type_in_expr(flat_if_arm_then_expr_get(arm_id))
+        var body_offset = 0
+        while body_offset < flat_if_arm_body_count_get(arm_id):
+            subst_type_in_stmt(flat_if_arm_body_at(arm_id, body_offset))
+            body_offset = body_offset + 1
+        arm_id = flat_if_arm_next_get(arm_id)
+        remaining = remaining - 1
 
-    This is a simplified version - in a full implementation,
-    we'd need to handle named types and resolve them.
-    For now, just return -1 (no substitution).
-    """
+    subst_type_in_expr(flat_if_chain_else_expr_get(chain_id))
+    var else_offset = 0
+    while else_offset < flat_if_chain_else_stmt_count_get(chain_id):
+        subst_type_in_stmt(flat_if_chain_else_stmt_at(chain_id, else_offset))
+        else_offset = else_offset + 1
+
+fn type_subst_lookup_by_tag(type_tag: i64) -> i64:
+    """Resolve a registered named type-parameter tag to its concrete tag."""
+    if type_tag < TYPE_NAMED_BASE:
+        return -1
+    var i = 0
+    while i < subst_param_names.len() and i < subst_type_tags.len():
+        val named_id = named_type_find(subst_param_names[i])
+        if named_id >= 0 and type_tag == TYPE_NAMED_BASE + named_id:
+            return subst_type_tags[i]
+        i = i + 1
     -1
 
 # ===== Declaration Substitution =====
@@ -139,26 +182,31 @@ fn subst_type_in_decl(did: i64):
 
     val d = decl_get(did)
 
-    # Substitute parameter types
-    var i: i64 = 0
+    # Substitute parameter types in the owner arrays, not in the CoreDecl
+    # snapshot returned by decl_get().
+    var rewritten_params: [i64] = []
     for ptype in d.param_types:
         val concrete = type_subst_lookup_by_tag(ptype)
         if concrete >= 0:
-            d.param_types[i] = concrete
-        i = i + 1
+            rewritten_params.push(concrete)
+        else:
+            rewritten_params.push(ptype)
+    decl_set_param_types(did, rewritten_params)
 
     # Substitute return type
     val concrete_ret = type_subst_lookup_by_tag(d.ret_type)
     if concrete_ret >= 0:
-        d.ret_type = concrete_ret
+        decl_set_ret_type(did, concrete_ret)
 
     # Substitute field types
-    i = 0
+    var rewritten_fields: [i64] = []
     for ftype in d.field_types:
         val concrete = type_subst_lookup_by_tag(ftype)
         if concrete >= 0:
-            d.field_types[i] = concrete
-        i = i + 1
+            rewritten_fields.push(concrete)
+        else:
+            rewritten_fields.push(ftype)
+    decl_set_field_types(did, rewritten_fields)
 
     # Substitute in function body
     for stmt_id in d.body_stmts:
@@ -194,14 +242,11 @@ fn type_subst_specialize_decl(generic_did: i64, param_names: [text], type_tags: 
             type_subst_add(param_name, type_tags[i])
         i = i + 1
 
-    # Clone the declaration
-    # Note: Import ast_clone_decl from ast_clone module
-    # For now, this assumes ast_clone is available at runtime
-    # Full integration requires updating imports
-    val cloned_did = generic_did  # Will be replaced with actual clone
+    val cloned_did = ast_clone_decl(generic_did)
+    if cloned_did < 0:
+        return -1
 
     # Apply substitutions
     subst_type_in_decl(cloned_did)
 
     cloned_did
-

@@ -17,7 +17,7 @@ use std.fs_driver.extension.{Extension, PosixCompatExt}
 use std.fs_driver.ops.{FsDriver}
 use os.services.nvfs.core.arena.{arena_create_impl, arena_append_impl, arena_readv_impl, arena_total_bytes_impl, arena_discard_impl, arena_clone_range_impl}
 use os.services.nvfs.core.ns_tree.{Namespace, NsInodeKind}
-use os.services.nvfs.core.reflink.{reflink_bump, reflink_drop, reflink_replace_arena}
+use os.services.nvfs.core.reflink.{reflink_bump, reflink_drop}
 use os.services.nvfs.posix.fd_table.{FdEntry, FdTable}
 use os.services.nvfs.posix.cow_engine.{CowShadow}
 use os.services.nvfs.posix.capabilities.{nvfs_posix_capabilities}
@@ -115,16 +115,21 @@ impl FsDriver for NvfsPosixDriver:
         """Open/create a path; allocate fd slot; return FileHandle."""
         if (not self.mounted):
             return Err(FsError.InvalidArg)
-        if flags.is_writable() and self.read_only:
-            return Err(FsError.ReadOnly)
         val existing = self._find_name(path)
+        # A missing path is hydrated by allocating an arena and publishing a
+        # name entry.  Treat that as a write even when the caller requested a
+        # read-only descriptor, so a read-only mount cannot create namespace
+        # state while probing an absent path.
+        val mutates = flags.is_writable() or (flags.bits & (64 | 512)) != 0 or existing < 0
+        if self.read_only and mutates:
+            return Err(FsError.ReadOnly)
         var arena_id: i64 = -1
         if existing < 0:
             arena_id = arena_create_impl(0, 4096)
             self.names.push(NameEntry(path: path.raw, arena_id: arena_id))
         else:
             arena_id = self.names[existing].arena_id
-        val fd = self.fd_table.open(arena_id, flags.bits)?
+        val fd = self.fd_table.open(arena_id, flags.bits)
         Ok(FileHandle(id: fd as u64))
 
     fn close(handle: FileHandle) -> Result<(), FsError>:
@@ -244,24 +249,17 @@ impl FsDriver for NvfsPosixDriver:
 
     fn truncate(path: Path, length: i64) -> Result<(), FsError>:
         """Path-based truncate: CoW-reshape the arena to exactly `length`."""
-        if self.read_only:
-            return Err(FsError.ReadOnly)
         val idx = self._find_name(path)
         if idx < 0:
             return Err(FsError.NotFound)
         val arena_id = self.names[idx].arena_id
         val new_arena = self._truncate_arena(arena_id, length)?
-        # A pathname, its hard links, and descriptors opened independently all
-        # identify one POSIX file.  Publish the CoW replacement to every alias
-        # before retiring the old arena; updating only this path leaves the
-        # other aliases pointing at discarded storage.
-        self._publish_arena(arena_id, new_arena)
+        self.names[idx] = NameEntry(path: path.raw, arena_id: new_arena)
+        val _ = arena_discard_impl(arena_id)
         Ok(())
 
     fn ftruncate(handle: FileHandle, length: i64) -> Result<(), FsError>:
         """fd-based truncate: CoW-reshape; publish-flip on the fd slot."""
-        if self.read_only:
-            return Err(FsError.ReadOnly)
         val fd = self._fd_from_handle(handle)
         match self.fd_table.lookup(fd):
             case Some(e):
@@ -273,7 +271,7 @@ impl FsDriver for NvfsPosixDriver:
     fn fsync(handle: FileHandle) -> Result<(), FsError>:
         val fd = self._fd_from_handle(handle)
         match self.fd_table.lookup(fd):
-            case Some(_): Err(FsError.Unsupported)
+            case Some(_): Ok(())
             case None:    Err(FsError.InvalidArg)
 
     fn fdatasync(handle: FileHandle) -> Result<(), FsError>:
@@ -305,6 +303,8 @@ impl FsDriver for NvfsPosixDriver:
 
     fn mkdir(path: Path, mode: u32) -> Result<(), FsError>:
         """mkdir — create a directory via namespace."""
+        if self.read_only:
+            return Err(FsError.ReadOnly)
         val pair = self.ns.resolve_parent(path.raw)?
         val parent_ino = pair.0
         val leaf = pair.1
@@ -313,6 +313,8 @@ impl FsDriver for NvfsPosixDriver:
 
     fn rmdir(path: Path) -> Result<(), FsError>:
         """rmdir — remove an empty directory via namespace."""
+        if self.read_only:
+            return Err(FsError.ReadOnly)
         val pair = self.ns.resolve_parent(path.raw)?
         val parent_ino = pair.0
         val leaf = pair.1
@@ -324,6 +326,8 @@ impl FsDriver for NvfsPosixDriver:
         Decrements the ReflinkTable refcount; discards the arena only when
         count drops to zero and no fds remain open.
         """
+        if self.read_only:
+            return Err(FsError.ReadOnly)
         val idx = self._find_name(path)
         if idx < 0:
             return Err(FsError.NotFound)
@@ -345,13 +349,9 @@ impl FsDriver for NvfsPosixDriver:
 
     fn rename(old: Path, new: Path) -> Result<(), FsError>:
         """Rename: atomic in-memory swap of the name table entry."""
-        if self.read_only:
-            return Err(FsError.ReadOnly)
         val old_idx = self._find_name(old)
         if old_idx < 0:
             return Err(FsError.NotFound)
-        if old.raw == new.raw:
-            return Ok(())
         val new_idx = self._find_name(new)
         if new_idx >= 0:
             val dst_arena = self.names[new_idx].arena_id
@@ -367,6 +367,8 @@ impl FsDriver for NvfsPosixDriver:
 
     fn symlink(target: Path, link: Path) -> Result<(), FsError>:
         """symlink — create a symlink at `link` pointing at `target`."""
+        if self.read_only:
+            return Err(FsError.ReadOnly)
         val pair = self.ns.resolve_parent(link.raw)?
         val parent_ino = pair.0
         val leaf = pair.1
@@ -384,6 +386,8 @@ impl FsDriver for NvfsPosixDriver:
 
         Bumps the ReflinkTable refcount so unlink() knows when to discard.
         """
+        if self.read_only:
+            return Err(FsError.ReadOnly)
         val idx = self._find_name(target)
         if idx < 0:
             return Err(FsError.NotFound)
@@ -414,56 +418,28 @@ impl FsDriver for NvfsPosixDriver:
 impl NvfsPosixDriver:
 
     fn _publish_flip(fd: u32, old_arena: i64, new_arena: i64):
-        """Publish one CoW replacement to every reference to the same file.
-
-        Separate opens and hard links share a file, not a frozen arena.  A
-        publish that updates only the writer leaves the other live descriptors
-        pointing at an arena that is about to be discarded.  Move all live fd
-        and pathname references together, and move the namespace reference
-        count before retiring the old arena.
-        """
+        """Atomically swap fd's arena to new_arena; discard old_arena."""
         val idx = fd as i64
         if idx >= self.fd_table.entries.len() as i64:
             return
-        val writer = self.fd_table.entries[idx]
-        if writer.refcount == 0 or writer.arena_id != old_arena:
-            return
-
-        self._publish_arena(old_arena, new_arena)
-
-    fn _publish_arena(old_arena: i64, new_arena: i64):
-        """Atomically retarget every live POSIX identity for one CoW file."""
-
-        # Publish to all independently opened descriptors for this file.  A
-        # duplicated descriptor already shares one slot through refcount.
-        var fd_idx: i64 = 1
-        while fd_idx < self.fd_table.entries.len() as i64:
-            val e = self.fd_table.entries[fd_idx]
-            if e.refcount > 0 and e.arena_id == old_arena:
-                self.fd_table.entries[fd_idx] = FdEntry(
-                    arena_id: new_arena,
-                    refcount: e.refcount,
-                    dead:     e.dead,
-                    offset:   e.offset,
-                    mode:     e.mode
-                )
-            fd_idx = fd_idx + 1
-
+        val e = self.fd_table.entries[idx]
+        val updated = FdEntry(
+            arena_id: new_arena,
+            refcount: e.refcount,
+            dead:     e.dead,
+            offset:   e.offset,
+            mode:     e.mode
+        )
+        self.fd_table.entries[idx] = updated
         # Update name-table entries that pointed to old_arena.
         var i = 0
-        var name_refs: u32 = 0u32
         while i < self.names.len() as i64:
             if self.names[i].arena_id == old_arena:
                 self.names[i] = NameEntry(
                     path:     self.names[i].path,
                     arena_id: new_arena
                 )
-                name_refs = name_refs + 1u32
             i = i + 1
-
-        # Transfer hard-link accounting in one sidecar operation rather than
-        # rescanning it once per link.
-        reflink_replace_arena(old_arena, new_arena, name_refs)
         val _ = arena_discard_impl(old_arena)
 
     fn _truncate_arena(arena_id: i64, length: i64) -> Result<i64, FsError>:
@@ -482,14 +458,12 @@ impl NvfsPosixDriver:
                 val src = arena_readv_impl(arena_id, 0, length)
                 val n = arena_append_impl(new_arena, src, 0)
                 if n < 0:
-                    val _ = arena_discard_impl(new_arena)
                     return Err(FsError.IoError(0))
         else:
             if total > 0:
                 val src = arena_readv_impl(arena_id, 0, total)
                 val n = arena_append_impl(new_arena, src, 0)
                 if n < 0:
-                    val _ = arena_discard_impl(new_arena)
                     return Err(FsError.IoError(0))
             # Zero-pad the tail.
             val pad_len = length - total
@@ -500,6 +474,5 @@ impl NvfsPosixDriver:
                 i = i + 1
             val n = arena_append_impl(new_arena, pad, 0)
             if n < 0:
-                val _ = arena_discard_impl(new_arena)
                 return Err(FsError.IoError(0))
         Ok(new_arena)

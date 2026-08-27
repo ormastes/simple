@@ -4,7 +4,6 @@
 
 use std.nogc_sync_mut.debug.remote.types.{DebugConfig, Architecture}
 use std.nogc_sync_mut.debug.remote.protocol.gdb_mi.GdbMiClient
-use std.nogc_sync_mut.debug.remote.protocol.process_command.{debug_shell_output}
 use std.nogc_async_mut.debug.coordinator.{VarInfo, FrameInfo}
 
 # Manages an OpenOCD process and its telnet interface
@@ -36,17 +35,16 @@ impl OpenocdProcess:
             return Err("failed to start openocd: exit code {result}")
         self.running = true
         # Wait for OpenOCD to initialize
-        thread_sleep(500)
+        rt_sleep_ms(500)
         Ok("openocd started on gdb:{self.gdb_port} telnet:{self.telnet_port}")
 
     # Send a command via telnet to OpenOCD
     fn send_telnet_command(cmd: text) -> Result<text, text>:
         if not self.running:
             return Err("openocd not running")
-        debug_shell_output(
-            "printf '%s\\n' \"$1\" | nc -q 1 localhost \"$2\"",
-            [cmd, "{self.telnet_port}"]
-        )
+        val telnet_cmd = "echo '{cmd}' | nc -q 1 localhost {self.telnet_port}"
+        val output = rt_command_output(telnet_cmd)
+        Ok(output)
 
     # Flash an ELF file to target
     fn flash_elf(elf_path: text) -> Result<text, text>:
@@ -62,11 +60,11 @@ impl OpenocdProcess:
 
     # Read memory words
     fn mdw(addr: i64, count: i32) -> Result<text, text>:
-        self.send_telnet_command("mdw 0x{rt_hex(addr)} {count}")
+        self.send_telnet_command("mdw 0x{format_hex(addr)} {count}")
 
     # Write memory word
     fn mww(addr: i64, value: i64) -> Result<text, text>:
-        self.send_telnet_command("mww 0x{rt_hex(addr)} 0x{rt_hex(value)}")
+        self.send_telnet_command("mww 0x{format_hex(addr)} 0x{format_hex(value)}")
 
     # Stop OpenOCD process
     me stop():
@@ -247,7 +245,7 @@ impl OpenocdClient:
         self.attached = false
 
 # Helper: format integer as hex string
-fn rt_hex(value: i64) -> text:
+fn format_hex(value: i64) -> text:
     if value == 0:
         return "0"
     var result = ""
@@ -261,4 +259,5 @@ fn rt_hex(value: i64) -> text:
 
 # SFFI declarations for process management
 extern fn rt_system(cmd: text) -> i64
+extern fn rt_command_output(cmd: text) -> text
 use std.io_runtime.{thread_sleep}

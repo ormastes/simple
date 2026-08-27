@@ -1,0 +1,108 @@
+# Pure-Simple Cosmos+ storage lifecycle policy.
+#
+# C retains the opaque FTL/NFC/NVMe object graph and direct ABI acquisition.
+# This owner sequences those acquisitions and exclusively owns readiness,
+# factory-format admission, GC cadence, and status mapping.
+
+pub val COSMOS_STORAGE_OK: i32 = 0
+pub val COSMOS_STORAGE_UNAVAILABLE: i32 = 1
+pub val COSMOS_STORAGE_INVALID: i32 = 2
+pub val COSMOS_STORAGE_RETRY: i32 = 5
+pub val COSMOS_STORAGE_GC_POLL_MASK: u32 = 0xFFFFFu32
+
+extern fn cosmos_storage_bridge_is_qemu() -> i32
+extern fn cosmos_storage_bridge_backend_init() -> i32
+extern fn cosmos_storage_bridge_ftl_init() -> i32
+extern fn cosmos_storage_bridge_backend_mount() -> i32
+extern fn cosmos_storage_bridge_ftl_recover() -> i32
+extern fn cosmos_storage_bridge_media_init() -> i32
+extern fn cosmos_storage_bridge_io_init() -> i32
+extern fn cosmos_storage_bridge_admin_init() -> i32
+extern fn cosmos_storage_bridge_dispatch_init() -> i32
+extern fn cosmos_storage_bridge_backend_format() -> i32
+extern fn cosmos_storage_bridge_factory_initialize_erased() -> i32
+extern fn cosmos_storage_bridge_dispatch_poll() -> i32
+extern fn cosmos_storage_bridge_gc_step() -> i32
+
+var g_cosmos_storage_prepared: u32 = 0u32
+var g_cosmos_storage_ready: u32 = 0u32
+var g_cosmos_storage_gc_polls: u32 = 0u32
+
+@export("C", name: "cosmos_storage_init")
+pub fn cosmos_storage_init() -> i32:
+    if cosmos_storage_bridge_is_qemu() != 0:
+        return COSMOS_STORAGE_UNAVAILABLE
+
+    g_cosmos_storage_prepared = 0u32
+    g_cosmos_storage_ready = 0u32
+
+    var status = cosmos_storage_bridge_backend_init()
+    if status != COSMOS_STORAGE_OK:
+        return status
+
+    status = cosmos_storage_bridge_ftl_init()
+    if status != COSMOS_STORAGE_OK:
+        return status
+    g_cosmos_storage_prepared = 1u32
+
+    status = cosmos_storage_bridge_backend_mount()
+    if status != COSMOS_STORAGE_OK:
+        return status
+
+    status = cosmos_storage_bridge_ftl_recover()
+    if status != COSMOS_STORAGE_OK:
+        return status
+
+    status = cosmos_storage_bridge_media_init()
+    if status != COSMOS_STORAGE_OK:
+        return status
+
+    status = cosmos_storage_bridge_io_init()
+    if status != COSMOS_STORAGE_OK:
+        return status
+
+    status = cosmos_storage_bridge_admin_init()
+    if status != COSMOS_STORAGE_OK:
+        return status
+
+    status = cosmos_storage_bridge_dispatch_init()
+    if status != COSMOS_STORAGE_OK:
+        return status
+
+    g_cosmos_storage_gc_polls = 0u32
+    g_cosmos_storage_ready = 1u32
+    COSMOS_STORAGE_OK
+
+@export("C", name: "cosmos_storage_factory_initialize_erased")
+pub fn cosmos_storage_factory_initialize_erased() -> i32:
+    if cosmos_storage_bridge_is_qemu() != 0:
+        return COSMOS_STORAGE_UNAVAILABLE
+    if g_cosmos_storage_prepared == 0u32 or g_cosmos_storage_ready != 0u32:
+        return COSMOS_STORAGE_INVALID
+
+    val status = cosmos_storage_bridge_backend_format()
+    if status != COSMOS_STORAGE_OK:
+        return status
+    cosmos_storage_bridge_factory_initialize_erased()
+
+@export("C", name: "cosmos_storage_poll")
+pub fn cosmos_storage_poll() -> i32:
+    if cosmos_storage_bridge_is_qemu() != 0:
+        return COSMOS_STORAGE_UNAVAILABLE
+    if g_cosmos_storage_ready == 0u32:
+        return COSMOS_STORAGE_UNAVAILABLE
+
+    var status = cosmos_storage_bridge_dispatch_poll()
+    if status != COSMOS_STORAGE_OK:
+        return status
+
+    g_cosmos_storage_gc_polls = g_cosmos_storage_gc_polls + 1u32
+    if (g_cosmos_storage_gc_polls & COSMOS_STORAGE_GC_POLL_MASK) != 0u32:
+        return COSMOS_STORAGE_OK
+
+    status = cosmos_storage_bridge_gc_step()
+    if status == COSMOS_STORAGE_UNAVAILABLE or status == COSMOS_STORAGE_RETRY:
+        return COSMOS_STORAGE_OK
+    if status != COSMOS_STORAGE_OK:
+        g_cosmos_storage_ready = 0u32
+    status

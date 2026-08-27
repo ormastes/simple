@@ -219,12 +219,13 @@ expect(promotion).to_equal("pass")
 - should capture the pinned SimpleOS glyph from guest framebuffer memory
 - Boot SimpleOS with the pinned font asset
 - Capture SimpleOS pinned-font pixels
+- fail test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -244,12 +245,13 @@ expect(expect_simpleos_font_pixel_oracle(evidence)).to_be(true)
 
 - should meet warm latency, recovery, GPU benefit, upload, RSS, and resource budgets
 - Measure warm font rendering and resource bounds
+- fail test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple

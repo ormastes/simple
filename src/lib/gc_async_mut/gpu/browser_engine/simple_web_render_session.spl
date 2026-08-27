@@ -7,131 +7,16 @@ use std.common.web.browser_renderer_protocol.{BrowserTextInputOverlay}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     SimpleWebLayoutDrawIrResult,
     simple_web_layout_animation_needs_layout,
-    simple_web_layout_compose_prepared,
-    simple_web_layout_empty_retained,
-    simple_web_layout_prepare_retained,
+    simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_animations_with_images,
     simple_web_layout_rerender_retained
 }
 use std.gc_async_mut.gpu.browser_engine.style.animation.{
     BrowserCssAnimationInstance
 }
-use std.common.structural.invalidation.contracts.{
-    DIRTY_INTRINSIC_MEASURE, DIRTY_LAYOUT, DIRTY_HIT_TEST, DIRTY_RESOURCE
-}
-use std.common.structural.layout.{
-    LayoutExecutionProfile, layout_execution_profile
-}
-use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.{
-    StyleDifference,
-    WebLayoutDirtyNode,
-    WebLayoutFrontier,
-    WebLayoutManager,
-    WebLayoutNodeSnapshot,
-    WebLayoutRunResult,
-    WebLayoutSnapshot,
-    web_layout_adapt_prepared,
-    web_layout_classify_style,
-    web_layout_manager,
-    web_layout_manager_run_full_with_ports,
-    web_layout_manager_run_incremental_with_ports
-}
-use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.cpu_execution_port.{
-    browser_cpu_layout_execution_port, browser_cpu_layout_full,
-    browser_cpu_layout_reconstruct
-}
-use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.cuda_execution_port.{
-    web_cuda_layout_execution_port
-}
 use std.gc_async_mut.web.browser_session.{BrowserRenderSnapshot}
 use std.common.ui.draw_ir_sdn.{draw_ir_to_sdn}
 use std.common.ui.draw_ir_patch.{draw_ir_patch_between}
 use std.common.crypto.sha256.{sha256_text}
-
-val SIMPLE_WEB_LAYOUT_FIXED_POINT_CAP: i64 = 4
-
-fn _simple_web_layout_execution_profile(
-    node_count: i64
-) -> LayoutExecutionProfile:
-    layout_execution_profile(
-        "hybrid_vector_gpu",
-        node_count * 8,
-        node_count * 2,
-        80,
-        node_count * 128,
-        node_count * 32,
-        1,
-        2,
-        20
-    )
-
-fn _simple_web_layout_prior_node(
-    snapshot: WebLayoutSnapshot, id: i64
-) -> WebLayoutNodeSnapshot?:
-    for node in snapshot.nodes:
-        if node.id == id:
-            return Some(node)
-    nil
-
-fn _simple_web_layout_style_dirty_bits(
-    prior: WebLayoutNodeSnapshot, current: WebLayoutNodeSnapshot
-) -> i64:
-    match web_layout_classify_style(prior.style, current.style):
-        StyleDifference.IntrinsicMeasure:
-            DIRTY_INTRINSIC_MEASURE | DIRTY_LAYOUT | DIRTY_HIT_TEST
-        StyleDifference.LayoutSelf: DIRTY_LAYOUT | DIRTY_HIT_TEST
-        StyleDifference.LayoutSubtree: DIRTY_LAYOUT | DIRTY_HIT_TEST
-        StyleDifference.RebuildFormattingContext:
-            DIRTY_LAYOUT | DIRTY_HIT_TEST
-        _:
-            # Geometry is authoritative when a newly covered style field is
-            # not yet represented by the narrower change hashes.
-            DIRTY_LAYOUT | DIRTY_HIT_TEST
-
-fn _simple_web_layout_pre_frontier(
-    prior: WebLayoutSnapshot,
-    current: WebLayoutSnapshot,
-    style_changed: bool,
-    resource_changed: bool,
-    viewport_changed: bool
-) -> WebLayoutFrontier:
-    var dirty_nodes: [WebLayoutDirtyNode] = []
-    var invalidated_ids: [i64] = []
-    for node in current.nodes:
-        if val Some(previous) = _simple_web_layout_prior_node(prior, node.id):
-            if (
-                previous.style.geometry_hash == node.style.geometry_hash and
-                not viewport_changed and
-                not (resource_changed and node.text_measure_required)
-            ):
-                continue
-            var dirty_bits = DIRTY_LAYOUT | DIRTY_HIT_TEST
-            if resource_changed:
-                dirty_bits = (
-                    dirty_bits | DIRTY_INTRINSIC_MEASURE | DIRTY_RESOURCE
-                )
-            elif style_changed:
-                dirty_bits = _simple_web_layout_style_dirty_bits(
-                    previous, node
-                )
-            dirty_nodes.push(WebLayoutDirtyNode(
-                id: node.id, dirty_bits: dirty_bits
-            ))
-            invalidated_ids.push(node.id)
-        else:
-            val dirty_bits = if resource_changed:
-                DIRTY_INTRINSIC_MEASURE | DIRTY_LAYOUT |
-                DIRTY_HIT_TEST | DIRTY_RESOURCE
-            else:
-                DIRTY_LAYOUT | DIRTY_HIT_TEST
-            dirty_nodes.push(WebLayoutDirtyNode(
-                id: node.id, dirty_bits: dirty_bits
-            ))
-            invalidated_ids.push(node.id)
-    WebLayoutFrontier(
-        dirty_nodes: dirty_nodes,
-        invalidated_ids: invalidated_ids,
-        fault: ""
-    )
 
 fn _simple_web_render_counter_next(value: i64) -> i64:
     if value >= 9223372036854775806: 9223372036854775806
@@ -203,9 +88,6 @@ pub class SimpleWebRenderSession:
     animation_time_ms: i64
     document_html: text
     current_result: SimpleWebLayoutDrawIrResult?
-    web_layout_manager_state: WebLayoutManager?
-    current_web_layout_snapshot: WebLayoutSnapshot?
-    current_web_layout_run: WebLayoutRunResult?
     counters: SimpleWebRenderCounters
     # Producer-owned raw old/new DrawIR bounds for the immediately preceding
     # render. These are deliberately not a backend damage plan: consumers
@@ -231,9 +113,6 @@ pub class SimpleWebRenderSession:
             animation_time_ms: -1,
             document_html: "",
             current_result: nil,
-            web_layout_manager_state: nil,
-            current_web_layout_snapshot: nil,
-            current_web_layout_run: nil,
             counters: SimpleWebRenderCounters.create(),
             last_damage_stage: "full",
             last_damage_rects: [],
@@ -260,13 +139,6 @@ pub class SimpleWebRenderSession:
         val resource_changed = (
             revisions.resource_revision != self.resource_revision
         )
-        # Arm binding kept distinct from the later `val manager` (interpreter
-        # match-arm binding leak family — never same-name an arm binding with
-        # another local in this function).
-        val generation_changed = match self.web_layout_manager_state:
-            Some(prior_manager):
-                prior_manager.generation != snapshot.document_generation
-            nil: false
         val viewport_changed = width != self.width or height != self.height
         val scroll_changed = scroll_y != self.scroll_y
         val overlay_changed = (
@@ -279,6 +151,7 @@ pub class SimpleWebRenderSession:
         var animation_unchanged = animation_time_ms == self.animation_time_ms
         if (
             not animation_unchanged and
+            animation_instances.len() == 0 and
             self.current_result != nil and
             self.current_result.unwrap().animation_next_ms < 0
         ):
@@ -287,8 +160,7 @@ pub class SimpleWebRenderSession:
             has_prior and
             snapshot.document_html == nil and
             not document_changed and not style_changed and
-            not resource_changed and not generation_changed and
-            not viewport_changed and
+            not resource_changed and not viewport_changed and
             not scroll_changed and not overlay_changed and
             animation_unchanged
         )
@@ -306,10 +178,7 @@ pub class SimpleWebRenderSession:
             self.counters.serialize_count = _simple_web_render_counter_next(
                 self.counters.serialize_count
             )
-        val dirty_stage = if (
-            not has_prior or document_changed or style_changed or
-            generation_changed
-        ):
+        val dirty_stage = if not has_prior or document_changed or style_changed:
             "full"
         elif viewport_changed:
             "css"
@@ -376,7 +245,9 @@ pub class SimpleWebRenderSession:
                     viewport_changed
                 )
             val cpu_port = browser_cpu_layout_execution_port(prepared, retained)
-            val gpu_port = web_cuda_layout_execution_port([])
+            self.web_cuda_layout_port.set_oracle_boxes(
+                adapted.snapshot.oracle_boxes)
+            val gpu_port = self.web_cuda_layout_port
             val manager_step = if needs_framework_full:
                 web_layout_manager_run_full_with_ports(
                     manager, adapted.snapshot, frontier, cpu_port, gpu_port
@@ -490,6 +361,7 @@ pub class SimpleWebRenderSession:
         self.checksum_cache
 
     me close():
+        self.web_cuda_layout_port.shutdown()
         self.document_revision = -1
         self.style_revision = -1
         self.resource_revision = -1

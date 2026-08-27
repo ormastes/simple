@@ -1,3 +1,7 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 # Specification for StaticCompressionCache in
 # src/lib/nogc_async_mut/http_server/static_file.spl
 #
@@ -5,6 +9,8 @@
 # is instantiated directly. All [u8] payloads live in module-level helpers
 # to avoid the it-block var-mutation footgun (rebinds in while-loops do not
 # persist across iterations under interpreter mode).
+
+use std.spec.step
 
 use std.spipe.*
 use std.nogc_async_mut.http_server.static_file.{StaticCompressionCache, CacheEntry}
@@ -52,13 +58,18 @@ fn _make_bytes_100() -> [u8]:
 # ---------------------------------------------------------------------------
 
 describe "StaticCompressionCache":
+    # @manual scenario evidence
 
     it "empty cache returns nil from get":
+        # @req REQ-SSPEC-UNIT
+        step("empty cache returns nil from get")
         val cache = StaticCompressionCache.new(128, 16777216)
         val result = cache.get("/index.html", "gzip")
-        expect(result).to_equal(nil)
+        expect(result == nil).to_equal(true)
 
     it "put then get returns the cached bytes":
+        # @req REQ-SSPEC-UNIT
+        step("put then get returns the cached bytes")
         val cache = StaticCompressionCache.new(128, 16777216)
         val payload = _make_bytes_10()
         cache.put("/index.html", "gzip", payload)
@@ -68,12 +79,14 @@ describe "StaticCompressionCache":
         expect(got.len()).to_equal(payload.len())
 
     it "different encoding for same path is a cache miss until put":
+        # @req REQ-SSPEC-UNIT
+        step("different encoding for same path is a cache miss until put")
         val cache = StaticCompressionCache.new(128, 16777216)
         val payload = _make_bytes_10()
         cache.put("/style.css", "gzip", payload)
         # "zstd" encoding not yet stored — must miss.
         val miss = cache.get("/style.css", "zstd")
-        expect(miss).to_equal(nil)
+        expect(miss == nil).to_equal(true)
         # After putting the zstd variant, it hits.
         val payload2 = _make_bytes_20()
         cache.put("/style.css", "zstd", payload2)
@@ -81,6 +94,8 @@ describe "StaticCompressionCache":
         expect(hit != nil).to_equal(true)
 
     it "clear() empties the cache":
+        # @req REQ-SSPEC-UNIT
+        step("clear() empties the cache")
         val cache = StaticCompressionCache.new(128, 16777216)
         cache.put("/a.html", "gzip", _make_bytes_10())
         cache.put("/b.css", "lz4", _make_bytes_20())
@@ -88,9 +103,11 @@ describe "StaticCompressionCache":
         expect(cache.entries.len()).to_equal(0)
         expect(cache.current_size).to_equal(0)
         val miss_a = cache.get("/a.html", "gzip")
-        expect(miss_a).to_equal(nil)
+        expect(miss_a == nil).to_equal(true)
 
     it "LRU eviction: filling beyond count capacity evicts the least-recently-used":
+        # @req REQ-SSPEC-UNIT
+        step("LRU eviction: filling beyond count capacity evicts the least-recently-used")
         # Capacity of 2 entries. Put A then B. Put C forces eviction of A (LRU).
         val cache = StaticCompressionCache.new(2, 16777216)
         cache.put("/a.html", "gzip", _make_bytes_10())
@@ -105,10 +122,12 @@ describe "StaticCompressionCache":
         val b_hit = cache.get("/b.css", "gzip")
         val c_hit = cache.get("/c.js", "gzip")
         expect(a_hit != nil).to_equal(true)
-        expect(b_hit).to_equal(nil)
+        expect(b_hit == nil).to_equal(true)
         expect(c_hit != nil).to_equal(true)
 
     it "get() promotes entry to MRU so subsequent eviction skips it":
+        # @req REQ-SSPEC-UNIT
+        step("get() promotes entry to MRU so subsequent eviction skips it")
         # Put A then B. get(A) promotes A to MRU, making B the LRU.
         # Putting C (capacity=2) evicts B, not A.
         val cache = StaticCompressionCache.new(2, 16777216)
@@ -119,10 +138,12 @@ describe "StaticCompressionCache":
         # Adding C forces eviction of LRU = B.
         cache.put("/c.js", "gzip", _make_bytes_30())
         expect(cache.get("/a.html", "gzip") != nil).to_equal(true)
-        expect(cache.get("/b.css", "gzip")).to_equal(nil)
+        expect(cache.get("/b.css", "gzip") == nil).to_equal(true)
         expect(cache.get("/c.js", "gzip") != nil).to_equal(true)
 
     it "total-bytes bound triggers eviction when new entry would exceed max_bytes":
+        # @req REQ-SSPEC-UNIT
+        step("total-bytes bound triggers eviction when new entry would exceed max_bytes")
         # max_bytes = 25, each payload is 10 bytes.
         # After 2 entries (20 bytes), adding a third (10 bytes → 30 total) evicts
         # the oldest to make room.
@@ -135,12 +156,14 @@ describe "StaticCompressionCache":
         # After gets above, /b.css is MRU, /a.html is LRU.
         # Adding /c.js (10 bytes) would push to 30 > 25 — must evict /a.html first.
         cache.put("/c.js", "gzip", _make_bytes_10())
-        expect(cache.get("/a.html", "gzip")).to_equal(nil)
+        expect(cache.get("/a.html", "gzip") == nil).to_equal(true)
         expect(cache.get("/b.css", "gzip") != nil).to_equal(true)
         expect(cache.get("/c.js", "gzip") != nil).to_equal(true)
         expect(cache.current_size <= 25).to_equal(true)
 
     it "entry larger than max_bytes is silently rejected and cache is unchanged":
+        # @req REQ-SSPEC-UNIT
+        step("entry larger than max_bytes is silently rejected and cache is unchanged")
         # max_bytes = 50. Put one valid 10-byte entry.
         # Then try to put a 100-byte entry — must be rejected.
         val cache = StaticCompressionCache.new(128, 50)
@@ -154,4 +177,4 @@ describe "StaticCompressionCache":
         # The previously-stored entry is still present.
         expect(cache.get("/a.html", "gzip") != nil).to_equal(true)
         # The oversized entry was not stored.
-        expect(cache.get("/big.html", "gzip")).to_equal(nil)
+        expect(cache.get("/big.html", "gzip") == nil).to_equal(true)

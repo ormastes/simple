@@ -1,0 +1,394 @@
+"""
+# Enterprise Expense — expense claims, category caps, tiered approval limits
+
+Expense vertical of the Simple Enterprise Suite over the durable enterprise
+store, following the FROZEN foundation contracts (`enterprise_sale/foundation.spl`
+and `enterprise_sale/rbac_registry.spl` are never edited). Money is integer
+minor units (cents) throughout — never floats.
+
+## Storage model (insert-only event log + pure fold)
+
+Two insert-only tables:
+
+- `expense_caps (tenant_id, category, cap_cents, set_by)` — a per-category
+  spend cap. There is no UPDATE: a re-cap appends a row and the LATEST row by
+  insert order wins (`expense_cap_cents`). `-1` means "no cap configured".
+- `expense_events (tenant_id, claim_id, event, actor_id, category, amount_cents,
+  reason)` — every claim lifecycle transition. A claim's line items are the
+  `line` events; its STATUS is the latest lifecycle event, derived by the pure
+  fold `expense_status`. Nothing is ever mutated in place, so the audit trail
+  and the state are the same rows.
+
+Both folds filter on the session's authoritative tenant id, so tenant B can
+never observe or approve tenant A's claims.
+
+## Approval tiers (threshold routing)
+
+`expense_required_role(total_cents)` is the pure routing rule:
+
+| claim total (cents) | required approver role |
+|---|---|
+| <= 50_000 (\$500)     | `manager`   |
+| <= 500_000 (\$5,000)  | `finance`   |
+| > 500_000            | `executive` |
+
+Routing is on the claim TOTAL, and the boundary is inclusive on the low side:
+exactly 50_000 routes to `manager`, 50_001 routes to `finance`. An approver
+whose role is below the required tier is denied `forbidden`; `admin` passes
+every tier (matching the frozen blanket rule).
+
+## Per-category cap
+
+A submitted claim whose total for its category exceeds the configured cap is
+denied `invalid-record` at the validation rung — before any effect. A category
+with no configured cap (`-1`) is uncapped.
+
+## Segregation of duties
+
+The approver's `actor_id` may NEVER equal the claim's submitter. Approving your
+own claim is denied `forbidden` even when the actor holds (or exceeds) the
+required tier role, and even for `admin`. This is checked at the rbac rung.
+
+## Reason vocabulary
+
+Only members of the frozen closed `reason_set()` are returned: a cap breach is
+`invalid-record`, a tier/SoD failure is `forbidden`, reimbursing a claim that is
+not approved is `invalid-transition`, and an unknown claim is `not-found`.
+
+## RBAC (reuse, not a new grant)
+
+The LOCAL `expense_role_allows` gate is used; the frozen `role_allows` table and
+`enterprise_sale/rbac_registry.spl` are deliberately NOT touched (the registry's
+equivalence spec is byte-fenced to the frozen table). The frozen session -> rbac
+-> validation -> idempotency -> effects SEQUENCE is preserved exactly. Audit
+hashing goes only through `records.audit_append` (the
+`enterprise_store.audit_hash.audit_sha256_hex` facade) — this module never
+imports `std.common.crypto.sha256`.
+
+Lane: .spipe/simple_enterprise_suite (W23-FAN, expense).
+"""
+
+use std.nogc_sync_mut.enterprise_store.store.{
+    EnterpriseStore, store_migrate, store_rows, store_insert_row,
+    uow_begin, uow_commit, uow_rollback
+}
+use std.nogc_sync_mut.enterprise_store.records.{
+    idempotency_seen, idempotency_result, idempotency_record,
+    outbox_append, audit_append
+}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, Money,
+    CommandEnvelope, CommandResult,
+    accepted, denied, session_valid
+}
+
+# =============================================================================
+# Schema — insert-only cap rows + insert-only claim event log
+# =============================================================================
+
+fn expense_setup(store: EnterpriseStore) -> bool:
+    store_migrate(store, "expense_001_caps",
+        "CREATE TABLE IF NOT EXISTS expense_caps (id INTEGER PRIMARY KEY, tenant_id TEXT, category TEXT, cap_cents TEXT, set_by TEXT)")
+    store_migrate(store, "expense_002_events",
+        "CREATE TABLE IF NOT EXISTS expense_events (id INTEGER PRIMARY KEY, tenant_id TEXT, claim_id TEXT, event TEXT, actor_id TEXT, category TEXT, amount_cents TEXT, reason TEXT)")
+
+# =============================================================================
+# RBAC + tier routing (pure)
+# =============================================================================
+
+# expense_role_allows gates expense actions. admin passes everything (the frozen
+# blanket rule); employees submit, and the approval roles form a TIER LADDER
+# handled by expense_role_meets_tier.
+fn expense_role_allows(role: text, action: text) -> bool:
+    if role == "admin":
+        return true
+    if action == "expense.claim.submit":
+        return role == "employee" or role == "manager" or role == "finance" or role == "executive"
+    if action == "expense.cap.set":
+        return role == "finance" or role == "executive"
+    if action == "expense.claim.approve" or action == "expense.claim.reject":
+        return role == "manager" or role == "finance" or role == "executive"
+    if action == "expense.claim.reimburse":
+        return role == "finance"
+    false
+
+# expense_tier_rank ranks the approval ladder. A higher rank may approve
+# anything a lower rank may. Non-approver roles rank 0.
+fn expense_tier_rank(role: text) -> i64:
+    if role == "admin":
+        return 4
+    if role == "executive":
+        return 3
+    if role == "finance":
+        return 2
+    if role == "manager":
+        return 1
+    0
+
+# expense_required_role routes a claim total to the approver tier it needs.
+# Boundaries are inclusive on the low side (see the table in the docstring).
+fn expense_required_role(total_cents: i64) -> text:
+    if total_cents <= 50000:
+        return "manager"
+    if total_cents <= 500000:
+        return "finance"
+    "executive"
+
+# expense_role_meets_tier reports whether `role` is at or above the tier a claim
+# of `total_cents` requires.
+fn expense_role_meets_tier(role: text, total_cents: i64) -> bool:
+    expense_tier_rank(role) >= expense_tier_rank(expense_required_role(total_cents))
+
+# =============================================================================
+# Pure folds over the insert-only rows
+# =============================================================================
+
+# expense_cap_cents folds the insert-only cap rows and returns the LATEST cap
+# for (tenant, category), or -1 when no cap has ever been set (uncapped).
+fn expense_cap_cents(store: EnterpriseStore, tenant_id: text, category: text) -> i64:
+    var cap: i64 = -1
+    val rows = store_rows(store, "expense_caps", "id, tenant_id, category, cap_cents, set_by")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "category") == category:
+            cap = int(sqlite_row_get(row, "cap_cents"))
+    cap
+
+# expense_status folds the event log and returns the LATEST lifecycle status of
+# a claim ("submitted" / "approved" / "rejected" / "reimbursed"), or "" when the
+# claim does not exist for this tenant.
+fn expense_status(store: EnterpriseStore, tenant_id: text, claim_id: text) -> text:
+    var status: text = ""
+    val rows = store_rows(store, "expense_events", "id, tenant_id, claim_id, event, actor_id, category, amount_cents, reason")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "claim_id") == claim_id:
+            val ev = sqlite_row_get(row, "event")
+            if ev != "line":
+                status = ev
+    status
+
+# expense_claim_total sums the `line` events of a claim (integer cents).
+fn expense_claim_total(store: EnterpriseStore, tenant_id: text, claim_id: text) -> i64:
+    var total: i64 = 0
+    val rows = store_rows(store, "expense_events", "id, tenant_id, claim_id, event, actor_id, category, amount_cents, reason")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "claim_id") == claim_id and sqlite_row_get(row, "event") == "line":
+            total = total + int(sqlite_row_get(row, "amount_cents"))
+    total
+
+# expense_claim_submitter returns the actor_id that submitted the claim, or ""
+# when the claim does not exist. The segregation-of-duties seam.
+fn expense_claim_submitter(store: EnterpriseStore, tenant_id: text, claim_id: text) -> text:
+    val rows = store_rows(store, "expense_events", "id, tenant_id, claim_id, event, actor_id, category, amount_cents, reason")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "claim_id") == claim_id and sqlite_row_get(row, "event") == "submitted":
+            return sqlite_row_get(row, "actor_id")
+    ""
+
+# expense_reject_reason returns the reason text recorded with a rejection, or ""
+# when the claim was never rejected.
+fn expense_reject_reason(store: EnterpriseStore, tenant_id: text, claim_id: text) -> text:
+    var reason: text = ""
+    val rows = store_rows(store, "expense_events", "id, tenant_id, claim_id, event, actor_id, category, amount_cents, reason")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "claim_id") == claim_id and sqlite_row_get(row, "event") == "rejected":
+            reason = sqlite_row_get(row, "reason")
+    reason
+
+# expense_reimbursed_total sums the reimbursement postings for a claim.
+fn expense_reimbursed_total(store: EnterpriseStore, tenant_id: text, claim_id: text) -> i64:
+    var total: i64 = 0
+    val rows = store_rows(store, "expense_events", "id, tenant_id, claim_id, event, actor_id, category, amount_cents, reason")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "claim_id") == claim_id and sqlite_row_get(row, "event") == "reimbursed":
+            total = total + int(sqlite_row_get(row, "amount_cents"))
+    total
+
+# expense_lines_sum is the pure total of a submitted line list (no store read).
+fn expense_lines_sum(line_amounts: [i64]) -> i64:
+    var total: i64 = 0
+    for amount_cents in line_amounts:
+        total = total + amount_cents
+    total
+
+# =============================================================================
+# Guarded commands (frozen sequence: session -> rbac -> validation ->
+# idempotency -> effects, all effects in one UoW)
+# =============================================================================
+
+# expense_cap_set records a per-category spend cap for the session's tenant.
+# Insert-only: a re-cap appends a row and the latest wins.
+fn expense_cap_set(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, category: text, cap_cents: i64) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", category)
+    if not expense_role_allows(who.role, "expense.cap.set"):
+        return denied("forbidden", category)
+    if category == "" or cap_cents < 0:
+        return denied("invalid-record", category)
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    val detail = category + ":{cap_cents}"
+    uow_begin(store)
+    if not store_insert_row(store,
+        "INSERT INTO expense_caps (tenant_id, category, cap_cents, set_by) VALUES (?, ?, ?, ?)",
+        [tenant.tenant_id, category, "{cap_cents}", who.actor_id]):
+        uow_rollback(store)
+        return denied("store-error", detail)
+    outbox_append(store, tenant.tenant_id, "expense.cap.set", detail)
+    audit_append(store, tenant.tenant_id, who.actor_id, "expense.cap.set", detail)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, detail)
+    uow_commit(store)
+    accepted(detail)
+
+# expense_claim_submit files a claim with line items under one category. The
+# claim total is the sum of the lines; a total above the category cap is denied
+# `invalid-record` at the validation rung, before any effect. Writes one
+# `submitted` event plus one `line` event per line item, all in one UoW.
+fn expense_claim_submit(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, claim_id: text, category: text, line_amounts: [i64]) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", claim_id)
+    if not expense_role_allows(who.role, "expense.claim.submit"):
+        return denied("forbidden", claim_id)
+    if claim_id == "" or category == "" or line_amounts.len() == 0:
+        return denied("invalid-record", claim_id)
+    var bad = false
+    for amount_cents in line_amounts:
+        if amount_cents <= 0:
+            bad = true
+    if bad:
+        return denied("invalid-record", claim_id)
+    if expense_status(store, tenant.tenant_id, claim_id) != "":
+        return denied("conflict", claim_id)
+    val total = expense_lines_sum(line_amounts)
+    val cap = expense_cap_cents(store, tenant.tenant_id, category)
+    if cap >= 0 and total > cap:
+        return denied("invalid-record", claim_id + ":cap-exceeded")
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    val detail = claim_id + ":" + category + ":{total}"
+    uow_begin(store)
+    if not store_insert_row(store,
+        "INSERT INTO expense_events (tenant_id, claim_id, event, actor_id, category, amount_cents, reason) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [tenant.tenant_id, claim_id, "submitted", who.actor_id, category, "{total}", ""]):
+        uow_rollback(store)
+        return denied("store-error", detail)
+    for amount_cents in line_amounts:
+        if not store_insert_row(store,
+            "INSERT INTO expense_events (tenant_id, claim_id, event, actor_id, category, amount_cents, reason) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [tenant.tenant_id, claim_id, "line", who.actor_id, category, "{amount_cents}", ""]):
+            uow_rollback(store)
+            return denied("store-error", detail)
+    outbox_append(store, tenant.tenant_id, "expense.claim.submit", detail)
+    audit_append(store, tenant.tenant_id, who.actor_id, "expense.claim.submit", detail)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, detail)
+    uow_commit(store)
+    accepted(detail)
+
+# expense_claim_approve approves a submitted claim. Two rbac rungs beyond the
+# role gate: the approver may not be the submitter (segregation of duties), and
+# the approver's role must meet the tier the claim TOTAL routes to.
+fn expense_claim_approve(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, claim_id: text) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", claim_id)
+    if not expense_role_allows(who.role, "expense.claim.approve"):
+        return denied("forbidden", claim_id)
+    val status = expense_status(store, tenant.tenant_id, claim_id)
+    if status == "":
+        return denied("not-found", claim_id)
+    # segregation of duties — never approve your own claim, not even as admin.
+    if expense_claim_submitter(store, tenant.tenant_id, claim_id) == who.actor_id:
+        return denied("forbidden", claim_id + ":segregation-of-duties")
+    val total = expense_claim_total(store, tenant.tenant_id, claim_id)
+    if not expense_role_meets_tier(who.role, total):
+        return denied("forbidden", claim_id + ":requires-" + expense_required_role(total))
+    if status != "submitted":
+        return denied("invalid-transition", claim_id + ":" + status)
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    val detail = claim_id + ":approved:{total}"
+    uow_begin(store)
+    if not store_insert_row(store,
+        "INSERT INTO expense_events (tenant_id, claim_id, event, actor_id, category, amount_cents, reason) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [tenant.tenant_id, claim_id, "approved", who.actor_id, "", "{total}", ""]):
+        uow_rollback(store)
+        return denied("store-error", detail)
+    outbox_append(store, tenant.tenant_id, "expense.claim.approve", detail)
+    audit_append(store, tenant.tenant_id, who.actor_id, "expense.claim.approve", detail)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, detail)
+    uow_commit(store)
+    accepted(detail)
+
+# expense_claim_reject rejects a submitted claim WITH a recorded reason text.
+# The reason is free text stored on the event; the CommandResult reason stays
+# inside the frozen closed set.
+fn expense_claim_reject(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, claim_id: text, reason_text: text) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", claim_id)
+    if not expense_role_allows(who.role, "expense.claim.reject"):
+        return denied("forbidden", claim_id)
+    val status = expense_status(store, tenant.tenant_id, claim_id)
+    if status == "":
+        return denied("not-found", claim_id)
+    if expense_claim_submitter(store, tenant.tenant_id, claim_id) == who.actor_id:
+        return denied("forbidden", claim_id + ":segregation-of-duties")
+    if reason_text == "":
+        return denied("invalid-record", claim_id + ":reason-required")
+    if status != "submitted":
+        return denied("invalid-transition", claim_id + ":" + status)
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    val detail = claim_id + ":rejected:" + reason_text
+    uow_begin(store)
+    if not store_insert_row(store,
+        "INSERT INTO expense_events (tenant_id, claim_id, event, actor_id, category, amount_cents, reason) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [tenant.tenant_id, claim_id, "rejected", who.actor_id, "", "0", reason_text]):
+        uow_rollback(store)
+        return denied("store-error", detail)
+    outbox_append(store, tenant.tenant_id, "expense.claim.reject", detail)
+    audit_append(store, tenant.tenant_id, who.actor_id, "expense.claim.reject", detail)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, detail)
+    uow_commit(store)
+    accepted(detail)
+
+# expense_claim_reimburse posts the reimbursement for an APPROVED claim. A claim
+# in any other state is denied `invalid-transition` — reimbursement is only
+# reachable through approval.
+fn expense_claim_reimburse(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, claim_id: text) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", claim_id)
+    if not expense_role_allows(who.role, "expense.claim.reimburse"):
+        return denied("forbidden", claim_id)
+    val status = expense_status(store, tenant.tenant_id, claim_id)
+    if status == "":
+        return denied("not-found", claim_id)
+    if status != "approved":
+        return denied("invalid-transition", claim_id + ":" + status)
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    val total = expense_claim_total(store, tenant.tenant_id, claim_id)
+    val detail = claim_id + ":reimbursed:{total}"
+    uow_begin(store)
+    if not store_insert_row(store,
+        "INSERT INTO expense_events (tenant_id, claim_id, event, actor_id, category, amount_cents, reason) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [tenant.tenant_id, claim_id, "reimbursed", who.actor_id, "", "{total}", ""]):
+        uow_rollback(store)
+        return denied("store-error", detail)
+    outbox_append(store, tenant.tenant_id, "expense.claim.reimburse", detail)
+    audit_append(store, tenant.tenant_id, who.actor_id, "expense.claim.reimburse", detail)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, detail)
+    uow_commit(store)
+    accepted(detail)
+
+# expense_claim_amount is the claim total as Money in the given currency — the
+# read a payables integration consumes. A session-gated pure read.
+fn expense_claim_amount(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, claim_id: text, currency: text) -> Money:
+    if not session_valid(session, tenant, who):
+        return Money(amount_cents: 0, currency: currency)
+    Money(amount_cents: expense_claim_total(store, session.tenant_id, claim_id), currency: currency)
+
+export expense_setup
+export expense_role_allows, expense_tier_rank, expense_required_role, expense_role_meets_tier
+export expense_cap_cents, expense_status, expense_claim_total, expense_claim_submitter
+export expense_reject_reason, expense_reimbursed_total, expense_lines_sum
+export expense_cap_set, expense_claim_submit, expense_claim_approve
+export expense_claim_reject, expense_claim_reimburse, expense_claim_amount

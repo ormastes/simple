@@ -257,37 +257,30 @@ fn _same_locator_v1(
         identity.dirent_sector == observation.dirent_sector and
         identity.dirent_offset == observation.dirent_offset
 
-fn _alias_conflicts_locked_v1(
-    mount_slot: i32,
-    mount_generation: u32,
+fn _slot_alias_conflicts_v1(
+    slot: Fat32ExecutableObjectSlotV1,
     observation: Fat32ExecutableObjectObservationV1,
     short_hash: u64,
     short_lookup_hash: u64,
     long_hash: u64,
     ascii_only: bool
 ) -> bool:
-    for slot in _fat32_exec_identity_owner_v1.objects:
-        if slot.active and slot.mount_slot == mount_slot and
-           slot.mount_generation == mount_generation and
-           slot.identity.directory_cluster == observation.directory_cluster and
-           not _same_locator_v1(slot.identity, mount_generation, observation):
-            if slot.identity.short_name_hash == short_hash: return true
-            if observation.lfn_utf16.len() > 0 and ascii_only and
-               slot.identity.short_lookup_hash == long_hash:
-                return true
-            if slot.identity.has_long_name and slot.identity.long_name_ascii_only and
-               slot.identity.long_name_hash == short_lookup_hash:
-                return true
-            if observation.lfn_utf16.len() > 0 and slot.identity.has_long_name and
-               slot.identity.long_name_hash == long_hash:
-                # Exact UTF-16 hashes and ASCII-folded hashes both collide.
-                # A hash collision is rejected rather than resolved by retaining
-                # unbounded name material in the kernel owner.
-                return true
-            if observation.lfn_utf16.len() > 0 and ascii_only and
-               slot.identity.has_long_name and slot.identity.long_name_ascii_only and
-               slot.identity.long_name_hash == long_hash:
-                return true
+    if slot.identity.short_name_hash == short_hash: return true
+    if observation.lfn_utf16.len() > 0 and ascii_only and
+       slot.identity.short_lookup_hash == long_hash:
+        return true
+    if slot.identity.has_long_name and slot.identity.long_name_ascii_only and
+       slot.identity.long_name_hash == short_lookup_hash:
+        return true
+    if observation.lfn_utf16.len() > 0 and slot.identity.has_long_name and
+       slot.identity.long_name_hash == long_hash:
+        # Exact UTF-16 hashes and ASCII-folded hashes both collide. A hash
+        # collision is rejected rather than retaining unbounded name material.
+        return true
+    if observation.lfn_utf16.len() > 0 and ascii_only and
+       slot.identity.has_long_name and slot.identity.long_name_ascii_only and
+       slot.identity.long_name_hash == long_hash:
+        return true
     false
 
 pub(package) fn fat32_executable_identity_open_mount_v1(
@@ -350,11 +343,6 @@ pub(package) fn fat32_executable_identity_observe_v1(
         _short_lookup_units_v1(observation.dirent), true)
     val ascii_only = _lfn_ascii_only_v1(observation.lfn_utf16)
     val long_hash = _hash_u16_v1(observation.lfn_utf16, ascii_only)
-    if _alias_conflicts_locked_v1(mount_index, seal._generation,
-                                  observation, short_hash, short_lookup_hash,
-                                  long_hash, ascii_only):
-        _ = _unlock_v1()
-        return Err("ambiguous-fat32-alias")
     val dirent_hash = _hash_u8_v1(observation.dirent) ^ long_hash
     var object_index = -1
     var free_index = -1
@@ -362,9 +350,14 @@ pub(package) fn fat32_executable_identity_observe_v1(
     while oi < FAT32_EXEC_IDENTITY_OBJECT_LIMIT_V1:
         val candidate = _fat32_exec_identity_owner_v1.objects[oi]
         if candidate.active and candidate.mount_slot == mount_index and
-           _same_locator_v1(candidate.identity, seal._generation, observation):
-            object_index = oi
-            break
+           candidate.mount_generation == seal._generation:
+            if _same_locator_v1(candidate.identity, seal._generation, observation):
+                object_index = oi
+            elif candidate.identity.directory_cluster == observation.directory_cluster and
+                 _slot_alias_conflicts_v1(candidate, observation, short_hash,
+                                          short_lookup_hash, long_hash, ascii_only):
+                _ = _unlock_v1()
+                return Err("ambiguous-fat32-alias")
         if not candidate.active and not candidate.retired and free_index < 0:
             free_index = oi
         oi = oi + 1

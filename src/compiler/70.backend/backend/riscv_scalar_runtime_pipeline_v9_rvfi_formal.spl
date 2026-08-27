@@ -1,0 +1,142 @@
+# Versioned formal-artifact protocol for the sealed V9 IM+Zicsr+Zifencei RVFI wrapper.
+#
+# This module emits evidence inputs only.  It deliberately does not claim that
+# a solver ran.  The public text reducer below is structural validation only
+# and cannot promote caller-authored receipt text to ModelProven; an eventual
+# runner-owned execution boundary must consume the solver outputs directly.
+# The product profile identifies the RTL under test; it is not a claim that
+# this harness proves every instruction in that profile.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.formal_interfaces.{HardwareProofReceiptV1}
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.backend.backend.riscv_scalar_runtime_pipeline_v9_flat_to_vhdl.{compile_strict_riscv_scalar_runtime_pipeline_v9_flat}
+use compiler.backend.backend.riscv_scalar_runtime_pipeline_v9_rvfi_to_vhdl.{compile_strict_riscv_scalar_runtime_pipeline_v9_rvfi, scalar_runtime_pipeline_v9_rvfi_contract_sha256}
+
+pub class RiscvScalarRuntimePipelineV9RvfiFormalArtifactsV1:
+    module_name: text
+    profile: text
+    xlen: i64
+    core_file: text
+    core_vhdl: text
+    harness_file: text
+    harness_vhdl: text
+    prove_file: text
+    prove_sby: text
+    cover_file: text
+    cover_sby: text
+    mutant_harness_file: text
+    mutant_harness_vhdl: text
+    mutant_file: text
+    mutant_sby: text
+    manifest: text
+    hwir_hash: text
+    rtl_hash: text
+    rvfi_contract_hash: text
+    assumption_manifest_hash: text
+
+    me diagnostic() -> text:
+        if self.module_name == "": return "FV2-E-RISCV-V9-FORMAL-MODULE: exact generated module is required"
+        if not (self.profile == "rv32im_zicsr_zifencei" or self.profile == "rv64im_zicsr_zifencei"):
+            return "FV2-E-RISCV-V9-FORMAL-SCOPE: exact V9 profile is required"
+        if not (self.xlen == 32 or self.xlen == 64): return "FV2-E-RISCV-V9-FORMAL-XLEN: RV32 or RV64 is required"
+        if self.core_file == "" or self.core_vhdl == "" or self.harness_vhdl == "": return "FV2-E-RISCV-V9-FORMAL-CORE: generated RVFI core and harness are required"
+        if not self.prove_sby.contains("mode prove") or not self.cover_sby.contains("mode cover") or not self.mutant_sby.contains("mode prove"):
+            return "FV2-E-RISCV-V9-FORMAL-JOBS: prove, cover, and mutation jobs are required"
+        if self.hwir_hash.len() != 64 or self.rtl_hash.len() != 64 or self.rvfi_contract_hash.len() != 64 or self.assumption_manifest_hash.len() != 64:
+            return "FV2-E-RISCV-V9-FORMAL-IDENTITY: complete V9 identities are required"
+        ""
+
+fn v9_formal_assumptions(profile: text, xlen: i64) -> text:
+    "simple-riscv-v9-rvfi-formal-assumptions/v1|product-profile=" + profile +
+        "|proved-property-ids=" + v9_proved_property_ids() +
+        "|excluded-claims=full-isa-conformance,zicsr-semantics,zifencei-semantics" +
+        "|xlen=" + xlen.to_text() +
+        "|clock=rising-edge|reset=asserted-first-cycle-only|interrupt=excluded" +
+        "|completion-ready=constant-one|bus-response-constrained-by-id" +
+        "|csr-inputs-symbolic|fault-output=observed|commit-output=observed"
+
+fn v9_proved_property_ids() -> text:
+    "v9.rvfi.non-control-pc-plus-four,v9.rvfi.retirement-order," +
+        "v9.rvfi.non-interrupt-retirement,v9.runtime.fault-fail-closed"
+
+fn v9_formal_harness(entity: text, core: text, xlen: i64, mutant: bool) -> text:
+    val width = (xlen - 1).to_text()
+    # The mutation reverses the first retired order.  Unlike a relation that
+    # needs consecutive retirement cycles, this is observable from the first
+    # covered retirement and therefore cannot prove vacuously on a sparse
+    # one-entry pipeline.
+    val first_order_relation = if mutant: "/=" else: "="
+    val first_order_label = if mutant: "order_zero_mutant_must_fail" else: "first_retirement_order_is_zero"
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n\n" +
+    "entity " + entity + " is port(clk : in std_logic; rst : in std_logic; in_valid : in std_logic; instruction : in std_logic_vector(31 downto 0); instruction_length_bytes : in std_logic_vector(2 downto 0); rs1_value : in std_logic_vector(" + width + " downto 0); rs2_value : in std_logic_vector(" + width + " downto 0); pc_before : in std_logic_vector(" + width + " downto 0); fallthrough_pc : in std_logic_vector(" + width + " downto 0); privilege : in std_logic_vector(1 downto 0)); end entity;\n" +
+    "architecture formal of " + entity + " is\n" +
+    " signal formal_started : std_logic := '0'; signal rvfi_valid, rvfi_trap, rvfi_halt, rvfi_intr, v9_fault, v9_csr_commit, v9_fence_effect : std_logic; signal v9_csr_address : std_logic_vector(11 downto 0); signal v9_csr_value : std_logic_vector(" + width + " downto 0); signal rvfi_order : std_logic_vector(63 downto 0); signal rvfi_insn : std_logic_vector(31 downto 0); signal rvfi_mode, rvfi_ixl : std_logic_vector(1 downto 0); signal rvfi_rs1_addr, rvfi_rs2_addr, rvfi_rd_addr : std_logic_vector(4 downto 0); signal rvfi_rs1_rdata, rvfi_rs2_rdata, rvfi_rd_wdata, rvfi_pc_rdata, rvfi_pc_wdata, rvfi_mem_addr, rvfi_mem_rdata, rvfi_mem_wdata : std_logic_vector(" + width + " downto 0); signal rvfi_mem_rmask, rvfi_mem_wmask : std_logic_vector(31 downto 0); signal previous_retirement_seen : std_logic := '0'; signal previous_order : unsigned(63 downto 0) := (others=>'0');\n" +
+    "begin\n dut: entity work." + core + " port map(clk=>clk,rst=>rst,in_valid=>in_valid,rvfi_input_ready=>open,instruction=>instruction,instruction_length_bytes=>instruction_length_bytes,rs1_value=>rs1_value,rs2_value=>rs2_value,pc_before=>pc_before,fallthrough_pc=>fallthrough_pc,privilege=>privilege,provider_event_id=>(others=>'0'),decode_event_id=>(others=>'0'),bus_request_ready=>'1',bus_response_valid=>'0',bus_response_id=>(others=>'0'),bus_response_data=>(others=>'0'),bus_response_fault=>'0',bus_response_cause=>(others=>'0'),bus_response_tval=>(others=>'0'),fence_effect_ready=>'1',csr_present=>'1',csr_read_value=>(others=>'0'),rvfi_valid=>rvfi_valid,rvfi_order=>rvfi_order,rvfi_insn=>rvfi_insn,rvfi_trap=>rvfi_trap,rvfi_halt=>rvfi_halt,rvfi_intr=>rvfi_intr,rvfi_mode=>rvfi_mode,rvfi_ixl=>rvfi_ixl,rvfi_rs1_addr=>rvfi_rs1_addr,rvfi_rs2_addr=>rvfi_rs2_addr,rvfi_rs1_rdata=>rvfi_rs1_rdata,rvfi_rs2_rdata=>rvfi_rs2_rdata,rvfi_rd_addr=>rvfi_rd_addr,rvfi_rd_wdata=>rvfi_rd_wdata,rvfi_pc_rdata=>rvfi_pc_rdata,rvfi_pc_wdata=>rvfi_pc_wdata,rvfi_mem_addr=>rvfi_mem_addr,rvfi_mem_rmask=>rvfi_mem_rmask,rvfi_mem_wmask=>rvfi_mem_wmask,rvfi_mem_rdata=>rvfi_mem_rdata,rvfi_mem_wdata=>rvfi_mem_wdata,v9_runtime_protocol_fault=>v9_fault,v9_csr_commit_valid=>v9_csr_commit,v9_csr_commit_address=>v9_csr_address,v9_csr_commit_value=>v9_csr_value,v9_fence_effect_valid=>v9_fence_effect);\n" +
+    " process(clk) begin if rising_edge(clk) then formal_started <= '1'; end if; end process;\n" +
+    " process(clk) begin if rising_edge(clk) then if rst='1' then previous_retirement_seen <= '0'; previous_order <= (others=>'0'); else if rvfi_valid='1' then assert rvfi_halt='0' and rvfi_intr='0' report \"rvfi_non_interrupt_retirement\" severity failure; assert rvfi_trap='1' or rvfi_insn(6 downto 0)=\"1100011\" or rvfi_insn(6 downto 0)=\"1101111\" or rvfi_insn(6 downto 0)=\"1100111\" or rvfi_pc_wdata=std_logic_vector(unsigned(rvfi_pc_rdata)+4) report \"non_control_non_trap_pc_advance_by_four\" severity failure; assert v9_fault='0' report \"faulted_runtime_cannot_retire\" severity failure; if previous_retirement_seen='0' then assert unsigned(rvfi_order) " + first_order_relation + " 0 report \"" + first_order_label + "\" severity failure; else assert unsigned(rvfi_order)>previous_order report \"retirement_order_strictly_increasing\" severity failure; end if; previous_order <= unsigned(rvfi_order); previous_retirement_seen <= '1'; end if; if v9_fault='1' then assert rvfi_valid='0' and v9_csr_commit='0' and v9_fence_effect='0' report \"fault_fail_closed\" severity failure; end if; end if; end if; end process;\n" +
+    " -- V9 fault boundary: completion execute/memory faults are projected by rvfi_trap.\n -- CSR commit and FENCE effect precede their later retirement in this pipeline;\n -- their temporal pairing is deliberately outside this generic RVFI harness.\n -- psl default clock is rising_edge(clk);\n -- psl reset_first: assume always (formal_started='0' -> rst='1');\n -- psl reset_released: assume always (formal_started='1' -> rst='0');\n -- psl retirement_reachable: cover {rst='1'; rst='0' and in_valid='1'; rvfi_valid='1'};\nend architecture formal;\n"
+
+fn v9_sby(core_file: text, harness_file: text, top: text, mode: text) -> text:
+    "[options]\nmode " + mode + "\ndepth 20\n\n[engines]\nsmtbmc boolector\n\n[script]\nghdl --std=08 -fpsl " + core_file + " " + harness_file + " -e " + top + "\nprep -top " + top + "\n\n[files]\n" + core_file + "\n" + harness_file + "\n"
+
+pub fn generate_riscv_scalar_runtime_pipeline_v9_rvfi_formal_artifacts(module_name: text, config: CoreConfig, bus: LsuConfig) -> Result<RiscvScalarRuntimePipelineV9RvfiFormalArtifactsV1, text>:
+    val base = compile_strict_riscv_scalar_runtime_pipeline_v9_flat(module_name, config, bus)
+    val rvfi = compile_strict_riscv_scalar_runtime_pipeline_v9_rvfi(module_name, config, bus)
+    if not rvfi.is_success(): return Err(rvfi.diagnostic)
+    if not base.is_success(): return Err(base.diagnostic)
+    val core_file = module_name + ".vhd"; val harness_file = module_name + "_formal.vhd"; val mutant_harness_file = module_name + "_mutant_formal.vhd"
+    val prove_file = module_name + "_prove.sby"; val cover_file = module_name + "_cover.sby"; val mutant_file = module_name + "_mutant.sby"
+    val assumptions = sha256_text(v9_formal_assumptions(config.profile, config.xlen))
+    val artifacts = RiscvScalarRuntimePipelineV9RvfiFormalArtifactsV1(module_name, config.profile, config.xlen, core_file, rvfi.vhdl, harness_file, v9_formal_harness(module_name + "_formal", module_name + "_rvfi", config.xlen, false), prove_file, v9_sby(core_file, harness_file, module_name + "_formal", "prove"), cover_file, v9_sby(core_file, harness_file, module_name + "_formal", "cover"), mutant_harness_file, v9_formal_harness(module_name + "_mutant_formal", module_name + "_rvfi", config.xlen, true), mutant_file, v9_sby(core_file, mutant_harness_file, module_name + "_mutant_formal", "prove"), "schema=simple-riscv-v9-rvfi-formal-manifest-v1\nproved_property_ids=" + v9_proved_property_ids() + "\nproduct_profile=" + config.profile + "\nxlen=" + config.xlen.to_text() + "\nexpected_results=prove:proved,cover:covered,mutant:counterexample\nhwir_sha256=" + rvfi.hwir_graph_sha256 + "\nrtl_sha256=" + sha256_text(rvfi.vhdl) + "\nrvfi_contract_sha256=" + scalar_runtime_pipeline_v9_rvfi_contract_sha256(base) + "\nassumption_manifest_sha256=" + assumptions + "\n", rvfi.hwir_graph_sha256, sha256_text(rvfi.vhdl), scalar_runtime_pipeline_v9_rvfi_contract_sha256(base), assumptions)
+    val diagnostic = artifacts.diagnostic()
+    if diagnostic != "": return Err(diagnostic)
+    Ok(artifacts)
+
+fn v9_unique_field(receipt: text, key: text) -> text:
+    var value = ""; var count = 0
+    for raw in receipt.split("\n"):
+        val parts = raw.trim().split(" ")
+        if parts.len() == 2 and parts[0] == key:
+            count = count + 1; value = parts[1]
+    if count == 1: value else: ""
+
+fn v9_sha256(value: text) -> bool:
+    if value.len() != 64: return false
+    for ch in value:
+        if not ((ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f')): return false
+    true
+
+fn v9_input_matches(receipt: text, file_name: text, content: text) -> bool:
+    var count = 0; val expected = "input_sha256 " + file_name + " " + sha256_text(content)
+    for raw in receipt.split("\n"):
+        if raw.trim() == expected: count = count + 1
+    count == 1
+
+fn v9_receipt_schema_is_strict(receipt: text) -> bool:
+    val known = ["schema", "module", "product_profile", "xlen", "hwir_sha256", "rtl_sha256", "rvfi_contract_sha256", "assumption_manifest_sha256", "prove_status", "cover_status", "mutant_status", "prove_output_sha256", "cover_output_sha256", "mutant_output_sha256", "sby_version_sha256", "yosys_version_sha256", "ghdl_version_sha256", "boolector_version_sha256"]
+    var count = 0; var valid = true
+    for raw in receipt.split("\n"):
+        val line = raw.trim()
+        if line != "":
+            count = count + 1
+            val parts = line.split(" ")
+            if parts[0] == "input_sha256":
+                if parts.len() != 3: valid = false
+            else:
+                if parts.len() != 2 or not known.contains(parts[0]): valid = false
+    valid and count == 24
+
+pub fn reduce_riscv_scalar_runtime_pipeline_v9_rvfi_formal_receipt(artifacts: RiscvScalarRuntimePipelineV9RvfiFormalArtifactsV1, receipt: text) -> HardwareProofReceiptV1:
+    val inputs_match = v9_input_matches(receipt, artifacts.core_file, artifacts.core_vhdl) and v9_input_matches(receipt, artifacts.harness_file, artifacts.harness_vhdl) and v9_input_matches(receipt, artifacts.mutant_harness_file, artifacts.mutant_harness_vhdl) and v9_input_matches(receipt, artifacts.prove_file, artifacts.prove_sby) and v9_input_matches(receipt, artifacts.cover_file, artifacts.cover_sby) and v9_input_matches(receipt, artifacts.mutant_file, artifacts.mutant_sby)
+    val outputs_match = v9_sha256(v9_unique_field(receipt, "prove_output_sha256")) and v9_sha256(v9_unique_field(receipt, "cover_output_sha256")) and v9_sha256(v9_unique_field(receipt, "mutant_output_sha256"))
+    val tools_match = v9_sha256(v9_unique_field(receipt, "sby_version_sha256")) and v9_sha256(v9_unique_field(receipt, "yosys_version_sha256")) and v9_sha256(v9_unique_field(receipt, "ghdl_version_sha256")) and v9_sha256(v9_unique_field(receipt, "boolector_version_sha256"))
+    # These checks keep malformed material distinguishable during review, but
+    # `structurally_closed` is not execution authority.  Both `artifacts` and
+    # `receipt` are caller-constructible values, so this public compatibility
+    # reducer must never issue accepted evidence.
+    val structurally_closed = artifacts.diagnostic() == "" and v9_receipt_schema_is_strict(receipt) and inputs_match and outputs_match and tools_match and v9_unique_field(receipt, "schema") == "simple-riscv-v9-rvfi-formal-receipt-v1" and v9_unique_field(receipt, "module") == artifacts.module_name and v9_unique_field(receipt, "product_profile") == artifacts.profile and v9_unique_field(receipt, "xlen") == artifacts.xlen.to_text() and v9_unique_field(receipt, "hwir_sha256") == artifacts.hwir_hash and v9_unique_field(receipt, "rtl_sha256") == artifacts.rtl_hash and v9_unique_field(receipt, "rvfi_contract_sha256") == artifacts.rvfi_contract_hash and v9_unique_field(receipt, "assumption_manifest_sha256") == artifacts.assumption_manifest_hash and v9_unique_field(receipt, "prove_status") == "proved" and v9_unique_field(receipt, "cover_status") == "covered" and v9_unique_field(receipt, "mutant_status") == "counterexample"
+    val reviewed_property_ids = if structurally_closed: ["v9.rvfi.non-control-pc-plus-four", "v9.rvfi.retirement-order", "v9.rvfi.non-interrupt-retirement", "v9.runtime.fault-fail-closed"] else: []
+    HardwareProofReceiptV1(hwir_hash: artifacts.hwir_hash, rtl_hash: artifacts.rtl_hash, netlist_hash: "", rvfi_contract_hash: artifacts.rvfi_contract_hash, property_ids: reviewed_property_ids, cover_ids: if structurally_closed: ["v9.rvfi.retirement-reachable"] else: [], mutation_ids: if structurally_closed: ["v9.rvfi.first-order-mutant"] else: [], engine_versions: [], evidence_receipt_hashes: [], assumption_manifest_hash: artifacts.assumption_manifest_hash, status: FormalStatus.Failed)

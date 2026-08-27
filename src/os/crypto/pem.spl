@@ -18,114 +18,28 @@
 # tag: crypto, pem, rfc7468
 # =============================================================================
 
-# Base64 is implemented locally over [u8] rather than imported.
-#
-# `base_encoding.base64.base64_encode` takes and returns `text`, and
-# `base_encoding.utilities` never exported `line_wrap`/`line_unwrap` at all —
-# this file was written against a list-of-i64 API that no longer exists, so
-# every call here failed (`method 'bytes' not found on type 'array'`).
-#
-# Routing DER through `text` would also be wrong even once it compiled: any
-# DER byte >= 0x80 becomes a multi-byte UTF-8 sequence, so the byte string
-# that comes back out is not the one that went in. PEM bodies are arbitrary
-# binary, so the codec below stays in byte space end to end.
+use base_encoding.base64.{base64_encode, base64_decode}
+use base_encoding.utilities.{line_wrap, line_unwrap}
 
 # =============================================================================
 # Internal helpers
 # =============================================================================
 
 # Convert [u8] to a Simple list of i64 for base_encoding APIs.
-fn _b64_alphabet() -> text:
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-
-# Base64-encode raw bytes (RFC 4648 section 4, with '=' padding). No line breaks.
-fn _b64_encode_bytes(src: [u8]) -> text:
-    val tbl = _b64_alphabet()
-    val n = src.len()
-    var out = ""
+fn _u8_to_list(src: [u8]) -> list:
+    var out: list = []
     var i: u64 = 0
-    while i < n:
-        val b1 = src[i].to_i64()
-        var b2: i64 = 0
-        var b3: i64 = 0
-        if i + 1 < n:
-            b2 = src[i + 1].to_i64()
-        if i + 2 < n:
-            b3 = src[i + 2].to_i64()
-
-        out = out + tbl.char_at(b1 >> 2)
-        out = out + tbl.char_at(((b1 & 3) << 4) | (b2 >> 4))
-        if i + 1 < n:
-            out = out + tbl.char_at(((b2 & 15) << 2) | (b3 >> 6))
-        else:
-            out = out + "="
-        if i + 2 < n:
-            out = out + tbl.char_at(b3 & 63)
-        else:
-            out = out + "="
-        i = i + 3
+    while i < src.len():
+        out.push(src[i].to_i64())
+        i = i + 1
     out
 
-# Value of one base64 character, or -1 if it is not in the alphabet.
-# '=' (61) is reported as -1 too; the caller stops at padding.
-fn _b64_value(c: i64) -> i64:
-    if c >= 65 and c <= 90:
-        return c - 65
-    if c >= 97 and c <= 122:
-        return c - 97 + 26
-    if c >= 48 and c <= 57:
-        return c - 48 + 52
-    if c == 43:
-        return 62
-    if c == 47:
-        return 63
-    -1
-
-# Base64-decode to raw bytes. Characters outside the alphabet (including
-# whitespace) are skipped; '=' padding terminates the stream.
-fn _b64_decode_to_bytes(s: text) -> [u8]:
+# Convert a base_encoding list-of-i64 back to [u8].
+fn _list_to_u8(src: list) -> [u8]:
     var out: [u8] = []
-    var acc: i64 = 0
-    var have: i64 = 0
     var i: i64 = 0
-    while i < s.len():
-        val c = s.byte_at(i).to_i64()
-        if c == 61:
-            i = s.len()
-        else:
-            val v = _b64_value(c)
-            if v >= 0:
-                acc = (acc << 6) | v
-                have = have + 6
-                if have >= 8:
-                    have = have - 8
-                    out.push(((acc >> have) & 0xFF).to_u8())
-            i = i + 1
-    out
-
-# Insert "\n" every `width` characters. Always ends with a trailing "\n"
-# when the input is non-empty.
-fn _line_wrap(s: text, width: i64) -> text:
-    if s.len() == 0:
-        return ""
-    var out = ""
-    var i: i64 = 0
-    while i < s.len():
-        var j = i + width
-        if j > s.len():
-            j = s.len()
-        out = out + s.substring(i, j) + "\n"
-        i = j
-    out
-
-# Remove every CR and LF, joining wrapped base64 back into one line.
-fn _line_unwrap(s: text) -> text:
-    var out = ""
-    var i: i64 = 0
-    while i < s.len():
-        val c = s.byte_at(i).to_i64()
-        if c != 10 and c != 13:
-            out = out + s.substring(i, i + 1)
+    while i < src.len().to_i64():
+        out.push(src.get(i).to_u8())
         i = i + 1
     out
 
@@ -167,8 +81,9 @@ fn _pem_marker(prefix: text, label: text) -> text:
 # reason: positional pem encode API
 fn pem_encode(label: [u8], der_bytes: [u8]) -> [u8]:
     val label_text = _u8_to_text(label)
-    val b64_flat = _b64_encode_bytes(der_bytes)
-    val b64_wrapped = _line_wrap(b64_flat, 64)
+    val body_list = _u8_to_list(der_bytes)
+    val b64_flat = base64_encode(body_list)
+    val b64_wrapped = line_wrap(b64_flat, 64)
     val begin = _pem_marker("BEGIN", label_text)
     # line_wrap may or may not append a trailing newline; ensure body ends with \n
     val body = if b64_wrapped.len() > 0 and b64_wrapped.char_at(b64_wrapped.len() - 1) != "\n":
@@ -205,23 +120,12 @@ fn _find_str(haystack: text, needle: text, start: i64) -> i64:
 
 # Strip whitespace (spaces, tabs, CR, LF) from both ends of a text.
 fn _trim_text(s: text) -> text:
-    # INDEX SPACE: BYTE-indexed throughout. `ls` and `le` are bounded by
-    # `s.len()` and handed to `substring`, both BYTE-based, but they used to be
-    # read with `char_at`, which is CHARACTER-based. On non-ASCII input that
-    # cut mid-character: `_trim_text("  <e-acute>")` is 4 BYTES / 3 CHARACTERS,
-    # `le` started at byte 3, `char_at(3)` was out of range so the trailing
-    # scan stopped immediately, and the result was `substring(2, 4)`... but the
-    # earlier form stopped at `le = 2` and returned only the LEAD BYTE of the
-    # e-acute -- invalid UTF-8 handed to the base64 decoder. All four
-    # whitespace bytes are ASCII (space 32, tab 9, CR 13, LF 10) and UTF-8
-    # continuation bytes are always >= 0x80, so a byte scan never mistakes part
-    # of a character for whitespace and always stops on a character boundary.
     val len = s.len()
     var ls = 0
     var found_start = false
     while ls < len and not found_start:
-        val b = s.byte_at(ls)
-        if b != 32 and b != 9 and b != 13 and b != 10:
+        val c = s.char_at(ls)
+        if c != " " and c != "\t" and c != "\r" and c != "\n":
             found_start = true
         else:
             ls = ls + 1
@@ -230,8 +134,8 @@ fn _trim_text(s: text) -> text:
     var le = len - 1
     var found_end = false
     while le >= 0 and not found_end:
-        val b = s.byte_at(le)
-        if b != 32 and b != 9 and b != 13 and b != 10:
+        val c = s.char_at(le)
+        if c != " " and c != "\t" and c != "\r" and c != "\n":
             found_end = true
         else:
             le = le - 1
@@ -259,19 +163,10 @@ fn pem_decode(pem_bytes: [u8]) -> Result<PemBlock, text>:
 
     # Body starts after the closing dashes + optional CRLF/LF
     var body_start = begin_end + marker_suffix.len()
-    # Skip one CRLF or LF. INDEX SPACE: `body_start` is a BYTE offset -- it
-    # comes from `_find_str` plus `len()`, both of which count bytes -- and it
-    # is fed to `substring` below, which is byte-indexed too. `char_at` counts
-    # CHARACTERS, so reading the newline with it desynced the probe by
-    # (bytes - characters) of everything to the left. RFC 7468 explicitly
-    # allows arbitrary text between blocks and openssl writes non-ASCII subject
-    # lines there, so the skew is reachable in practice; when the misread
-    # landed on a "\n" (base64 wraps every ~64 characters) the body lost its
-    # first base64 character and the decoded DER was silently wrong. `byte_at`
-    # keeps the whole computation in one space. CR = 13, LF = 10.
-    if body_start < src.len() and src.byte_at(body_start) == 13:
+    # Skip one CRLF or LF
+    if body_start < src.len() and src.char_at(body_start) == "\r":
         body_start = body_start + 1
-    if body_start < src.len() and src.byte_at(body_start) == 10:
+    if body_start < src.len() and src.char_at(body_start) == "\n":
         body_start = body_start + 1
 
     # Find matching END marker
@@ -282,16 +177,17 @@ fn pem_decode(pem_bytes: [u8]) -> Result<PemBlock, text>:
 
     # Extract body text and strip whitespace
     val body_raw = src.substring(body_start, end_pos)
-    val body_clean = _line_unwrap(body_raw)
+    val body_clean = line_unwrap(body_raw)
     val body_trimmed = _trim_text(body_clean)
 
     if body_trimmed.len() == 0:
         return Err("pem: empty Base64 body")
 
-    val der = _b64_decode_to_bytes(body_trimmed)
-    if der.len() == 0:
+    val decoded_list = base64_decode(body_trimmed)
+    if decoded_list.len() == 0:
         return Err("pem: Base64 decode produced empty result — body may be malformed")
 
+    val der = _list_to_u8(decoded_list)
     val label_bytes = _text_to_u8(begin_label)
     Ok(PemBlock(label: label_bytes, der: der))
 
@@ -328,11 +224,9 @@ fn pem_decode_all(pem_bytes: [u8]) -> Result<list, text>:
             val begin_label = src.substring(begin_label_start, begin_end)
 
             var body_start = begin_end + marker_suffix.len()
-            # BYTE offset, same as the single-block path above; see the note
-            # there. CR = 13, LF = 10.
-            if body_start < src_len and src.byte_at(body_start) == 13:
+            if body_start < src_len and src.char_at(body_start) == "\r":
                 body_start = body_start + 1
-            if body_start < src_len and src.byte_at(body_start) == 10:
+            if body_start < src_len and src.char_at(body_start) == "\n":
                 body_start = body_start + 1
 
             val end_search = "-----END " + begin_label + "-----"
@@ -341,16 +235,17 @@ fn pem_decode_all(pem_bytes: [u8]) -> Result<list, text>:
                 return Err("pem: no matching END for label '" + begin_label + "'")
 
             val body_raw = src.substring(body_start, end_pos)
-            val body_clean = _line_unwrap(body_raw)
+            val body_clean = line_unwrap(body_raw)
             val body_trimmed = _trim_text(body_clean)
 
             if body_trimmed.len() == 0:
                 return Err("pem: empty Base64 body for label '" + begin_label + "'")
 
-            val der = _b64_decode_to_bytes(body_trimmed)
-            if der.len() == 0:
+            val decoded_list = base64_decode(body_trimmed)
+            if decoded_list.len() == 0:
                 return Err("pem: Base64 decode failed for label '" + begin_label + "'")
 
+            val der = _list_to_u8(decoded_list)
             val label_bytes = _text_to_u8(begin_label)
             val block = PemBlock(label: label_bytes, der: der)
             blocks.push(block)

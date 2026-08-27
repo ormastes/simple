@@ -2,6 +2,29 @@
 
 > @pure
 
+<!-- sdn-diagram:id=effect_annotations_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=effect_annotations_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+effect_annotations_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=effect_annotations_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 35 | 35 | 0 | 0 |
@@ -21,7 +44,7 @@
 | Category | Type System \| Effects |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/effect_annotations_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Effect Types
@@ -37,8 +60,6 @@
 
 ```simple
 @pure
-use std.spec.step
-
 fn add(x: i64, y: i64) -> i64:
 x + y
 
@@ -56,18 +77,17 @@ print(data)
 
 #### parses @pure on function
 
-- parses @pure on function
+1. fn add
+2. expect add
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses @pure on function")
 @pure
 fn add(x: i64, y: i64) -> i64:
     x + y
@@ -78,18 +98,17 @@ expect add(20, 22) == 42
 
 #### pure function has no side effects
 
-- pure function has no side effects
+1. fn double
+2. expect double
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("pure function has no side effects")
 @pure
 fn double(x: i64) -> i64:
     x * 2
@@ -102,18 +121,17 @@ expect double(21) == 42
 
 #### parses @io on function
 
-- parses @io on function
+1. fn print hello
+2. print
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses @io on function")
 @io
 fn print_hello():
     print("Hello, World!")
@@ -126,18 +144,16 @@ expect true  # Parsed successfully
 
 #### parses @net on function
 
-- parses @net on function
+1. fn fetch
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses @net on function")
 @net
 fn fetch(url: text) -> text:
     "mock response"  # Placeholder
@@ -150,18 +166,16 @@ expect true
 
 #### parses @fs on function
 
-- parses @fs on function
+1. fn read file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses @fs on function")
 @fs
 fn read_file(path: text) -> text:
     "file contents"  # Placeholder
@@ -174,18 +188,16 @@ expect true
 
 #### parses @unsafe on function
 
-- parses @unsafe on function
+1. fn raw cast
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses @unsafe on function")
 @unsafe
 fn raw_cast(ptr: i64) -> i64:
     ptr
@@ -198,18 +210,16 @@ expect true
 
 #### parses @async on function
 
-- parses @async on function
+1. fn delayed task
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses @async on function")
 @async
 fn delayed_task():
     pass
@@ -222,18 +232,17 @@ expect true
 
 #### parses two effects
 
-- parses two effects
+1. fn fetch and log
+2. print
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses two effects")
 @io
 @net
 fn fetch_and_log(url: text):
@@ -246,18 +255,17 @@ expect true
 
 #### parses three effects
 
-- parses three effects
+1. fn sync remote file
+2. print
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses three effects")
 @io
 @net
 @fs
@@ -271,18 +279,17 @@ expect true
 
 #### parses io and fs together
 
-- parses io and fs together
+1. fn log to file
+2. print
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses io and fs together")
 @io
 @fs
 fn log_to_file(path: text, message: text):
@@ -296,18 +303,17 @@ expect true
 
 #### function with no effects parses
 
-- function with no effects parses
+1. fn unrestricted function
+2. print
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("function with no effects parses")
 fn unrestricted_function():
     print("Can do anything!")
 expect true
@@ -317,18 +323,17 @@ expect true
 
 #### no-effect function can call anything
 
-- no-effect function can call anything
+1. fn flexible
+2. expect flexible
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("no-effect function can call anything")
 fn flexible():
     val x = 42
     x
@@ -341,18 +346,17 @@ expect flexible() == 42
 
 #### combines @pure with @inline
 
-- combines @pure with @inline
+1. fn fast add
+2. expect fast add
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("combines @pure with @inline")
 @pure
 @inline
 fn fast_add(x: i64, y: i64) -> i64:
@@ -364,18 +368,17 @@ expect fast_add(20, 22) == 42
 
 #### combines @io with @deprecated
 
-- combines @io with @deprecated
+1. fn old print
+2. print
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("combines @io with @deprecated")
 @io
 @deprecated
 fn old_print(msg: text):
@@ -387,18 +390,17 @@ expect true
 
 #### effects separate from other decorators
 
-- effects separate from other decorators
+1. fn cached compute
+2. expect cached compute
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("effects separate from other decorators")
 @pure
 @memoize
 fn cached_compute(x: i64) -> i64:
@@ -412,18 +414,13 @@ expect cached_compute(6) == 36
 
 #### Effect has Pure variant
 
-- Effect has Pure variant
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("Effect has Pure variant")
 val e = Effect.Pure
 expect e == Effect.Pure
 ```
@@ -432,18 +429,13 @@ expect e == Effect.Pure
 
 #### Effect has Io variant
 
-- Effect has Io variant
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("Effect has Io variant")
 val e = Effect.Io
 expect e == Effect.Io
 ```
@@ -452,18 +444,13 @@ expect e == Effect.Io
 
 #### Effect has Net variant
 
-- Effect has Net variant
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("Effect has Net variant")
 val e = Effect.Net
 expect e == Effect.Net
 ```
@@ -472,18 +459,13 @@ expect e == Effect.Net
 
 #### Effect has Fs variant
 
-- Effect has Fs variant
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("Effect has Fs variant")
 val e = Effect.Fs
 expect e == Effect.Fs
 ```
@@ -492,18 +474,13 @@ expect e == Effect.Fs
 
 #### Effect has Unsafe variant
 
-- Effect has Unsafe variant
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("Effect has Unsafe variant")
 val e = Effect.Unsafe
 expect e == Effect.Unsafe
 ```
@@ -512,18 +489,13 @@ expect e == Effect.Unsafe
 
 #### Effect has Async variant
 
-- Effect has Async variant
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("Effect has Async variant")
 val e = Effect.Async
 expect e == Effect.Async
 ```
@@ -534,18 +506,13 @@ expect e == Effect.Async
 
 #### converts 'pure' to Pure
 
-- converts 'pure' to Pure
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("converts 'pure' to Pure")
 # Effect.from_decorator_name("pure") would return Some(Effect.Pure)
 val e = Effect.Pure
 expect e == Effect.Pure
@@ -555,18 +522,13 @@ expect e == Effect.Pure
 
 #### converts 'io' to Io
 
-- converts 'io' to Io
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("converts 'io' to Io")
 val e = Effect.Io
 expect e == Effect.Io
 ```
@@ -575,18 +537,13 @@ expect e == Effect.Io
 
 #### converts 'net' to Net
 
-- converts 'net' to Net
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("converts 'net' to Net")
 val e = Effect.Net
 expect e == Effect.Net
 ```
@@ -595,18 +552,13 @@ expect e == Effect.Net
 
 #### converts 'fs' to Fs
 
-- converts 'fs' to Fs
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("converts 'fs' to Fs")
 val e = Effect.Fs
 expect e == Effect.Fs
 ```
@@ -615,18 +567,13 @@ expect e == Effect.Fs
 
 #### converts 'unsafe' to Unsafe
 
-- converts 'unsafe' to Unsafe
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("converts 'unsafe' to Unsafe")
 val e = Effect.Unsafe
 expect e == Effect.Unsafe
 ```
@@ -635,18 +582,13 @@ expect e == Effect.Unsafe
 
 #### converts 'async' to Async
 
-- converts 'async' to Async
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("converts 'async' to Async")
 val e = Effect.Async
 expect e == Effect.Async
 ```
@@ -655,18 +597,13 @@ expect e == Effect.Async
 
 #### returns None for unknown
 
-- returns None for unknown
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns None for unknown")
 # Effect.from_decorator_name("unknown") would return None
 # Verify that unknown strings don't match any known effect
 expect "unknown" != "pure"
@@ -676,18 +613,13 @@ expect "unknown" != "pure"
 
 #### returns None for inline
 
-- returns None for inline
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns None for inline")
 # Effect.from_decorator_name("inline") would return None
 # @inline is a decorator but not an effect
 expect "inline" != "pure"
@@ -699,18 +631,16 @@ expect "inline" != "pure"
 
 #### Pure decorator name is 'pure'
 
-- Pure decorator name is 'pure'
+1. expect e decorator name
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("Pure decorator name is 'pure'")
 val e = Effect.Pure
 expect e.decorator_name() == "pure"
 ```
@@ -719,18 +649,16 @@ expect e.decorator_name() == "pure"
 
 #### Io decorator name is 'io'
 
-- Io decorator name is 'io'
+1. expect e decorator name
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("Io decorator name is 'io'")
 val e = Effect.Io
 expect e.decorator_name() == "io"
 ```
@@ -739,18 +667,16 @@ expect e.decorator_name() == "io"
 
 #### Net decorator name is 'net'
 
-- Net decorator name is 'net'
+1. expect e decorator name
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("Net decorator name is 'net'")
 val e = Effect.Net
 expect e.decorator_name() == "net"
 ```
@@ -759,18 +685,16 @@ expect e.decorator_name() == "net"
 
 #### Fs decorator name is 'fs'
 
-- Fs decorator name is 'fs'
+1. expect e decorator name
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("Fs decorator name is 'fs'")
 val e = Effect.Fs
 expect e.decorator_name() == "fs"
 ```
@@ -779,18 +703,16 @@ expect e.decorator_name() == "fs"
 
 #### Unsafe decorator name is 'unsafe'
 
-- Unsafe decorator name is 'unsafe'
+1. expect e decorator name
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("Unsafe decorator name is 'unsafe'")
 val e = Effect.Unsafe
 expect e.decorator_name() == "unsafe"
 ```
@@ -799,18 +721,16 @@ expect e.decorator_name() == "unsafe"
 
 #### Async decorator name is 'async'
 
-- Async decorator name is 'async'
+1. expect e decorator name
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("Async decorator name is 'async'")
 val e = Effect.Async
 expect e.decorator_name() == "async"
 ```
@@ -829,51 +749,3 @@ expect e.decorator_name() == "async"
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `0d3d3cbe57fb594452f6b7e2bcab67a86378a71453f3940f88e34b87f44bb007`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `0d3d3cbe57fb594452f6b7e2bcab67a86378a71453f3940f88e34b87f44bb007`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `0d3d3cbe57fb594452f6b7e2bcab67a86378a71453f3940f88e34b87f44bb007`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/effect_annotations_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/effect_annotations_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/effect_annotations_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/effect_annotations_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/effect_annotations_spec.spl:55:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses @pure on function' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/effect_annotations_spec.spl:63:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'pure function has no side effects' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/effect_annotations_spec.spl:72:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses @io on function' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

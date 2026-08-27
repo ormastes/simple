@@ -8,6 +8,7 @@
 
 use std.nogc_async_mut.mcp.fileio_json (LB, extract_json_string_v2, extract_json_value, extract_nested_string, make_result_response, make_error_response, make_tool_result, parse_params_json)
 use std.nogc_async_mut.mcp.fileio_server (FileIOServer, get_all_tools)
+use std.nogc_sync_mut.sffi.runtime.{gc_collect}
 use std.io.{env_get}
 use std.nogc_sync_mut.io.process_ops.{shell}
 use std.sffi.cli.{cli_get_args}
@@ -17,6 +18,7 @@ fn _fileio_text_byte_len(s: text) -> i64:
 
 # Protocol framing auto-detection
 var USE_JSON_LINES: bool = false
+val GC_COLLECT_EVERY = 100
 val NL = "\n"
 var TOOLS_LIST_CACHE = ""
 
@@ -51,6 +53,7 @@ fn run_server():
 
     val server = FileIOServer.init(config)
     val isolate_mode = (env_get("SIMPLE_MCP_LEAK_ISOLATE") ?? "") == "1"
+    var request_count = 0
 
     var running = true
     for _iter in range(0, 999999):
@@ -60,6 +63,7 @@ fn run_server():
         if line == "":
             running = false
         else:
+            request_count = request_count + 1
             val method = extract_json_string_v2(line, "method")
             val id = extract_json_value(line, "id")
             var response = ""
@@ -101,6 +105,10 @@ fn run_server():
 
             if response != "":
                 write_stdout_message(response)
+
+            # Periodic collection reduces long-session heap growth under heavy MCP traffic.
+            if request_count % GC_COLLECT_EVERY == 0:
+                gc_collect()
 
     server.shutdown()
 

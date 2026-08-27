@@ -27,7 +27,22 @@ Selected `<article>` block-default rendering through Web semantics, Draw IR, and
 
 Plan: `doc/03_plan/sys_test/html_css_spec_traceability.md`
 
-## Scenarios
+use std.spec.*
+use common.ui.draw_ir.{DrawIrCommand, DrawIrComposition}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_get_tag, be_dom_path_for_route
+}
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
+    html_tree_builder_build
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    HNode, SimpleWebLayoutDrawIrResult,
+    simple_web_layout_render_html_draw_ir_result
+}
+use test.system.browser_dom_identity_helpers.{
+    system_dom_identity_index, system_dom_route
+}
 
 ### Production article element rendering
 
@@ -64,14 +79,20 @@ Plan: `doc/03_plan/sys_test/html_css_spec_traceability.md`
 Runnable source: 49 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
-```simple
-# @req REQ-SSPEC-SYSTEM
-step("should lower the article block default through Draw IR to pixels")
-val html = (
-    "<style>html,body{margin:0;background:#ffffff}" +
-    "article{width:40px;height:12px;background:#2563eb}</style>" +
-    "<body id='body'><article id='article'></article></body>"
-)
+        step("Parse article as a body child")
+        val root = html_tree_builder_build(html)
+        val identity_index = system_dom_identity_index(root)
+        val article_path = be_dom_path_for_route(
+            root, identity_index, system_dom_route(identity_index, "article")
+        )
+        val body_path = be_dom_path_for_route(
+            root, identity_index, system_dom_route(identity_index, "body")
+        )
+        expect(article_path.len()).to_be_greater_than(1)
+        expect(be_dom_get_tag(article_path[article_path.len() - 1])).to_equal("article")
+        expect(article_path[article_path.len() - 2].node_id).to_equal(
+            body_path[body_path.len() - 1].node_id
+        )
 
 step("Parse article as a body child")
 val root = html_tree_builder_build(html)

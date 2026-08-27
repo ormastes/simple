@@ -1,6 +1,29 @@
 # Types Specification
 
-> Tests covering TestExecutionMode, TestLevel, OutputFormat, TestFileResult, TestRunResult, SkipFeatureInfo.
+> <details>
+
+<!-- sdn-diagram:id=types_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=types_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+types_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=types_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,152 +40,109 @@
 
 #### creates Interpreter variant
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- creates Interpreter variant
-   - Expected: mode equals `TestExecutionMode.Interpreter`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("creates Interpreter variant")
 val mode = TestExecutionMode.Interpreter
-expect(mode).to_equal(TestExecutionMode.Interpreter)
+expect(mode == TestExecutionMode.Interpreter).to_equal(true)
 ```
 
 </details>
 
 #### creates Smf variant
 
-- creates Smf variant
-   - Expected: mode equals `TestExecutionMode.Smf`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("creates Smf variant")
 val mode = TestExecutionMode.Smf
-expect(mode).to_equal(TestExecutionMode.Smf)
+expect(mode == TestExecutionMode.Smf).to_equal(true)
 ```
 
 </details>
 
 #### creates Native variant
 
-- creates Native variant
-   - Expected: mode equals `TestExecutionMode.Native`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("creates Native variant")
 val mode = TestExecutionMode.Native
-expect(mode).to_equal(TestExecutionMode.Native)
+expect(mode == TestExecutionMode.Native).to_equal(true)
 ```
 
 </details>
 
 #### distinguishes Interpreter from Smf
 
-- distinguishes Interpreter from Smf
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("distinguishes Interpreter from Smf")
 val a = TestExecutionMode.Interpreter
 val b = TestExecutionMode.Smf
-expect(a).to_not_equal(b)
+expect(a == b).to_equal(false)
 ```
 
 </details>
 
 #### distinguishes Interpreter from Native
 
-- distinguishes Interpreter from Native
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("distinguishes Interpreter from Native")
 val a = TestExecutionMode.Interpreter
 val b = TestExecutionMode.Native
-expect(a).to_not_equal(b)
+expect(a == b).to_equal(false)
 ```
 
 </details>
 
 #### distinguishes Smf from Native
 
-- distinguishes Smf from Native
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("distinguishes Smf from Native")
 val a = TestExecutionMode.Smf
 val b = TestExecutionMode.Native
-expect(a).to_not_equal(b)
+expect(a == b).to_equal(false)
 ```
 
 </details>
 
 #### compares equal variants
 
-- compares equal variants
-   - Expected: a equals `b`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("compares equal variants")
 val a = TestExecutionMode.Native
 val b = TestExecutionMode.Native
-expect(a).to_equal(b)
+expect(a == b).to_equal(true)
 ```
 
 </details>
@@ -171,122 +151,88 @@ expect(a).to_equal(b)
 
 #### creates All variant
 
-- creates All variant
-   - Expected: level equals `TestLevel.All`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("creates All variant")
 val level = TestLevel.All
-expect(level).to_equal(TestLevel.All)
+expect(level == TestLevel.All).to_equal(true)
 ```
 
 </details>
 
 #### creates Unit variant
 
-- creates Unit variant
-   - Expected: level equals `TestLevel.Unit`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("creates Unit variant")
 val level = TestLevel.Unit
-expect(level).to_equal(TestLevel.Unit)
+expect(level == TestLevel.Unit).to_equal(true)
 ```
 
 </details>
 
 #### creates Integration variant
 
-- creates Integration variant
-   - Expected: level equals `TestLevel.Integration`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("creates Integration variant")
 val level = TestLevel.Integration
-expect(level).to_equal(TestLevel.Integration)
+expect(level == TestLevel.Integration).to_equal(true)
 ```
 
 </details>
 
 #### creates System variant
 
-- creates System variant
-   - Expected: level equals `TestLevel.System`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("creates System variant")
 val level = TestLevel.System
-expect(level).to_equal(TestLevel.System)
+expect(level == TestLevel.System).to_equal(true)
 ```
 
 </details>
 
 #### distinguishes Unit from Integration
 
-- distinguishes Unit from Integration
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("distinguishes Unit from Integration")
-expect(TestLevel.Unit).to_not_equal(TestLevel.Integration)
+expect(TestLevel.Unit == TestLevel.Integration).to_equal(false)
 ```
 
 </details>
 
 #### distinguishes All from System
 
-- distinguishes All from System
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("distinguishes All from System")
-expect(TestLevel.All).to_not_equal(TestLevel.System)
+expect(TestLevel.All == TestLevel.System).to_equal(false)
 ```
 
 </details>
@@ -295,61 +241,44 @@ expect(TestLevel.All).to_not_equal(TestLevel.System)
 
 #### creates Default variant
 
-- creates Default variant
-   - Expected: fmt equals `OutputFormat.Default`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("creates Default variant")
 val fmt = OutputFormat.Default
-expect(fmt).to_equal(OutputFormat.Default)
+expect(fmt == OutputFormat.Default).to_equal(true)
 ```
 
 </details>
 
 #### creates Doc variant
 
-- creates Doc variant
-   - Expected: fmt equals `OutputFormat.Doc`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("creates Doc variant")
 val fmt = OutputFormat.Doc
-expect(fmt).to_equal(OutputFormat.Doc)
+expect(fmt == OutputFormat.Doc).to_equal(true)
 ```
 
 </details>
 
 #### distinguishes Default from Doc
 
-- distinguishes Default from Doc
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("distinguishes Default from Doc")
-expect(OutputFormat.Default).to_not_equal(OutputFormat.Doc)
+expect(OutputFormat.Default == OutputFormat.Doc).to_equal(false)
 ```
 
 </details>
@@ -358,26 +287,13 @@ expect(OutputFormat.Default).to_not_equal(OutputFormat.Doc)
 
 #### creates a result with all fields
 
-- creates a result with all fields
-   - Expected: r.path equals `test/example_spec.spl`
-   - Expected: r.passed equals `10`
-   - Expected: r.failed equals `0`
-   - Expected: r.skipped equals `2`
-   - Expected: r.pending equals `1`
-   - Expected: r.duration_ms equals `500`
-   - Expected: r.error equals ``
-   - Expected: r.timed_out is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("creates a result with all fields")
 val r = TestFileResult(
     path: "test/example_spec.spl",
     passed: 10,
@@ -402,19 +318,13 @@ expect(r.timed_out).to_equal(false)
 
 #### is_ok returns true when no failures and no error and not timed out
 
-- is_ok returns true when no failures and no error and not timed out
-   - Expected: file_result_is_ok(r) is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("is_ok returns true when no failures and no error and not timed out")
 val r = TestFileResult(
     path: "passing.spl",
     passed: 5,
@@ -432,19 +342,13 @@ expect(file_result_is_ok(r)).to_equal(true)
 
 #### is_ok returns false when there are failures
 
-- is_ok returns false when there are failures
-   - Expected: file_result_is_ok(r) is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("is_ok returns false when there are failures")
 val r = TestFileResult(
     path: "failing.spl",
     passed: 3,
@@ -462,19 +366,13 @@ expect(file_result_is_ok(r)).to_equal(false)
 
 #### is_ok returns false when there is an error message
 
-- is_ok returns false when there is an error message
-   - Expected: file_result_is_ok(r) is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("is_ok returns false when there is an error message")
 val r = TestFileResult(
     path: "error.spl",
     passed: 0,
@@ -492,19 +390,13 @@ expect(file_result_is_ok(r)).to_equal(false)
 
 #### is_ok returns false when timed out
 
-- is_ok returns false when timed out
-   - Expected: file_result_is_ok(r) is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("is_ok returns false when timed out")
 val r = TestFileResult(
     path: "slow.spl",
     passed: 0,
@@ -522,19 +414,13 @@ expect(file_result_is_ok(r)).to_equal(false)
 
 #### is_ok returns false when both failed and error
 
-- is_ok returns false when both failed and error
-   - Expected: file_result_is_ok(r) is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("is_ok returns false when both failed and error")
 val r = TestFileResult(
     path: "bad.spl",
     passed: 1,
@@ -552,19 +438,13 @@ expect(file_result_is_ok(r)).to_equal(false)
 
 #### is_ok returns false when all bad conditions
 
-- is_ok returns false when all bad conditions
-   - Expected: file_result_is_ok(r) is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("is_ok returns false when all bad conditions")
 val r = TestFileResult(
     path: "worst.spl",
     passed: 0,
@@ -582,20 +462,13 @@ expect(file_result_is_ok(r)).to_equal(false)
 
 #### handles zero counts
 
-- handles zero counts
-   - Expected: file_result_is_ok(r) is true
-   - Expected: r.passed equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("handles zero counts")
 val r = TestFileResult(
     path: "empty.spl",
     passed: 0,
@@ -614,21 +487,13 @@ expect(r.passed).to_equal(0)
 
 #### stores skipped count separately from failures
 
-- stores skipped count separately from failures
-   - Expected: file_result_is_ok(r) is true
-   - Expected: r.skipped equals `10`
-   - Expected: r.pending equals `5`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("stores skipped count separately from failures")
 val r = TestFileResult(
     path: "skipped.spl",
     passed: 0,
@@ -650,24 +515,13 @@ expect(r.pending).to_equal(5)
 
 #### creates a result with aggregate counts
 
-- creates a result with aggregate counts
-   - Expected: r.total_passed equals `100`
-   - Expected: r.total_failed equals `0`
-   - Expected: r.total_skipped equals `5`
-   - Expected: r.total_pending equals `3`
-   - Expected: r.total_timed_out equals `0`
-   - Expected: r.total_duration_ms equals `5000`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("creates a result with aggregate counts")
 val r = TestRunResult(
     total_passed: 100,
     total_failed: 0,
@@ -688,19 +542,13 @@ expect(r.total_duration_ms).to_equal(5000)
 
 #### is_ok returns true when no failures and no timeouts
 
-- is_ok returns true when no failures and no timeouts
-   - Expected: run_result_is_ok(r) is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("is_ok returns true when no failures and no timeouts")
 val r = TestRunResult(
     total_passed: 50,
     total_failed: 0,
@@ -716,19 +564,13 @@ expect(run_result_is_ok(r)).to_equal(true)
 
 #### is_ok returns false when there are failures
 
-- is_ok returns false when there are failures
-   - Expected: run_result_is_ok(r) is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("is_ok returns false when there are failures")
 val r = TestRunResult(
     total_passed: 48,
     total_failed: 2,
@@ -744,19 +586,13 @@ expect(run_result_is_ok(r)).to_equal(false)
 
 #### is_ok returns false when there are timeouts
 
-- is_ok returns false when there are timeouts
-   - Expected: run_result_is_ok(r) is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("is_ok returns false when there are timeouts")
 val r = TestRunResult(
     total_passed: 49,
     total_failed: 0,
@@ -772,19 +608,13 @@ expect(run_result_is_ok(r)).to_equal(false)
 
 #### is_ok returns false when both failures and timeouts
 
-- is_ok returns false when both failures and timeouts
-   - Expected: run_result_is_ok(r) is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("is_ok returns false when both failures and timeouts")
 val r = TestRunResult(
     total_passed: 40,
     total_failed: 5,
@@ -800,19 +630,13 @@ expect(run_result_is_ok(r)).to_equal(false)
 
 #### handles all zeros
 
-- handles all zeros
-   - Expected: run_result_is_ok(r) is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("handles all zeros")
 val r = TestRunResult(
     total_passed: 0,
     total_failed: 0,
@@ -830,23 +654,13 @@ expect(run_result_is_ok(r)).to_equal(true)
 
 #### creates with all fields
 
-- creates with all fields
-   - Expected: info.file_path equals `test/feature/language/pattern_matching_spec.spl`
-   - Expected: info.title equals `Pattern Matching Exhaustiveness`
-   - Expected: info.feature_ids equals `PM-001,PM-002`
-   - Expected: info.category equals `pattern_matching`
-   - Expected: info.status equals `planned`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("creates with all fields")
 val info = SkipFeatureInfo(
     file_path: "test/feature/language/pattern_matching_spec.spl",
     title: "Pattern Matching Exhaustiveness",
@@ -865,20 +679,13 @@ expect(info.status).to_equal("planned")
 
 #### handles empty fields
 
-- handles empty fields
-   - Expected: info.file_path equals ``
-   - Expected: info.title equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("handles empty fields")
 val info = SkipFeatureInfo(
     file_path: "",
     title: "",
@@ -894,21 +701,13 @@ expect(info.title).to_equal("")
 
 #### handles various status values
 
-- handles various status values
-   - Expected: planned.status equals `planned`
-   - Expected: in_progress.status equals `in_progress`
-   - Expected: blocked.status equals `blocked`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("handles various status values")
 val planned = SkipFeatureInfo(
     file_path: "a.spl",
     title: "Feature A",
@@ -946,12 +745,12 @@ expect(blocked.status).to_equal("blocked")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/test_runner/types_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering TestExecutionMode, TestLevel, OutputFormat, TestFileResult, TestRunResult, SkipFeatureInfo.
+Tests covering:
 - TestExecutionMode
 - TestLevel
 - OutputFormat
@@ -971,54 +770,3 @@ Tests covering TestExecutionMode, TestLevel, OutputFormat, TestFileResult, TestR
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-APP`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `ef3043e67c66bbc617848a28d4a081bf206514fde80a9399efae09602d304769`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `ef3043e67c66bbc617848a28d4a081bf206514fde80a9399efae09602d304769`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `ef3043e67c66bbc617848a28d4a081bf206514fde80a9399efae09602d304769`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/01_unit/app/test_runner/types_spec.spl
-mirror: doc/06_spec/01_unit/app/test_runner/types_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/test_runner/types_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/test_runner/types_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/test_runner/types_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 14 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/app/test_runner/types_spec.spl:98:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates Interpreter variant' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/test_runner/types_spec.spl:104:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates Smf variant' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/test_runner/types_spec.spl:110:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates Native variant' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -1,6 +1,29 @@
 # Sdoctest Specification
 
-> Tests covering SDoctest glob matching, SDoctest fence line parsing, SDoctest block extraction, SDoctest config, SDoctest modifier parsing, SDoctest code building, SDoctest results, SDoctest fail-as-success modifier, SDoctest block accumulation, SDoctest language-based validation.
+> <details>
+
+<!-- sdn-diagram:id=sdoctest_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=sdoctest_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+sdoctest_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=sdoctest_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,22 +40,13 @@
 
 #### matches exact paths
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- matches exact paths
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("matches exact paths")
 # Test literal path matching
 val path = "doc/07_guide/intro.md"
 val pattern = "doc/07_guide/intro.md"
@@ -43,18 +57,16 @@ expect path == pattern
 
 #### matches single wildcard *
 
-- matches single wildcard *
+1. expect filename ends with
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("matches single wildcard *")
 # * matches any characters within a single segment
 val filename = "intro.md"
 val pattern = "*.md"
@@ -65,18 +77,16 @@ expect filename.ends_with(".md")
 
 #### matches ? for single character
 
-- matches ? for single character
+1. expect filename len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("matches ? for single character")
 val filename = "test1.md"
 expect filename.len() == 8
 ```
@@ -85,18 +95,16 @@ expect filename.len() == 8
 
 #### matches ** for directory traversal
 
-- matches ** for directory traversal
+1. expect path starts with
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("matches ** for directory traversal")
 # ** matches zero or more path segments
 val path = "doc/09_report/2026/summary.md"
 expect path.starts_with("doc/09_report/")
@@ -108,18 +116,13 @@ expect path.starts_with("doc/09_report/")
 
 #### parses simple fence
 
-- parses simple fence
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses simple fence")
 val fence = "```simple"
 val parts = fence.split(":")
 expect parts[0] == "```simple"
@@ -129,18 +132,16 @@ expect parts[0] == "```simple"
 
 #### parses fence with skip modifier
 
-- parses fence with skip modifier
+1. expect parts len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses fence with skip modifier")
 val fence = "```simple:skip"
 val parts = fence.split(":")
 expect parts.len() == 2
@@ -151,18 +152,16 @@ expect parts[1] == "skip"
 
 #### parses fence with multiple modifiers
 
-- parses fence with multiple modifiers
+1. expect mods len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses fence with multiple modifiers")
 val fence = "```simple:init=std_imports,env=slow"
 val colon_idx = fence.index_of(":")
 expect colon_idx >= 0
@@ -177,18 +176,16 @@ expect mods[1] == "env=slow"
 
 #### parses fence with should_fail
 
-- parses fence with should_fail
+1. expect fence contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses fence with should_fail")
 val fence = "```simple:should_fail"
 expect fence.contains("should_fail")
 ```
@@ -197,18 +194,16 @@ expect fence.contains("should_fail")
 
 #### parses fence with tag modifier
 
-- parses fence with tag modifier
+1. expect mod str starts with
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses fence with tag modifier")
 val fence = "```simple:tag=integration"
 val mod_str = fence.split(":")[1]
 expect mod_str.starts_with("tag=")
@@ -220,18 +215,16 @@ expect mod_str.starts_with("tag=")
 
 #### extracts simple code block from markdown
 
-- extracts simple code block from markdown
+1. expect blocks len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("extracts simple code block from markdown")
 val md = "# Title\n\n```simple\nval x = 42\nprint x\n```\n\nSome text."
 val blocks = extract_blocks_from_content(md, "sample.md")
 expect blocks.len() == 1
@@ -241,18 +234,16 @@ expect blocks.len() == 1
 
 #### extracts multiple code blocks
 
-- extracts multiple code blocks
+1. expect blocks len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("extracts multiple code blocks")
 val md = "```simple\nval a = 1\n```\n\nText\n\n```simple\nval b = 2\n```"
 val blocks = extract_blocks_from_content(md, "sample.md")
 expect blocks.len() == 2
@@ -262,18 +253,16 @@ expect blocks.len() == 2
 
 #### ignores non-simple code blocks
 
-- ignores non-simple code blocks
+1. expect blocks len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("ignores non-simple code blocks")
 val md = "```python\nprint('hello')\n```\n\n```simple\nval x = 1\n```"
 val blocks = extract_blocks_from_content(md, "sample.md")
 expect blocks.len() == 1
@@ -283,18 +272,13 @@ expect blocks.len() == 1
 
 #### handles skip-next HTML comment
 
-- handles skip-next HTML comment
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles skip-next HTML comment")
 val md = "<!--sdoctest:skip-next-->\n```simple\nval x = 1\n```"
 val lines = md.split("\n")
 expect lines[0] == "<!--sdoctest:skip-next-->"
@@ -304,18 +288,17 @@ expect lines[0] == "<!--sdoctest:skip-next-->"
 
 #### handles skip-begin/end HTML comments
 
-- handles skip-begin/end HTML comments
+1. expect md contains
+2. expect md contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles skip-begin/end HTML comments")
 val md = "<!--sdoctest:skip-begin-->\n```simple\nval x = 1\n```\n<!--sdoctest:skip-end-->"
 expect md.contains("skip-begin")
 expect md.contains("skip-end")
@@ -327,18 +310,16 @@ expect md.contains("skip-end")
 
 #### provides sensible defaults
 
-- provides sensible defaults
+1. expect default sources len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("provides sensible defaults")
 # Default config should include README.md and doc/07_guide/
 val default_sources = ["README.md", "doc/07_guide/", "examples/"]
 expect default_sources.len() == 3
@@ -349,18 +330,16 @@ expect default_sources[0] == "README.md"
 
 #### parses SDN source entries
 
-- parses SDN source entries
+1. expect sdn source contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses SDN source entries")
 val sdn_source = "file: README.md"
 expect sdn_source.contains("file:")
 ```
@@ -369,18 +348,17 @@ expect sdn_source.contains("file:")
 
 #### parses ignore patterns
 
-- parses ignore patterns
+1. expect patterns len
+2. expect patterns[0] contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses ignore patterns")
 val patterns = ["doc/archive/**", "doc/09_report/**"]
 expect patterns.len() == 2
 expect patterns[0].contains("**")
@@ -390,18 +368,17 @@ expect patterns[0].contains("**")
 
 #### parses init scripts section
 
-- parses init scripts section
+1. expect init entry contains
+2. expect init entry contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses init scripts section")
 val init_entry = "std_imports:\n  file: test/doctest/init/std_imports.spl"
 expect init_entry.contains("std_imports")
 expect init_entry.contains(".spl")
@@ -411,18 +388,16 @@ expect init_entry.contains(".spl")
 
 #### parses environment configuration
 
-- parses environment configuration
+1. expect env entry contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses environment configuration")
 val env_entry = "default:\n  timeout: 5000"
 expect env_entry.contains("timeout")
 ```
@@ -433,18 +408,13 @@ expect env_entry.contains("timeout")
 
 #### recognizes skip modifier
 
-- recognizes skip modifier
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("recognizes skip modifier")
 val mod_str = "skip"
 expect mod_str == "skip"
 ```
@@ -453,7 +423,22 @@ expect mod_str == "skip"
 
 #### recognizes should_fail modifier
 
-- recognizes should_fail modifier
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val mod_str = "should_fail"
+expect mod_str == "should_fail"
+```
+
+</details>
+
+#### parses init=name modifier
+
+1. expect mod str starts with
 
 
 <details>
@@ -463,28 +448,6 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("recognizes should_fail modifier")
-val mod_str = "should_fail"
-expect mod_str == "should_fail"
-```
-
-</details>
-
-#### parses init=name modifier
-
-- parses init=name modifier
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("parses init=name modifier")
 val mod_str = "init=std_imports"
 expect mod_str.starts_with("init=")
 val name = mod_str[5:]
@@ -495,18 +458,16 @@ expect name == "std_imports"
 
 #### parses env=name modifier
 
-- parses env=name modifier
+1. expect mod str starts with
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses env=name modifier")
 val mod_str = "env=slow"
 expect mod_str.starts_with("env=")
 val name = mod_str[4:]
@@ -517,18 +478,16 @@ expect name == "slow"
 
 #### parses tag=name modifier
 
-- parses tag=name modifier
+1. expect mod str starts with
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses tag=name modifier")
 val mod_str = "tag=integration"
 expect mod_str.starts_with("tag=")
 val name = mod_str[4:]
@@ -539,18 +498,16 @@ expect name == "integration"
 
 #### splits comma-separated modifiers
 
-- splits comma-separated modifiers
+1. expect parts len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("splits comma-separated modifiers")
 val mod_str = "init=std_imports,env=slow,tag=integration"
 val parts = mod_str.split(",")
 expect parts.len() == 3
@@ -560,18 +517,13 @@ expect parts.len() == 3
 
 #### recognizes fail_as_success modifier
 
-- recognizes fail_as_success modifier
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("recognizes fail_as_success modifier")
 val mod_str = "fail_as_success"
 expect mod_str == "fail_as_success"
 ```
@@ -580,18 +532,17 @@ expect mod_str == "fail_as_success"
 
 #### parses fence with fail_as_success
 
-- parses fence with fail_as_success
+1. expect fence contains
+2. expect parts len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses fence with fail_as_success")
 val fence = "```simple:fail_as_success"
 expect fence.contains("fail_as_success")
 val parts = fence.split(":")
@@ -605,18 +556,17 @@ expect parts[1] == "fail_as_success"
 
 #### prepends init script content
 
-- prepends init script content
+1. expect combined starts with
+2. expect combined contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("prepends init script content")
 val init_content = "use std.collections.*"
 val block_code = "val x = [1, 2, 3]"
 val combined = init_content + "\n\n" + block_code
@@ -628,18 +578,13 @@ expect combined.contains("val x = [1, 2, 3]")
 
 #### returns block code when no init script
 
-- returns block code when no init script
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns block code when no init script")
 val block_code = "val x = 42"
 expect block_code == "val x = 42"
 ```
@@ -650,18 +595,13 @@ expect block_code == "val x = 42"
 
 #### tracks passed/failed/skipped counts
 
-- tracks passed/failed/skipped counts
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("tracks passed/failed/skipped counts")
 var passed = 3
 var failed = 1
 var skipped = 2
@@ -673,18 +613,13 @@ expect total == 6
 
 #### reports ok when no failures
 
-- reports ok when no failures
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("reports ok when no failures")
 var failed = 0
 var errors = 0
 val is_ok = failed == 0 and errors == 0
@@ -695,18 +630,13 @@ expect is_ok
 
 #### reports not ok when failures exist
 
-- reports not ok when failures exist
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("reports not ok when failures exist")
 var failed = 1
 var errors = 0
 val is_ok = failed == 0 and errors == 0
@@ -719,18 +649,13 @@ expect not is_ok
 
 #### converts failed to accepted
 
-- converts failed to accepted
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("converts failed to accepted")
 # Simulate per-block :fail_as_success modifier: when a block fails,
 # the failure is converted to passed with accepted count
 var file_passed = 2
@@ -753,18 +678,13 @@ expect file_accepted == 3
 
 #### does not convert errors to accepted
 
-- does not convert errors to accepted
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("does not convert errors to accepted")
 # Errors (infra issues like timeout) should NOT be converted
 var file_passed = 2
 var file_failed = 1
@@ -788,18 +708,13 @@ expect file_accepted == 1
 
 #### reports ok when all failures are accepted
 
-- reports ok when all failures are accepted
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("reports ok when all failures are accepted")
 var failed = 0
 var errors = 0
 var accepted = 5
@@ -812,18 +727,13 @@ expect accepted == 5
 
 #### tracks accepted separately from passed
 
-- tracks accepted separately from passed
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("tracks accepted separately from passed")
 var passed = 3
 var accepted = 2
 val total_passing = passed
@@ -837,18 +747,13 @@ expect accepted == 2
 
 #### first block gets empty preamble
 
-- first block gets empty preamble
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("first block gets empty preamble")
 # Block 0 should always have empty preamble (no preceding blocks)
 val block1_code = "struct Point:\n    x: i64\n    y: i64"
 # Simulate: for block 0, preamble is always ""
@@ -860,18 +765,18 @@ expect preamble == ""
 
 #### extracts use statements as reusable
 
-- extracts use statements as reusable
+1. reusable lines push
+2. expect reusable lines len
+3. expect reusable lines[0] == "use app io mod
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("extracts use statements as reusable")
 val code = "use app.io.mod (file_read)\nval x = 42\nprint x"
 val lines = code.split("\n")
 var reusable_lines: [text] = []
@@ -887,18 +792,18 @@ expect reusable_lines[0] == "use app.io.mod (file_read)"
 
 #### extracts struct definitions as reusable
 
-- extracts struct definitions as reusable
+1. expect lines[1] starts with
+2. expect lines[2] starts with
+3. expect not lines[3] starts with
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("extracts struct definitions as reusable")
 val code = "struct Point:\n    x: i64\n    y: i64\nval p = Point(x: 3, y: 4)"
 val lines = code.split("\n")
 # struct definition starts at line 0, has 2 indented body lines
@@ -913,18 +818,18 @@ expect not lines[3].starts_with(" ")
 
 #### extracts fn definitions as reusable
 
-- extracts fn definitions as reusable
+1. expect lines[0] == "fn double
+2. expect lines[1] starts with
+3. expect not lines[2] starts with
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("extracts fn definitions as reusable")
 val code = "fn double(x):\n    x * 2\nval result = double(21)"
 val lines = code.split("\n")
 expect lines[0] == "fn double(x):"
@@ -937,18 +842,13 @@ expect not lines[2].starts_with(" ")
 
 #### does not extract bare expressions
 
-- does not extract bare expressions
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("does not extract bare expressions")
 val code = "print \"hello\"\nval x = 42"
 val lines = code.split("\n")
 var reusable = 0
@@ -963,18 +863,17 @@ expect reusable == 0
 
 #### accumulates from multiple preceding blocks
 
-- accumulates from multiple preceding blocks
+1. expect accumulated contains
+2. expect accumulated contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("accumulates from multiple preceding blocks")
 # Block 1 defines struct, block 2 defines fn, block 3 should see both
 val block1_reusable = "struct Point:\n    x: i64"
 val block2_reusable = "fn double(x):\n    x * 2"
@@ -989,18 +888,17 @@ expect accumulated.contains("fn double(x):")
 
 #### prepends preamble before block code
 
-- prepends preamble before block code
+1. expect combined starts with
+2. expect combined ends with
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("prepends preamble before block code")
 val preamble = "struct Point:\n    x: i64\n    y: i64"
 val block_code = "val p = Point(x: 3, y: 4)"
 val combined = preamble + "\n\n" + block_code
@@ -1014,18 +912,13 @@ expect combined.ends_with("val p = Point(x: 3, y: 4)")
 
 #### simple blocks ignore non-zero exit codes
 
-- simple blocks ignore non-zero exit codes
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("simple blocks ignore non-zero exit codes")
 # Simple blocks are demonstration code - they pass even if exit code != 0
 val block_language = "simple"
 val exit_code = 1  # Non-zero exit
@@ -1037,18 +930,13 @@ expect should_pass
 
 #### spl blocks ignore non-zero exit codes
 
-- spl blocks ignore non-zero exit codes
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("spl blocks ignore non-zero exit codes")
 # spl is an alias for simple
 val block_language = "spl"
 val exit_code = 1
@@ -1060,18 +948,13 @@ expect should_pass
 
 #### sdoctest blocks validate exit codes
 
-- sdoctest blocks validate exit codes
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sdoctest blocks validate exit codes")
 # Sdoctest blocks are verified examples - must succeed
 val block_language = "sdoctest"
 val exit_code = 1
@@ -1083,18 +966,13 @@ expect not should_pass
 
 #### simple blocks pass on parse error exit codes
 
-- simple blocks pass on parse error exit codes
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("simple blocks pass on parse error exit codes")
 # Exit code 1 from parse error is still ignored for simple blocks
 val block_language = "simple"
 val exit_code = 1  # Could be parse error, undefined var, etc.
@@ -1106,18 +984,13 @@ expect is_simple
 
 #### distinguishes demo code from verified examples
 
-- distinguishes demo code from verified examples
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("distinguishes demo code from verified examples")
 # Core principle: simple = demo, sdoctest = verified
 val demo_language = "simple"
 val verified_language = "sdoctest"
@@ -1133,12 +1006,12 @@ expect demo_language != verified_language
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/sdoctest_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering SDoctest glob matching, SDoctest fence line parsing, SDoctest block extraction, SDoctest config, SDoctest modifier parsing, SDoctest code building, SDoctest results, SDoctest fail-as-success modifier, SDoctest block accumulation, SDoctest language-based validation.
+Tests covering:
 - SDoctest glob matching
 - SDoctest fence line parsing
 - SDoctest block extraction
@@ -1162,51 +1035,3 @@ Tests covering SDoctest glob matching, SDoctest fence line parsing, SDoctest blo
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `58b2260f964bbe85577a626ca6dc99835423cccc2de2b1a2fb270774669a35f2`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `58b2260f964bbe85577a626ca6dc99835423cccc2de2b1a2fb270774669a35f2`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `58b2260f964bbe85577a626ca6dc99835423cccc2de2b1a2fb270774669a35f2`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/sdoctest_spec.spl
-mirror: doc/06_spec/01_unit/app/sdoctest_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/sdoctest_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/sdoctest_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/sdoctest_spec.spl:23:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches exact paths' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/sdoctest_spec.spl:31:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches single wildcard *' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/sdoctest_spec.spl:39:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches ? for single character' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

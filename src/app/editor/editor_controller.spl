@@ -6,13 +6,12 @@
 
 use std.editor.services.md_wiki_index.*
 use std.editor.services.md_search.*
+use std.editor.services.md_diagnostics.*
 use std.editor.services.file_watcher.*
 use std.editor.services.command_palette.*
 use std.editor.common.keybindings.*
 use std.editor.extensions.host.*
 use std.editor.extensions.builtin.md_edit_assist.*
-use std.editor.extensions.builtin.md_language.{md_toggle_bold_handler, md_toggle_task_handler,
-    md_language_diagnose_handler, md_language_complete_handler, md_language_hover_handler}
 use std.editor.view.diagnostics_panel.*
 use std.editor.view.lsp_result_panel.*
 use std.editor.view.lsp_popup.*
@@ -42,8 +41,10 @@ use app.editor.editor_extension_roots.*
 use app.editor.editor_controller_types.*
 
 use std.io_runtime.{file_exists}
+extern fn rt_file_read_text(path: text) -> text
 use std.io_runtime.{read_file_text}
 use std.io_runtime.{file_write}
+extern fn rt_file_read_bytes(path: text) -> [u8]?
 use std.io_runtime.{file_write_bytes}
 use std.io_runtime.{dir_create_all}
 use std.io_runtime.{dir_walk}
@@ -155,11 +156,7 @@ class EditorController:
 impl EditorController:
 
     static fn new(session: EditSession) -> EditorController:
-        # Markdown providers route through the kernel's typed CommandRegistry;
-        # call sites resolve them via host.dispatch_command, not direct imports.
-        # The registrations themselves live in extension_host_with_builtin_handlers()
-        # so the IDE capability census sees the same dispatchable host this does.
-        val host = extension_host_with_builtin_handlers()
+        val host = extension_host_with_builtins()
         host.discover_extensions(editor_extension_roots())
         EditorController(
             session: session,
@@ -391,8 +388,6 @@ impl EditorController:
         ctrl_open_palette(me)
 
     me _execute_palette_command(command_name: text, command_payload: text) -> EditorAction:
-        if command_name == "markdown.toggle_bold":
-            return me._markdown_toggle_bold()
         if command_name == "problems":
             return me._show_diagnostics_panel()
         if command_name == "diagnostics-filter":
@@ -616,7 +611,7 @@ impl EditorController:
         val config = md_wiki_daily_note_config_with_title(folder, title_format, _editor_payload_part(payload, 4), template_body)
         val path = md_wiki_daily_note_path(config, date)
         val content = md_wiki_daily_note_content(config, date)
-        if not file_write(path, content):
+        if not rt_file_write_text(path, content):
             me.status_msg = "failed to create daily note"
             return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
         var session_daily = me.session
@@ -650,10 +645,10 @@ impl EditorController:
         if template_path == "" or target_path == "":
             me.status_msg = "missing template or target path"
             return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-        val rendered = _editor_apply_template_text(read_file_text(template_path), title, date)
-        val existing = read_file_text(target_path)
+        val rendered = _editor_apply_template_text(rt_file_read_text(template_path) ?? "", title, date)
+        val existing = rt_file_read_text(target_path) ?? ""
         val sep = if existing == "" or existing.ends_with("\n") then "" else: "\n"
-        if not file_write(target_path, existing + sep + rendered):
+        if not rt_file_write_text(target_path, existing + sep + rendered):
             me.status_msg = "failed to insert template"
             return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
         me.status_msg = "inserted template: " + template_path
@@ -746,48 +741,11 @@ impl EditorController:
                 me.status_msg = "1 quick fix"
                 return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
             me.code_actions = []
-            # Resolved through the extension kernel's CommandRegistry (typed
-            # markdown diagnostics provider), not a direct service import.
-            val diag_dispatch = me.extension_host.dispatch_command("markdown.provide_diagnostics", content)
-            var has_diags = false
-            if val Ok(diag_text) = diag_dispatch:
-                has_diags = diag_text != ""
-            me.status_msg = if has_diags then "diagnostics available" else: "no quick fixes"
+            val diags = md_diagnose(content, doc.path())
+            me.status_msg = if diags.len() > 0 then "diagnostics available" else: "no quick fixes"
             return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
         me.code_actions = []
         me.status_msg = "no quick fixes"
-        EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-
-    # Toggle bold on the active markdown document. Routed through the extension
-    # kernel: host.dispatch_command("markdown.toggle_bold", payload) runs the
-    # typed handler registered by the markdown-language builtin.
-    me _markdown_toggle_bold() -> EditorAction:
-        if me.session.active_index < 0 or me.session.active_index >= me.session.buffers.len():
-            me.status_msg = "no file open"
-            return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-        val doc = me.session.documents[me.session.active_index]
-        if doc.language_id != "markdown":
-            me.status_msg = "markdown.toggle_bold: not a markdown document"
-            return EditorAction(redraw: false, quit: false, status_msg: me.status_msg)
-        val buffer = me.session.buffers[me.session.active_index]
-        val row = buffer.cursor_row
-        val line = buffer.line_at(row)
-        var sel_start = -1
-        var sel_end = -1
-        if buffer.selection_range.active:
-            if buffer.selection_range.start_row == row and buffer.selection_range.end_row == row:
-                sel_start = buffer.selection_range.start_col
-                sel_end = buffer.selection_range.end_col
-        val payload = buffer.cursor_col.to_text() + "|" + sel_start.to_text() + "|" +
-            sel_end.to_text() + "|" + line
-        val dispatch = me.extension_host.dispatch_command("markdown.toggle_bold", payload)
-        if val Ok(new_line) = dispatch:
-            if new_line != line:
-                _editor_markdown_replace_line(buffer, row, new_line)
-            me.status_msg = "markdown: toggle bold"
-            return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-        if val Err(reason) = dispatch:
-            me.status_msg = "markdown.toggle_bold failed: " + reason
         EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
 
     me _show_diagnostics_panel() -> EditorAction:
@@ -1020,7 +978,7 @@ impl EditorController:
         if launch_path == "":
             me.status_msg = "debug compound source not found: " + editor_debug_launch_config_name(compound_config)
             return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-        val content = read_file_text(launch_path)
+        val content = rt_file_read_text(launch_path) ?? ""
         val workspace = _editor_workspace_dir_from_launch_json(launch_path)
         val doc = me.session.active_document()
         val program = if doc == nil then "" else: doc.path()
@@ -1627,14 +1585,14 @@ impl EditorController:
             return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
         val checked = mode == "done" or mode == "checked" or mode == "complete" or mode == "completed"
         var changed_count = 0
-        val files = dir_walk(root)
+        val files = rt_dir_walk(root)
         for file in files:
             if not _editor_is_markdown_path(file):
                 continue
-            val existing = read_file_text(file)
+            val existing = rt_file_read_text(file) ?? ""
             val next = md_tasks_set_checked(existing, checked)
             if next != existing:
-                if file_write(file, next):
+                if rt_file_write_text(file, next):
                     changed_count = changed_count + 1
                     me._refresh_open_document_from_disk_batch(file, next)
         val index = md_wiki_index_documents(_editor_markdown_vault_documents(root))
@@ -1685,16 +1643,16 @@ impl EditorController:
             return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
         me.wiki_property_vault_root = parsed.root
         var changed_count = 0
-        val files = dir_walk(parsed.root)
+        val files = rt_dir_walk(parsed.root)
         for file in files:
             if not _editor_is_markdown_path(file):
                 continue
             if not _editor_vault_property_path_selected(file, parsed.selected_paths):
                 continue
-            val existing = read_file_text(file)
+            val existing = rt_file_read_text(file) ?? ""
             val next = _editor_markdown_property_content(existing, parsed.key, parsed.value)
             if next != existing:
-                if file_write(file, next):
+                if rt_file_write_text(file, next):
                     changed_count = changed_count + 1
                     me._refresh_open_document_from_disk_batch(file, next)
         val index = md_wiki_index_documents(_editor_markdown_vault_documents(parsed.root))
@@ -1710,13 +1668,13 @@ impl EditorController:
             return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
         me.wiki_property_vault_root = parsed.root
         var rows: [WikiPanelRow] = []
-        val files = dir_walk(parsed.root)
+        val files = rt_dir_walk(parsed.root)
         for file in files:
             if not _editor_is_markdown_path(file):
                 continue
             if not _editor_vault_property_path_selected(file, parsed.selected_paths):
                 continue
-            val existing = read_file_text(file)
+            val existing = rt_file_read_text(file) ?? ""
             val next = _editor_markdown_property_content(existing, parsed.key, parsed.value)
             if next != existing:
                 rows.push(WikiPanelRow(icon: "review", label: _editor_path_basename(file), detail: parsed.key + " -> " + parsed.value, path: file, line: 0))
@@ -2109,7 +2067,7 @@ impl EditorController:
         me.lsp_result_panel = lsp_result_panel_workspace_edit_preview(title, edit_json, 0)
         var rows: [LspResultRow] = []
         for row in me.lsp_result_panel.rows:
-            if row.path != "" and not file_exists(row.path):
+            if row.path != "" and not rt_file_exists(row.path):
                 rows.push(LspResultRow(
                     icon: "conflict",
                     label: row.label,
@@ -2141,7 +2099,7 @@ impl EditorController:
     me _mark_workspace_edit_preview_conflicts():
         var rows: [LspResultRow] = []
         for row in me.lsp_result_panel.rows:
-            if row.path != "" and not file_exists(row.path):
+            if row.path != "" and not rt_file_exists(row.path):
                 rows.push(LspResultRow(
                     icon: "conflict",
                     label: row.label,
@@ -2288,11 +2246,8 @@ impl EditorController:
         val end_col = _editor_parse_i64(_editor_payload_part(row.command_payload, 1), row.col)
         var preserved_ranges: [SelectionRangeDeco] = []
         for existing in buffer.selection_ranges:
-            # Preserve only multi-selection ranges on OTHER line spans: a
-            # range on the same span is the previous expand/shrink step being
-            # replaced, not a user-added extra selection.
-            val same_span = existing.start_row == row.line and existing.end_row == end_line
-            if not same_span:
+            val same_range = existing.start_row == row.line and existing.start_col == row.col and existing.end_row == end_line and existing.end_col == end_col
+            if not same_range:
                 preserved_ranges.push(existing)
         buffer.set_primary_selection_range(row.line, row.col, end_line, end_col)
         for preserved in preserved_ranges:
@@ -2378,7 +2333,7 @@ impl EditorController:
         if should_create:
             val heading = if title == "" then md_wiki_title_from_path(path) else: title
             val note_content = "# " + heading + "\n\n"
-            val written = file_write(path, note_content)
+            val written = rt_file_write_text(path, note_content)
             if not written:
                 me.status_msg = "failed to create note: " + path
                 return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
@@ -2650,7 +2605,7 @@ impl EditorController:
             return LspResponse(id: 0, ok: false, result_json: "", error_text: "no active language server")
 
     me _notify_lsp_file_changed(path: text, change_type: i64) -> EditorAction:
-        me.vault_search_index = md_vault_search_index_apply_file_change(me.vault_search_index, path, read_file_text(path), change_type)
+        me.vault_search_index = md_vault_search_index_apply_file_change(me.vault_search_index, path, rt_file_read_text(path) ?? "", change_type)
         var notified = false
         if me.md_lsp_state.running:
             me.md_lsp_state = md_lsp_notify_watched_file(me.md_lsp_state, path, change_type)
@@ -2845,10 +2800,6 @@ impl EditorController:
             return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
         buffer.toggle_fold_range(start_line, end_line)
         val folded = buffer.has_fold_range(start_line, end_line)
-        # A collapsed section hides its body lines, so a cursor parked inside
-        # it has to ride up to the (still visible) fold header.
-        if folded and buffer.cursor_row > start_line and buffer.cursor_row <= end_line:
-            buffer.move_cursor(start_line, 0)
         me.session.update_active_buffer(buffer)
         me.status_msg = if folded then "folded section" else: "unfolded section"
         EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
@@ -2888,7 +2839,7 @@ impl EditorController:
         while i < events.len():
             val event = events[i]
             val path = event.path
-            val content = read_file_text(path)
+            val content = rt_file_read_text(path) ?? ""
             if event.change_type != 3:
                 me._refresh_open_document_from_disk_batch(path, content)
             me._notify_lsp_file_changed(path, event.change_type)
@@ -3131,10 +3082,6 @@ impl EditorController:
             val start_line = _editor_json_number_field(range_json, "\"startLine\"")
             val end_line = _editor_json_number_field(range_json, "\"endLine\"")
             buffer.fold_range(start_line, end_line)
-            # A collapsed range hides its body lines, so a cursor parked inside
-            # it has to ride up to the (still visible) fold header.
-            if buffer.cursor_row > start_line and buffer.cursor_row <= end_line:
-                buffer.move_cursor(start_line, 0)
             cursor = cursor + relative + 11
         me.session.update_active_buffer(buffer)
 

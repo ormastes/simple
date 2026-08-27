@@ -22,15 +22,6 @@ the production browser, sandbox, HTTPS, live events, or GC/performance targets.
    - startup/render/frame/input;
    - RSS, GC, lifecycle, soak, cancellation;
    - hot-path and regression budgets.
-4. `test/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_deadline_spec.spl`
-   - one absolute Fetch deadline across local HTTP/HTTPS redirects;
-   - deterministic within-budget, aggregate-timeout, and redirect-limit cases.
-5. `test/03_system/security/browser_tls_ipv6_service_identity_spec.spl`
-   - bracketed IPv6 URL/HTTP authority separated from the bare numeric TLS
-     connect and certificate service identity;
-   - malformed bracket forms and ordinary DNS names stay outside the literal
-     fast path;
-   - offline target preparation only, not live certificate/provider evidence.
 
 Mirrored manuals use the same paths below `doc/06_spec/`.
 
@@ -76,31 +67,13 @@ Each row has a normal (`N`), edge (`E`), and denial/error (`D`) case.
 | REQ-WEB-BROWSER-020 diagnostics | all | DIAG-N/E/D | typed safe diagnostics and secret/path redaction |
 | REQ-WEB-BROWSER-021 SSpec/manual | all | MANUAL-N/E/D | executable paths, mirrored docs, no stubs/placeholder passes |
 
-The focused Fetch deadline spec supplies `FETCH-DEADLINE-N/E/D` supporting
-evidence for REQ-WEB-BROWSER-010 and REQ-WEB-BROWSER-017. Its virtual monotonic
-clock models local hop latency without sleeps or live network access. It proves
-deadline propagation and no cache commit after timeout; it does not replace the
-blocked live platform-TLS certificate/HSTS evidence.
-
-The focused IPv6 service-identity spec supplies `TLS-IPV6-N/E/D` supporting
-evidence for REQ-WEB-BROWSER-010 and REQ-WEB-BROWSER-011. It proves the H1
-owner retains `[IPv6]` for URL/HTTP authority but sends bare `IPv6` as both the
-numeric transport target and TLS peer identity. It rejects malformed bracket
-forms and suppresses a caller-supplied Host field. It does not replace live
-platform trust, chain, expiry, SAN/IP identity, deadline, or cleanup evidence.
-
-Blocking DNS is excluded from the aggregate elapsed-time claim. The current
-DNS facade accepts only a hostname, not the remaining absolute deadline; H1
-checks the shared deadline immediately after lookup, but cannot interrupt the
-lookup itself.
-
 ## NFR traceability
 
 | Requirement | Executable spec | Cases |
 |---|---|---|
 | NFR-WEB-BROWSER-001 startup | budget | START-WARM/COLD/FAIL |
 | NFR-WEB-BROWSER-002 first render/navigation | budget | RENDER-LOCAL/NAV/ERROR |
-| NFR-WEB-BROWSER-003 frame pacing | budget | ANIMATION-CLOCK-PIXELS supporting; FRAME-P95/FPS fail-closed |
+| NFR-WEB-BROWSER-003 frame pacing | budget | FRAME-CHANGED/UNCHANGED/STALL |
 | NFR-WEB-BROWSER-004 input latency | budget | INPUT-POINTER/KEYBOARD/SCROLL |
 | NFR-WEB-BROWSER-005 RSS | budget | RSS-WARM/60M/LIMIT |
 | NFR-WEB-BROWSER-006 soak retention | budget | SOAK-WARM/10K/PLATEAU |
@@ -134,7 +107,6 @@ replace their live assertions.
 | `cargo test --offline -p simple-runtime --lib --features runtime-tls 'value::net::browser_http_job_tests::silent_tls_peer_respects_job_deadline_and_retires_slot' -- --exact` | PASS | TLS deadline and slot retirement |
 | `sh scripts/check/check-runtime-https-openssl.shs` | PASS | `rt_tls_client_*` address+SNI OpenSSL trusted/mismatch/untrusted/stall/reset/trickle |
 | `node scripts/check/check-web-render-backend-chromium-sandbox.js` | PASS | mocked Chromium-helper contract |
-| `sh scripts/check/check-browser-renderer-sandbox-seccomp.shs` | PASS | real `rt_browser_renderer_sandbox_enter` jail: allow-listed read/write work, non-allow-listed `socket()` is SIGSYS-killed by `SECCOMP_RET_KILL_PROCESS`. Native C-runtime evidence only; promotes no production row |
 | `CRB_HTML="$PWD/test/09_baselines/web_html_input/vanillastyle_demo.html" timeout 60 xvfb-run -a tools/electron-shell/node_modules/.bin/electron --no-sandbox tools/web-render-backend/chromium_event_check.js` | PASS | trusted Electron form events only |
 | `CRB_HTML="$PWD/test/09_baselines/web_html_input/vanillastyle_demo.html" timeout 60 xvfb-run -a /home/ormastes/dev/pub/simple/tools/electron-shell/node_modules/.bin/electron --no-sandbox tools/web-render-backend/chromium_event_check.js` | PASS | pinned Electron/Chromium injected-JS rAF and CSS keyframes changed captured pixels |
 | `cargo test --offline --manifest-path src/compiler_rust/runtime/Cargo.toml --lib --no-default-features public_address_policy_rejects_any_mixed_resolution_set` | PASS | mixed-resolution egress policy unit |
@@ -145,37 +117,6 @@ These checks do not prove a live HTTPS certificate matrix, hosted
 DrawIR, Engine2D, an admitted hosted renderer artifact, broker/CSP enforcement,
 Electron, or Chromium process sandboxing. They do not promote any TLS or
 SANDBOX production row.
-
-## REQ-WEB-BROWSER-014 sandbox/broker — system coverage (2026-08-16)
-
-`test/03_system/browser_engine/browser_renderer_sandbox_spec.spl` is the
-step-based SSpec system scenario for SANDBOX-N/E/D; the mirrored manual is
-`doc/06_spec/03_system/browser_engine/browser_renderer_sandbox_spec.md`. It
-drives `scripts/check/check-browser-renderer-sandbox-seccomp.shs`.
-
-That gate exists because the native self-check
-`src/runtime/test/rt_browser_renderer_seccomp_allowlist_selfcheck.c` — added
-2026-08-15 with the seccomp ALLOW-list fix — was invoked by **nothing**: no
-runner, no spec, no wrapper. The jail's strongest evidence was unreachable from
-any gate. The gate is fail-closed: a kernel without seccomp/Landlock and a host
-without a C compiler both yield `ERROR — nothing was checked` (exit 2), never a
-pass.
-
-Status split, deliberately:
-
-- The **gate** ran on this host: `PASS — 3 check(s) verified`, including a real
-  `SIGSYS` kill on `socket()`. This is native C-runtime evidence for the jail.
-- The **SSpec scenario has not executed**: no admitted pure-Simple self-hosted
-  runtime exists on this host, and Rust-seed output is not evidence for this
-  lane. REQ-WEB-BROWSER-014 therefore stays **not promoted**; the spec is
-  written to run unchanged once a qualified runtime is deployed.
-
-Problems 2 and 3 of
-`doc/08_tracking/bug/browser_seccomp_denylist_and_inprocess_unjailed_2026-08-15.md`
-(no namespace/privilege drop; in-process browsers under `src/app/browser/**`
-still evaluate page script unjailed) remain open and are **not** covered by this
-spec. It asserts the jail's syscall contract, not that every browser surface
-enters the jail.
 
 ## Held bundle status (2026-07-30)
 
@@ -365,10 +306,8 @@ deferred Stop and draining a coalesced buffered frame. Transport checks keep
 remain unchanged. Native containment must observe `get_robust_list` denial
 after final sandbox entry.
 
-Current evidence includes the focused offline H1 IPv6 service-identity SSpec
-and focused host C containment/TLS PASS. The SSpec proves target preparation
-and wire authority, not a live connection or certificate result. Qualified
-pure-Simple execution and manual generation remain compiler-blocked. Signal
+Current evidence is limited to focused host C containment/TLS PASS.
+Pure-Simple scenarios and manual generation remain compiler-blocked. Signal
 exit 139, source inspection, bootstrap output, and Rust-seed execution cannot
 satisfy the runtime gate.
 
@@ -380,27 +319,7 @@ Focused checks must retain:
    fail-closed behavior after aggregate CSS-background command area consumes
    one framebuffer;
 2. no Draw IR for an `opacity: 0` element or descendant; fractional subtree
-   opacity stays RED until
-   `browser_css_opacity_subtree_draw_ir_spec.spl` proves these four visible
-   steps:
-   `Compute inherited subtree opacity`,
-   `Emit one composited Draw IR group`,
-   `Render through canonical Engine2D`, and
-   `Verify source-over pixels`.
-   With alpha byte `(pct * 255 + 50) / 100` and premultiplied source-over
-   rounding `(x + 127) / 255`, three separate fixtures must yield:
-   `0xFFFF7F7F` for a parent-only red box in one 50% group over white,
-   `0xFF7F7FFF` for an opaque blue child fully covering its red parent inside
-   one 50% group, and `0xFFBFBFFF` for a blue box at 50% inside a same-bounds
-   transparent/no-paint parent at 50%, over white. In that nested fixture only
-   blue has effective 25% alpha.
-   The scenario also requires one opaque HTML root and one child reference at
-   the exact parent paint slot. Hostile fixtures must reject an unknown child
-   target, a child referenced by two group commands, duplicate/orphan/cyclic
-   IDs, depth 513, aggregate command 1,025, aggregate batch 1,026, encoded
-   payload 1,048,577 bytes, and clipped command-plus-group pixel work above
-   `viewport_pixels * 16`, all before transient allocation. A
-   `filter: opacity(...)` control must not emit a CSS-opacity group;
+   opacity stays an explicitly documented incomplete case;
 3. one persisted bookmark toggle becoming the same revisioned snapshot in the
    primary renderer, an existing secondary renderer, and a newly admitted one;
 4. address edit then Escape restoring `about:network` before a commit and the
@@ -493,20 +412,6 @@ scroll, and unchanged steps. The production budget scenarios keep their current
 `fail("NFR-WEB-BROWSER-001..017: ... not implemented")` until one healthy
 pure-Simple target produces changed/unchanged latency, allocation, RSS, and
 10,000-cycle receipts.
-
-Animation evidence split (2026-07-30): the budget spec now has one supporting
-modern SSpec scenario with four visible steps. It advances CSS and JavaScript
-from the same renderer timestamp, requires the rAF callback to observe exactly
-`16` ms, and requires a changed composition revision. Its Draw-IR oracle binds
-the `stage` rectangle to `(0,0)`, `32x24`, and exact red/blue colors before one
-persistent `Engine2dCompositorBackend` must produce exactly 768 corresponding
-pixels with zero skipped commands. A title-only revision cannot satisfy those
-checks. This remains a deterministic clock/Draw-IR/pixel oracle, not
-NFR-WEB-BROWSER-003 performance evidence. The adjacent p95/FPS and
-RSS/GC/10,000-cycle scenarios call the existing production fixture and budget
-helpers, then fail with requirement-specific missing-receipt errors. They
-remain RED until an admitted source-matched production artifact supplies real
-samples and provenance.
 
 Two-layer CSS checks now require both BrowserSession resources, back-to-front
 Draw-IR order, front-over-back Engine2D pixels, and atomic absence for CSP,
@@ -641,7 +546,7 @@ must show reuse. This design cites
 <https://www.w3.org/TR/css-cascade-5/> and
 <https://www.w3.org/TR/css-overflow-3/>; it creates no production claim.
 
-## Bookmark title persistence SSpec (IMPLEMENTED STATIC / EXECUTION HELD)
+## Bookmark title persistence SSpec (PROPOSED / RED)
 
 Target the existing modern scenario at
 `test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl`.
@@ -688,7 +593,7 @@ Required assertions use built-in matchers only:
 - legacy `SBRF7` renders with no title witness and cannot reuse a prior
   generation's title.
 
-The original RED was the hosted `(url, url)` persistence call: even the valid
+The pre-fix RED is the hosted `(url, url)` persistence call: even the valid
 512-byte document title becomes the URL in both the sandbox parent and
 `HostedWebContentRegistry` reconciliation. Source inspection or direct
 BrowserSession-only coverage cannot promote this scenario. No bootstrap or
@@ -762,18 +667,18 @@ present with changed full pixels.
 No executable claim exists until an admitted current full pure-Simple CLI runs
 the focused modern SSpec once.
 
-## Primary navigation chrome cancellation gate
+## Navigation chrome patch gate (HOLD/FAIL)
 
-The fresh repair in `/tmp/simple-web-pointer-safe` makes
-`HostedBrowserRendererProcess` the primary page-pointer owner. The focused
-modern policy scenarios must prove the press wire, the exact pointer-up wire
-before chrome ownership, a redundant no-op, resource-job retention, and retry
-with the original event ID. The hosted-entry source gate additionally requires
-the primary chrome route to call `cancel_pointer` before arming the control and
-the poll route to flush retained cancellation before lower-priority sync work.
+`/tmp/simple-browser-chrome-state.XRePMs` reached the three-review cap with one
+remaining blocker: `clear_chrome_pressed_controls` clears the host page owner
+but does not send the existing renderer `begin_pointer(..., false)` cancel/up,
+so DOM pressed state can remain stale. The SSpec checks only the integer clear
+and therefore cannot close that behavior.
 
-Execution and docgen remain held until an admitted current full pure-Simple CLI
-is available. Static/manual review cannot promote this row to production PASS.
+All other state, paint, hit, drain, projection, partial-wire, and lifecycle
+work reviewed sound but remains unpromoted. The patch is unexecuted and
+unmerged; repair the renderer cancellation and exact DOM-state oracle in a
+fresh cycle.
 
 ## Renderer command capability SSpec (IMPLEMENTED STATIC / EXECUTION RED)
 The focused modern scenario is
@@ -1726,15 +1631,6 @@ prove direct mode uses no wire. A validator-only check, source scan, Rust seed,
 or bootstrap result cannot promote this RED row. It remains static until one
 admitted pure-Simple focused execution and docgen produce the manual.
 
-## Reviewed hosted/rendering batch (2026-07-31)
-
-| Requirement area | Evidence | Status |
-|---|---|---|
-| Worker Reload broker ownership | Raw worker Reload evidence in `browser_ui_access_controls_spec.spl` rejects before mutation and preserves URL/loading/pending/full history/index/body/DrawIR. | STATIC REVIEW PASS; qualified execution HELD |
-| Same-tick SimpleScript replacement | The BrowserSession animation integration evidence stops callbacks copied from the old generation after body replacement, with red DrawIR/Engine2D retained. | STATIC REVIEW PASS; animation lists/lifecycle events RED |
-| Renderer staged CORS | `browser_hosted_cors_preflight_spec.spl`; public-only OPTIONS validates before the actual job under one terminal owner/deadline and no preflight side effects. | STATIC SECURITY REVIEW PASS; direct-host CORS/live execution RED |
-| Inert iframe DrawIR | `simple_web_iframe_draw_ir_embedding_spec.spl`; child batches preserve order/clip/IDs/materials and clear child hit authority, with grouped fail-closed placeholders. | STATIC REVIEW PASS; legacy pixel parity/caller migration/child runtime authority RED |
-
 ## Reviewed browser hardening evidence reconciliation (2026-07-31)
 
 All entries are source/spec/manual review results only; prior RED/FAIL history
@@ -1778,75 +1674,3 @@ The mirrored manual is
 `doc/06_spec/03_system/app/browser/feature/browser_disabled_fieldset_sequential_focus_spec.md`.
 Status remains **STATIC / EXECUTION HELD** until an admitted current
 pure-Simple runner and docgen execute the scenario.
-
-## REQ-WEB-BROWSER-014 — startup-failure row closed, render route wired (2026-08-16)
-
-The plan row lists three evidence items for this requirement: *syscall denial*,
-*typed broker success*, *startup failure*. Status after this change:
-
-| item | evidence | state |
-|---|---|---|
-| syscall denial | `socket()` SIGSYS-killed by `SECCOMP_RET_KILL_PROCESS` under the real `rt_browser_renderer_sandbox_enter` | native PASS |
-| startup failure | non-empty `envp` fatal with exit 126; `sandbox_enter` refuses without preinit | native PASS (new) |
-| typed broker success | broker -> jailed worker -> Draw IR -> pixels | code complete, NOT executed |
-
-`scripts/check/check-browser-renderer-sandbox-seccomp.shs` now reports
-`PASS — 6 check(s) verified`. The count is ACCUMULATED as each self-check
-passes; it was previously a hardcoded literal `4`, which would have kept
-claiming four even if a check were deleted.
-
-New self-check: `src/runtime/test/rt_browser_renderer_startup_failure_selfcheck.c`.
-Neither of its arms can SKIP — both fire before any kernel capability is
-consulted, so a host without seccomp or Landlock still decides them. Both were
-sabotage-tested and both FAIL under sabotage.
-
-The render route is wired (`src/app/browser/sandbox_render.spl`). The blocker
-previously recorded here — "the broker returns `DrawIrComposition`, not
-`[u32]`, and no rasterizer exists" — was **false**;
-`Engine2dCompositorBackend.render_draw_ir_composition`
-(`src/os/compositor/compositor_engine2d.spl:364`) has 20 call sites. See the
-bug record for how a `.gitignore`-honouring `grep` wrapper produced that false
-absence, and `.claude/skills/spipe.md` for the rule that now prevents it.
-
-**Not promoted.** The sandboxed render has never executed: the Rust seed lacks
-the `rt_browser_renderer_spawn_sandboxed` extern, and no admitted pure-Simple
-runtime exists on this host. Diagnostic seed observations (not lane evidence):
-the browser runs and renders real glyphs (`61 pixels painted`; GUI captured
-under Xvfb at 64x36 with 15 distinct colours), and all three routing states
-report distinct, correct reasons.
-
-Out of scope and explicitly NOT claimed: rendering a real remote page. The app
-returns `"(no page loaded for {url})"` for every URL except `simple://home`
-(`src/app/browser/render_adapter.spl:110-113`). Real TLS/HTTP exists but is
-wired only into the hosted worker browser.
-
-## REQ-WEB-BROWSER-015 — scheme gate landed, real fetch merged (2026-08-16)
-
-`src/app/browser/page_loader.spl` closes the enforcement gap: until now NO
-code in the app validated URL schemes at all — any string was accepted. The
-gate allows top-level http/https plus `simple://home`; file/data/javascript/
-custom schemes are refused with a reason naming this requirement.
-
-The same module merges the browser fronts onto ONE fetch path: the app browser
-now loads real pages through `FetchEngine` — the engine already carrying the
-hosted worker browser's cache/CORS surface — instead of a stub. No second
-fetch implementation exists.
-
-Evidence tiers, kept honest:
-- Unit (EXECUTED, seed interpreter): `browser_page_loader_spec.spl` — 3/3
-  passed, counted verdict `executed=3`. Gate logic only, no network.
-- Live (seed, diagnostic): `http://example.com` fetched (559 bytes) and the
-  ORIGIN'S document rendered by the engine; `file://` refused with the
-  REQ-015 reason.
-- UPDATE 2026-08-16: the seed TLS stubs were replaced with real delegates to
-  the runtime rustls client (`interpreter_extern/net_tls_client.rs`, driver
-  `runtime-tls` feature). Live under the seed: `https://example.com` loads
-  (559 bytes, chunked transfer decoded) and `https://self-signed.badssl.com`
-  is rejected by the certificate verifier. Seed evidence remains diagnostic
-  tier — promotion still requires the self-hosted binary.
-
-Also fixed en route: `h1_client.spl:get_mock_registry` used `.?` +
-`.unwrap()`, which the seed's semantic pass cannot resolve after narrowing
-("method `unwrap` not found") — every live fetch died before reaching the
-network. Rewritten as an optional `match` (the dominant idiom, valid under
-both runtimes).

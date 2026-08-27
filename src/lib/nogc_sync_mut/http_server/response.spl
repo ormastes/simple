@@ -8,24 +8,10 @@ use std.nogc_sync_mut.io.tcp.{TcpStream}
 use std.nogc_sync_mut.http_server.types.{
     HttpResponse, HttpStatus, http_status_code, http_status_reason
 }
-use std.common.base_encoding.{text_to_bytes}
 
 fn write_response(stream: TcpStream, resp: HttpResponse) -> bool:
-    _write_response_wire(stream, serialize_response(resp))
-
-# Canonical bounded writer used by the production listener.  It builds at
-# most one complete wire response and then uses write_all, so an oversized
-# application response is never truncated into a syntactically valid prefix.
-# The fallback is generated through the same serializer and carries the same
-# baseline security headers as every other server-owned error.
-fn write_response_limited(stream: TcpStream, resp: HttpResponse, max_response_bytes: i64) -> bool:
-    val wire = bounded_response_wire(resp, max_response_bytes)
-    if wire == "":
-        return false
-    _write_response_wire(stream, wire)
-
-fn _write_response_wire(stream: TcpStream, wire: text) -> bool:
-    match stream.write_all(text_to_bytes(wire)):
+    val wire = serialize_response(resp)
+    match stream.write_text(wire):
         Ok(_):
             return true
         Err(_):
@@ -89,7 +75,10 @@ fn _application_header_is_safe(name: text, value: text) -> bool:
     if not _header_name_is_token(name) or not _header_value_is_safe(value):
         return false
     val normalized = name.to_lower()
-    normalized != "content-length" and normalized != "transfer-encoding" and normalized != "connection"
+    normalized != "content-length" and normalized != "transfer-encoding" and
+        normalized != "trailer" and normalized != "connection" and
+        normalized != "keep-alive" and normalized != "proxy-connection" and
+        normalized != "upgrade"
 
 # RFC 9110 section 6.4.1 forbids a message body on 204 and 304 responses.
 # Keep this decision in the canonical serializer so an application-provided
@@ -97,114 +86,40 @@ fn _application_header_is_safe(name: text, value: text) -> bool:
 # status line.  A 304 may still advertise the selected representation length;
 # a 204 must not carry Content-Length at all (section 8.6).
 fn response_status_allows_message_body(status: HttpStatus) -> bool:
-    not (status == HttpStatus.NoContent or status == HttpStatus.NotModified)
+    response_body_framing_decision(
+        "GET", http_status_code(status).to_i64(), false).transfer_body
 
 fn _response_status_forbids_body(status: HttpStatus) -> bool:
     not response_status_allows_message_body(status)
 
-fn _response_status_forbids_content_length(status: HttpStatus) -> bool:
-    status == HttpStatus.NoContent
-
 fn _serialize_response_head_with_body_length_and_connection(
-    resp: HttpResponse, body_len: i64, close_connection: bool
+    resp: HttpResponse, body_len: i64, close_connection: bool,
+    request_method: text
 ) -> text:
     val status_code = http_status_code(resp.status)
     val reason = http_status_reason(resp.status)
+    val body_len = resp.body.len()
 
     var wire = "HTTP/1.1 {status_code} {reason}\r\n"
-    if not _response_status_forbids_content_length(resp.status):
-        wire = "{wire}Content-Length: {body_len}\r\n"
-    val connection_value = if close_connection: "close" else: "keep-alive"
-    wire = "{wire}Connection: {connection_value}\r\n"
+    wire = "{wire}Content-Length: {body_len}\r\n"
+    wire = "{wire}Connection: close\r\n"
 
     var has_content_type = false
     for pair in resp.headers:
-        if _application_header_is_safe(pair.0, pair.1):
-            wire = "{wire}{pair.0}: {pair.1}\r\n"
-            if pair.0.to_lower() == "content-type":
-                has_content_type = true
+        wire = "{wire}{pair.0}: {pair.1}\r\n"
+        if pair.0.to_lower() == "content-type":
+            has_content_type = true
 
     if not has_content_type:
         wire = "{wire}Content-Type: text/plain; charset=utf-8\r\n"
 
     wire = "{wire}\r\n"
+    wire = "{wire}{resp.body}"
     return wire
-
-fn _serialize_response_head_with_body_length(resp: HttpResponse, body_len: i64) -> text:
-    _serialize_response_head_with_body_length_and_connection(resp, body_len, true)
-
-fn serialize_response_head_for_body_length(resp: HttpResponse, body_len: i64) -> text:
-    """Serialize canonical HTTP/1.1 headers for an externally-owned byte body.
-
-    A negative length is never a valid wire representation.  Returning an
-    empty head lets bounded callers fail closed before writing any bytes.
-    """
-    if body_len < 0:
-        return ""
-    _serialize_response_head_with_body_length(resp, body_len)
-
-fn serialize_response_head_for_body_length_connection(
-    resp: HttpResponse, body_len: i64, close_connection: bool
-) -> text:
-    """Serialize a canonical response head with an explicit connection
-    lifecycle decision owned by the HTTP/1 connection loop."""
-    if body_len < 0:
-        return ""
-    _serialize_response_head_with_body_length_and_connection(
-        resp, body_len, close_connection)
-
-fn _serialize_response_head(resp: HttpResponse) -> text:
-    _serialize_response_head_with_body_length(resp, resp.body.len())
-
-fn serialize_response(resp: HttpResponse) -> text:
-    val head = _serialize_response_head(resp)
-    if _response_status_forbids_body(resp.status):
-        return head
-    "{head}{resp.body}"
-
-fn serialize_response_connection(resp: HttpResponse, close_connection: bool) -> text:
-    val head = _serialize_response_head_with_body_length_and_connection(
-        resp, resp.body.len(), close_connection)
-    if _response_status_forbids_body(resp.status):
-        return head
-    "{head}{resp.body}"
-
-fn response_wire_size(resp: HttpResponse) -> i64:
-    val head_len = _serialize_response_head(resp).len()
-    if _response_status_forbids_body(resp.status):
-        return head_len
-    head_len + resp.body.len()
-
-fn response_wire_fits(resp: HttpResponse, max_response_bytes: i64) -> bool:
-    max_response_bytes > 0 and response_wire_size(resp) <= max_response_bytes
-
-fn response_wire_parts_fit(head_len: u64, body_len: u64, max_response_bytes: u64) -> bool:
-    """Check a split head/body wire size without overflow-prone addition."""
-    if head_len > max_response_bytes:
-        return false
-    body_len <= max_response_bytes - head_len
-
-# Returns one complete response or an empty string.  The empty result means
-# even the fixed, security-hardened 500 response does not fit; callers close
-# the connection without emitting a partial response.
-fn bounded_response_wire(resp: HttpResponse, max_response_bytes: i64) -> text:
-    if response_wire_fits(resp, max_response_bytes):
-        return serialize_response(resp)
-    val fallback = with_default_security_headers(
-        HttpResponse.error(HttpStatus.InternalError, "response exceeds configured byte limit"),
-        false
-    )
-    if response_wire_fits(fallback, max_response_bytes):
-        return serialize_response(fallback)
-    ""
 
 fn write_error(stream: TcpStream, status: HttpStatus, message: text) -> bool:
     val resp = with_default_security_headers(HttpResponse.error(status, message), false)
     write_response(stream, resp)
-
-fn write_error_limited(stream: TcpStream, status: HttpStatus, message: text, max_response_bytes: i64) -> bool:
-    val resp = with_default_security_headers(HttpResponse.error(status, message), false)
-    write_response_limited(stream, resp, max_response_bytes)
 
 # =============================================================================
 # Error Page Generation
@@ -245,12 +160,14 @@ fn html_error_page(status: HttpStatus, message: text) -> HttpResponse:
         body: body
     )
 
-export write_response, write_response_limited, write_error, write_error_limited
+export write_response, write_response_limited, write_response_limited_for_method, write_error, write_error_limited
 export serialize_response, serialize_response_connection
+export serialize_response_for_method_connection
 export response_wire_size, response_wire_fits, bounded_response_wire
+export bounded_response_wire_for_method
 export serialize_response_head_for_body_length
 export serialize_response_head_for_body_length_connection, response_wire_parts_fit
+export serialize_response_head_for_method_body_length_connection
 export with_default_security_headers
 export response_header_name_is_token, response_header_value_is_safe
-export response_status_allows_message_body
 export generate_error_page, html_not_found_page, html_error_page

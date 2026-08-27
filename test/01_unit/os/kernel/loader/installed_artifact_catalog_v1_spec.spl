@@ -4,6 +4,10 @@ use std.common.contracts.execution.simpleos_executable_v1.{
 }
 use os.kernel.loader.installed_artifact_catalog_v1.{
     SIMPLEOS_INSTALLED_ARTIFACT_ALIAS_LIMIT_V1,
+    SIMPLEOS_INSTALLED_ARTIFACT_ALIAS_TEXT_LIMIT_PER_RECORD_V1,
+    SIMPLEOS_INSTALLED_ARTIFACT_ALIAS_TEXT_LIMIT_GLOBAL_V1,
+    SIMPLEOS_INSTALLED_ARTIFACT_MAX_KEY_COUNT_V1,
+    SIMPLEOS_INSTALLED_ARTIFACT_KEY_TABLE_CAPACITY_V1,
     SIMPLEOS_INSTALLED_ARTIFACT_LIMIT_V1,
     SIMPLEOS_INSTALLED_ARTIFACT_LIMIT_PER_TARGET_V1,
     SIMPLEOS_INSTALLED_ARTIFACT_TARGET_LIMIT_V1,
@@ -15,7 +19,8 @@ use os.kernel.loader.installed_artifact_catalog_v1.{
     installed_artifact_catalog_bootstrap_add_v1,
     installed_artifact_catalog_bootstrap_seal_v1,
     installed_artifact_catalog_lookup_v1,
-    installed_artifact_catalog_lookup_target_v1
+    installed_artifact_catalog_lookup_target_v1,
+    installed_artifact_catalog_authenticated_alias_plan_v1
 }
 
 fn catalog_digest() -> text:
@@ -66,11 +71,31 @@ describe "installed artifact catalog bounded input":
             aliases: ["/usr/bin/simple", "/usr/bin/simple"])).to_be(false)
 
     it "rejects alias capacity overflow":
+        expect(SIMPLEOS_INSTALLED_ARTIFACT_ALIAS_LIMIT_V1).to_equal(64)
+        expect(SIMPLEOS_INSTALLED_ARTIFACT_MAX_KEY_COUNT_V1).to_equal(6630)
+        expect(SIMPLEOS_INSTALLED_ARTIFACT_KEY_TABLE_CAPACITY_V1)
+            .to_be_greater_than(SIMPLEOS_INSTALLED_ARTIFACT_MAX_KEY_COUNT_V1)
+        expect(SIMPLEOS_INSTALLED_ARTIFACT_ALIAS_TEXT_LIMIT_PER_RECORD_V1)
+            .to_be_less_than(262144)
+        expect(SIMPLEOS_INSTALLED_ARTIFACT_ALIAS_TEXT_LIMIT_GLOBAL_V1)
+            .to_be_less_than(25165824)
         var aliases: [text] = []
         var i: i64 = 0
-        while i <= SIMPLEOS_INSTALLED_ARTIFACT_ALIAS_LIMIT_V1:
+        while i < SIMPLEOS_INSTALLED_ARTIFACT_ALIAS_LIMIT_V1:
             aliases.push("/alias/{i}")
             i = i + 1
+        expect(catalog_input_valid(aliases: aliases)).to_be(true)
+        aliases.push("/alias/overflow")
+        expect(catalog_input_valid(aliases: aliases)).to_be(false)
+
+    it "rejects alias text over the per-record byte budget":
+        var aliases: [text] = []
+        var i: i64 = 0
+        while i < 17:
+            aliases.push("/alias/{i}/" + "x" * 4080)
+            i = i + 1
+        expect(aliases.len()).to_be_less_than(
+            SIMPLEOS_INSTALLED_ARTIFACT_ALIAS_LIMIT_V1)
         expect(catalog_input_valid(aliases: aliases)).to_be(false)
 
     it "rejects target path digest and signature disagreement":
@@ -208,6 +233,21 @@ describe "installed artifact catalog bounded input":
             "/usr/bin/simple", exact_target)
         expect(exact.?).to_be(true)
         expect(exact.unwrap().canonical_path).to_equal("/bin/simple")
+        val alias_plan = installed_artifact_catalog_authenticated_alias_plan_v1(
+            "/usr/bin/simple", exact_target,
+            ["/usr/bin/simple", "/diagnostic/x86-simple"])
+        expect(alias_plan.ok).to_be(true)
+        expect(alias_plan.nodes.len()).to_equal(2)
+        expect(alias_plan.nodes[0].source.canonical_path).to_equal("/bin/simple")
+        expect(alias_plan.nodes[1].source.content_sha256).to_equal(catalog_digest())
+        expect(installed_artifact_catalog_authenticated_alias_plan_v1(
+            "/usr/bin/simple", exact_target,
+            ["/usr/bin/simple", "/usr/bin/simple"]).ok).to_be(false)
+        expect(installed_artifact_catalog_authenticated_alias_plan_v1(
+            "/usr/bin/simple", exact_target, ["/bin/not-catalogued"]).ok)
+            .to_be(false)
+        expect(installed_artifact_catalog_authenticated_alias_plan_v1(
+            "/usr/bin/simple", exact_target, ["/bin/simple"]).ok).to_be(false)
 
         for architecture in architectures:
             val target_record = installed_artifact_catalog_lookup_target_v1(

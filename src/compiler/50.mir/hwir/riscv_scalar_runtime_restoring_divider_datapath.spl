@@ -1,0 +1,167 @@
+# Dynamic, geometry-bound restoring divider transition graph for the runtime M owner.
+#
+# Unlike `riscv_scalar_restoring_divider_datapath`, this graph deliberately has
+# no instruction projection or semantic row baked into it.  The owning provider
+# supplies normalized magnitudes, sign-correction controls, result selection,
+# and the captured special-case code.  That makes one graph safe to share by
+# DIV/DIVU/REM/REMU and RV64 *W rows of the same operand geometry.
+
+use compiler.mir.hwir.bit_vector_constant.{HwBitVectorConstant}
+use compiler.mir.hwir.types.{CoreConfig, HwBitExtractOp, HwCombOp,
+    HwFixedSliceOp, HwSelectOp, HwSignal}
+
+pub class RiscvScalarRuntimeRestoringDividerDatapath:
+    config: CoreConfig
+    operand_width: i32
+    xlen: i32
+    remainder_width: i32
+    count_width: i32
+    input_fields: [(text, i32)]
+    output_fields: [(text, i32)]
+    signals: [HwSignal]
+    constants: [HwBitVectorConstant]
+    comb_ops: [HwCombOp]
+    select_ops: [HwSelectOp]
+    bit_extract_ops: [HwBitExtractOp]
+    fixed_slice_ops: [HwFixedSliceOp]
+
+    me diagnostic() -> text:
+        val config_error = self.config.diagnostic()
+        if config_error != "": return config_error
+        if self.xlen != self.config.xlen or (self.xlen != 32 and self.xlen != 64):
+            return "HWIR-E-RISCV-RUNTIME-DIVIDER-CONFIG: runtime divider requires RV32 or RV64 geometry"
+        if self.operand_width != 32 and self.operand_width != self.xlen:
+            return "HWIR-E-RISCV-RUNTIME-DIVIDER-WIDTH: operand width must be XLEN or the RV64 W width"
+        if self.operand_width == 32 and self.xlen != 32 and self.xlen != 64:
+            return "HWIR-E-RISCV-RUNTIME-DIVIDER-WIDTH: 32-bit operation requires a RISC-V base width"
+        if self.remainder_width != self.operand_width + 1:
+            return "HWIR-E-RISCV-RUNTIME-DIVIDER-REMAINDER: remainder state must be operand width plus one"
+        val expected_count = if self.operand_width == 32: 6 else: 7
+        if self.count_width != expected_count:
+            return "HWIR-E-RISCV-RUNTIME-DIVIDER-COUNT: iteration count must represent the selected operand width"
+        if self.input_fields.len() != 10 or self.output_fields.len() != 6 or
+            self.signals.len() != 26 or self.constants.len() != 8 or
+            self.comb_ops.len() != 15 or self.select_ops.len() != 9 or
+            self.bit_extract_ops.len() != 1 or self.fixed_slice_ops.len() != 1:
+            return "HWIR-E-RISCV-RUNTIME-DIVIDER-SHAPE: runtime divider requires the closed dynamic transition graph"
+        if self.input_fields[0][0] != "dividend_reg" or
+            self.input_fields[7][0] != "select_remainder" or
+            self.output_fields[5][0] != "architectural_result":
+            return "HWIR-E-RISCV-RUNTIME-DIVIDER-ABI: normalized divider ABI has changed"
+        ""
+
+fn zero_bits(width: i32) -> text:
+    var result = ""; var index = 0
+    while index < width:
+        result = result + "0"; index = index + 1
+    result
+
+fn one_bits(width: i32) -> text:
+    if width == 1: return "1"
+    zero_bits(width - 1) + "1"
+
+fn all_one_bits(width: i32) -> text:
+    var result = ""; var index = 0
+    while index < width:
+        result = result + "1"; index = index + 1
+    result
+
+fn minimum_bits(width: i32) -> text:
+    "1" + zero_bits(width - 1)
+
+# The caller must normalize signed magnitudes before capture.  `special_reg`
+# uses 00=ordinary, 01=divide-by-zero, 10=signed min/-1 overflow.  Both
+# `select_remainder` and `word_result_mode` are runtime controls, never
+# construction-time instruction specializations.
+pub fn strict_riscv_scalar_runtime_restoring_divider_datapath(
+    config: CoreConfig, operand_width: i32
+) -> Result<RiscvScalarRuntimeRestoringDividerDatapath, text>:
+    val config_error = config.diagnostic(); if config_error != "": return Err(config_error)
+    val x = config.xlen
+    if x != 32 and x != 64:
+        return Err("HWIR-E-RISCV-RUNTIME-DIVIDER-CONFIG: runtime divider requires RV32 or RV64 geometry")
+    if operand_width != x and not (x == 64 and operand_width == 32):
+        return Err("HWIR-E-RISCV-RUNTIME-DIVIDER-WIDTH: operand width must be XLEN or RV64 W width")
+    val remw = operand_width + 1
+    val datapath = RiscvScalarRuntimeRestoringDividerDatapath(
+        config: config, operand_width: operand_width, xlen: x,
+        remainder_width: remw, count_width: if operand_width == 32: 6 else: 7,
+        input_fields: [("dividend_reg", operand_width), ("divisor_reg", remw),
+            ("remainder_reg", remw), ("quotient_reg", operand_width),
+            ("original_dividend_reg", operand_width), ("result_negate_reg", 1),
+            ("remainder_negate_reg", 1), ("select_remainder", 1),
+            ("special_reg", 2), ("word_result_mode", 1)],
+        output_fields: [("remainder_next", remw), ("quotient_next", operand_width),
+            ("dividend_next", operand_width), ("special_is_divzero", 1),
+            ("special_is_overflow", 1), ("architectural_result", x)],
+        signals: [HwSignal.comb("dividend_msb", "Bits", 1),
+            HwSignal.comb("dividend_msb_extended", "Bits", remw),
+            HwSignal.comb("remainder_shifted", "Bits", remw),
+            HwSignal.comb("shifted_remainder", "Bits", remw),
+            HwSignal.comb("remainder_ge_divisor", "Bits", 1),
+            HwSignal.comb("remainder_subtracted", "Bits", remw),
+            HwSignal.comb("remainder_next", "Bits", remw),
+            HwSignal.comb("quotient_shifted", "Bits", operand_width),
+            HwSignal.comb("quotient_bit_extended", "Bits", operand_width),
+            HwSignal.comb("quotient_next", "Bits", operand_width),
+            HwSignal.comb("dividend_next", "Bits", operand_width),
+            HwSignal.comb("remainder_low", "Bits", operand_width),
+            HwSignal.comb("quotient_negated", "Bits", operand_width),
+            HwSignal.comb("remainder_negated", "Bits", operand_width),
+            HwSignal.comb("corrected_quotient", "Bits", operand_width),
+            HwSignal.comb("corrected_remainder", "Bits", operand_width),
+            HwSignal.comb("normal_result", "Bits", operand_width),
+            HwSignal.comb("divide_zero_result", "Bits", operand_width),
+            HwSignal.comb("overflow_result", "Bits", operand_width),
+            HwSignal.comb("special_is_divzero", "Bits", 1),
+            HwSignal.comb("special_is_overflow", "Bits", 1),
+            HwSignal.comb("overflow_or_normal", "Bits", operand_width),
+            HwSignal.comb("selected_word_result", "Bits", operand_width),
+            HwSignal.comb("zero_extended_result", "Bits", x),
+            HwSignal.comb("sign_extended_result", "Bits", x),
+            HwSignal.comb("architectural_result", "Bits", x)],
+        constants: [HwBitVectorConstant.binary("zero_remainder", remw, zero_bits(remw)),
+            HwBitVectorConstant.binary("one_remainder", remw, one_bits(remw)),
+            HwBitVectorConstant.binary("zero_operand", operand_width, zero_bits(operand_width)),
+            HwBitVectorConstant.binary("one_operand", operand_width, one_bits(operand_width)),
+            HwBitVectorConstant.binary("all_ones_operand", operand_width, all_one_bits(operand_width)),
+            HwBitVectorConstant.binary("minimum_operand", operand_width, minimum_bits(operand_width)),
+            HwBitVectorConstant.binary("special_divzero", 2, "01"),
+            HwBitVectorConstant.binary("special_overflow", 2, "10")],
+        comb_ops: [HwCombOp.unary("zext", "dividend_msb_extended", "dividend_msb", remw),
+            HwCombOp.binary("shl", "remainder_shifted", "remainder_reg", "one_remainder", remw),
+            HwCombOp.binary("or", "shifted_remainder", "remainder_shifted", "dividend_msb_extended", remw),
+            HwCombOp.binary("uge", "remainder_ge_divisor", "shifted_remainder", "divisor_reg", remw),
+            HwCombOp.binary("sub", "remainder_subtracted", "shifted_remainder", "divisor_reg", remw),
+            HwCombOp.binary("shl", "quotient_shifted", "quotient_reg", "one_operand", operand_width),
+            HwCombOp.unary("zext", "quotient_bit_extended", "remainder_ge_divisor", operand_width),
+            HwCombOp.binary("or", "quotient_next", "quotient_shifted", "quotient_bit_extended", operand_width),
+            HwCombOp.binary("shl", "dividend_next", "dividend_reg", "one_operand", operand_width),
+            HwCombOp.binary("sub", "quotient_negated", "zero_operand", "quotient_reg", operand_width),
+            HwCombOp.binary("sub", "remainder_negated", "zero_operand", "remainder_low", operand_width),
+            HwCombOp.binary("eq", "special_is_divzero", "special_reg", "special_divzero", 2),
+            HwCombOp.binary("eq", "special_is_overflow", "special_reg", "special_overflow", 2),
+            HwCombOp.unary("zext", "zero_extended_result", "selected_word_result", x),
+            HwCombOp.unary("sext", "sign_extended_result", "selected_word_result", x)],
+        select_ops: [HwSelectOp.mux("remainder_next", "remainder_ge_divisor",
+                "remainder_subtracted", "shifted_remainder", remw),
+            HwSelectOp.mux("corrected_quotient", "result_negate_reg",
+                "quotient_negated", "quotient_reg", operand_width),
+            HwSelectOp.mux("corrected_remainder", "remainder_negate_reg",
+                "remainder_negated", "remainder_low", operand_width),
+            HwSelectOp.mux("normal_result", "select_remainder",
+                "corrected_remainder", "corrected_quotient", operand_width),
+            HwSelectOp.mux("divide_zero_result", "select_remainder",
+                "original_dividend_reg", "all_ones_operand", operand_width),
+            HwSelectOp.mux("overflow_result", "select_remainder",
+                "zero_operand", "minimum_operand", operand_width),
+            HwSelectOp.mux("overflow_or_normal", "special_is_overflow",
+                "overflow_result", "normal_result", operand_width),
+            HwSelectOp.mux("selected_word_result", "special_is_divzero",
+                "divide_zero_result", "overflow_or_normal", operand_width),
+            HwSelectOp.mux("architectural_result", "word_result_mode",
+                "sign_extended_result", "zero_extended_result", x)],
+        bit_extract_ops: [HwBitExtractOp.fixed("dividend_msb", "dividend_reg", operand_width - 1)],
+        fixed_slice_ops: [HwFixedSliceOp.fixed("remainder_low", "remainder_reg", operand_width - 1, 0)])
+    val error = datapath.diagnostic(); if error != "": return Err(error)
+    Ok(datapath)

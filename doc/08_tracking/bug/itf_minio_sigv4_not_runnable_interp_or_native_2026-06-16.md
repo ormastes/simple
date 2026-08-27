@@ -4,8 +4,7 @@
 - **Severity:** P2
 - **Area:** app/itf (minio), runtime HTTP extern, interpreter/native compile
 - **Date:** 2026-06-16
-- Status: OPEN (P2)
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status:** Partially resolved (interpreter `rt_http_request` now works; JIT bridge + module/native gaps remain)
 
 ## Summary
 
@@ -97,26 +96,3 @@ binary path failed. (Container + creds + mc alias were torn down after the run.)
 3. Resolve the `nogc_sync_mut.http_client.types` module chain in all import forms.
 4. Provide an `itf` native build target that resolves `platform`, enabling an
    AOT binary that links the runtime HTTP extern.
-
-## Content re-verification 2026-08-17 (app-rest lane) — PATH DRIFT, defect not in `src/app/`
-
-Classified by CONTENT only. The file this record is filed against,
-`src/app/itf/main.spl`, **no longer exists** — `itf` now ships as `bin/itf`.
-The HTTP extern the row points at is not in `src/app/` either: it lives at
-`src/lib/nogc_sync_mut/io/http_sffi.spl:26,189,483`.
-The remaining blocker the doc describes (JIT bridge + module/native gaps for the
-SigV4 round-trip) is a **runtime/JIT tuple-return** issue, not app code, so it
-is unfixable from `src/app/**`. **Re-file against the JIT bridge or close as
-path-drifted;** no app-layer patch exists.
-
-## Re-verification 2026-08-17 (app-rest lane) — path drift; re-file
-
-The claimed file is not where the defect is. `src/app/io/http_sffi.spl:26,189,267`
-declares and calls `rt_http_request` correctly — no defect there, and this doc's
-own Resolved section already records that interpreter registration is done.
-
-The residual blockers are elsewhere: (a) the JIT tuple-return bridge,
-(b) `http_client.types` module resolution, (c) `simple compile` reporting
-`undefined identifier: platform`. Recommend re-filing against the JIT tuple
-bridge. End-to-end verification is UNVERIFIABLE here (needs a live MinIO
-endpoint plus a JIT run).

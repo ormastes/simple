@@ -6,8 +6,17 @@ import { canonicalSnapshotTuple as canonicalModelSnapshotTuple, createSnapshotId
 import { safeNamespace } from "../workspace/paths.js";
 import { canonicalRoot } from "../workspace/paths.js";
 
+const SNAPSHOT_STORE_V1 = new WeakSet();
+
 export const SNAPSHOT_SCHEMA_VERSION = 1;
 export const SNAPSHOT_ID_PREFIX = "spks1-";
+
+const IMMUTABLE_SNAPSHOT_STORE_V1_BRAND = new WeakSet();
+
+/** Internal construction brand; prototype/instanceof lookalikes are not owners. */
+export function isImmutableSnapshotStoreV1(value) {
+  return IMMUTABLE_SNAPSHOT_STORE_V1_BRAND.has(value);
+}
 
 const SNAPSHOT_FIELDS = Object.freeze([
   "project_uid", "worktree_uid", "revision_id", "base_generation_hash",
@@ -140,6 +149,7 @@ export class ImmutableSnapshotStore {
     this.repository_id = safeNamespace(String(repositoryId), "repository id");
     this.root = join(this.cacheRoot, "shared", this.repository_id, "snapshots");
     mkdirSync(this.root, { recursive: true });
+    IMMUTABLE_SNAPSHOT_STORE_V1_BRAND.add(this);
   }
 
   pathFor(snapshotUid) {
@@ -179,6 +189,11 @@ export class ImmutableSnapshotStore {
     return this.read(snapshotUid);
   }
 
+  /** Official, branded exact-open boundary for the sealed authority service. */
+  openExactSnapshotV1(snapshotUid) {
+    return this.read(snapshotUid);
+  }
+
   static cleanOverlayHash() {
     return ZERO_HASH;
   }
@@ -186,4 +201,8 @@ export class ImmutableSnapshotStore {
 
 export function createSnapshotStore(options) {
   return new ImmutableSnapshotStore(options);
+}
+
+export function isSnapshotStoreV1(value) {
+  return SNAPSHOT_STORE_V1.has(value);
 }

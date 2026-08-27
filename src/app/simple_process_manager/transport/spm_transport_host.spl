@@ -11,13 +11,9 @@ Feature: spm-winfs-llm-suite AC-3.
 use lib.nogc_sync_mut.io.env_ops.{env_get}
 use app.simple_process_manager.transport.spm_transport.{SpmTransport, TransportStatus, SpmRequest, SpmResponse, spm_encode_request, spm_encode_response, spm_decode_request, spm_decode_response}
 
-@unsafe(reason: "raw SPM Unix-socket connect status ABI", capabilities: [ffi])
 extern fn rt_unix_socket_connect(path: text) -> i64
-@unsafe(reason: "raw SPM file-descriptor write status ABI", capabilities: [ffi])
 extern fn rt_fd_write(fd: i64, data: text, len: i64) -> i64
-@unsafe(reason: "raw SPM receive ABI; native descriptor lifting remains unverified", capabilities: [ffi])
 extern fn rt_fd_read_until(fd: i64, stop_byte: i64, max: i64) -> text
-@unsafe(reason: "raw SPM file-descriptor close status ABI", capabilities: [ffi])
 extern fn rt_fd_close(fd: i64) -> bool
 
 @always_inline
@@ -74,17 +70,17 @@ impl SpmTransport for SpmTransportHost:
             if req.kind == "ping":
                 return SpmResponse.ok_with("pong".bytes())
             return SpmResponse(ok: false, body: [], error: "transport has no handler bound")
-        val fd = _spm_sffi_connect(self.sock_path)
+        val fd = rt_unix_socket_connect(self.sock_path)
         if fd < 0:
             return SpmResponse(ok: false, body: [], error: "host socket connect failed: {self.sock_path}")
         val wire = spm_encode_request(req)
         val wire_text = bytes_to_text(wire)
-        val wrote = _spm_sffi_write(fd, wire_text, wire_text.len())
+        val wrote = rt_fd_write(fd, wire_text, wire_text.len())
         if wrote < 0:
-            _spm_sffi_close(fd)
+            rt_fd_close(fd)
             return SpmResponse(ok: false, body: [], error: "host socket write failed: {self.sock_path}")
-        val reply_text = _spm_sffi_read_until(fd, 0, 1048576)
-        _spm_sffi_close(fd)
+        val reply_text = rt_fd_read_until(fd, 0, 1048576)
+        rt_fd_close(fd)
         if reply_text.len() == 0:
             return SpmResponse(ok: false, body: [], error: "host socket returned empty response: {self.sock_path}")
         spm_decode_response(reply_text.bytes())

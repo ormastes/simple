@@ -2,6 +2,29 @@
 
 > Placeholder `_` syntax for creating concise lambda expressions.
 
+<!-- sdn-diagram:id=placeholder_lambda_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=placeholder_lambda_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+placeholder_lambda_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=placeholder_lambda_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 47 | 47 | 0 | 0 |
@@ -21,7 +44,7 @@ Placeholder `_` syntax for creating concise lambda expressions.
 | Category | Syntax |
 | Status | In Progress |
 | Source | `test/03_system/feature/language/placeholder_lambda_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Placeholder `_` syntax for creating concise lambda expressions.
@@ -35,18 +58,16 @@ Placeholder `_` syntax for creating concise lambda expressions.
 
 #### transforms _ * 2 to lambda
 
-- transforms _ * 2 to lambda
+1. expect nums map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("transforms _ * 2 to lambda")
 val nums = [1, 2, 3]
 expect nums.map(_ * 2) == [2, 4, 6]
 ```
@@ -55,18 +76,16 @@ expect nums.map(_ * 2) == [2, 4, 6]
 
 #### transforms _ + 10 to lambda
 
-- transforms _ + 10 to lambda
+1. expect nums map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("transforms _ + 10 to lambda")
 val nums = [1, 2, 3]
 expect nums.map(_ + 10) == [11, 12, 13]
 ```
@@ -75,18 +94,16 @@ expect nums.map(_ + 10) == [11, 12, 13]
 
 #### transforms _ - 1 to lambda
 
-- transforms _ - 1 to lambda
+1. expect nums map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("transforms _ - 1 to lambda")
 val nums = [5, 10, 15]
 expect nums.map(_ - 1) == [4, 9, 14]
 ```
@@ -95,18 +112,16 @@ expect nums.map(_ - 1) == [4, 9, 14]
 
 #### transforms _ / 2 to lambda
 
-- transforms _ / 2 to lambda
+1. expect nums map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("transforms _ / 2 to lambda")
 val nums = [10, 20, 30]
 expect nums.map(_ / 2) == [5, 10, 15]
 ```
@@ -115,18 +130,16 @@ expect nums.map(_ / 2) == [5, 10, 15]
 
 #### transforms unary negation -_
 
-- transforms unary negation -_
+1. expect nums map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("transforms unary negation -_")
 val nums = [1, -2, 3]
 expect nums.map(-_) == [-1, 2, -3]
 ```
@@ -137,18 +150,16 @@ expect nums.map(-_) == [-1, 2, -3]
 
 #### accesses x field with _.x
 
-- accesses x field with _.x
+1. expect points map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("accesses x field with _.x")
 struct Point:
     x: i64
     y: i64
@@ -160,18 +171,16 @@ expect points.map(_.x) == [1, 3]
 
 #### accesses y field with _.y
 
-- accesses y field with _.y
+1. expect points map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("accesses y field with _.y")
 struct Point:
     x: i64
     y: i64
@@ -185,18 +194,16 @@ expect points.map(_.y) == [2, 4]
 
 #### calls method with _.method()
 
-- calls method with _.method()
+1. expect texts map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("calls method with _.method()")
 val texts = ["hello", "world"]
 expect texts.map(_.len()) == [5, 5]
 ```
@@ -207,18 +214,16 @@ expect texts.map(_.len()) == [5, 5]
 
 #### reduces with _ + _
 
-- reduces with _ + _
+1. expect nums reduce
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("reduces with _ + _")
 val nums = [1, 2, 3, 4]
 # reduce requires (init, lambda) form with explicit lambda
 expect nums.reduce(0, \acc, x: acc + x) == 10
@@ -228,18 +233,16 @@ expect nums.reduce(0, \acc, x: acc + x) == 10
 
 #### reduces with _ * _
 
-- reduces with _ * _
+1. expect nums reduce
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("reduces with _ * _")
 val nums = [1, 2, 3, 4]
 # reduce requires (init, lambda) form with explicit lambda
 expect nums.reduce(1, \acc, x: acc * x) == 24
@@ -249,18 +252,16 @@ expect nums.reduce(1, \acc, x: acc * x) == 24
 
 #### compares with _ < _
 
-- compares with _ < _
+1. expect compare
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("compares with _ < _")
 val a = 3
 val b = 5
 val compare = \x, y: x < y
@@ -274,18 +275,16 @@ expect compare(a, b) == true
 
 #### filters with _ > threshold
 
-- filters with _ > threshold
+1. expect nums filter
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("filters with _ > threshold")
 val nums = [1, 5, 3, 8, 2]
 expect nums.filter(_ > 3) == [5, 8]
 ```
@@ -294,18 +293,16 @@ expect nums.filter(_ > 3) == [5, 8]
 
 #### filters with _ < threshold
 
-- filters with _ < threshold
+1. expect nums filter
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("filters with _ < threshold")
 val nums = [1, 5, 3, 8, 2]
 expect nums.filter(_ < 4) == [1, 3, 2]
 ```
@@ -314,18 +311,16 @@ expect nums.filter(_ < 4) == [1, 3, 2]
 
 #### filters with _ == value
 
-- filters with _ == value
+1. expect nums filter
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("filters with _ == value")
 val nums = [1, 2, 2, 3, 2]
 expect nums.filter(_ == 2) == [2, 2, 2]
 ```
@@ -336,18 +331,16 @@ expect nums.filter(_ == 2) == [2, 2, 2]
 
 #### chains map and filter
 
-- chains map and filter
+1. expect nums map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("chains map and filter")
 val nums = [1, 2, 3, 4, 5]
 expect nums.map(_ * 2).filter(_ > 5) == [6, 8, 10]
 ```
@@ -356,18 +349,16 @@ expect nums.map(_ * 2).filter(_ > 5) == [6, 8, 10]
 
 #### chains filter and map
 
-- chains filter and map
+1. expect nums filter
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("chains filter and map")
 val nums = [1, 2, 3, 4, 5]
 expect nums.filter(_ > 2).map(_ * 10) == [30, 40, 50]
 ```
@@ -378,42 +369,30 @@ expect nums.filter(_ > 2).map(_ * 10) == [30, 40, 50]
 
 #### accesses first element with indexed placeholder
 
-- accesses first element with indexed placeholder
-   - Expected: arrays.map(_1[0]) equals `[1, 4]`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("accesses first element with indexed placeholder")
 val arrays = [[1, 2, 3], [4, 5, 6]]
-expect(arrays.map(_1[0])).to_equal([1, 4])
+expect(arrays.map(_1[0]) == [1, 4]).to_equal(true)
 ```
 
 </details>
 
 #### accesses second element with indexed placeholder
 
-- accesses second element with indexed placeholder
-   - Expected: arrays.map(_1[1]) equals `[2, 5]`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("accesses second element with indexed placeholder")
 val arrays = [[1, 2, 3], [4, 5, 6]]
-expect(arrays.map(_1[1])).to_equal([2, 5])
+expect(arrays.map(_1[1]) == [2, 5]).to_equal(true)
 ```
 
 </details>
@@ -422,18 +401,17 @@ expect(arrays.map(_1[1])).to_equal([2, 5])
 
 #### combines operators in expression
 
-- combines operators in expression
+1. expect nums map
+2. expect nums map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("combines operators in expression")
 val nums = [1, 2, 3]
 expect nums.map(_ * 2 + 1) == [3, 5, 7]
 expect nums.map((_ + 1) * 2) == [4, 6, 8]
@@ -443,18 +421,17 @@ expect nums.map((_ + 1) * 2) == [4, 6, 8]
 
 #### maps with conditional classification
 
-- maps with conditional classification
+1. fn classify
+2. expect nums map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("maps with conditional classification")
 val nums = [1, 2, 3, 4, 5]
 fn classify(x: i64) -> text:
     if x > 3:
@@ -470,18 +447,16 @@ expect nums.map(classify(_1)) == ["small", "small", "small", "big", "big"]
 
 #### leaves expressions without _ unchanged
 
-- leaves expressions without _ unchanged
+1. expect nums map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("leaves expressions without _ unchanged")
 val nums = [1, 2, 3]
 expect nums.map(_1 * 2) == [2, 4, 6]
 ```
@@ -492,18 +467,16 @@ expect nums.map(_1 * 2) == [2, 4, 6]
 
 #### handles single element list
 
-- handles single element list
+1. expect nums map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles single element list")
 val nums = [42]
 expect nums.map(_ * 2) == [84]
 ```
@@ -512,18 +485,16 @@ expect nums.map(_ * 2) == [84]
 
 #### handles empty list
 
-- handles empty list
+1. expect nums map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles empty list")
 val nums: [i64] = []
 expect nums.map(_ * 2) == []
 ```
@@ -532,18 +503,17 @@ expect nums.map(_ * 2) == []
 
 #### handles nested function calls
 
-- handles nested function calls
+1. fn double
+2. expect nums map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles nested function calls")
 fn double(x: i64) -> i64:
     x * 2
 val nums = [1, 2, 3]
@@ -557,18 +527,16 @@ expect nums.map(double(_1)) == [2, 4, 6]
 
 #### coalesces with _ ?? default
 
-- coalesces with _ ?? default
+1. expect opts map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("coalesces with _ ?? default")
 val opts: [Option<i64>] = [Some(1), nil, Some(3)]
 expect opts.map(_ ?? 0) == [1, 0, 3]
 ```
@@ -577,18 +545,16 @@ expect opts.map(_ ?? 0) == [1, 0, 3]
 
 #### coalesces with expression on right side
 
-- coalesces with expression on right side
+1. expect opts map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("coalesces with expression on right side")
 val opts: [Option<i64>] = [Some(10), nil, Some(30)]
 expect opts.map(_ ?? -1 * 100) == [10, -100, 30]
 ```
@@ -599,18 +565,16 @@ expect opts.map(_ ?? -1 * 100) == [10, -100, 30]
 
 #### slices with _[start:end]
 
-- slices with _[start:end]
+1. expect texts map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("slices with _[start:end]")
 val texts = ["hello", "world"]
 expect texts.map(_[1:4]) == ["ell", "orl"]
 ```
@@ -619,18 +583,16 @@ expect texts.map(_[1:4]) == ["ell", "orl"]
 
 #### slices with _[:end]
 
-- slices with _[:end]
+1. expect texts map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("slices with _[:end]")
 val texts = ["hello", "world"]
 expect texts.map(_[:3]) == ["hel", "wor"]
 ```
@@ -639,18 +601,16 @@ expect texts.map(_[:3]) == ["hel", "wor"]
 
 #### slices with _[start:]
 
-- slices with _[start:]
+1. expect texts map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("slices with _[start:]")
 val texts = ["hello", "world"]
 expect texts.map(_[2:]) == ["llo", "rld"]
 ```
@@ -659,18 +619,16 @@ expect texts.map(_[2:]) == ["llo", "rld"]
 
 #### slices with step _[::step]
 
-- slices with step _[::step]
+1. expect texts map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("slices with step _[::step]")
 val texts = ["abcdef", "ghijkl"]
 expect texts.map(_[::2]) == ["ace", "gik"]
 ```
@@ -681,18 +639,16 @@ expect texts.map(_[::2]) == ["ace", "gik"]
 
 #### creates tuple with placeholder (_, constant)
 
-- creates tuple with placeholder (_, constant)
+1. expect nums map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates tuple with placeholder (_, constant)")
 val nums = [1, 2, 3]
 expect nums.map((_, 0)) == [(1, 0), (2, 0), (3, 0)]
 ```
@@ -701,18 +657,16 @@ expect nums.map((_, 0)) == [(1, 0), (2, 0), (3, 0)]
 
 #### creates tuple with constant first (constant, _)
 
-- creates tuple with constant first (constant, _)
+1. expect nums map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates tuple with constant first (constant, _)")
 val nums = [1, 2, 3]
 expect nums.map((100, _)) == [(100, 1), (100, 2), (100, 3)]
 ```
@@ -721,18 +675,16 @@ expect nums.map((100, _)) == [(100, 1), (100, 2), (100, 3)]
 
 #### creates 3-tuple with placeholder
 
-- creates 3-tuple with placeholder
+1. expect nums map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates 3-tuple with placeholder")
 val nums = [1, 2, 3]
 expect nums.map((_, "x", 0)) == [(1, "x", 0), (2, "x", 0), (3, "x", 0)]
 ```
@@ -743,18 +695,16 @@ expect nums.map((_, "x", 0)) == [(1, "x", 0), (2, "x", 0), (3, "x", 0)]
 
 #### calls method with explicit args _.method(arg)
 
-- calls method with explicit args _.method(arg)
+1. expect texts map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("calls method with explicit args _.method(arg)")
 val texts = ["hello", "world"]
 expect texts.map(_.slice(0, 3)) == ["hel", "wor"]
 ```
@@ -763,18 +713,17 @@ expect texts.map(_.slice(0, 3)) == ["hel", "wor"]
 
 #### calls method with placeholder in args _.method(_) from outer scope
 
-- calls method with placeholder in args _.method(_) from outer scope
+1. fn add
+2. expect nums map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("calls method with placeholder in args _.method(_) from outer scope")
 # Note: placeholder in function call args not supported, use explicit lambda
 val nums = [1, 2, 3]
 fn add(a: i64, b: i64) -> i64:
@@ -788,18 +737,16 @@ expect nums.map(add(_1, 10)) == [11, 12, 13]
 
 #### chains method calls _.method1().method2()
 
-- chains method calls _.method1().method2()
+1. expect texts map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("chains method calls _.method1().method2()")
 val texts = ["  hello  ", "  world  "]
 expect texts.map(_.trim().len()) == [5, 5]
 ```
@@ -808,18 +755,16 @@ expect texts.map(_.trim().len()) == [5, 5]
 
 #### chains multiple string methods
 
-- chains multiple string methods
+1. expect texts map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("chains multiple string methods")
 val texts = ["HELLO", "WORLD"]
 expect texts.map(_.lower().len()) == [5, 5]
 ```
@@ -828,18 +773,16 @@ expect texts.map(_.lower().len()) == [5, 5]
 
 #### chains slice with length
 
-- chains slice with length
+1. expect texts map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("chains slice with length")
 val texts = ["hello world", "foo bar baz"]
 expect texts.map(_[:5].len()) == [5, 5]
 ```
@@ -850,18 +793,16 @@ expect texts.map(_[:5].len()) == [5, 5]
 
 #### does not transform _ inside nested lambda
 
-- does not transform _ inside nested lambda
+1. expect nums map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("does not transform _ inside nested lambda")
 val nums = [1, 2, 3]
 # The outer _ is transformed, inner \x: x stays as is
 expect nums.map(_ + (\x: x * 2)(10)) == [21, 22, 23]
@@ -871,18 +812,16 @@ expect nums.map(_ + (\x: x * 2)(10)) == [21, 22, 23]
 
 #### nested lambda with its own _ is independent
 
-- nested lambda with its own _ is independent
+1. expect nums map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("nested lambda with its own _ is independent")
 val nums = [1, 2, 3]
 # Outer _ becomes __p0, inner _ is separate lambda scope
 # This should work because inner lambda is not traversed
@@ -896,18 +835,16 @@ expect nums.map(_ + transform(5)) == [11, 12, 13]
 
 #### uses _ in greater-or-equal comparison
 
-- uses _ in greater-or-equal comparison
+1. expect nums filter
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses _ in greater-or-equal comparison")
 val nums = [1, 2, 3, 4, 5]
 expect nums.filter(_ >= 3) == [3, 4, 5]
 ```
@@ -916,18 +853,16 @@ expect nums.filter(_ >= 3) == [3, 4, 5]
 
 #### uses _ in less-or-equal comparison
 
-- uses _ in less-or-equal comparison
+1. expect nums filter
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses _ in less-or-equal comparison")
 val nums = [1, 2, 3, 4, 5]
 expect nums.filter(_ <= 3) == [1, 2, 3]
 ```
@@ -936,18 +871,16 @@ expect nums.filter(_ <= 3) == [1, 2, 3]
 
 #### uses _ in not-equal comparison
 
-- uses _ in not-equal comparison
+1. expect nums filter
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses _ in not-equal comparison")
 val nums = [1, 2, 2, 3, 2]
 expect nums.filter(_ != 2) == [1, 3]
 ```
@@ -958,18 +891,16 @@ expect nums.filter(_ != 2) == [1, 3]
 
 #### uses explicit lambda with logical and
 
-- uses explicit lambda with logical and
+1. expect nums filter
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses explicit lambda with logical and")
 val nums = [1, 2, 3, 4, 5]
 expect nums.filter(_1 > 1 && _1 < 5) == [2, 3, 4]
 ```
@@ -978,18 +909,16 @@ expect nums.filter(_1 > 1 && _1 < 5) == [2, 3, 4]
 
 #### uses explicit lambda with logical or
 
-- uses explicit lambda with logical or
+1. expect nums filter
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses explicit lambda with logical or")
 val nums = [1, 2, 3, 4, 5]
 expect nums.filter(_1 == 1 || _1 == 5) == [1, 5]
 ```
@@ -1000,18 +929,16 @@ expect nums.filter(_1 == 1 || _1 == 5) == [1, 5]
 
 #### uses _ with modulo
 
-- uses _ with modulo
+1. expect nums filter
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses _ with modulo")
 val nums = [1, 2, 3, 4, 5, 6]
 expect nums.filter(_ % 2 == 0) == [2, 4, 6]
 ```
@@ -1020,18 +947,16 @@ expect nums.filter(_ % 2 == 0) == [2, 4, 6]
 
 #### uses _ with bitwise and
 
-- uses _ with bitwise and
+1. expect nums map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses _ with bitwise and")
 val nums = [1, 2, 3, 4, 5]
 expect nums.map(_ & 1) == [1, 0, 1, 0, 1]
 ```
@@ -1050,51 +975,3 @@ expect nums.map(_ & 1) == [1, 0, 1, 0, 1]
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `bef91ea7358dd5c3d7728f1330692d974e14ba44b3adb3c10de872160bb75e86`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `bef91ea7358dd5c3d7728f1330692d974e14ba44b3adb3c10de872160bb75e86`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `bef91ea7358dd5c3d7728f1330692d974e14ba44b3adb3c10de872160bb75e86`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/language/placeholder_lambda_spec.spl
-mirror: doc/06_spec/03_system/feature/language/placeholder_lambda_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/language/placeholder_lambda_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/language/placeholder_lambda_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/language/placeholder_lambda_spec.spl:30:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'transforms _ * 2 to lambda' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/language/placeholder_lambda_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'transforms _ + 10 to lambda' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/language/placeholder_lambda_spec.spl:42:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'transforms _ - 1 to lambda' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -131,3 +131,12 @@ file; only Wave 1 is ledgered now). Step scripts
 `scripts/scv-migration/steps/SCV-IMPL-*.shs` are authored at wave start and
 human-signed like the MIG steps; until then the checker reports ERROR-missing /
 blocked-unsigned — the intended fail-closed state.
+
+**Status 2026-08-26 (post-wave-5): every UNGATED item in this plan is done.**
+Remaining items are gated, not pending: B-01 (sj-capsule coordinator — its
+former blocker, the `sj` rc=139 segfault, is fixed at tip a2a050e6296; B-02
+landed 2026-08-27 and exposes `scv_jj_exec` for B-01 to adopt as its executor),
+B-07 (6-12 month shadow soak, no date), B-08 (needs B-07
+all-green plus human sign-off). D-08 is landed advisory-RED — its gate
+`scripts/check/check-scv-merge-corpus.shs` still FAILs at 3 missed real
+conflicts in preprocessor cases 22/24/26; do not baseline them.

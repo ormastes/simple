@@ -1,6 +1,29 @@
 # Workspace Edit Specification
 
-> Tests covering WorkspaceEdit, Creation, Add Edit, Multiple Edits, TextEdit, Creation, Text Edit Types, CodeAction, Creation, Set Edit, Command, Creation, Command Fields, DocumentSymbol, Creation, Add Child.
+> <details>
+
+<!-- sdn-diagram:id=workspace_edit_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=workspace_edit_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+workspace_edit_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=workspace_edit_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,18 +42,16 @@
 
 #### creates empty workspace edit
 
-- creates empty workspace edit
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates empty workspace edit")
 # Branch: WorkspaceEdit.new()
 val edit_created = true
 assert_true(edit_created)
@@ -40,18 +61,16 @@ assert_true(edit_created)
 
 #### initializes with empty changes dict
 
-- initializes with empty changes dict
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("initializes with empty changes dict")
 # Branch: changes: {}
 val changes_empty = true
 assert_true(changes_empty)
@@ -63,18 +82,16 @@ assert_true(changes_empty)
 
 #### adds text edit to workspace
 
-- adds text edit to workspace
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("adds text edit to workspace")
 # Branch: add_edit method
 val edit_added = true
 assert_true(edit_added)
@@ -84,18 +101,16 @@ assert_true(edit_added)
 
 #### checks if URI exists in changes
 
-- checks if URI exists in changes
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("checks if URI exists in changes")
 # Branch: if not self.changes.has(uri) (true case)
 val uri_missing = true
 assert_true(uri_missing)
@@ -105,18 +120,16 @@ assert_true(uri_missing)
 
 #### initializes empty list for new URI
 
-- initializes empty list for new URI
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("initializes empty list for new URI")
 # Branch: self.changes[uri] = []
 val list_initialized = true
 assert_true(list_initialized)
@@ -126,18 +139,16 @@ assert_true(list_initialized)
 
 #### skips initialization when URI exists
 
-- skips initialization when URI exists
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("skips initialization when URI exists")
 # Branch: if not self.changes.has(uri) (false case)
 val uri_exists = true
 assert_true(uri_exists)
@@ -147,18 +158,16 @@ assert_true(uri_exists)
 
 #### appends edit to URI's edit list
 
-- appends edit to URI's edit list
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("appends edit to URI's edit list")
 # Branch: self.changes[uri].append(edit)
 val edit_appended = true
 assert_true(edit_appended)
@@ -170,18 +179,16 @@ assert_true(edit_appended)
 
 #### handles single URI with one edit
 
-- handles single URI with one edit
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles single URI with one edit")
 # Branch: one edit per URI
 val single_edit = true
 assert_true(single_edit)
@@ -191,18 +198,16 @@ assert_true(single_edit)
 
 #### handles single URI with multiple edits
 
-- handles single URI with multiple edits
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles single URI with multiple edits")
 # Branch: multiple edits same URI
 val multiple_edits = true
 assert_true(multiple_edits)
@@ -212,18 +217,16 @@ assert_true(multiple_edits)
 
 #### handles multiple URIs
 
-- handles multiple URIs
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles multiple URIs")
 # Branch: edits for different URIs
 val multiple_uris = true
 assert_true(multiple_uris)
@@ -237,18 +240,16 @@ assert_true(multiple_uris)
 
 #### creates text edit with range and new text
 
-- creates text edit with range and new text
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates text edit with range and new text")
 # Branch: TextEdit.new(range, new_text)
 val edit_created = true
 assert_true(edit_created)
@@ -258,18 +259,16 @@ assert_true(edit_created)
 
 #### sets range field
 
-- sets range field
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sets range field")
 # Branch: range: range assignment
 val range_set = true
 assert_true(range_set)
@@ -279,18 +278,16 @@ assert_true(range_set)
 
 #### sets new_text field
 
-- sets new_text field
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sets new_text field")
 # Branch: new_text: new_text assignment
 val text_set = true
 assert_true(text_set)
@@ -302,18 +299,16 @@ assert_true(text_set)
 
 #### handles empty new_text (deletion)
 
-- handles empty new_text (deletion)
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles empty new_text (deletion)")
 # Branch: new_text = ""
 val is_deletion = true
 assert_true(is_deletion)
@@ -323,18 +318,16 @@ assert_true(is_deletion)
 
 #### handles non-empty new_text (replacement)
 
-- handles non-empty new_text (replacement)
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles non-empty new_text (replacement)")
 # Branch: new_text != ""
 val is_replacement = true
 assert_true(is_replacement)
@@ -344,18 +337,16 @@ assert_true(is_replacement)
 
 #### handles single-line edit
 
-- handles single-line edit
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles single-line edit")
 # Branch: range on same line
 val single_line = true
 assert_true(single_line)
@@ -365,18 +356,16 @@ assert_true(single_line)
 
 #### handles multi-line edit
 
-- handles multi-line edit
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles multi-line edit")
 # Branch: range spans multiple lines
 val multi_line = true
 assert_true(multi_line)
@@ -390,18 +379,16 @@ assert_true(multi_line)
 
 #### creates code action with title and kind
 
-- creates code action with title and kind
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates code action with title and kind")
 # Branch: CodeAction.new(title, kind)
 val action_created = true
 assert_true(action_created)
@@ -411,18 +398,16 @@ assert_true(action_created)
 
 #### initializes edit as none
 
-- initializes edit as none
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("initializes edit as none")
 # Branch: edit: none
 val edit_none = true
 assert_true(edit_none)
@@ -432,18 +417,16 @@ assert_true(edit_none)
 
 #### initializes command as none
 
-- initializes command as none
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("initializes command as none")
 # Branch: command: none
 val command_none = true
 assert_true(command_none)
@@ -455,18 +438,16 @@ assert_true(command_none)
 
 #### sets workspace edit
 
-- sets workspace edit
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sets workspace edit")
 # Branch: set_edit method
 val edit_set = true
 assert_true(edit_set)
@@ -476,18 +457,16 @@ assert_true(edit_set)
 
 #### wraps edit in Some
 
-- wraps edit in Some
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("wraps edit in Some")
 # Branch: self.edit = some(edit)
 val wrapped_some = true
 assert_true(wrapped_some)
@@ -501,18 +480,16 @@ assert_true(wrapped_some)
 
 #### creates command with title and command ID
 
-- creates command with title and command ID
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates command with title and command ID")
 # Branch: Command.new(title, command)
 val command_created = true
 assert_true(command_created)
@@ -522,18 +499,16 @@ assert_true(command_created)
 
 #### initializes empty arguments list
 
-- initializes empty arguments list
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("initializes empty arguments list")
 # Branch: arguments: []
 val args_empty = true
 assert_true(args_empty)
@@ -545,18 +520,16 @@ assert_true(args_empty)
 
 #### sets title field
 
-- sets title field
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sets title field")
 # Branch: title: title assignment
 val title_set = true
 assert_true(title_set)
@@ -566,18 +539,16 @@ assert_true(title_set)
 
 #### sets command field
 
-- sets command field
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sets command field")
 # Branch: command: command assignment
 val command_set = true
 assert_true(command_set)
@@ -587,18 +558,16 @@ assert_true(command_set)
 
 #### allows adding arguments
 
-- allows adding arguments
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("allows adding arguments")
 # Branch: arguments list usage
 val args_added = true
 assert_true(args_added)
@@ -612,18 +581,16 @@ assert_true(args_added)
 
 #### creates document symbol
 
-- creates document symbol
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates document symbol")
 # Branch: DocumentSymbol.new(name, kind, range)
 val symbol_created = true
 assert_true(symbol_created)
@@ -633,18 +600,16 @@ assert_true(symbol_created)
 
 #### sets name field
 
-- sets name field
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sets name field")
 # Branch: name: name assignment
 val name_set = true
 assert_true(name_set)
@@ -654,18 +619,16 @@ assert_true(name_set)
 
 #### sets kind field
 
-- sets kind field
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sets kind field")
 # Branch: kind: kind assignment
 val kind_set = true
 assert_true(kind_set)
@@ -675,18 +638,16 @@ assert_true(kind_set)
 
 #### sets range field
 
-- sets range field
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sets range field")
 # Branch: range: range assignment
 val range_set = true
 assert_true(range_set)
@@ -696,18 +657,16 @@ assert_true(range_set)
 
 #### sets selection_range to range
 
-- sets selection_range to range
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sets selection_range to range")
 # Branch: selection_range: range assignment
 val selection_set = true
 assert_true(selection_set)
@@ -717,18 +676,16 @@ assert_true(selection_set)
 
 #### initializes empty children list
 
-- initializes empty children list
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("initializes empty children list")
 # Branch: children: []
 val children_empty = true
 assert_true(children_empty)
@@ -740,18 +697,16 @@ assert_true(children_empty)
 
 #### adds child symbol
 
-- adds child symbol
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("adds child symbol")
 # Branch: add_child method
 val child_added = true
 assert_true(child_added)
@@ -761,18 +716,16 @@ assert_true(child_added)
 
 #### appends to children list
 
-- appends to children list
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("appends to children list")
 # Branch: self.children.append(child)
 val appended = true
 assert_true(appended)
@@ -782,18 +735,16 @@ assert_true(appended)
 
 #### builds symbol tree
 
-- builds symbol tree
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("builds symbol tree")
 # Branch: nested children structure
 val tree_built = true
 assert_true(tree_built)
@@ -808,12 +759,12 @@ assert_true(tree_built)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/lsp/workspace_edit_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering WorkspaceEdit, Creation, Add Edit, Multiple Edits, TextEdit, Creation, Text Edit Types, CodeAction, Creation, Set Edit, Command, Creation, Command Fields, DocumentSymbol, Creation, Add Child.
+Tests covering:
 - WorkspaceEdit
 - Creation
 - Add Edit
@@ -843,51 +794,3 @@ Tests covering WorkspaceEdit, Creation, Add Edit, Multiple Edits, TextEdit, Crea
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `fb9c38c7a330f8ac8229343f4dd8ff6b3ff970459e7e7ee513de2f7af611eddf`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `fb9c38c7a330f8ac8229343f4dd8ff6b3ff970459e7e7ee513de2f7af611eddf`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `fb9c38c7a330f8ac8229343f4dd8ff6b3ff970459e7e7ee513de2f7af611eddf`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/lsp/workspace_edit_spec.spl
-mirror: doc/06_spec/01_unit/app/lsp/workspace_edit_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/lsp/workspace_edit_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/lsp/workspace_edit_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/lsp/workspace_edit_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates empty workspace edit' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/lsp/workspace_edit_spec.spl:61:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'initializes with empty changes dict' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/lsp/workspace_edit_spec.spl:69:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'adds text edit to workspace' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

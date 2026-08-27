@@ -1,6 +1,6 @@
-# Stage4 Native Link Source Contract Specification
+# Contract spec: test/01_unit/compiler/backend/stage4_native_link_source_contract_spec.spl
 
-> Tests covering Stage4 split native linker source contracts.
+> Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,47 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Stage4 Native Link Source Contract Specification
+# Contract spec: test/01_unit/compiler/backend/stage4_native_link_source_contract_spec.spl
+
+Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Compiler |
+| Status | Active |
+| Source | `test/01_unit/compiler/backend/stage4_native_link_source_contract_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and Audience
+
+Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
+contracts red-visible, so a regression in the owned code fails this spec
+instead of shipping silently.
+
+## Scope and Preconditions
+
+Precondition: the repository working tree holds the subject code under test.
+Each scenario exercises the subject and asserts its observable contract; no
+behavior outside the named subject is claimed.
+
+## Primary Workflow
+
+Run the scenarios; each one drives the subject through its pinned contract
+and asserts the expected observable outcome with an executed oracle.
+
+## Unsupported / Limitations
+
+Only the pinned contracts are asserted here; end-to-end and integration
+behavior of the surrounding system is covered by companion specs.
+
+## Verification and Recovery
+
+A red scenario names the contract that regressed. Recover by restoring the
+pinned behavior in the subject; verify with
+`bin/simple test test/01_unit/compiler/backend/stage4_native_link_source_contract_spec.spl` and a green Results line.
 
 ## Scenarios
 
@@ -48,7 +88,7 @@ expect(source).to_contain("if hosted_os == \"windows\" and not _is_mingw(): \"si
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 62 lines folded for reproduction.
+Runnable source: 56 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -95,9 +135,7 @@ expect(build_source).to_contain("closure_args = closure_args.push(\"-no-pie\")")
 expect(build_source).to_contain("closure_args = closure_args.push(\"-Wl,--gc-sections\")")
 expect(build_source).to_contain("for symbol in manifest:\n            closure_args = closure_args.push(\"-Wl,--undefined={{symbol}}\")")
 expect(build_source).to_contain("for symbol in manifest:\n            closure_args = closure_args.push(\"-Wl,-u,_{{symbol}}\")")
-expect(build_source.contains("--whole-archive")).to_be(false)
-expect(build_source.contains("-force_load")).to_be(false)
-for flag in [
+expect(build_source).to_not_contain("--whole-archive")        expect(build_source).to_not_contain("-force_load")        for flag in [
     "\"--localize-symbols=\" + localize_path,",
     "\"--remove-section=.init_array\",", "\"--remove-section=.init_array.*\",",
     "\"--remove-section=.ctors\",", "\"--remove-section=.ctors.*\",",
@@ -109,11 +147,7 @@ for flag in [
     expect(build_source).to_contain(flag)
 expect(build_source.split("\"--remove-section=").len() - 1).to_equal(12)
 expect(build_source).to_contain("process_run(archiver, [\"t\", capsule_path])")
-expect(build_source.contains("file_delete(raw_archive)")).to_be(false)
-expect(build_source.contains("remove_file_if_exists(raw_archive)")).to_be(false)
-expect(build_source.contains("file_copy(raw_archive")).to_be(false)
-expect(build_source.contains("file_write(raw_archive")).to_be(false)
-expect(build_source.contains("dir_remove_all(raw_archive")).to_be(false)
+expect(build_source).to_not_contain("file_delete(raw_archive)")        expect(build_source).to_not_contain("remove_file_if_exists(raw_archive)")        expect(build_source).to_not_contain("file_copy(raw_archive")        expect(build_source).to_not_contain("file_write(raw_archive")        expect(build_source).to_not_contain("dir_remove_all(raw_archive")
 ```
 
 </details>
@@ -126,7 +160,7 @@ expect(build_source.contains("dir_remove_all(raw_archive")).to_be(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -142,9 +176,7 @@ expect(provider_pos).to_be_greater_than(capsule_pos)
 expect(projection_pos).to_be_greater_than(provider_pos)
 expect(source).to_contain("simple_stage4_compiler_backfill_{{pid}}_{{output.hash()}}")
 expect(source.split("return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule,").len() - 1).to_be_greater_than(8)
-expect(source.contains("all_objects = all_objects.push(compiler_backfill_capsule)")).to_be(false)
-expect(source.contains("link_to_native(all_objects.push(compiler_backfill_capsule)")).to_be(false)
-val step3_pos = source.find("# Step 3: Combine all objects and link")
+expect(source).to_not_contain("all_objects = all_objects.push(compiler_backfill_capsule)")        expect(source).to_not_contain("link_to_native(all_objects.push(compiler_backfill_capsule)")        val step3_pos = source.find("# Step 3: Combine all objects and link")
 expect(step3_pos).to_be_greater_than(projection_pos)
 val strict_source = if final_symbols_pos >= 0 and step3_pos > final_symbols_pos: source.substring(final_symbols_pos, step3_pos) else: ""
 expect(strict_source).to_contain("compiler_backfill_capsule")
@@ -194,14 +226,14 @@ expect(strict_source).to_contain("remove_file_if_exists(path)")
 #### builds and validates the dedicated dynload archive before strict projection
 
 - builds and validates the dedicated dynload archive before strict projection
-   - Expected: source.split("stage4_msvc_objects, stage4_msvc_linker, pid").len() - 1 equals `8`
+   - Expected: source).to_not_contain("_obj_ext() == \".obj\"")        expect(source.split("stage4_msvc_objects, stage4_msvc_linker, pid").len() - 1 equals `8`
    - Expected: source.split("archive_file, object_ext, target_os_name == \"windows\", pid").len() - 1 equals `6`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 64 lines folded for reproduction.
+Runnable source: 62 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -253,12 +285,10 @@ expect(inventory_call_pos).to_be_greater_than(list_pos)
 expect(contract_pos).to_be_greater_than(inventory_call_pos)
 expect(source).to_contain("find_archive_portable()")
 expect(source).to_contain("stage4_runtime_provider_object_matches(object, object_stem, object_ext, windows_paths)")
-expect(source.contains("_obj_ext() == \".obj\"")).to_be(false)
-expect(source.split("stage4_msvc_objects, stage4_msvc_linker, pid").len() - 1).to_equal(8)
+expect(source).to_not_contain("_obj_ext() == \".obj\"")        expect(source.split("stage4_msvc_objects, stage4_msvc_linker, pid").len() - 1).to_equal(8)
 expect(source.split("archive_file, object_ext, target_os_name == \"windows\", pid").len() - 1).to_equal(6)
 expect(source).to_contain("compile_entry_point_c(user_objects, pid, verbose, options.opt_level, hosted_cc)")
-expect(source.contains("object.ends_with(object_stem + object_ext)")).to_be(false)
-expect(source).to_contain("provider_objects.len() != 1")
+expect(source).to_not_contain("object.ends_with(object_stem + object_ext)")        expect(source).to_contain("provider_objects.len() != 1")
 expect(source).to_contain("file_copy(provider_objects[0], staged_object)")
 expect(source).to_contain("val expected_member = object_stem + object_ext")
 expect(source).to_contain("llvm_stage4_build_single_object_provider_archive(runtime_objects, \"runtime_dynload\"")
@@ -268,7 +298,7 @@ expect(source).to_contain("members_out.replace(\"\\r\", \"\").trim()")
 expect(source).to_contain("llvm_stage4_candidate_archive_inventory([\"runtime_dynload\"], [archive_path])")
 expect(source).to_contain("stage4_validate_dynload_provider_symbol_contract(scans[0], object_format)")
 expect(source).to_contain("dir_remove_all(stage_dir)")
-expect(source.contains("runtime_dynload.c")).to_be(false)
+expect(source).to_not_contain("runtime_dynload.c")
 ```
 
 </details>
@@ -364,7 +394,7 @@ val fallback_pos = resolver_source.last_index_of("\"ar\"")
 expect(override_pos).to_be_greater_than(-1)
 expect(newest_pos).to_be_greater_than(override_pos)
 expect(fallback_pos).to_be_greater_than(newest_pos)
-expect(resolver_source.contains("\"lib\"")).to_be(false)
+expect(resolver_source).to_not_contain("\"lib\"")
 ```
 
 </details>
@@ -441,21 +471,6 @@ expect(usr_pos).to_be_greater_than(usr_18_pos)
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Compiler |
-| Status | Active |
-| Source | `test/01_unit/compiler/backend/stage4_native_link_source_contract_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering Stage4 split native linker source contracts.
-- Stage4 split native linker source contracts
-
 ## Scenario Summary
 
 | Metric | Count |
@@ -474,56 +489,42 @@ Tests covering Stage4 split native linker source contracts.
 
 Requirements covered by the scenarios in this manual:
 
-- `REQ-SSPEC-UNIT`
 - `REQ-SSPEC-COMPILER`
 <!-- sspec-maintain:traceability:end -->
 
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `7c3871bad2be2fa2bcaea9260cddc13a4f417e1ba370ee7f38519b75305a4b67`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `fae6e23e831412fbd7884a11f25ac6ecf3be2f05ff1925a74e4dd409bd1e9928`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `7c3871bad2be2fa2bcaea9260cddc13a4f417e1ba370ee7f38519b75305a4b67`.
+Source SHA-256: `fae6e23e831412fbd7884a11f25ac6ecf3be2f05ff1925a74e4dd409bd1e9928`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `7c3871bad2be2fa2bcaea9260cddc13a4f417e1ba370ee7f38519b75305a4b67`  
+Source SHA-256: `fae6e23e831412fbd7884a11f25ac6ecf3be2f05ff1925a74e4dd409bd1e9928`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **70/100**; effective score: **49/100**; blockers: **2**.
+Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 89/100
 source: test/01_unit/compiler/backend/stage4_native_link_source_contract_spec.spl
 mirror: doc/06_spec/01_unit/compiler/backend/stage4_native_link_source_contract_spec.md (current)
-findings: 8 blockers: 2
-  narrative=100 structure=100 oracle=20
-  traceability=60 evidence=70 coverage=100 maintainability=70
+findings: 4 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=100
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=70; blocker cap makes effective=49
-doc/06_spec/01_unit/compiler/backend/stage4_native_link_source_contract_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/compiler/backend/stage4_native_link_source_contract_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/compiler/backend/stage4_native_link_source_contract_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
 test/01_unit/compiler/backend/stage4_native_link_source_contract_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 6 unexplained numeric expected value(s)
   why: Reviewers need to know why a magic expected value is authoritative.
   improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/compiler/backend/stage4_native_link_source_contract_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/01_unit/compiler/backend/stage4_native_link_source_contract_spec.spl:16:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'discovers the canonical native-all archive name for each hosted OS' has no retained capture or evidence
+test/01_unit/compiler/backend/stage4_native_link_source_contract_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'discovers the canonical native-all archive name for each hosted OS' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler/backend/stage4_native_link_source_contract_spec.spl:22:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'builds a private deterministic compiler backfill capsule from the derived manifest' has no retained capture or evidence
+test/01_unit/compiler/backend/stage4_native_link_source_contract_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'builds a private deterministic compiler backfill capsule from the derived manifest' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler/backend/stage4_native_link_source_contract_spec.spl:86:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'owns and cleans the compiler capsule only inside the strict Stage4 transaction' has no retained capture or evidence
+test/01_unit/compiler/backend/stage4_native_link_source_contract_spec.spl:111:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'owns and cleans the compiler capsule only inside the strict Stage4 transaction' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

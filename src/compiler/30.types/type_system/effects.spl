@@ -204,8 +204,8 @@ fn propagate_effects_transitive(functions: [FunctionInfo]) -> Dict<text, Effect>
     for func in functions:
         var callees: [text] = []
         for callee in func.called_functions:
-            if func_names.contains(callee):
-                callees = callees.push(callee)
+            if func_names_contains(func_names, callee):
+                callees = callees_push(callees, callee)
         call_graph[func.name] = callees
 
     # Find SCCs using Tarjan's algorithm
@@ -218,12 +218,6 @@ fn propagate_effects_transitive(functions: [FunctionInfo]) -> Dict<text, Effect>
 
     # Process SCCs
     for scc in sccs:
-        # Membership is queried once per outgoing edge below. Index the current
-        # component once instead of linearly rescanning `scc` for every edge.
-        var scc_members: Dict<text, bool> = {}
-        for name in scc:
-            scc_members[name] = true
-
         var any_explicit_async = false
         for name in scc:
             val env_entry = env_get(env, name)
@@ -233,7 +227,7 @@ fn propagate_effects_transitive(functions: [FunctionInfo]) -> Dict<text, Effect>
 
         var any_suspension = false
         for name in scc:
-            val f = func_map.get(name)
+            val f = func_map_get(func_map, name)
             if has_f:
                 val func = f_value
                 if not func.is_sync and func.contains_suspension:
@@ -241,7 +235,7 @@ fn propagate_effects_transitive(functions: [FunctionInfo]) -> Dict<text, Effect>
 
         var any_calls_async = false
         for name in scc:
-            val callees = call_graph.get(name) ?? []
+            val callees = call_graph_get(call_graph, name) ?? []
             for callee in callees:
                 if not scc_members.contains(callee):
                     val callee_entry = env_get(env, callee)
@@ -255,7 +249,7 @@ fn propagate_effects_transitive(functions: [FunctionInfo]) -> Dict<text, Effect>
             Effect.Sync
 
         for name in scc:
-            if not env.contains(name):
+            if not env_contains(env, name):
                 env[name] = scc_effect
 
     env
@@ -270,8 +264,8 @@ fn tarjan_scc(graph: Dict<text, [text]>) -> [[text]]:
     var lowlinks: Dict<text, i64> = {}
     var result: [[text]] = []
 
-    for node in graph.keys():
-        if not indices.contains(node):
+    for node in graph_keys(graph):
+        if not indices_contains(indices, node):
             tarjan_dfs(node, graph, index_counter, stack, on_stack,
                        indices, lowlinks, result)
 
@@ -285,18 +279,18 @@ fn tarjan_dfs(v: text, graph: Dict<text, [text]>,
     indices[v] = index_counter
     lowlinks[v] = index_counter
     index_counter = index_counter + 1
-    stack.push(v)
+    stack_push(stack, v)
     on_stack[v] = true
 
-    val successors = graph.get(v) ?? []
+    val successors = graph_get(graph, v) ?? []
     for w in successors:
-        if not indices.contains(w):
+        if not indices_contains(indices, w):
             tarjan_dfs(w, graph, index_counter, stack, on_stack,
                        indices, lowlinks, result)
             val w_low = lowlinks[w]
             if w_low < lowlinks[v]:
                 lowlinks[v] = w_low
-        elif on_stack.get(w) ?? false:
+        elif on_stack_get(on_stack, w) ?? false:
             val w_idx = indices[w]
             if w_idx < lowlinks[v]:
                 lowlinks[v] = w_idx
@@ -304,12 +298,12 @@ fn tarjan_dfs(v: text, graph: Dict<text, [text]>,
     if lowlinks[v] == indices[v]:
         var scc: [text] = []
         while true:
-            val w = stack.pop()
+            val w = stack_pop(stack)
             on_stack[w] = false
-            scc = scc.push(w)
+            scc = scc_push(scc, w)
             if w == v:
                 break
-        result = result.push(scc)
+        result = result_push(result, scc)
 
 # ============================================================================
 # Validation
@@ -317,7 +311,8 @@ fn tarjan_dfs(v: text, graph: Dict<text, [text]>,
 
 fn validate_sync_constraint(func: FunctionInfo) -> text:
     """Validate that a sync function doesn't contain suspension operators."""
-    if func.is_sync and func.contains_suspension:
+    if func.is_sync:
+        if func.contains_suspension:
         return Err("Sync function '{func.name}' cannot contain suspension operators (~=, await, etc.)")
     Ok(())
 
@@ -357,9 +352,9 @@ fn wrap_in_promise(type_name: text) -> text:
 fn unwrap_promise(type_name: text) -> text:
     """Extract inner type from Promise<T>."""
     if type_name.starts_with("Promise<") and type_name.ends_with(">"):
-        type_name[8:type_name.len() - 1]
+        type_name[8:type_name_len(type_name) - 1]
     else:
-        type_name
+        nil
 
 # ============================================================================
 # Await Inference
@@ -397,3 +392,4 @@ fn infer_promise_type_info(func: FunctionInfo, env: Dict<text, Effect>) -> Promi
     match effect:
         case Sync: promisetypeinfo_sync_function(nil)
         case Async: promisetypeinfo_async_function(nil)
+

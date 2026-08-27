@@ -35,7 +35,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("shows basic statistics")
 # This is a manual test - run: bin/simple stats
 # Expected: Shows files, lines, tests, features
-check_msg(true, "Manual test placeholder")
+check(true, "Manual test placeholder")
 ```
 
 </details>
@@ -56,7 +56,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("supports --brief flag")
 # Run: bin/simple stats --brief
 # Expected: No "Collecting data..." or documentation section
-check_msg(true, "Manual test placeholder")
+check(true, "Manual test placeholder")
 ```
 
 </details>
@@ -77,7 +77,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("supports --verbose flag")
 # Run: bin/simple stats --verbose
 # Expected: Shows directory scan details
-check_msg(true, "Manual test placeholder")
+check(true, "Manual test placeholder")
 ```
 
 </details>
@@ -98,7 +98,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("supports --quick flag")
 # Run: bin/simple stats --quick
 # Expected: Skips line counting, faster execution
-check_msg(true, "Manual test placeholder")
+check(true, "Manual test placeholder")
 ```
 
 </details>
@@ -119,7 +119,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("supports --json flag")
 # Run: bin/simple stats --json
 # Expected: Outputs valid JSON with all metrics
-check_msg(true, "Manual test placeholder")
+check(true, "Manual test placeholder")
 ```
 
 </details>
@@ -140,7 +140,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("combines flags correctly")
 # Run: bin/simple stats --json --quick
 # Expected: JSON output with lines: 0
-check_msg(true, "Manual test placeholder")
+check(true, "Manual test placeholder")
 ```
 
 </details>
@@ -162,7 +162,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-INTEGRATION
 step("counts source files correctly")
 # Verify file counts match actual filesystem
-check_msg(true, "Manual test placeholder")
+check(true, "Manual test placeholder")
 ```
 
 </details>
@@ -182,7 +182,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-INTEGRATION
 step("extracts test statistics from test_result.md")
 # Verify test counts match doc/08_tracking/test/test_result.md
-check_msg(true, "Manual test placeholder")
+check(true, "Manual test placeholder")
 ```
 
 </details>
@@ -202,7 +202,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-INTEGRATION
 step("extracts feature statistics from feature_db.sdn")
 # Verify feature counts match doc/08_tracking/feature/feature_db.sdn
-check_msg(true, "Manual test placeholder")
+check(true, "Manual test placeholder")
 ```
 
 </details>
@@ -225,7 +225,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("completes in under 5 seconds (full mode)")
 # time bin/simple stats
 # Expected: < 5s
-check_msg(true, "Manual test placeholder")
+check(true, "Manual test placeholder")
 ```
 
 </details>
@@ -246,7 +246,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("completes in under 1 second (quick mode)")
 # time bin/simple stats --quick
 # Expected: < 1s
-check_msg(true, "Manual test placeholder")
+check(true, "Manual test placeholder")
 ```
 
 </details>

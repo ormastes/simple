@@ -1,0 +1,103 @@
+"""Owned-copy IPC syscall v1 contract tests (syscalls 132/133)."""
+
+use std.spec.{describe, it, expect}
+use os.kernel.ipc.syscall_ipc.{
+    IPC_OWNED_V1_HEADER_BYTES,
+    ipc_owned_v1_encode,
+    _handle_ipc_send_owned_v1_state,
+    _handle_ipc_recv_owned_v1_state
+}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.types.ipc_types.{IpcMessage, IpcFlags}
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallId}
+use os.kernel.errno.{EAGAIN, EFAULT, EMSGSIZE, ENOSYS, EPERM}
+
+fn _args(id: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> SyscallArgs:
+    SyscallArgs(id: id, arg0: a0, arg1: a1, arg2: a2, arg3: a3, arg4: a4, arg5: a5)
+
+describe "owned-copy IPC syscall v1 ABI":
+    it "allocates only the additive free IDs 132 and 133":
+        expect(SyscallId.IpcSendOwnedV1 as u64).to_equal(132)
+        expect(SyscallId.IpcRecvOwnedV1 as u64).to_equal(133)
+        expect(SyscallId.IpcSend as u64).to_equal(20)
+        expect(SyscallId.IpcRecv as u64).to_equal(21)
+
+    it "encodes a fixed little-endian header before payload":
+        val header = IpcMessage(src_port: 0x0102, dst_port: 0x0304, method: 0x0506u32, flags: IpcFlags.Async as u32, payload_len: 2u32, cap_count: 0u32)
+        val bytes = ipc_owned_v1_encode(header, [0xAAu8, 0xBBu8])
+        expect(bytes.len()).to_equal(IPC_OWNED_V1_HEADER_BYTES.to_i64() + 2)
+        expect(bytes[0]).to_equal(0x02u8)
+        expect(bytes[1]).to_equal(0x01u8)
+        expect(bytes[8]).to_equal(0x04u8)
+        expect(bytes[9]).to_equal(0x03u8)
+        expect(bytes[32]).to_equal(0xAAu8)
+        expect(bytes[33]).to_equal(0xBBu8)
+
+describe "owned-copy IPC syscall authentication and bounds":
+    it "uses the method high bit for one exact reverse-pair reply permit":
+        val scheduler = Scheduler.new()
+        var ipc = IpcManager.new()
+        val caller = scheduler.get_current()
+        val client = ipc.create_port(caller, "reply-client")
+        val server = ipc.create_port(caller, "reply-server")
+        val request = _handle_ipc_send_owned_v1_state(
+            _args(132, server.id, 7, 0, 0, client.id, 0), scheduler, ipc)
+        expect(request.result.value).to_equal(0i64)
+        val reply = _handle_ipc_send_owned_v1_state(
+            _args(132, client.id, 0x80000007u64, 0, 0, server.id, 0),
+            request.scheduler, request.ipc)
+        expect(reply.result.value).to_equal(0i64)
+        val replay = _handle_ipc_send_owned_v1_state(
+            _args(132, client.id, 0x80000007u64, 0, 0, server.id, 0),
+            reply.scheduler, reply.ipc)
+        expect(replay.result.value).to_equal(-(EPERM as i64))
+
+    it "authenticates the claimed reply endpoint against scheduler current task":
+        val scheduler = Scheduler.new()
+        var ipc = IpcManager.new()
+        val caller = scheduler.get_current()
+        val source = ipc.create_port(caller, "owned-source")
+        val destination = ipc.create_port(caller, "owned-destination")
+        val state = _handle_ipc_send_owned_v1_state(_args(132, destination.id, 7, 0x1000, 0, source.id + 1000, 0), scheduler, ipc)
+        expect(state.result.value).to_equal(-(EPERM as i64))
+        expect(state.ipc.next_owned_payload_len(caller, destination)).to_equal(-3)
+
+    it "queues an empty owned message without trusting a user source TaskId":
+        val scheduler = Scheduler.new()
+        var ipc = IpcManager.new()
+        val caller = scheduler.get_current()
+        val source = ipc.create_port(caller, "owned-source-ok")
+        val destination = ipc.create_port(caller, "owned-destination-ok")
+        val state = _handle_ipc_send_owned_v1_state(_args(132, destination.id, 9, 0x1000, 0, source.id, 0), scheduler, ipc)
+        expect(state.result.value).to_equal(0)
+        expect(state.ipc.next_owned_payload_len(caller, destination)).to_equal(0)
+
+    it "rejects oversized send before touching the user pointer":
+        val state = _handle_ipc_send_owned_v1_state(_args(132, 1, 1, 0, 4097, 1, 0), Scheduler.new(), IpcManager.new())
+        expect(state.result.value).to_equal(-(EMSGSIZE as i64))
+
+    it "returns EFAULT for an unreadable send buffer":
+        val state = _handle_ipc_send_owned_v1_state(_args(132, 1, 1, 0, 1, 1, 0), Scheduler.new(), IpcManager.new())
+        expect(state.result.value).to_equal(-(EFAULT as i64))
+
+    it "distinguishes empty receive, undersized buffer, bad output pointer, and unsupported timeout":
+        val scheduler = Scheduler.new()
+        var ipc = IpcManager.new()
+        val caller = scheduler.get_current()
+        val source = ipc.create_port(caller, "recv-source")
+        val destination = ipc.create_port(caller, "recv-destination")
+        val empty = _handle_ipc_recv_owned_v1_state(_args(133, destination.id, 0x1000, 32, 0, 0, 0), scheduler, ipc)
+        expect(empty.result.value).to_equal(-(EAGAIN as i64))
+
+        val sent = _handle_ipc_send_owned_v1_state(_args(132, destination.id, 1, 0x1000, 0, source.id, 0), scheduler, ipc)
+        val small = _handle_ipc_recv_owned_v1_state(_args(133, destination.id, 0x1000, 31, 0, 0, 0), sent.scheduler, sent.ipc)
+        expect(small.result.value).to_equal(-(EMSGSIZE as i64))
+        expect(small.ipc.next_owned_payload_len(caller, destination)).to_equal(0)
+
+        val fault = _handle_ipc_recv_owned_v1_state(_args(133, destination.id, 0, 32, 0, 0, 0), small.scheduler, small.ipc)
+        expect(fault.result.value).to_equal(-(EFAULT as i64))
+        expect(fault.ipc.next_owned_payload_len(caller, destination)).to_equal(0)
+
+        val timeout = _handle_ipc_recv_owned_v1_state(_args(133, destination.id, 0x1000, 32, 1, 10, 0), fault.scheduler, fault.ipc)
+        expect(timeout.result.value).to_equal(-(ENOSYS as i64))

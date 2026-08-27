@@ -15,7 +15,7 @@ fn hash_b() -> text: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 fn zeros() -> text: "0000000000000000000000000000000000000000000000000000000000000000"
 
 fn empty_policy() -> text:
-    "{\"schema\":\"spipe-self-review-policy-db/1\",\"default_allow\":true,\"max_ttl_seconds\":86400,\"authority\":\"operator_owned_external\"}\n"
+    "{\"schema\":\"spipe-self-review-policy-db/2\",\"record_type\":\"header\",\"default_allow\":true,\"max_ttl_seconds\":86400,\"authority\":{\"type\":\"operator_owned_external\",\"id\":\"github:user:2378857\",\"key_id\":\"operator-key-1\"}}\n"
 
 fn ordinary_manifest(path: text, kind: text) -> text:
     """changed_paths:
@@ -57,7 +57,7 @@ fn request(policy_hash: text) -> SelfReviewRequest:
         author_provider: "github", author_identity: "2378857",
         reviewer_provider: "github", reviewer_identity: "2378857",
         reviewer_model: "codex/gpt-5.6-sol", reviewer_tier: "high_capability",
-        reviewer_effort: "xhigh", review_evidence_mode: "self_attested",
+        reviewer_effort: "xhigh", review_evidence_mode: "broker_signed",
         now_unix: 1787846400,
         decision_expires_at_unix: 1787847300,
         higher_model_verdict: "PASS", higher_model_p0_count: 0,
@@ -65,8 +65,8 @@ fn request(policy_hash: text) -> SelfReviewRequest:
         review_evidence_sha256: hash_a(),
         expected_policy_db_sha256: policy_hash,
         policy_db_authenticated: true, changed_manifest_authenticated: true,
-        review_evidence_broker_authenticated: false,
-        self_attestation_authorized: true,
+        review_evidence_broker_authenticated: true,
+        self_attestation_authorized: false,
         target_repository_id: 1175797696, target_ref: "refs/heads/main",
         target_ruleset_id: "github:ruleset:123", target_ruleset_version: "spipe-vcs-v3-main",
         target_ruleset_sha256: hash_b(),
@@ -78,19 +78,19 @@ fn request(policy_hash: text) -> SelfReviewRequest:
 
 fn policy_record(effect: text, manifest_hash: text, allow_scopes: text, deny_scopes: text) -> text:
     empty_policy() +
-    "{\"schema\":\"spipe-self-review-policy-db/grant/1\",\"record_id\":\"record-1\",\"effect\":\"" + effect +
-    "\",\"repository\":{\"provider\":\"github\",\"id\":1175797696,\"node_id\":\"R_kgDORhU_wA\",\"name\":\"ormastes/simple\"}," +
+    "{\"schema\":\"spipe-self-review-subject-policy/2\",\"record_type\":\"subject_policy\",\"policy_id\":\"record-1\",\"effect\":\"" + effect +
+    "\",\"subject\":{\"repository\":{\"provider\":\"github\",\"id\":1175797696,\"node_id\":\"R_kgDORhU_wA\",\"name\":\"ormastes/simple\"}," +
     "\"pull_request_number\":28,\"head_sha\":\"" + sha40() + "\",\"session_id\":\"feature/release-hardening\"," +
-    "\"self_reviewer\":{\"provider\":\"github\",\"identity\":\"2378857\",\"model\":\"codex/gpt-5.6-sol\",\"tier\":\"high_capability\",\"effort\":\"xhigh\"}," +
-    "\"changed_paths_manifest_sha256\":\"" + manifest_hash + "\",\"review_evidence_sha256\":\"" + hash_a() + "\"," +
+    "\"reviewer\":{\"provider\":\"github\",\"id\":\"2378857\",\"model\":\"codex/gpt-5.6-sol\"}}," +
+    "\"changed_paths_manifest_sha256\":\"" + manifest_hash + "\",\"higher_model_receipt_digest\":\"" + hash_a() + "\"," +
     "\"allow_scopes\":" + allow_scopes + ",\"deny_scopes\":" + deny_scopes + "," +
-    "\"issuer\":{\"provider\":\"github\",\"identity\":\"owner\",\"key_id\":\"operator-key-1\"}," +
-    "\"issued_at_unix\":1787846300,\"expires_at_unix\":1787848200,\"previous_record_sha256\":\"" + zeros() +
+    "\"issued_by\":{\"type\":\"operator_owned_external\",\"id\":\"github:user:2378857\",\"key_id\":\"operator-key-1\"}," +
+    "\"issued_at\":\"2026-08-27T15:58:20.000Z\",\"not_before\":\"2026-08-27T15:58:20.000Z\",\"expires_at\":\"2026-08-27T16:30:00.000Z\",\"previous_record_sha256\":\"" + zeros() +
     "\",\"signature\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n"
 
 describe "self-review privilege policy":
     it "allows ordinary code/text by default but never claims provider approval":
-        step("Bind an explicitly authorized self-attestation to the exact PR head/base/diff")
+        step("Bind authenticated broker-signed higher-model evidence to the exact PR head/base/diff")
         val policy = parse_self_review_policy_db(empty_policy())
         val manifest = parse_self_review_changed_manifest(ordinary_manifest("doc/guide.md", "text"))
         val decision = evaluate_self_review(policy, manifest, request(policy.sha256))
@@ -99,7 +99,7 @@ describe "self-review privilege policy":
         expect(decision.provider_action).to_contain("separate_eligible_broker")
         expect(decision.provider_approval_claimed).to_be(false)
         expect(decision.head_sha).to_equal(sha40())
-        expect(decision.review_evidence_mode).to_equal("self_attested")
+        expect(decision.review_evidence_mode).to_equal("broker_signed")
         expect(decision.changed_manifest_sha256).to_equal(manifest.sha256)
 
     it "denies unauthenticated policy, manifest, or review evidence":
@@ -111,18 +111,19 @@ describe "self-review privilege policy":
         expect(decision.allowed).to_be(false)
         expect(decision.reason).to_contain("authentication evidence")
 
-    it "never labels caller self-attestation as authenticated broker evidence":
+    it "rejects caller self-attestation and requires authenticated broker evidence":
         val policy = parse_self_review_policy_db(empty_policy())
         val manifest = parse_self_review_changed_manifest(ordinary_manifest("README.md", "text"))
-        var masquerade = request(policy.sha256)
-        masquerade.review_evidence_broker_authenticated = true
-        val decision = evaluate_self_review(policy, manifest, masquerade)
+        var legacy = request(policy.sha256)
+        legacy.review_evidence_mode = "self_attested"
+        legacy.review_evidence_broker_authenticated = false
+        legacy.self_attestation_authorized = true
+        val decision = evaluate_self_review(policy, manifest, legacy)
         expect(decision.allowed).to_be(false)
-        expect(decision.reason).to_contain("evidence mode")
-        var unsigned = request(policy.sha256)
-        unsigned.review_evidence_mode = "broker_signed"
-        unsigned.self_attestation_authorized = false
-        expect(evaluate_self_review(policy, manifest, unsigned).allowed).to_be(false)
+        expect(decision.reason).to_contain("self_attested evidence is unsupported")
+        var forged = request(policy.sha256)
+        forged.self_attestation_authorized = true
+        expect(evaluate_self_review(policy, manifest, forged).allowed).to_be(false)
 
     it "denies stale heads and later pushes":
         val policy = parse_self_review_policy_db(empty_policy())
@@ -249,6 +250,8 @@ describe "self-review privilege policy":
     it "rejects malformed, non-default, and broken-chain external policy databases":
         expect(parse_self_review_policy_db("").valid).to_be(false)
         expect(parse_self_review_policy_db(empty_policy().replace("true", "false")).valid).to_be(false)
+        expect(parse_self_review_policy_db("{\"schema\":\"spipe-self-review-policy-db/1\",\"record_type\":\"header\",\"default_allow\":true}\n").valid).to_be(false)
+        expect(parse_self_review_policy_db("{\"schema\":\"spipe-self-review-policy-db/1\",\"default_allow\":true,\"max_ttl_seconds\":86400,\"authority\":\"operator_owned_external\"}\n").valid).to_be(false)
         val manifest = parse_self_review_changed_manifest(ordinary_manifest("README.md", "text"))
         val broken = policy_record("deny", manifest.sha256, "[]", "[]").replace(zeros(), hash_a())
         expect(parse_self_review_policy_db(broken).error).to_contain("hash chain")

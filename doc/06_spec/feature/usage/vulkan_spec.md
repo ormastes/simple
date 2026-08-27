@@ -1,17 +1,6 @@
 # Vulkan Compute Backend
 
-> As a runtime maintainer I need the Vulkan loader to report availability truthfully on any host, so that code paths gated on Vulkan neither crash on a machine with no ICD nor silently pretend a device exists.
-
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
-
-<details>
-<summary>Full Scenario Manual</summary>
-
-# Vulkan Compute Backend
-
-As a runtime maintainer I need the Vulkan loader to report availability truthfully on any host, so that code paths gated on Vulkan neither crash on a machine with no ICD nor silently pretend a device exists.
+Tests Vulkan compute backend functionality including initialization and shutdown, device selection and info retrieval, storage buffer allocation and data transfers, GLSL compute shader compilation and pipeline creation, descriptor set management, command recording and submission, synchronization, error handling, and the gpu_vulkan device wrapper. Requires Vulkan SDK to be available.
 
 ## At a Glance
 
@@ -20,195 +9,74 @@ As a runtime maintainer I need the Vulkan loader to report availability truthful
 | Feature IDs | #GPU-003 |
 | Category | Runtime |
 | Status | In Progress |
-| Source | `test/feature/usage/vulkan_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-As a runtime maintainer I need the Vulkan loader to report availability
-truthfully on any host, so that code paths gated on Vulkan neither crash on a
-machine with no ICD nor silently pretend a device exists.
-
-`vulkan_loader_init()` is a *host-independent* probe: it returns a structured
-`VulkanLoaderResult` on both outcomes rather than panicking. That contract is
-assertable without any GPU, and it is what this spec pins down. Device-touching
-work stays behind `SIMPLE_GPU_TEST=1` and reports a VISIBLE skip when closed —
-it is never asserted as if it had run.
-
-## Syntax
-
-```simple
-use std.spec.step
-
-val probe = vulkan_loader_init()
-if probe.is_ok:
-    vulkan_loader_destroy(probe.handle)
-```
-
-## Scenarios
-
-### Vulkan loader availability contract
-
-#### reports a decided, self-consistent probe result on any host
-
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- reports a decided, self-consistent probe result on any host
-- probe the loader — this must not panic with or without an ICD
-- the two outcomes are mutually exclusive and each carries its evidence
-   - Expected: probe.handle equals `0`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 14 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("reports a decided, self-consistent probe result on any host")
-step("probe the loader — this must not panic with or without an ICD")
-val probe = vulkan_loader_init()
-
-step("the two outcomes are mutually exclusive and each carries its evidence")
-if probe.is_ok:
-    # Success must hand back a usable handle, not a zero sentinel.
-    expect(probe.handle).to_be_greater_than(0)
-    vulkan_loader_destroy(probe.handle)
-else:
-    # Failure must explain itself and must NOT leak a live handle.
-    expect(probe.handle).to_equal(0)
-    expect(probe.error.len()).to_be_greater_than(0)
-```
-
-</details>
-
-#### probes deterministically — a second probe agrees with the first
-
-- probes deterministically — a second probe agrees with the first
-- two consecutive probes on an unchanged host must not disagree
-   - Expected: second.is_ok equals `first.is_ok`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 10 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("probes deterministically — a second probe agrees with the first")
-step("two consecutive probes on an unchanged host must not disagree")
-val first = vulkan_loader_init()
-if first.is_ok:
-    vulkan_loader_destroy(first.handle)
-val second = vulkan_loader_init()
-if second.is_ok:
-    vulkan_loader_destroy(second.handle)
-expect(second.is_ok).to_equal(first.is_ok)
-```
-
-</details>
-
-### Vulkan device-backed compute
-
-#### runs device work only when SIMPLE_GPU_TEST is open, and skips visibly otherwise
-
-- runs device work only when SIMPLE_GPU_TEST is open, and skips visibly otherwise
-- gate CLOSED — no device assertion is made, and this is stated aloud
-   - Expected: test_env_require("SIMPLE_GPU_TEST") equals `blocked:SIMPLE_GPU_TEST`
-- gate OPEN — the operator asserts a real device is present, so demand one
-   - Expected: probe.is_ok is true
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("runs device work only when SIMPLE_GPU_TEST is open, and skips visibly otherwise")
-if not test_env_gpu_available():
-    step("gate CLOSED — no device assertion is made, and this is stated aloud")
-    print("SKIP (no device assertion made): " + test_env_gate_reason("SIMPLE_GPU_TEST"))
-    expect(test_env_require("SIMPLE_GPU_TEST")).to_equal("blocked:SIMPLE_GPU_TEST")
-else:
-    step("gate OPEN — the operator asserts a real device is present, so demand one")
-    val probe = vulkan_loader_init()
-    expect(probe.is_ok).to_equal(true)
-    expect(probe.handle).to_be_greater_than(0)
-    vulkan_loader_destroy(probe.handle)
-```
-
-</details>
+| Source | `test/03_system/feature/usage/vulkan_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 22 |
+| Active scenarios | 22 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
+## Overview
 
-</details>
+Tests Vulkan compute backend functionality including initialization and shutdown,
+device selection and info retrieval, storage buffer allocation and data transfers,
+GLSL compute shader compilation and pipeline creation, descriptor set management,
+command recording and submission, synchronization, error handling, and the
+gpu_vulkan device wrapper. Requires Vulkan SDK to be available.
 
-<!-- sspec-maintain:traceability:start -->
-## Traceability
+## Syntax
 
-Requirements covered by the scenarios in this manual:
+```simple
+vulkan_init()
+vulkan_select_device(0)
+val buf = vulkan_alloc_storage(1024)
+val shader = vulkan_compile_glsl(VECTOR_ADD_GLSL)
+```
+Vulkan Compute Backend Tests
 
-- `REQ-SSPEC-FEATURE`
-<!-- sspec-maintain:traceability:end -->
+Tests specific to Vulkan compute functionality.
+These tests require Vulkan SDK to be available.
 
-<!-- sspec-maintain:provenance:start -->
-## Generation history
+## Evidence
 
-- Canonical SPipe generation for source `862061a33ab20efb4829ebb298710233d956503d70533e2a6282d07ae7cb6c3e`; maintenance tool `1`, rules `ssdoc-rules/1`.
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-Source SHA-256: `862061a33ab20efb4829ebb298710233d956503d70533e2a6282d07ae7cb6c3e`.
-<!-- sspec-maintain:provenance:end -->
+### Artifacts
 
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/vulkan/result.json` |
 
-Source SHA-256: `862061a33ab20efb4829ebb298710233d956503d70533e2a6282d07ae7cb6c3e`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+## Scenarios
 
-SSpec documentization score: 90/100
-source: test/feature/usage/vulkan_spec.spl
-mirror: doc/06_spec/feature/usage/vulkan_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=90
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/feature/usage/vulkan_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/feature/usage/vulkan_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/feature/usage/vulkan_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/feature/usage/vulkan_spec.spl:42:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reports a decided, self-consistent probe result on any host' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/feature/usage/vulkan_spec.spl:58:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'probes deterministically — a second probe agrees with the first' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/feature/usage/vulkan_spec.spl:72:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'runs device work only when SIMPLE_GPU_TEST is open, and skips visibly otherwise' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->
+- checks Vulkan availability
+- initializes Vulkan
+- reports device count
+- shuts down cleanly
+- selects device
+- gets device info
+- reports device type
+- gets API version
+- allocates storage buffer
+- allocates different buffer types
+- copies data to buffer
+- copies data from buffer
+- copies between buffers
+- compiles GLSL compute shader
+- creates compute pipeline
+- creates descriptor set
+- binds buffers to descriptors
+- records and submits commands
+- waits for device idle
+- gets last error message
+- creates gpu_vulkan device wrapper
+- synchronizes via wrapper

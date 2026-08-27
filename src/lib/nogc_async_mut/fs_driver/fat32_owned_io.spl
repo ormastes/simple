@@ -1,52 +1,65 @@
 # FAT32 ownership-preserving write helpers.
 use std.fs_driver.fat32_core.{
-    Fat32Core, OpenFile, FAT32_FREE, FAT32_EOC, _fat32_handle_index,
+    Fat32Core, OpenFile, Fat32CloseState, FAT32_FREE, FAT32_EOC, _fat32_handle_index,
+    _fat32_open_operation_index,
     _fat32_saved_open_files
 }
 use std.fs_driver.types.{FileHandle}
+use std.fs_driver.fat32_parsers.{_read_u16_le}
+
+fn _fat32_close_retryable(mut core: Fat32Core, idx: i32, of: OpenFile, reason: text) -> Result<(), text>:
+    var retained = of
+    retained.close_state = Fat32CloseState.Retryable
+    core.open_files = _fat32_saved_open_files(core.open_files, idx, retained)
+    Err("retryable FAT32 close: " + reason)
+
+fn _fat32_close_quarantined(mut core: Fat32Core, idx: i32, of: OpenFile, reason: text) -> Result<(), text>:
+    var retired = of
+    retired.is_open = false
+    retired.close_state = Fat32CloseState.Quarantined
+    core.open_files = _fat32_saved_open_files(core.open_files, idx, retired)
+    if retired.file_generation_slot >= 0 and
+            retired.file_generation_slot < core.file_generations.len() as i32:
+        core.file_generations[retired.file_generation_slot].cleanup_quarantined = true
+    Err("quarantined FAT32 close: " + reason)
 
 fn fat32_close(mut core: Fat32Core, handle: FileHandle) -> Result<(), text>:
-    val idx = _fat32_handle_index(core.open_files, handle)
+    val idx = _fat32_handle_index(core.open_files, handle, core.owner_id)
     if idx < 0 or idx >= core.open_files.len():
         return Err("invalid file handle")
     var of = core.open_files[idx]
-    if not of.is_open:
+    if not of.is_open or (of.close_state != Fat32CloseState.Open and
+            of.close_state != Fat32CloseState.Retryable):
         return Err("file handle not open")
+    val deferred_unlink = of.start_cluster >= 2u32 and
+        core._file_unlink_is_deferred(of.start_cluster)
+    var deferred_reclaim_error = ""
     var flush_i = 0
-    while flush_i < core._dirty_clusters.len():
+    while flush_i < core._dirty_clusters.len() and deferred_reclaim_error == "":
         val cluster = core._dirty_clusters[flush_i]
         val cached = core._cluster_cache_lookup(cluster)
         if cached.len() > 0:
             val rc = core.write_cluster_raw(cluster, cached)
             if rc.is_err():
-                return match rc:
-                    Ok(_): Err("failed to flush dirty cluster")
-                    Err(err): Err(err)
+                if deferred_unlink:
+                    deferred_reclaim_error = "deferred FAT32 unlink dirty-data flush is indeterminate"
+                    continue
+                return _fat32_close_retryable(core, idx, of, "failed to flush dirty cluster")
         flush_i = flush_i + 1
     core._dirty_clusters = []
-    if of.start_cluster >= 2 and core._file_unlink_is_deferred(of.start_cluster):
-        var other_open = false
-        var oi: i32 = 0
-        while oi < core.open_files.len():
-            if oi != idx and core.open_files[oi].is_open and
-               core.open_files[oi].start_cluster == of.start_cluster:
-                other_open = true
-            oi = oi + 1
-        if not other_open:
-            val chain = core.follow_chain(of.start_cluster)?
-            var ci: i32 = 0
-            while ci < chain.len():
-                core.write_fat_entry(chain[ci], FAT32_FREE)?
-                ci = ci + 1
-            core.file_generations[of.file_generation_slot].pending_unlink = false
     of.is_open = false
+    of.close_state = if deferred_reclaim_error == "": Fat32CloseState.Closed else: Fat32CloseState.Quarantined
     core.open_files = _fat32_saved_open_files(core.open_files, idx, of)
+    if deferred_reclaim_error != "":
+        if of.file_generation_slot >= 0 and of.file_generation_slot < core.file_generations.len() as i32:
+            core.file_generations[of.file_generation_slot].cleanup_quarantined = true
+        return Err(deferred_reclaim_error)
     Ok(())
 
 fn fat32_write(mut core: Fat32Core, handle: FileHandle, buf: [u8], len: i64) -> Result<i64, text>:
     if not core.mounted:
         return Err("filesystem not mounted")
-    val idx = _fat32_handle_index(core.open_files, handle)
+    val idx = _fat32_open_operation_index(core.open_files, handle, core.owner_id)
     if idx < 0 or idx >= core.open_files.len():
         return Err("invalid file handle")
     var of = core.open_files[idx]
@@ -73,7 +86,6 @@ fn fat32_write(mut core: Fat32Core, handle: FileHandle, buf: [u8], len: i64) -> 
             Err(err): return Err(err)
         of.start_cluster = start
         of.current_cluster = start
-        of.file_generation_slot = core._file_generation_slot(start)?
     val chain_rc = core.follow_chain(start)
     if chain_rc.is_err():
         return match chain_rc:
@@ -82,8 +94,6 @@ fn fat32_write(mut core: Fat32Core, handle: FileHandle, buf: [u8], len: i64) -> 
     var chain = match chain_rc:
         Ok(value): value
         Err(err): return Err(err)
-    if len > 0:
-        core._prepare_file_content_mutation_slot(of.file_generation_slot)?
     var bytes_written: i64 = 0
     var pos = of.position
     val original_pos = of.position
@@ -163,7 +173,7 @@ fn fat32_write_4k_overwrite(mut core: Fat32Core, handle: FileHandle, buf: [u8]) 
         return Err("filesystem not mounted")
     if buf.len() < 4096:
         return Err("buffer too small")
-    val idx = _fat32_handle_index(core.open_files, handle)
+    val idx = _fat32_open_operation_index(core.open_files, handle, core.owner_id)
     if idx < 0 or idx >= core.open_files.len():
         return Err("invalid file handle")
     var of = core.open_files[idx]
@@ -187,7 +197,6 @@ fn fat32_write_4k_overwrite(mut core: Fat32Core, handle: FileHandle, buf: [u8]) 
         Err(err): return Err(err)
     if cluster_index < 0 or cluster_index >= chain.len():
         return Err("overwrite beyond allocated file")
-    core._prepare_file_content_mutation_slot(of.file_generation_slot)?
     val wrc = core.write_cluster_from(chain[cluster_index], buf, 0)
     if wrc.is_err():
         return match wrc:

@@ -1,0 +1,62 @@
+# Control-flow expression rows and auxiliary control records.
+use compiler.hir.hir_lowering.hir_destination_graph.*
+
+impl HirDestinationGraph:
+    me write_if(i: i64, cond: i64, then_block: i64, has_else: bool, else_block: i64) -> bool:
+        if not self.expr_writable(i) or not self.index_ready(HD_RANGE_EXPR, cond) or not self.block_is_ready(then_block): return self.fail_expr(i, "HIR if payload is not ready")
+        if has_else and not self.block_is_ready(else_block): return self.fail_expr(i, "HIR if else block is not ready")
+        if not has_else and else_block != -1: return self.fail_expr(i, "HIR absent if else block is not inert")
+        self.expr_i0[i] = cond; self.expr_i1[i] = then_block; self.expr_b0[i] = has_else; self.expr_i2[i] = if has_else: else_block else: -1
+        self.finalize_expr(i, HD_EXPR_IF)
+
+    me write_if_chain(i: i64, arm_start: i64, arm_count: i64, has_else: bool, else_block: i64) -> bool:
+        if not self.expr_writable(i) or not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_IF_ARM, arm_start, arm_count): return self.fail_expr(i, "HIR if-chain arms are not ready")
+        if has_else and not self.block_is_ready(else_block): return self.fail_expr(i, "HIR if-chain else is not ready")
+        if not has_else and else_block != -1: return self.fail_expr(i, "HIR absent if-chain else is not inert")
+        self.expr_r0_start[i] = arm_start; self.expr_r0_len[i] = arm_count
+        self.expr_b0[i] = has_else; self.expr_i0[i] = if has_else: else_block else: -1
+        self.finalize_expr(i, HD_EXPR_IF_CHAIN)
+
+    me write_match(i: i64, scrutinee: i64, arm_start: i64, arm_count: i64) -> bool:
+        if not self.expr_writable(i) or not self.index_ready(HD_RANGE_EXPR, scrutinee) or not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_MATCH_ARM, arm_start, arm_count): return self.fail_expr(i, "HIR match payload is not ready")
+        self.expr_i0[i] = scrutinee; self.expr_r0_start[i] = arm_start; self.expr_r0_len[i] = arm_count
+        self.finalize_expr(i, HD_EXPR_MATCH)
+
+    me write_loop(i: i64, block: i64, has_label: bool, label: text) -> bool:
+        if not self.expr_writable(i) or not self.block_is_ready(block): return self.fail_expr(i, "HIR loop block is not ready")
+        if (has_label and label == "") or (not has_label and label != ""): return self.fail_expr(i, "HIR loop label presence is invalid")
+        self.expr_i0[i] = block; self.expr_b0[i] = has_label; self.expr_t0[i] = if has_label: label else: ""
+        self.finalize_expr(i, HD_EXPR_LOOP)
+
+    me write_while(i: i64, cond: i64, block: i64, has_label: bool, label: text) -> bool:
+        if not self.expr_writable(i) or not self.index_ready(HD_RANGE_EXPR, cond) or not self.block_is_ready(block): return self.fail_expr(i, "HIR while payload is not ready")
+        if (has_label and label == "") or (not has_label and label != ""): return self.fail_expr(i, "HIR while label presence is invalid")
+        self.expr_i0[i] = cond; self.expr_i1[i] = block; self.expr_b0[i] = has_label; self.expr_t0[i] = if has_label: label else: ""
+        self.finalize_expr(i, HD_EXPR_WHILE)
+
+    me write_for(i: i64, symbol: i64, iter: i64, block: i64, has_label: bool, label: text) -> bool:
+        if not self.expr_writable(i) or symbol < 0 or not self.index_ready(HD_RANGE_EXPR, iter) or not self.block_is_ready(block): return self.fail_expr(i, "HIR for payload is not ready")
+        if (has_label and label == "") or (not has_label and label != ""): return self.fail_expr(i, "HIR for label presence is invalid")
+        self.expr_i0[i] = symbol; self.expr_i1[i] = iter; self.expr_i2[i] = block
+        self.expr_b0[i] = has_label; self.expr_t0[i] = if has_label: label else: ""
+        self.finalize_expr(i, HD_EXPR_FOR)
+
+    me write_with(i: i64, item_start: i64, item_count: i64, block: i64) -> bool:
+        if not self.expr_writable(i) or not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_WITH_ITEM, item_start, item_count) or not self.block_is_ready(block): return self.fail_expr(i, "HIR with payload is not ready")
+        self.expr_r0_start[i] = item_start; self.expr_r0_len[i] = item_count; self.expr_i0[i] = block
+        self.finalize_expr(i, HD_EXPR_WITH)
+
+    me write_block_control(i: i64, shape: i64, block: i64) -> bool:
+        if not self.expr_writable(i) or not self.block_is_ready(block): return self.fail_expr(i, "HIR control block is not ready")
+        if shape != HD_EXPR_BLOCK and shape != HD_EXPR_LOSS and shape != HD_EXPR_NOGRAD and shape != HD_EXPR_UNSAFE: return self.fail_expr(i, "HIR block-control shape is invalid")
+        self.expr_i0[i] = block; self.finalize_expr(i, shape)
+
+    me write_try_catch(i: i64, body: i64, clause_start: i64, clause_count: i64, has_finally: bool, finally_block: i64) -> bool:
+        if not self.expr_writable(i) or not self.block_is_ready(body) or not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_CATCH, clause_start, clause_count): return self.fail_expr(i, "HIR try-catch payload is not ready")
+        if has_finally and not self.block_is_ready(finally_block): return self.fail_expr(i, "HIR finally block is not ready")
+        if not has_finally and finally_block != -1: return self.fail_expr(i, "HIR absent finally block is not inert")
+        self.expr_i0[i] = body; self.expr_r0_start[i] = clause_start; self.expr_r0_len[i] = clause_count
+        self.expr_b0[i] = has_finally; self.expr_i1[i] = if has_finally: finally_block else: -1
+        self.finalize_expr(i, HD_EXPR_TRY_CATCH)
+
+export HirDestinationGraph

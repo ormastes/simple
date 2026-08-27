@@ -618,6 +618,19 @@ It is **not** a measurement of this bug's lane and must not be quoted as one.
 Both specs are source-TEXT contracts; passing them fences the fix's shape and
 proves nothing about RSS.
 
+### 2026-08-22 driver promotion-attribution instrumentation
+
+The streaming HIR driver now records two v1 memory-snapshot rows per source:
+`hir-promotion` attributes the initial canonical HIR graph, while
+`hir-promotion-total` records the transient scope's cumulative promoted nodes
+and bytes after diagnostic, flat-HIR-row, and frontend-registry owners have
+also promoted. Cache hits record zero for both rows because they open no
+transient scope. The receipt field schema is unchanged: the existing
+`retained_modules` and `validation_keys` columns continue to carry promoted
+nodes and bytes for promotion phases. This is attribution instrumentation, not
+a Stage-3 RSS fix or closure evidence; the bug remains open pending a canonical
+instrumented Stage-3 transaction.
+
 `stage3_hir_lowerer_reuse_contract_spec.spl` was found **RED on arrival** at
 `4 total, 3 passed, 1 failed`: the example "validates compatibility spellings
 through physical source identity" died with `semantic: variable source_idx not
@@ -635,3 +648,45 @@ one resolve inside the extracted 690..730 range (`:714`, `:718`, `:699`/`:719`,
 `:691`, `:692`, `:701`/`:721`; `module_surface_index_for_source(` appears
 nowhere in the file). No assertion was weakened or removed and the driver was
 not touched.
+
+### 2026-08-22 recovery snapshot ABI blocker
+
+A fresh Stage 2 was admitted, but its first Stage 3 recovery stopped at HIR
+entry with `SIMPLE_MEM_SNAPSHOT_FILE could not be established safely`.
+`strace` showed no `openat` attempt. At a GDB breakpoint,
+`rt_mem_snapshot_open` received a boxed Simple text value in `rdi` and zero in
+`rsi`; the runtime provider requires `(byte_ptr, byte_len)`. The memory and
+phase-profile owners now lower this raw SFFI boundary explicitly with
+`rt_string_data` and `rt_string_len`. Another Stage 2 admission is required
+before Stage 3 can be retried because the admitted compiler embeds the old
+call site.
+
+### 2026-08-22 rebuilt Stage 2 and first durable promotion evidence
+
+The raw-boundary audit found a second instance of the same defect:
+`rt_mem_snapshot_record` still passed three boxed Simple `text` values to a C
+provider whose ABI is `(byte_ptr, byte_len)` for each value. The initial file
+was therefore created successfully but remained zero bytes when its first
+record was rejected. The driver now lowers `event`, `phase`, and `source_path`
+explicitly through `rt_string_data` / `rt_string_len` in both snapshot owners.
+
+A fresh four-job Stage 2 at `9c3cc6b4048` passed sanity and the struct receiver
+proof and was admitted. The canonical Stage 3 recovery then showed one
+intermittent SIGSEGV during streaming surfaces at sequence 62. A debugger run
+with the identical admitted compiler, environment, one-thread mode, and cache
+passed all 688 surfaces and entered HIR. Its durable first-module rows are:
+
+| row | promoted nodes | promoted bytes | RSS | HWM |
+|---|---:|---:|---:|---:|
+| `hir-promotion` | 13,485 | 419,955 | 640,932 KiB | 688,312 KiB |
+| `hir-promotion-total` | 38,060 | 1,218,945 | 640,932 KiB | 688,312 KiB |
+
+The debugger transaction was externally terminated while module 1 was still
+lowering. Its live backtrace was in `rt_transient_raw_insert` via `rt_alloc`,
+under a repeating chain of `register_imported_symbol_inner`,
+`materialize_imported_field_dependency_inner`, and
+`register_imported_type_methods_inner`. This is measured evidence of recursive
+import-materialization fan-out in the allocation hot path; it does not yet
+prove whether the termination is caused by a cycle, repeated acyclic work, or
+an ownership lifetime defect. The row remains OPEN pending a visited/in-flight
+audit of those three functions and a canonical Stage 3 completion.

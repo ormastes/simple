@@ -1,31 +1,21 @@
 # Flat AST Bridge: module assembly (flat_ast_to_module, parse_and_build_module).
 use compiler.frontend.flat_ast_bridge.*
-use compiler.frontend.trace_policy.{
-    frontend_compiler_trace_enabled,
-    frontend_compiler_trace_scope_enter,
-    frontend_compiler_trace_scope_exit}
 # Flat AST Bridge
 #
 # Converts the core parser's flat, index-based AST into the richer frontend
-# ParserModule shape expected by HIR lowering. This is used as the bootstrap-safe
+# Module shape expected by HIR lowering. This is used as the bootstrap-safe
 # frontend path when the newer parser surface is unavailable.
 
-use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with_path, parser_error}
-use compiler.frontend.core.string_interpolation_expand.{expand_string_interpolations_with_placeholder_receipt}
-use compiler.frontend.core.string_interpolation_expand.{si_stats_reset, si_stats_report}
-use compiler.frontend.desugar.placeholder_lambda.{transform_placeholder_call_args_after_interpolation_known_present}
+use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with_path, parser_error, parser_prepare_persistent_globals, parser_release_parse_globals}
+use compiler.frontend.core.string_interpolation_expand.{expand_string_interpolations}
+use compiler.frontend.desugar.placeholder_lambda.{transform_placeholder_call_args_after_interpolation}
 use compiler.semantics.layer_dag_checker.{LayerDagRegistry, check_layer_dag}
 use compiler.core.parser_decls.{parse_module_body, parser_enum_attributes_for}
-use compiler.core.parser_decls.{parser_enum_open_regions_for}
-use compiler.core.parser_decls.{parser_extend_targets, parser_extend_closures, parser_extend_ctor_counts}
-use compiler.core.parser_decls.{parser_extend_ctor_providers, parser_extend_ctor_names}
-use compiler.core.parser_decls.{parser_extend_ctor_type_counts, parser_extend_ctor_type_ids}
-use compiler.common.dynamic_identity.closure.{Closure}
 use compiler.core.ast.*
 use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaults, decl_get_field_types, decl_get_fields}
-use compiler.core.ast.{decl_enum_payload_unnamed_marker, decl_get_imports, decl_get_is_comptime, decl_get_is_lazy, decl_get_name, decl_get_param_names}
+use compiler.core.ast.{decl_get_imports, decl_get_is_comptime, decl_get_is_lazy, decl_get_name, decl_get_param_names}
 use compiler.core.ast.{decl_get_param_types, decl_get_ret_type, decl_get_visibility_text, module_decl_at, module_decl_count_get}
-use compiler.core.ast.{decl_is_packed, decl_get_is_value_type}
+use compiler.core.ast.{decl_is_packed}
 use compiler.core.ast_expr.*
 use compiler.core.ast_stmt.*
 use compiler.core.ast_stmt.{STMT_GPU_LAUNCH, stmt_get_gpu_grid, stmt_get_gpu_block}
@@ -33,102 +23,48 @@ use compiler.core.ast_coverage_inventory.{compiler_coverage_inventory_record_mod
 use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL, TYPE_ARRAY_ANY, TYPE_ANY, TYPE_NIL}
 use compiler.core.types.{TYPE_DICT, TYPE_FN, TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
 use compiler.core.types.{TYPE_RESULT, TYPE_FUTURE, TYPE_POLL, TYPE_TASK, TYPE_GENERIC_ERASED}
-use compiler.core.types.{TYPE_UNION, TYPE_INTERSECTION, TYPE_REFINEMENT, TYPE_NAMED_BASE, TYPE_UNION_BASE, type_tag_name, int_to_str, reset_all_pools}
-use compiler.core.types.{span_start, span_end, span_line, span_col, span_is_valid}
+use compiler.core.types.{TYPE_UNION, TYPE_INTERSECTION, TYPE_REFINEMENT, TYPE_NAMED_BASE, TYPE_UNION_BASE, type_tag_name, int_to_str}
 use compiler.frontend.parser_types.*
-use compiler.frontend.parser_types.{ParserModule}
 use compiler.frontend.parser_types_expr.*
-use compiler.common.attributes.{parse_function_attrs}
 use compiler.frontend.parser_types_expr.{ComprehensionClause, ComprehensionKind, GpuLaunchConfig}
 use compiler.frontend.desugar.collection_desugar.{desugar_collections}
 use compiler.frontend.core.string_interpolation_expand.{expand_interpolated_placeholder_call_args}
-use compiler.common.diagnostics.span.{Span}
-use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
+use compiler.frontend.lexer_types.{Span}
+use compiler.frontend.core.lexer.{lexer_release_parse_source_globals, lexer_prepare_persistent_globals}
 use compiler.frontend.resource_registry.{resource_registry_declare}
 use compiler.frontend.layer_eq_registry.{layer_eq_registry_declare}
 use compiler.frontend.effect_registry.{effect_registry_declare}
 use compiler.frontend.rt_criticality_registry.{rt_criticality_declare}
 use compiler.frontend.aspect_registry.{aspect_registry_declare}
+use compiler.frontend.facet_static_registry.{facet_static_declare_interface, facet_static_declare_impl, facet_static_declare_bind, facet_static_key}
+use compiler.frontend.frontend_parse_ownership.{frontend_prepare_persistent_registry_globals, frontend_discard_failed_parse_registries, frontend_promote_compilation_registries}
 use compiler.common.dependency.visibility.{Visibility}
 use std.nogc_sync_mut.io.process_ops.{eprint}
-use std.nogc_sync_mut.io_runtime.{env_get_opt, env_set}
-use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, FLAT_POOL_CODEC_VERSION}
-use compiler.core.types.{flat_type_pools_dump, flat_type_pools_restore}
-use compiler.core.parser.{flat_parser_state_dump, flat_parser_state_restore}
-use compiler.core.parser_decls.{flat_extend_pools_dump, flat_extend_pools_restore}
-use compiler.core.parser_decls.{flat_pending_pools_dump, flat_pending_pools_restore}
-@unsafe(reason: "raw wall-clock timestamp ABI", capabilities: [ffi])
-extern fn rt_time_now_unix_micros() -> i64
-
-# Level-gated parse phase profile (DEFAULT OFF; SIMPLE_PARSE_PHASE_PROFILE=1).
-# Splits parse_and_build_module_scoped into its six phases so a per-file cost
-# regression can be attributed. NOT a throwaway probe -- do not delete.
-var _fab_phase_prof_cached: i64 = -1
-fn fab_phase_prof_enabled() -> bool:
-    if _fab_phase_prof_cached < 0:
-        _fab_phase_prof_cached = if (_sffi_env_get("SIMPLE_PARSE_PHASE_PROFILE") ?? "") == "1": 1 else: 0
-    _fab_phase_prof_cached == 1
-@unsafe(reason: "raw transient-array scope begin ABI", capabilities: [ffi])
-extern fn rt_transient_array_scope_begin() -> bool
-@unsafe(reason: "raw transient-array scope pause ABI", capabilities: [ffi])
-extern fn rt_transient_array_scope_pause() -> bool
-@unsafe(reason: "raw transient-array scope end ABI", capabilities: [ffi])
-extern fn rt_transient_array_scope_end() -> bool
-@unsafe(reason: "raw transient-heap graph promotion ABI", capabilities: [ffi])
-extern fn rt_transient_heap_promote(value: Any) -> bool
-
-@always_inline
-fn _sffi_env_get(key: text) -> text?:
-    env_get_opt(key)
-
-@always_inline
-fn _sffi_time_now_unix_micros() -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_time_now_unix_micros()
-
-@always_inline
-fn _sffi_env_set(key: text, value: text) -> bool:
-    env_set(key, value)
-
-@always_inline
-fn _sffi_transient_array_scope_begin() -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_transient_array_scope_begin()
-
-@always_inline
-fn _sffi_transient_array_scope_pause() -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_transient_array_scope_pause()
-
-@always_inline
-fn _sffi_transient_array_scope_end() -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_transient_array_scope_end()
-
-@always_inline
-fn _sffi_transient_heap_promote(value: Any) -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_transient_heap_promote(value)
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text)
 
 fn flat_module_env_get(key: text) -> text:
-    _sffi_env_get(key) ?? ""
+    rt_env_get(key) ?? ""
 
 fn flat_decl_tag_text(idx: i64) -> text:
+    val direct = flat_module_env_get("SIMPLE_BOOTSTRAP_DECL_TAG_" + int_to_str(idx))
+    if direct != "":
+        return direct
     val tag = decl_get_tag(idx)
     if tag > 0:
         return int_to_str(tag)
     ""
 
 fn flat_decl_field_text(idx: i64, field: text) -> text:
-    flat_module_env_get("SIMPLE_BOOTSTRAP_DECL_" + int_to_str(idx) + "_" + field)
+    rt_env_get("SIMPLE_BOOTSTRAP_DECL_" + int_to_str(idx) + "_" + field)
 
 fn flat_bootstrap_enabled() -> bool:
-    flat_module_env_get("SIMPLE_BOOTSTRAP") == "1"
+    rt_env_get("SIMPLE_BOOTSTRAP") == "1"
 
 fn flat_bridge_trace_enabled() -> bool:
-    frontend_compiler_trace_enabled()
+    (flat_module_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
 
-fn flat_module_trace_function(stage: text, fn_: ParserFunction):
+fn flat_module_trace_function(stage: text, fn_: Function):
     if flat_module_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") == "1":
         val return_name = parser_type_kind_named_name(fn_.return_type.kind)
         eprint("[flat-function-roundtrip] phase={stage} name={fn_.name} return={return_name}")
@@ -182,31 +118,22 @@ fn flat_i64_list_at(raw: text, target: i64) -> i64:
     0
 
 fn flat_ast_to_module(path: text) -> ParserModule:
-    val saved_compiler_trace_scope = frontend_compiler_trace_scope_enter()
     if flat_bridge_trace_enabled():
         print "[flat-bridge] path={path}"
     if flat_bootstrap_enabled() and not flat_is_bootstrap_entry_path(path):
-        val empty_module = flat_empty_module(path)
-        frontend_compiler_trace_scope_exit(saved_compiler_trace_scope)
-        return empty_module
+        return flat_empty_module(path)
     if flat_bootstrap_enabled() and flat_bridge_trace_enabled():
         eprint("[flat-bridge] bootstrap real entry:start")
     val raw_decl_count = module_decl_count_get()
-    val decl_count = raw_decl_count
-    # A leaked debugging guard here used to CAP decl_count at 64 under
-    # SIMPLE_BOOTSTRAP (arrived via an hourly-sync WC snapshot, never a
-    # reviewed change): every module with >64 top-level decls silently lost
-    # its tail — functions, trailing `export` lines, everything past #64
-    # (std.io_runtime lost fns after mkdir_p; app.mcp.assistant lost
-    # session-store helpers; symptom "unresolved name" storms with a clean
-    # parse). The flat arena itself handles arbitrary counts (the same file
-    # parses all 88 decls); never truncate here.
+    var decl_count = raw_decl_count
+    if flat_bootstrap_enabled() and raw_decl_count > 64:
+        decl_count = 64
     if flat_bootstrap_enabled() and flat_bridge_trace_enabled():
         eprint("[flat-bridge] decl_count {decl_count}")
     var functions: Dict<text, ParserFunction> = {}
     var function_headers: Dict<text, ParserFunctionHeader> = {}
     var function_order: [text] = []
-    var structs: Dict<text, ParserStruct> = {}
+    var structs: Dict<text, Struct> = {}
     # bug s19_class_free_fn_mutation_dropped_native_2026-07-17: `class` decls
     # used to always land in `structs` below (this dict was the only sink),
     # so HIR/MIR never saw a distinct `class` (module.classes stayed
@@ -221,28 +148,24 @@ fn flat_ast_to_module(path: text) -> ParserModule:
     # to a free function and mutated inside had the mutation dropped for the
     # caller; the tree-walking interpreter path already got this right via
     # `interp_struct_is_value_type`).
-    var classes: Dict<text, ParserClass> = {}
-    var enums: Dict<text, ParserEnum> = {}
-    var traits: Dict<text, ParserTrait> = {}
-    var constants: Dict<text, ParserConst> = {}
-    var imports: [ParserImport] = []
+    var classes: Dict<text, Class> = {}
+    var enums: Dict<text, Enum> = {}
+    var traits: Dict<text, Trait> = {}
+    var constants: Dict<text, Const> = {}
+    var imports: [Import] = []
     var exports: [Export] = []
+    var explicit_export_count: i64 = 0
     var domain_blocks: [DomainBlock] = []
     var impls: [Impl] = []
     var aop_advices: [AopAdvice] = []
     var di_bindings: [DiBinding] = []
     var arch_rules: [ArchRule] = []
     var bitfields: Dict<text, Bitfield> = {}
-    # TAL1 (bug type_alias_declarations_discarded_at_parse_2026-07-29): the
-    # arena now captures `type X = Y` (decl_type_alias, tag 17). Thread it
-    # through into module.type_aliases instead of the old hardcoded `{}` --
-    # pure plumbing, no semantic alias registry consumes this yet.
-    var type_aliases: Dict<text, ParserTypeAlias> = {}
     # Bare top-level statements (parsed as `_expr_N` val bindings). Collected in
     # source order so they can be wrapped into a synthetic `fn main` when the
     # module defines none (e.g. `-c "print(1+1)"` snippets / script-style files).
     var top_level_stmt_names: [text] = []
-    var top_level_stmt_consts: [ParserConst] = []
+    var top_level_stmt_consts: [Const] = []
     var top_level_stmts: [Stmt] = []
     # M0 wiring (doc/03_plan/compiler/forwarding/
     # zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md): the
@@ -262,25 +185,39 @@ fn flat_ast_to_module(path: text) -> ParserModule:
 
     var di = 0
     while di < decl_count:
+        while (extension_merge_index < parser_extensions.len() and
+                parser_extensions[extension_merge_index].source_ordinal == di):
+            if parser_extensions[extension_merge_index].source_local_index != extension_merge_index:
+                parser_error("extend-enum source local index mismatch")
+                break
+            declaration_kinds.push(PARSER_DECL_EXTENSION)
+            declaration_names.push(parser_extensions[extension_merge_index].target)
+            declaration_local_indices.push(extension_merge_index)
+            declaration_source_ordinals.push(parser_extensions[extension_merge_index].source_ordinal)
+            extension_merge_index = extension_merge_index + 1
         val idx = module_decl_at(di)
         val tag_text = flat_decl_tag_text(idx)
         if flat_bootstrap_enabled() and flat_bridge_trace_enabled():
             eprint("[flat-bridge] decl:start {di} tag {tag_text}")
+            if tag_text != "1":
+                di = di + 1
+                eprint("[flat-bridge] decl:skip {di}")
+                continue
         if tag_text == "1":
-            val fn_: ParserFunction = convert_decl_fn(idx)
+            val fn_: Function = convert_decl_fn(idx)
             flat_module_trace_function("before", fn_)
             functions[fn_.name] = fn_
             function_headers[fn_.name] = parser_function_header(fn_)
             function_order.push(fn_.name)
-            val stored_fn: ParserFunction = functions[fn_.name]
+            val stored_fn: Function = functions[fn_.name]
             flat_module_trace_function("after", stored_fn)
         elif tag_text == "2":
-            val fn_: ParserFunction = convert_decl_extern_fn(idx)
+            val fn_: Function = convert_decl_extern_fn(idx)
             flat_module_trace_function("before", fn_)
             functions[fn_.name] = fn_
             function_headers[fn_.name] = parser_function_header(fn_)
             function_order.push(fn_.name)
-            val stored_fn: ParserFunction = functions[fn_.name]
+            val stored_fn: Function = functions[fn_.name]
             flat_module_trace_function("after", stored_fn)
         elif tag_text == "3":
             val s_name = decl_get_name(idx)
@@ -290,10 +227,10 @@ fn flat_ast_to_module(path: text) -> ParserModule:
             # un-overridden defaults; skip struct/class emission to avoid a
             # phantom zero-field `s_name` struct shadowing the trait.
             if decl_get_is_trait(idx) != 0:
-                var t_methods: [ParserFunction] = []
+                var t_methods: [Function] = []
                 for t_method_id in decl_get_body(idx):
                     t_methods.push(convert_decl_method_fn(t_method_id, s_name))
-                traits[s_name] = ParserTrait(
+                traits[s_name] = Trait(
                     name: s_name,
                     type_params: [],
                     super_traits: [],
@@ -306,22 +243,24 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                     doc_comment: "",
                     span: span
                 )
+                if trait_is_new: trait_count = trait_count + 1
                 di = di + 1
                 continue
             val f_names = decl_get_fields(idx)
             val f_types = decl_get_field_types(idx)
             val f_bits = decl_get_field_bits(idx)
-            val f_defaults = decl_get_field_defaults(idx)
             val s_visibility = convert_decl_visibility(idx)
             var is_packed = false
             if idx < decl_is_packed.len():
                 if decl_is_packed[idx] == 1:
                     is_packed = true
             if is_packed:
+                val bitfield_is_new = not bitfields.contains_key(s_name)
+                declaration_kinds.push(PARSER_DECL_BITFIELD)
+                declaration_names.push(s_name); declaration_local_indices.push(bitfield_count)
+                declaration_source_ordinals.push(di)
                 var bf_fields: [BitfieldField] = []
-                # Index 0 is the parser's synthetic `__raw` backing-storage
-                # field (see parse_bitfield_decl) -- not a bitfield member.
-                var fi = 1
+                var fi = 0
                 while fi < f_names.len():
                     var fb: i64 = -1
                     if fi < f_bits.len():
@@ -335,7 +274,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                         type_: Type(kind: TypeKind.Infer, span: span),
                         has_bits: fb > 0,
                         bits: bf_bits,
-                        is_reserved: f_names[fi].starts_with("_reserved_"),
+                        is_reserved: false,
                         span: span
                     ))
                     fi = fi + 1
@@ -344,17 +283,15 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                     backing_type: Type(kind: TypeKind.Infer, span: span),
                     fields: bf_fields,
                     visibility: s_visibility,
-                    is_public: decl_get_visibility_text(idx) == "public",
+                    is_public: s_visibility.is_public(),
                     has_doc_comment: false,
                     doc_comment: "",
-                    # Bitfield members are laid out in declaration order
-                    # (hardware register layout contract); suppress HIR's
-                    # width-descending field sort.
-                    attributes: [Attribute(name: "preserve_order", args: [], span: span)],
+                    attributes: [],
                     span: span
                 )
+                if bitfield_is_new: bitfield_count = bitfield_count + 1
             else:
-                var fields: [ParserField] = []
+                var fields: [Field] = []
                 var fi = 0
                 while fi < f_names.len():
                     # floatstruct fix: `f_types` (decl_get_field_types) was
@@ -372,37 +309,28 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                     var ft = Type(kind: TypeKind.Infer, span: span)
                     if fi < f_types.len():
                         ft = convert_flat_type(f_types[fi])
-                    # Field default: the flat AST records a default expr id per
-                    # field (-1 = none; ast_types.spl `field_defaults`). This
-                    # was `val fd = nil` — hardcoded ABSENT — so `has_default`
-                    # was false for every struct/class field and omitted-field
-                    # construction could never apply declared defaults
-                    # (jit-0x890 defaulted-field bug chain).
-                    var fd_id: i64 = -1
-                    if fi < f_defaults.len():
-                        fd_id = f_defaults[fi]
-                    val field_has_default = fd_id >= 0
+                    val fd = nil
                     var fb: i64 = -1
                     if fi < f_bits.len():
                         fb = f_bits[fi]
                     var field_default = Expr(kind: ExprKind.NilLit, span: span)
-                    if field_has_default:
-                        field_default = convert_flat_expr(fd_id)
+                    if fd != nil:
+                        field_default = fd
                     var field_bits: i64 = 0
                     if fb > 0:
                         field_bits = fb
                     # NAMED construction (NOT positional): on stage4 the
-                    # positional ParserField(...) form misaligns the 12-field desugared
-                    # ParserField struct, so `type_` receives a non-Type value ->
+                    # positional Field(...) form misaligns the 12-field desugared
+                    # Field struct, so `type_` receives a non-Type value ->
                     # lower_type reads a garbage TypeKind -> SIGSEGV in
                     # lower_type_list when lowering a struct/class field type
                     # (bug doc iteration 20 #86; gdb: lower_type_list <- lower_type
                     # <- lower_field <- lower_struct). Explicit field names pin
                     # every slot.
-                    fields.push(ParserField(
+                    fields.push(Field(
                         name: f_names[fi],
                         type_: ft,
-                        has_default: field_has_default,
+                        has_default: fd != nil,
                         default: field_default,
                         visibility: Visibility.Private,
                         is_public: false,
@@ -418,14 +346,14 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                 # ...>` names (threaded through by parse_struct_decl via
                 # decl_set_type_params -- previously dropped entirely, always
                 # `[]` here regardless of a declared `<T>`, see fn_struct_decls.spl).
-                # Build real [ParserTypeParam] so HIR lowering can register `T` as a
+                # Build real [TypeParam] so HIR lowering can register `T` as a
                 # genuine SymbolKind.TypeParam symbol instead of it falling
                 # through to the unrelated bareword-forward-declared-type path.
                 val s_tp_names = decl_get_type_params(idx)
-                var s_type_params: [ParserTypeParam] = []
+                var s_type_params: [TypeParam] = []
                 var s_tpi = 0
                 while s_tpi < s_tp_names.len():
-                    s_type_params.push(ParserTypeParam(
+                    s_type_params.push(TypeParam(
                         name: s_tp_names[s_tpi],
                         bounds: [],
                         has_default: false,
@@ -433,7 +361,48 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                         span: span
                     ))
                     s_tpi = s_tpi + 1
-                if decl_get_is_value_type(idx) == 0:
+                if decl_get_is_actor(idx) != 0:
+                    # Actors intentionally share the compact struct payload in
+                    # FlatAst, but retain a distinct identity receipt. Methods
+                    # arrive in the immediately scheduled synthesized impl and
+                    # are attached there without dictionary-order dependence.
+                    declaration_kinds.push(PARSER_DECL_ACTOR)
+                    declaration_names.push(s_name); declaration_local_indices.push(actor_order.len())
+                    declaration_source_ordinals.push(di)
+                    var actor_methods: Dict<text, ParserFunction> = {}
+                    var actor_method_order: [ParserFunction] = []
+                    if pending_actor_name != "" and pending_actor_name != s_name:
+                        parser_error("actor method schedule owner mismatch: " + pending_actor_name)
+                    elif pending_actor_name == s_name:
+                        actor_methods = pending_actor_methods
+                        actor_method_order = pending_actor_order
+                        pending_actor_name = ""
+                        pending_actor_methods = {}
+                        pending_actor_order = []
+                    if actors.contains_key(s_name):
+                        parser_error("duplicate actor declaration: " + s_name)
+                    val actor_doc = decl_get_doc_comment(idx)
+                    actors[s_name] = ActorDef(
+                        name: s_name,
+                        type_params: s_type_params,
+                        fields: fields,
+                        methods: actor_methods,
+                        visibility: s_visibility,
+                        is_public: decl_get_visibility_text(idx) == "public",
+                        has_doc_comment: actor_doc != "",
+                        doc_comment: actor_doc,
+                        attributes: flat_actor_attributes(idx, span),
+                        attribute_raw_spellings:
+                            flat_actor_attribute_raw_spellings(idx),
+                        span: span,
+                        ordered_methods: actor_method_order
+                    )
+                    actor_order.push(s_name)
+                elif decl_get_is_value_type(idx) == 0:
+                    val class_is_new = not classes.contains_key(s_name)
+                    declaration_kinds.push(PARSER_DECL_CLASS)
+                    declaration_names.push(s_name); declaration_local_indices.push(class_count)
+                    declaration_source_ordinals.push(di)
                     # `class` decl (parse_struct_decl(is_class: true) ->
                     # decl_set_is_value_type(struct_d, 0)) -- route into the
                     # dedicated `classes` dict instead of `structs` so HIR/MIR
@@ -442,7 +411,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                     # `methods` stays empty: class methods are carried via the
                     # synthesized `impl` block (tag_text == "9" below), the
                     # same mechanism plain structs already use.
-                    classes[s_name] = ParserClass(
+                    classes[s_name] = Class(
                         name: s_name,
                         type_params: s_type_params,
                         fields: fields,
@@ -452,10 +421,14 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                         has_doc_comment: false,
                         doc_comment: "",
                         attributes: [],
-                        span: span
+                        span: span,
+                        ordered_methods: [],
+                        base_type: class_base,
+                        implemented_traits: class_traits
                     )
+                    if class_is_new: class_count = class_count + 1
                 else:
-                    structs[s_name] = ParserStruct(
+                    structs[s_name] = Struct(
                         name: s_name,
                         type_params: s_type_params,
                         fields: fields,
@@ -464,60 +437,41 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                         attributes: [],
                         has_doc_comment: false,
                         doc_comment: "",
-                        span: span
+                        span: span,
+                        base_type: struct_base,
+                        implemented_traits: struct_traits
                     )
         elif tag_text == "8":
             val e_name = decl_get_name(idx)
+            val enum_is_new = not enums.contains_key(e_name)
+            declaration_kinds.push(PARSER_DECL_ENUM)
+            declaration_names.push(e_name); declaration_local_indices.push(enum_count)
+            declaration_source_ordinals.push(di)
             # Recover variant NAMES from the flat AST (stored in the FIELD_NAMES
-            # slot by decl_enum_def), optional discriminant expression ids from
-            # FIELD_DEFAULTS, and (EPA1, bug enum_payload_multi_arity, extends
-            # EPC1) each variant's FULL payload type list: FIELD_TYPES holds
-            # the flat, in-order concatenation of every variant's payload
-            # field types across the whole enum, and FIELD_BITS (reused --
-            # unused by enum decls otherwise; structs use it for bitfield
-            # widths) holds the per-variant field COUNT. Walk a running
-            # offset into the flat list, slicing out each variant's own
-            # `count` entries. A count of 0 means `kind: Tuple([])`.
+            # slot by decl_enum_def). Payload types are not stored in the flat
+            # AST, so kind is Tuple([]) — the MIR discriminant index and match
+            # dispatch only need variant names + declared order.
             var e_variants: [Variant] = []
             val e_names = decl_get_fields(idx)
             val e_discriminants = decl_get_field_defaults(idx)
             val e_payload_types_flat = decl_get_field_types(idx)
             val e_payload_counts = decl_get_field_bits(idx)
-            # S1 (hardening plan 15 Phase 4): payload field NAMES, parallel
-            # element-for-element to e_payload_types_flat, stored by
-            # decl_enum_def in the otherwise-unused-for-enums PARAM_NAMES slot.
-            # An entry equal to decl_enum_payload_unnamed_marker() means the
-            # field was POSITIONAL. Absent (older flat AST) => all positional.
-            val e_payload_field_names_flat = decl_get_param_names(idx)
             var e_vi = 0
-            var e_type_offset = 0
             while e_vi < e_names.len():
                 var e_discriminant_id: i64 = -1
                 if e_vi < e_discriminants.len():
                     e_discriminant_id = e_discriminants[e_vi]
                 val e_has_discriminant = e_discriminant_id >= 0
-                # `span` was created before the declaration walk and can cross
-                # pool safepoints while earlier declarations are converted.
-                # Rebuild this empty diagnostic value at the use site so the
-                # staged bridge never copies a stale six-word aggregate.
-                var e_discriminant = Expr(kind: ExprKind.NilLit, span: make_span())
+                var e_discriminant = Expr(kind: ExprKind.NilLit, span: span)
                 if e_has_discriminant:
                     e_discriminant = convert_flat_expr(e_discriminant_id)
                 var e_payload_count: i64 = 0
                 if e_vi < e_payload_counts.len():
                     e_payload_count = e_payload_counts[e_vi]
                 var e_variant_types: [Type] = []
-                var e_variant_field_names: [text] = []
-                var e_variant_any_named = false
                 var e_ti = 0
                 while e_ti < e_payload_count and e_type_offset < e_payload_types_flat.len():
                     e_variant_types.push(convert_flat_type(e_payload_types_flat[e_type_offset]))
-                    var e_field_name = decl_enum_payload_unnamed_marker()
-                    if e_type_offset < e_payload_field_names_flat.len():
-                        e_field_name = e_payload_field_names_flat[e_type_offset]
-                    if e_field_name != decl_enum_payload_unnamed_marker():
-                        e_variant_any_named = true
-                    e_variant_field_names.push(e_field_name)
                     e_type_offset = e_type_offset + 1
                     e_ti = e_ti + 1
                 # A variant whose payload fields were DECLARED with names
@@ -545,7 +499,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                             name: e_fname,
                             type_: e_variant_types[e_fi],
                             has_default: false,
-                            default: Expr(kind: ExprKind.NilLit, span: make_span()),
+                            default: Expr(kind: ExprKind.NilLit, span: span),
                             visibility: Visibility.Public,
                             is_public: true,
                             is_volatile: false,
@@ -553,69 +507,51 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                             bits: 0,
                             has_fixed_address: false,
                             fixed_address: 0,
-                            span: make_span()
+                            span: span
                         ))
                         e_fi = e_fi + 1
                     e_kind = VariantKind.Struct(e_variant_fields)
                 e_variants.push(Variant(
                     name: e_names[e_vi],
-                    kind: e_kind,
+                    kind: VariantKind.Tuple([]),
                     has_discriminant: e_has_discriminant,
                     discriminant: e_discriminant,
-                    span: make_span()
+                    span: span
                 ))
                 e_vi = e_vi + 1
             val (e_complete_open, e_dyn_open) = parser_enum_open_regions_for(e_name)
-            # `enum Opt<T>:` -- decl_get_type_params returns the names threaded
-            # by parse_enum_decl (decl_set_type_params on the shared TYPE_PARAMS
-            # slot), the same slot and shape the struct/class arm above reads.
-            # Previously hardcoded `[]`, so HIR never bound `T` and the payload
-            # was erased to Any. See
-            # doc/08_tracking/bug/enum_payload_type_param_erased_to_any_in_flat_ast_2026-08-21.md
-            val e_tp_names = decl_get_type_params(idx)
-            var e_type_params: [ParserTypeParam] = []
-            var e_tpi = 0
-            while e_tpi < e_tp_names.len():
-                e_type_params.push(ParserTypeParam(
-                    name: e_tp_names[e_tpi],
-                    bounds: [],
-                    has_default: false,
-                    default: Type(kind: TypeKind.Infer, span: make_span()),
-                    span: make_span()
-                ))
-                e_tpi = e_tpi + 1
             enums[e_name] = ParserEnum(
                 name: e_name,
-                type_params: e_type_params,
+                type_params: [],
                 variants: e_variants,
                 visibility: convert_decl_visibility(idx),
-                is_public: decl_get_visibility_text(idx) == "public",
+                is_public: convert_decl_visibility(idx).is_public(),
                 has_doc_comment: false,
                 doc_comment: "",
-                span: make_span(),
-                attributes: parser_enum_attributes_for(e_name),
-                complete_open: e_complete_open,
-                dyn_open: e_dyn_open
+                span: span,
+                attributes: parser_enum_attributes_for(e_name)
             )
+            if enum_is_new: enum_count = enum_count + 1
         elif tag_text == "9":
             val target_name = decl_get_name(idx)
             val method_ids = decl_get_body(idx)
-            var methods: Dict<text, ParserFunction> = {}
+            var methods: Dict<text, Function> = {}
             var mi = 0
             while mi < method_ids.len():
                 val method_id = method_ids[mi]
-                val fn_: ParserFunction = convert_decl_method_fn(method_id, target_name)
+                val fn_: Function = convert_decl_method_fn(method_id, target_name)
                 methods[fn_.name] = fn_
+                ordered_methods.push(fn_)
                 mi = mi + 1
             # decl_get_type_params(idx) here reads the type params threaded by
             # parse_struct_decl (decl_set_type_params(impl_d, type_params)) for
             # the synthesized impl block of a generic struct/class's nested
             # methods (see fn_struct_decls.spl). Previously hardcoded `[]`.
             val i_tp_names = decl_get_type_params(idx)
-            var i_type_params: [ParserTypeParam] = []
+            var i_type_params: [TypeParam] = []
             var i_tpi = 0
             while i_tpi < i_tp_names.len():
-                i_type_params.push(ParserTypeParam(
+                i_type_params.push(TypeParam(
                     name: i_tp_names[i_tpi],
                     bounds: [],
                     has_default: false,
@@ -625,9 +561,10 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                 i_tpi = i_tpi + 1
             # #157: restore the trait link that parse_impl_decl records via
             # decl_set_impl_trait. Empty => inherent `impl Type:` (trait_ Infer);
-            # non-empty => `impl ParserTrait for Type:`, needed so lower_impl injects
+            # non-empty => `impl Trait for Type:`, needed so lower_impl injects
             # un-overridden trait default methods for the concrete type.
             val impl_trait_name = decl_get_impl_trait(idx)
+            val facet_impl_name = decl_get_facet_impl_name(idx)
             val impl_has_trait = impl_trait_name != ""
             val impl_trait_type = if impl_has_trait:
                 Type(kind: TypeKind.Named(impl_trait_name, []), span: span)
@@ -635,29 +572,17 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                 Type(kind: TypeKind.Infer, span: span)
             impls.push(Impl(
                 type_: Type(kind: TypeKind.Named(target_name, []), span: span),
-                has_trait_: impl_has_trait,
-                trait_: impl_trait_type,
-                type_params: i_type_params,
+                has_trait_: false,
+                trait_: Type(kind: TypeKind.Infer, span: span),
+                type_params: [],
                 where_clause: [],
                 methods: methods,
+                facet_impl_key: if facet_impl_name == "": "" else: facet_static_key(path, facet_impl_name),
                 assoc_types: [],
                 span: span
             ))
         elif tag_text == "4" or tag_text == "5":
             val c_name = decl_get_name(idx)
-            val flat_span = decl_get_span(idx)
-            var span = make_span()
-            if span_is_valid(flat_span):
-                val start_pos = span_start(flat_span)
-                val end_pos = span_end(flat_span)
-                span = Span(
-                    start: start_pos,
-                    end: end_pos,
-                    line: span_line(flat_span),
-                    col: span_col(flat_span),
-                    file: path,
-                    length: end_pos - start_pos
-                )
             val body = decl_get_body(idx)
             var init = Expr(kind: ExprKind.NilLit, span: span)
             if body.len() > 0:
@@ -819,6 +744,34 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                                             pass
                                     di = di + 1
                                     continue
+                                elif helper_name == "__facet_static_decl" and args.len() >= 4:
+                                    # Compiler-only facet metadata. The real
+                                    # trait/impl declarations continue through
+                                    # HIR; this inert marker carries the
+                                    # source-level impl identity and exact
+                                    # bind row to the post-HIR coherence pass.
+                                    match args[0].value.kind:
+                                        case ExprKind.StringLit(facet_kind, _):
+                                            match args[1].value.kind:
+                                                case ExprKind.StringLit(facet_a, _):
+                                                    match args[2].value.kind:
+                                                        case ExprKind.StringLit(facet_b, _):
+                                                            match args[3].value.kind:
+                                                                case ExprKind.StringLit(facet_c, _):
+                                                                    if facet_kind == "interface":
+                                                                        facet_static_declare_interface(path, facet_a)
+                                                                    elif facet_kind == "impl":
+                                                                        facet_static_declare_impl(path, facet_a, facet_b, facet_c)
+                                                                    elif facet_kind == "bind":
+                                                                        facet_static_declare_bind(path, facet_a, facet_b, facet_c)
+                                                                    else:
+                                                                        parser_error("unknown compiler facet marker kind '" + facet_kind + "'")
+                                                                case _: pass
+                                                        case _: pass
+                                                case _: pass
+                                        case _: pass
+                                    di = di + 1
+                                    continue
                                 elif helper_name == "__resource_decl" and args.len() >= 2:
                                     # WP-A `@sffi(...) resource Name`
                                     # (doc/03_plan/language/resource/
@@ -871,7 +824,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                                 pass
                     case _:
                         pass
-            val decl_const = ParserConst(
+            val decl_const = Const(
                 name: c_name,
                 has_type_: const_type_tag > 0,
                 type_: if const_type_tag > 0:
@@ -881,7 +834,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                 value: init,
                 is_mutable: tag_text == "5",
                 visibility: convert_decl_visibility(idx),
-                is_public: decl_get_visibility_text(idx) == "public",
+                is_public: convert_decl_visibility(idx).is_public(),
                 is_volatile: false,
                 has_fixed_address: false,
                 fixed_address: 0,
@@ -912,25 +865,22 @@ fn flat_ast_to_module(path: text) -> ParserModule:
             var import_items: [ImportItem] = []
             var ii = 0
             while ii < items_list.len():
-                val raw_import_item = items_list[ii]
-                val alias_parts = raw_import_item.split(":")
-                val import_name = if alias_parts.len() == 2: alias_parts[0] else: raw_import_item
-                val import_alias = if alias_parts.len() == 2: alias_parts[1] else: ""
                 import_items.push(ImportItem(
-                    name: import_name,
-                    has_alias: alias_parts.len() == 2,
-                    alias: import_alias
+                    name: items_list[ii],
+                    has_alias: false,
+                    alias: ""
                 ))
                 ii = ii + 1
-            imports.push(ParserImport(
+            imports.push(Import(
                 module: module_path,
                 items: import_items,
                 is_lazy: decl_get_is_lazy(idx) != 0,
                 span: span
             ))
+            explicit_import_count = explicit_import_count + 1
         elif tag_text == "7":
             val export_items = decl_get_imports(idx)
-            exports.push(Export(items: flat_copy_text_list(export_items), span: span))
+            exports.push(Export(items: export_items, span: span))
         elif tag_text == "14":
             val aop_data = decl_get_imports(idx)
             var aop_pointcut = ""
@@ -974,12 +924,16 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                 span: span
             ))
         elif tag_text == "17":
+            val ta_name = decl_get_name(idx)
+            val type_alias_is_new = not type_aliases.contains_key(ta_name)
+            declaration_kinds.push(PARSER_DECL_ALIAS)
+            declaration_names.push(ta_name); declaration_local_indices.push(type_alias_count)
+            declaration_source_ordinals.push(di)
             # type X = Y (decl_type_alias). Pure capture: name + aliased type
             # only -- no type_params/visibility recorded by the parser yet,
             # so those are left at their defaults.
-            val ta_name = decl_get_name(idx)
             val ta_type = convert_flat_type(decl_get_ret_type(idx))
-            type_aliases[ta_name] = ParserTypeAlias(
+            type_aliases[ta_name] = TypeAlias(
                 name: ta_name,
                 type_params: [],
                 type_: ta_type,
@@ -987,26 +941,6 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                 is_public: decl_get_visibility_text(idx) == "public",
                 span: span
             )
-        else:
-            # Lane C2 (flat-bridge transition census). Until this arm existed
-            # the decl dispatch chain above simply RAN OFF THE END for any tag
-            # with no arm: the declaration was dropped from the module with no
-            # diagnostic at all -- the same silent-loss class as the
-            # convert_flat_expr / convert_flat_stmt NilLit catch-alls (see
-            # flat_bridge_report_unhandled_node in convert_nodes.spl and
-            # doc/08_tracking/bug/spawn_call_expr_silently_becomes_nillit_2026-07-29.md),
-            # but strictly worse, because a dropped decl leaves no node behind
-            # at all. Three tags reach here from REAL source today --
-            # DECL_CE (11, decl_ce_block), DECL_LAZY_VAL (12,
-            # decl_lazy_val_binding) and DECL_CLI (13, decl_cli_def), all
-            # allocated by _Ast/decl_nodes.spl. Route the fallback through the
-            # parser's real error channel so parser_has_errors() goes true,
-            # then keep going (error recovery, not a hard stop) so the rest of
-            # the module still converts.
-            parser_error("flat AST bridge: unhandled decl node kind (tag=" +
-                tag_text + ") silently dropped from the module -- add an arm to " +
-                "module_assembly.spl's flat_ast_to_module decl loop (see " +
-                "doc/08_tracking/bug/spawn_call_expr_silently_becomes_nillit_2026-07-29.md)")
         di = di + 1
         if flat_bootstrap_enabled() and flat_bridge_trace_enabled():
             eprint("[flat-bridge] decl:done {di}")
@@ -1046,7 +980,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
     # Synthetic main: wrap bare top-level statements so script-style sources
     # (`-c` snippets, single files without `fn main`) actually execute instead
     # of the interpreter backend returning Unit (no `main` found).
-    if top_level_stmt_names.len() > 0:
+    if top_level_stmts.len() > 0:
         if not functions.contains("main"):
             val main_span = make_span()
             functions["main"] = parser_function_new(
@@ -1073,8 +1007,16 @@ fn flat_ast_to_module(path: text) -> ParserModule:
             )
             function_headers["main"] = parser_function_header(functions["main"])
             function_order.push("main")
+            ordered_functions.push(functions["main"])
+            declaration_kinds.push(PARSER_DECL_FUNCTION)
+            declaration_names.push("main"); declaration_local_indices.push(ordered_functions.len() - 1)
+            var synthetic_main_ordinal = decl_count
+            if declaration_source_ordinals.len() > 0:
+                synthetic_main_ordinal =
+                    declaration_source_ordinals[declaration_source_ordinals.len() - 1] + 1
+            declaration_source_ordinals.push(synthetic_main_ordinal)
         else:
-            # ParserModule already defines main: keep previous behavior (store as
+            # Module already defines main: keep previous behavior (store as
             # `_expr_N` constants) to avoid any semantic change.
             var tsi = 0
             while tsi < top_level_stmt_names.len():
@@ -1113,16 +1055,14 @@ fn flat_ast_to_module(path: text) -> ParserModule:
         exports: exports,
         domain_blocks: domain_blocks,
         functions: functions,
-        function_order: function_order,
-        classes: classes,
+        classes: {},
         actors: {},
-        actor_order: [],
         structs: structs,
         enums: enums,
         bitfields: bitfields,
-        traits: traits,
+        traits: {},
         impls: impls,
-        type_aliases: type_aliases,
+        type_aliases: {},
         constants: constants,
         static_asserts: [],
         aop_advices: aop_advices,
@@ -1136,138 +1076,29 @@ fn flat_ast_to_module(path: text) -> ParserModule:
     built_module.extend_enums = build_parser_extend_enums()
     if flat_bridge_trace_enabled():
         print "[flat-bridge] built frontend module path={path}"
-    frontend_compiler_trace_scope_exit(saved_compiler_trace_scope)
     built_module
 
+pub fn frontend_prepare_transient_parse_scope():
+    # Persistent frontend owners must exist before a transient parse scope is
+    # opened. First-touching these slots inside the scope leaves their global
+    # handles pointing at reclaimed storage after scope end.
+    reset_all_pools()
+    frontend_prepare_persistent_registry_globals()
+    lexer_prepare_persistent_globals()
+    parser_prepare_persistent_globals()
+    ast_decl_prepare_persistent_globals()
+    parser_init_with_path("", "")
+    parser_release_parse_globals()
+    lexer_release_parse_source_globals()
 
-# ===== Flat-AST pool snapshot: whole-parse dump/restore ======================
-#
-# The seven per-file dump/restore units, composed in ONE fixed order. This is
-# the unit the front-end cache stores and the unit the round-trip gate
-# compares. The version line is first so a blob written by an older codec is a
-# clean MISS rather than a misparse.
-#
-# Completeness (does every piece of per-parse state appear at all?) is enforced
-# by scripts/check/check-flat-ast-codec-complete.shs. Fidelity (does a restore
-# reproduce the dump byte-for-byte over real modules?) is enforced by
-# scripts/check/check-flat-ast-roundtrip.shs, which drives the self-check
-# below over the whole src/app bootstrap closure.
-
-pub fn flat_pools_dump_all() -> text:
-    var out = FLAT_POOL_CODEC_VERSION + "\n"
-    out = out + flat_decl_pools_dump()
-    out = out + flat_expr_pools_dump()
-    out = out + flat_stmt_pools_dump()
-    out = out + flat_type_pools_dump()
-    out = out + flat_parser_state_dump()
-    out = out + flat_extend_pools_dump()
-    out = out + flat_pending_pools_dump()
-    out
-
-# Returns false when the blob is truncated, malformed, or written by a
-# different codec version. A false here MUST be treated as a cache miss and a
-# reparse -- never as a successfully-restored empty parse, which is exactly the
-# silent-miscompile shape this whole design has to avoid.
-#
-# Every unit is invoked and its verdict AND-ed at the end rather than being
-# short-circuited: a restore that stops halfway leaves the pools in a torn
-# state that a later `and` would hide.
-pub fn flat_pools_restore_all(blob: text) -> bool:
-    val r = FlatPoolReader.new(blob)
-    val version = r.next()
-    if version != FLAT_POOL_CODEC_VERSION:
-        return false
-    val ok_decl = flat_decl_pools_restore(r)
-    val ok_expr = flat_expr_pools_restore(r)
-    val ok_stmt = flat_stmt_pools_restore(r)
-    val ok_type = flat_type_pools_restore(r)
-    val ok_par = flat_parser_state_restore(r)
-    val ok_ext = flat_extend_pools_restore(r)
-    val ok_pend = flat_pending_pools_restore(r)
-    ok_decl and ok_expr and ok_stmt and ok_type and ok_par and ok_ext and ok_pend and r.ok
-
-var _fab_roundtrip_cached: i64 = -1
-fn flat_roundtrip_enabled() -> bool:
-    if _fab_roundtrip_cached < 0:
-        _fab_roundtrip_cached = if (_sffi_env_get("SIMPLE_FLAT_POOL_ROUNDTRIP") ?? "") == "1": 1 else: 0
-    _fab_roundtrip_cached == 1
-
-# Round-trip self-check, DEFAULT OFF (SIMPLE_FLAT_POOL_ROUNDTRIP=1).
-#
-# Runs in situ, immediately before flat_ast_to_module, so it exercises the real
-# pools of a real module in a real build rather than a fixture. Three facts per
-# module, all on one line:
-#   reset=  restoring the pristine pre-parse snapshot really does clear the
-#           pools (otherwise "stable" would be vacuous -- B could equal A just
-#           because nothing was ever cleared between them)
-#   ok=     the restore of the post-parse snapshot reported success
-#   stable= the re-dump is BYTE-equal to the original dump
-# and then it leaves the RESTORED pools in place, so the build that follows is
-# built from restored state. A lossy codec therefore also breaks the build
-# loudly, not just this line.
-fn flat_pools_roundtrip_selfcheck(path: text, zero: text):
-    val a = flat_pools_dump_all()
-    val cleared = flat_pools_restore_all(zero)
-    val z2 = flat_pools_dump_all()
-    val restored = flat_pools_restore_all(a)
-    val b = flat_pools_dump_all()
-    val reset_ok = cleared and (z2 == zero)
-    print("FLATROUNDTRIP\treset={reset_ok}\tok={restored}\tstable={a == b}\tbytes={a.len()}\tpath={path}")
-
-
-# ===== Front-end cache entrypoints ==========================================
-#
-# Capture: the driver asks for the post-parse pool blob for THIS parse, taken
-# at exactly the point a hit will restore it -- after every desugar pass, just
-# before the bridge. Taking it anywhere else would store a different program.
-#
-# The flag is a var rather than a parameter because
-# parse_and_build_module_scoped has many callers and only one of them caches;
-# threading a parameter through all of them would be churn for no behaviour.
-# Counts real parses. The front-end cache spec asserts this is 0 on an
-# all-hit rebuild -- a hit count alone would not prove the parser was skipped.
-var _fab_parse_module_body_calls: i64 = 0
-
-pub fn flat_parse_module_body_calls() -> i64:
-    _fab_parse_module_body_calls
-
-var _fab_capture_pools: i64 = 0
-var _fab_captured_blob: text = ""
-
-pub fn flat_pool_capture_arm():
-    _fab_capture_pools = 1
-    _fab_captured_blob = ""
-
-# Reads AND disarms, so a blob can never be attributed to a later module: a
-# caller that forgets to re-arm gets "" (a store that does not happen), never
-# the previous module's parse.
-pub fn flat_pool_capture_take() -> text:
-    val blob = _fab_captured_blob
-    _fab_capture_pools = 0
-    _fab_captured_blob = ""
-    blob
-
-# Cache HIT path: rebuild the identical ParserModule from a stored blob without
-# parsing. Returns nil on any decode failure, which the caller MUST treat as a
-# miss and reparse.
-#
-# parser_init_with_path still runs: it installs the lexer source globals the
-# bridge reads for spans and slices, and it clears the per-parse state that the
-# restore is about to overwrite. The restore comes after it, so nothing init
-# sets can survive into the rebuilt module.
-pub fn build_module_from_flat_pool_blob(blob: text, source: text, path: text) -> ParserModule?:
-    if blob == "":
-        return nil
-    # Hit-path profile, same gate as the miss path above
-    # (SIMPLE_PARSE_PHASE_PROFILE=1). Without it a hit's cost was invisible:
-    # the driver's per-file dt stamp brackets the whole parse_full_frontend
-    # call, so it says a hit took N seconds but never which of decode, restore
-    # or bridge spent them, and on a sharded build nine processes interleave
-    # into one log so even that N is unattributable.
-    # doc/08_tracking/bug/frontend_shard_and_cache_hit_cost_2026-08-21.md
-    val _hp_t0 = if fab_phase_prof_enabled(): _sffi_time_now_unix_micros() else: 0
-    val saved_lex_source = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
-    val saved_lex_path = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
+pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: bool) -> ParserModule:
+    val saved_lex_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
+    val saved_lex_path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
+    if streaming_scope:
+        # This entry owns the scope it opens below, so prepare every durable
+        # shell while still outside it.  Driver-owned scopes use the separate
+        # frontend_prepare_transient_parse_scope boundary before their loop.
+        frontend_prepare_transient_parse_scope()
     reset_all_pools()
     parser_init_with_path(source, path)
     val _hp_t1 = if fab_phase_prof_enabled(): _sffi_time_now_unix_micros() else: 0
@@ -1297,20 +1128,23 @@ pub fn build_module_from_flat_pool_blob(blob: text, source: text, path: text) ->
 
 pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: bool) -> ParserModule:
     val saved_compiler_trace_scope = frontend_compiler_trace_scope_enter()
-    val saved_lex_source = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
-    val saved_lex_path = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
+    val saved_lex_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
+    val saved_lex_path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
     reset_all_pools()
     parser_init_with_path(source, path)
-    val _rt_zero = if flat_roundtrip_enabled(): flat_pools_dump_all() else: ""
     # The caller has already admitted this only for the experimental Stage4
     # AOT low-memory path. Keep the scope alive while the rich ParserModule is
     # copied out of the flat AST, then promote that retained graph before the
     # arena is cleared.
-    val transient_scope = if streaming_scope: _sffi_transient_array_scope_begin() else: false
-    if streaming_scope and not transient_scope:
-        panic("transient parser scope unavailable for {path}")
-    val _pp_t0 = if fab_phase_prof_enabled(): _sffi_time_now_unix_micros() else: 0
-    _fab_parse_module_body_calls = _fab_parse_module_body_calls + 1
+    var transient_scope = false
+    if streaming_scope:
+        transient_scope = rt_transient_array_scope_begin()
+        if not transient_scope:
+            parser_error("transient parser scope unavailable for " + path)
+            parser_release_parse_globals()
+            lexer_release_parse_source_globals()
+            ast_reset()
+            return flat_empty_module(path)
     parse_module_body()
     val _pp_t1 = if fab_phase_prof_enabled(): _sffi_time_now_unix_micros() else: 0
     if fab_phase_prof_enabled():
@@ -1341,43 +1175,80 @@ pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: 
             print "  {errors[ei]}"
             ei = ei + 1
     if transient_scope:
-        if not _sffi_transient_array_scope_pause():
-            panic("transient parser scope pause failed for {path}")
-    if flat_roundtrip_enabled():
-        flat_pools_roundtrip_selfcheck(path, _rt_zero)
-    # A parse that reported errors is never stored: the driver poisons that
-    # module and keeps going, and a stored error-parse would come back as a
-    # HIT on the next build with par_had_error restored true but no parser
-    # diagnostics re-emitted -- a build that fails with no message.
-    if _fab_capture_pools == 1 and not parser_has_errors():
-        _fab_captured_blob = flat_pools_dump_all()
+        if parser_has_errors():
+            frontend_discard_failed_parse_registries(path)
+            val paused_error = rt_transient_array_scope_pause()
+            parser_release_parse_globals()
+            lexer_release_parse_source_globals()
+            val promoted_error = if paused_error: frontend_promote_compilation_registries() else: false
+            val _ended_error = rt_transient_array_scope_end()
+            ast_reset()
+            if not paused_error or not promoted_error or not _ended_error:
+                parser_error("transient parser cleanup failed after parse error for " + path)
+            return flat_empty_module(path)
+        if not rt_transient_array_scope_pause():
+            parser_error("transient parser scope pause failed for " + path)
+            frontend_discard_failed_parse_registries(path)
+            parser_release_parse_globals()
+            lexer_release_parse_source_globals()
+            val _ended_pause = rt_transient_array_scope_end()
+            ast_reset()
+            if not _ended_pause:
+                parser_error("transient parser cleanup failed after pause error for " + path)
+            return flat_empty_module(path)
     val built_module = flat_ast_to_module(path)
-    if fab_phase_prof_enabled():
-        val _pp_t6 = _sffi_time_now_unix_micros()
-        print("PARSEPHASE\tparse_module_body\t{_pp_t1 - _pp_t0}\tinterp\t{_pp_t2 - _pp_t1}\tph_transform\t{_pp_t2b - _pp_t2}\tph_expand\t{_pp_t3 - _pp_t2b}\tdesugar_coll\t{_pp_t4 - _pp_t3}\tcoverage_inv\t{_pp_t5 - _pp_t4}\tbridge\t{_pp_t6 - _pp_t5}\tpath\t{path}")
-        si_stats_report(path)
     if transient_scope:
-        if not _sffi_transient_heap_promote(built_module):
-            panic("transient parser graph promotion failed for {path}")
-        # ORDER IS LOAD-BEARING: end the scope before replacing lexer or AST
-        # owners. Both cleanup functions allocate fresh process-lifetime arrays;
-        # inside the scope those replacements are stamped with its id and then
-        # reclaimed, leaving dangling globals for the next parse. Same fix as
+        # Flat conversion publishes compilation-wide layer/effect/aspect/facet
+        # facts.  Promote those roots before any end path, independently of
+        # whether retaining the ParserModule succeeds.
+        if not frontend_promote_compilation_registries():
+            parser_error("transient parser registry promotion failed for " + path)
+            frontend_discard_failed_parse_registries(path)
+            # Discard runs after pause, so its in-place removals and filtered
+            # rows are persistent.  A second promotion preserves all sibling
+            # module roots even when the failed promotion stopped early.
+            val _remaining_promoted = frontend_promote_compilation_registries()
+            parser_release_parse_globals()
+            lexer_release_parse_source_globals()
+            val _ended_registry = rt_transient_array_scope_end()
+            ast_reset()
+            if not _remaining_promoted or not _ended_registry:
+                parser_error("transient parser cleanup failed after registry promotion error for " + path)
+            return flat_empty_module(path)
+        if not rt_transient_heap_promote(built_module):
+            parser_error("transient parser module promotion failed for " + path)
+            frontend_discard_failed_parse_registries(path)
+            parser_release_parse_globals()
+            lexer_release_parse_source_globals()
+            val _ended_promote = rt_transient_array_scope_end()
+            ast_reset()
+            if not _ended_promote:
+                parser_error("transient parser cleanup failed after module promotion error for " + path)
+            return flat_empty_module(path)
+        parser_release_parse_globals()
+        lexer_release_parse_source_globals()
+        # ORDER IS LOAD-BEARING: end the scope BEFORE ast_reset(). Arrays that
+        # ast_reset() allocates while the scope is still active are stamped with
+        # the scope id and are free()d + unregistered by scope end, leaving the
+        # process-lifetime arena globals pointing at dead objects (len 0/-1,
+        # pushes silently dropped). Same defect and same fix as
         # driver_end_transient_parse_scope(). See
         # doc/08_tracking/bug/ast_arena_reset_inside_transient_scope_2026-08-01.md
-        if not _sffi_transient_array_scope_end():
-            panic("transient parser scope end failed for {path}")
-        lexer_release_parse_source_globals()
+        val ended = rt_transient_array_scope_end()
         ast_reset()
+        if not ended:
+            parser_error("transient parser scope end failed for " + path)
+            return flat_empty_module(path)
     else:
-        if not _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source):
-            panic("failed to restore SIMPLE_BOOTSTRAP_LEX_SOURCE for {path}")
-        if not _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path):
-            panic("failed to restore SIMPLE_BOOTSTRAP_LEX_PATH for {path}")
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
     frontend_compiler_trace_scope_exit(saved_compiler_trace_scope)
     built_module
 
 fn parse_and_build_module(source: text, path: text) -> ParserModule:
+    # This convenience entry is the standalone boundary. Driver-owned
+    # streaming callers use parse_and_build_module_scoped and prewarm once.
+    frontend_prepare_transient_parse_scope()
     parse_and_build_module_scoped(source, path, false)
 
 

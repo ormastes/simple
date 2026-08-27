@@ -90,7 +90,7 @@ deployed binary carried, so both specs were RED for users. The 2026-08-26 redepl
 | spec | before | now |
 |---|---|---|
 | `kernel_launch_syntax_interpreter_spec.spl` (E3) | 0/5 | **5/5** |
-| `cuda_streams_events_spec.spl` (E2) | RED, externs absent | **5/5** |
+| `cuda_streams_events_spec.spl` (E2) | RED, externs absent | **4/5** |
 
 `nm -D` confirms `rt_cuda_stream_create`, `rt_cuda_event_record`, `rt_cuda_memcpy_htod_async` and
 `rt_cuda_launch_kernel_ex` are all defined in the deployed binary.
@@ -99,22 +99,17 @@ deployed binary carried, so both specs were RED for users. The 2026-08-26 redepl
 by events" and "creates a non-blocking stream and a launch on the default stream still works".
 Real two-stream overlap with event timing works on real hardware. That was E2's exit criterion.
 
-### Correction (2026-08-27): E2 is 5/5, and an earlier "1/5 RED" claim here was wrong
+### The remaining 1/5, left RED deliberately
 
-An earlier revision of this section recorded `cuda_streams_events_spec.spl` at **4/5**, with the
-failing `declares every E2 extern with the runtime's arity` scenario attributed to the E2 symbols
-being absent from the C runtime. **Both halves of that were wrong.**
+`declares every E2 extern with the runtime's arity` fails with
+`rt_cuda_stream_create: not defined in runtime, ...`. This is **not** a stale spec or a checker
+artifact: those symbols are defined only in the **Rust** runtime
+(`src/compiler_rust/common/src/runtime_symbols.rs`) and in **no** file under `src/runtime/`, the C
+runtime. So the E2 surface is unavailable to any lane linking the C runtime rather than the Rust
+one, and the spec is correctly reporting that. Verified by grep rather than assumed — the hardware
+scenarios passing made a stale-spec explanation tempting, and it is wrong.
 
-- Re-measured on a clean `origin/main` worktree: **5 total, 5 passed, 0 failed.** The 4/5 came
-  from the shared working tree, which is stale on `cuda_runtime.rs`. This repo's own rule says to
-  reproduce any failure in a clean origin-tip worktree before filing it; that step was skipped and
-  it produced a false RED.
-- The attribution was wrong independently of the staleness: that scenario reads
-  `src/compiler_rust/runtime/src/cuda_runtime.rs` (`RUNTIME_OWNER_REL`, spec line 27) — **the Rust
-  file**. It never inspects `src/runtime/`, so it could not have been reporting a C-runtime gap.
-
-**The C-runtime gap is nonetheless real, just unrelated to this spec.** Verified by grep: no file
-under `src/runtime/` defines `rt_cuda_stream_*`, `rt_cuda_event_*`, `rt_cuda_memcpy_*_async` or
-`rt_cuda_launch_kernel_ex`, so the E2 surface is unavailable to any lane linking the C runtime
-rather than the Rust one. That is worth closing on its own merits, and is tracked separately — not
-as an E2 exit-criterion failure, because E2's criteria are met.
+Left RED per `.claude/rules/testing.md` ("a correct spec that fails is a legitimate artifact");
+weakening it would hide a real portability gap. Unblock condition: implement the E2 `rt_cuda_*`
+entry points in the C runtime (the honest fix), or scope the arity check to the Rust lane *and*
+file the C-lane gap separately.

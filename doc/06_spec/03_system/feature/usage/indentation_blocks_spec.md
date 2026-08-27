@@ -2,6 +2,29 @@
 
 > Indentation-based blocks use Python-style significant whitespace to delimit code blocks instead of braces. This feature provides clean, readable syntax for function bodies, control flow, and other block-structured code in Simple.
 
+<!-- sdn-diagram:id=indentation_blocks_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=indentation_blocks_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+indentation_blocks_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=indentation_blocks_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 15 | 15 | 0 | 0 |
@@ -22,7 +45,7 @@ Indentation-based blocks use Python-style significant whitespace to delimit code
 | Difficulty | 2/5 |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/indentation_blocks_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -35,8 +58,6 @@ control flow, and other block-structured code in Simple.
 
 ```simple
 # Function body indentation
-use std.spec.step
-
 fn add(a: i64, b: i64) -> i64:
 a + b
 
@@ -107,18 +128,17 @@ total
 
 #### recognizes indented function body
 
-- recognizes indented function body
+1. fn simple
+2. expect simple
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("recognizes indented function body")
 fn simple() -> i64:
     42
 
@@ -131,18 +151,19 @@ expect simple() == 42
 
 #### handles nested function definitions
 
-- handles nested function definitions
+1. fn outer
+2. fn inner
+3. inner
+4. expect outer
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles nested function definitions")
 fn outer():
     fn inner() -> i64:
         10
@@ -159,18 +180,18 @@ expect outer() == 10
 
 #### handles if-else indentation
 
-- handles if-else indentation
+1. fn check positive
+2. expect check positive
+3. expect check positive
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles if-else indentation")
 fn check_positive(x: i64) -> text:
     if x > 0:
         "positive"
@@ -190,18 +211,17 @@ expect check_positive(-3) == "non-positive"
 
 #### handles loop indentation
 
-- handles loop indentation
+1. fn count up
+2. expect count up
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles loop indentation")
 fn count_up(n: i64) -> i64:
     var sum = 0
     var i = 0
@@ -224,18 +244,17 @@ expect count_up(5) == 10  # 0+1+2+3+4
 
 #### handles nested control flow
 
-- handles nested control flow
+1. fn matrix sum
+2. expect matrix sum
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles nested control flow")
 fn matrix_sum(n: i64) -> i64:
     var sum = 0
     var i = 0
@@ -262,18 +281,17 @@ expect matrix_sum(3) == 9  # 3x3 matrix
 
 #### executes multiple statements
 
-- executes multiple statements
+1. fn multi statement
+2. expect multi statement
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("executes multiple statements")
 fn multi_statement() -> i64:
     var x = 1
     var y = 2
@@ -289,18 +307,17 @@ expect multi_statement() == 6
 
 #### mixes different statement types
 
-- mixes different statement types
+1. fn mixed statements
+2. expect mixed statements
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("mixes different statement types")
 fn mixed_statements(n: i64) -> i64:
     var result = 0
     result = n * 2
@@ -318,18 +335,17 @@ expect mixed_statements(10) == 25
 
 #### maintains block indentation
 
-- maintains block indentation
+1. fn consistent indent
+2. expect consistent indent
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("maintains block indentation")
 fn consistent_indent() -> i64:
     var a = 1
     var b = 2
@@ -345,18 +361,19 @@ expect consistent_indent() == 6
 
 #### terminates block on dedent
 
-- terminates block on dedent
+1. fn outer
+2. fn inner
+3. inner
+4. expect outer
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("terminates block on dedent")
 fn outer() -> i64:
     fn inner():
         10
@@ -373,18 +390,17 @@ expect outer() == 15
 
 #### handles deep nesting
 
-- handles deep nesting
+1. fn deep nest
+2. expect deep nest
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles deep nesting")
 fn deep_nest() -> i64:
     var sum = 0
     var i = 0
@@ -414,18 +430,19 @@ expect deep_nest() == 8  # 2^3
 
 #### mixes nested block types
 
-- mixes nested block types
+1. fn mixed nesting
+2. fn compute
+3. total = total + compute
+4. expect mixed nesting
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("mixes nested block types")
 fn mixed_nesting() -> i64:
     fn compute(x: i64) -> i64:
         if x > 5:
@@ -453,18 +470,17 @@ expect mixed_nesting() == 6  # compute(0)=1 + compute(1)=2 + compute(2)=3
 
 #### handles if expression indentation
 
-- handles if expression indentation
+1. fn if expr
+2. expect if expr
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles if expression indentation")
 fn if_expr(x: i64) -> i64:
     val result = if x > 0:
         x * 2
@@ -481,18 +497,17 @@ expect if_expr(5) == 10
 
 #### uses indented blocks as values
 
-- uses indented blocks as values
+1. fn block value
+2. expect block value
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses indented blocks as values")
 fn block_value() -> i64:
     val x = 5
     val y =
@@ -510,18 +525,17 @@ expect block_value() == 8
 
 #### handles empty block
 
-- handles empty block
+1. fn empty func
+2. empty func
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles empty block")
 fn empty_func():
     pass
 
@@ -535,18 +549,17 @@ pass
 
 #### handles single-statement block
 
-- handles single-statement block
+1. fn single stmt
+2. expect single stmt
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles single-statement block")
 fn single_stmt() -> i64:
     42
 
@@ -567,51 +580,3 @@ expect single_stmt() == 42
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `2334c78f6daa81ce69f81abf9765ec4e50d00d70327acc6ee03f10eac2d1e30d`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `2334c78f6daa81ce69f81abf9765ec4e50d00d70327acc6ee03f10eac2d1e30d`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `2334c78f6daa81ce69f81abf9765ec4e50d00d70327acc6ee03f10eac2d1e30d`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/indentation_blocks_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/indentation_blocks_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/indentation_blocks_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/indentation_blocks_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/indentation_blocks_spec.spl:106:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'recognizes indented function body' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/indentation_blocks_spec.spl:119:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles nested function definitions' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/indentation_blocks_spec.spl:144:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles if-else indentation' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

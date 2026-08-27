@@ -5,10 +5,8 @@
 #
 # Format: line-based text file at .simple/test-manifest.idx
 
-use std.io_runtime.{read_file_text}
-use std.io_runtime.{file_write}
-use std.io_runtime.{file_exists}
-use std.io_runtime.{mkdir_p}
+use std.io_runtime.{file_read_raw, file_write_raw, file_exists}
+extern fn rt_mkdir_p(path: text) -> bool
 use std.io_runtime.{time_now_unix_micros}
 
 # ============================================================================
@@ -41,12 +39,6 @@ struct SdoctestManifestEntry:
 struct TestManifest:
     version: i64
     scan_timestamp: i64
-    # Directory roots this index actually WALKED. A manifest is only
-    # authoritative for a path inside one of these roots; without them a scoped
-    # scan (e.g. `simple test test/01_unit/lib/.../io`) produced a small but
-    # FRESH index that every other path then matched zero entries against,
-    # printing "No test files found" — a silent false green.
-    roots: [text]
     entries: [TestManifestEntry]
     sdoctest_entries: [SdoctestManifestEntry]
 
@@ -67,7 +59,6 @@ fn manifest_new() -> TestManifest:
     TestManifest(
         version: MANIFEST_VERSION,
         scan_timestamp: 0,
-        roots: [],
         entries: [],
         sdoctest_entries: []
     )
@@ -79,69 +70,16 @@ fn manifest_new() -> TestManifest:
 fn manifest_is_fresh(manifest: TestManifest) -> bool:
     if manifest.scan_timestamp == 0:
         return false
-    val now = time_now_unix_micros()
+    val now = rt_time_now_unix_micros()
     val age = now - manifest.scan_timestamp
     age < MANIFEST_TTL_MICROS
 
 fn manifest_is_fresh_with_ttl(manifest: TestManifest, ttl_micros: i64) -> bool:
     if manifest.scan_timestamp == 0:
         return false
-    val now = time_now_unix_micros()
+    val now = rt_time_now_unix_micros()
     val age = now - manifest.scan_timestamp
     age < ttl_micros
-
-# ============================================================================
-# Coverage Check
-# ============================================================================
-
-# Strip trailing slashes and normalize separators so root/path comparison is
-# textual but separator-safe.
-fn manifest_normalize_root(raw: text) -> text:
-    var d = raw.replace("\\", "/")
-    while d.ends_with("/") and d.len() > 1:
-        d = d[0:d.len() - 1]
-    d
-
-# Does this manifest's WALK actually include `base_path`? Freshness alone is not
-# enough: a fresh index built from a narrower root has no entries for anything
-# outside it, and an empty filter result would otherwise read as "no tests".
-fn manifest_covers(manifest: TestManifest, base_path: text) -> bool:
-    val target = manifest_normalize_root(base_path)
-    for raw_root in manifest.roots:
-        val root = manifest_normalize_root(raw_root)
-        if root == "":
-            continue
-        if target == root:
-            return true
-        if target.starts_with(root + "/"):
-            return true
-    false
-
-# Union of existing roots with newly walked dirs, dropping any root that a
-# broader new root already subsumes.
-fn manifest_merge_roots(old_roots: [text], new_dirs: [text]) -> [text]:
-    var merged: [text] = []
-    for raw_dir in new_dirs:
-        val d = manifest_normalize_root(raw_dir)
-        if d == "":
-            continue
-        var already = false
-        for m in merged:
-            if m == d:
-                already = true
-        if not already:
-            merged.push(d)
-    for raw_old in old_roots:
-        val o = manifest_normalize_root(raw_old)
-        if o == "":
-            continue
-        var covered = false
-        for m in merged:
-            if o == m or o.starts_with(m + "/"):
-                covered = true
-        if not covered:
-            merged.push(o)
-    merged
 
 # ============================================================================
 # Serialization — Save
@@ -152,13 +90,11 @@ fn manifest_save(manifest: TestManifest, path: text) -> bool:
     val last_slash = path.last_index_of("/")
     if last_slash > 0:
         val parent = path[0:last_slash]
-        mkdir_p(parent)
+        rt_mkdir_p(parent)
 
     var lines: [text] = []
     lines.push("# test-manifest v{manifest.version}")
-    val roots_line = manifest.roots.join(",")
     lines.push("scan_timestamp={manifest.scan_timestamp}")
-    lines.push("roots={roots_line}")
     lines.push("entry_count={manifest.entries.len()}")
     lines.push("sdoctest_count={manifest.sdoctest_entries.len()}")
     lines.push("")
@@ -184,17 +120,17 @@ fn manifest_save(manifest: TestManifest, path: text) -> bool:
         lines.push("{sd.path}|{sd.file_size}|{sd.file_mtime}|{sd.block_count}")
 
     val content = lines.join("\n") + "\n"
-    file_write(path, content)
+    file_write_raw(path, content)
 
 # ============================================================================
 # Serialization — Load
 # ============================================================================
 
 fn manifest_load(path: text) -> TestManifest:
-    if not file_exists(path):
+    if not rt_file_exists(path):
         return manifest_new()
 
-    val content = read_file_text(path)
+    val content = file_read_raw(path) ?? ""
     if content == "":
         return manifest_new()
 
@@ -221,18 +157,7 @@ fn manifest_load(path: text) -> TestManifest:
 
         # Parse header fields
         if line.starts_with("scan_timestamp="):
-            manifest.scan_timestamp = line[15:].to_int() ?? 0
-            continue
-        if line.starts_with("roots="):
-            # Absent in pre-coverage manifests: those parse to an EMPTY root
-            # list, which manifest_covers() rejects, so they force a rescan
-            # instead of silently reporting zero tests.
-            val roots_raw = line[6:]
-            if roots_raw != "":
-                for r in roots_raw.split(","):
-                    val rn = r.trim()
-                    if rn != "":
-                        manifest.roots.push(rn)
+            manifest.scan_timestamp = to_int(line[15:])
             continue
         if line.starts_with("entry_count=") or line.starts_with("sdoctest_count="):
             continue
@@ -262,13 +187,13 @@ fn parse_manifest_entry(line: text) -> TestManifestEntry:
     # Field 15 (index 14) is optional for backward compat with old manifests
     var duration_ms = 0
     if parts.len() >= 15:
-        duration_ms = parts[14].to_int() ?? 0
+        duration_ms = to_int(parts[14])
 
     TestManifestEntry(
         path: parts[0],
-        file_size: parts[1].to_int() ?? 0,
-        file_mtime: parts[2].to_int() ?? 0,
-        test_level: parts[3].to_int() ?? 0,
+        file_size: to_int(parts[1]),
+        file_mtime: to_int(parts[2]),
+        test_level: to_int(parts[3]),
         slow_tag: parts[4] == "1",
         skip_tag: parts[5] == "1",
         pending_tag: parts[6] == "1",
@@ -290,9 +215,9 @@ fn parse_sdoctest_entry(line: text) -> SdoctestManifestEntry:
 
     SdoctestManifestEntry(
         path: parts[0],
-        file_size: parts[1].to_int() ?? 0,
-        file_mtime: parts[2].to_int() ?? 0,
-        block_count: parts[3].to_int() ?? 0
+        file_size: to_int(parts[1]),
+        file_mtime: to_int(parts[2]),
+        block_count: to_int(parts[3])
     )
 
 # ============================================================================
@@ -318,7 +243,6 @@ fn manifest_find_sdoctest(manifest: TestManifest, path: text) -> SdoctestManifes
 export TestManifestEntry, SdoctestManifestEntry, TestManifest
 export MANIFEST_VERSION, MANIFEST_PATH, MANIFEST_TTL_MICROS
 export manifest_new, manifest_is_fresh, manifest_is_fresh_with_ttl
-export manifest_covers, manifest_merge_roots, manifest_normalize_root
 export manifest_save, manifest_load
 export parse_manifest_entry, parse_sdoctest_entry
 export manifest_find_entry, manifest_find_sdoctest

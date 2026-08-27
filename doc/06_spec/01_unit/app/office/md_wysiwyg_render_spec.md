@@ -2,6 +2,30 @@
 
 > This unit spec proves the end-to-end graphical markdown path: raw markdown is built into a `WysiwygView`, wrapped as styled preview HTML via `wysiwyg_preview_pane`, and rendered to pixels through the EXACT same renderer entrypoint the `md_wysiwyg_ppm` / `md_wysiwyg_gui` apps use (`simple_web_render_html_to_pixels_with_engine2d_backend`, backend `cpu_simd`).
 
+<!-- sdn-diagram:id=md_wysiwyg_render_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=md_wysiwyg_render_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+md_wysiwyg_render_spec -> std
+md_wysiwyg_render_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=md_wysiwyg_render_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 7 | 7 | 0 | 0 |
@@ -22,7 +46,7 @@ This unit spec proves the end-to-end graphical markdown path: raw markdown is bu
 | Requirements | N/A — implementation/architecture evidence for the markdown -> |
 | Design | doc/04_architecture/ui/simple_gui_stack.md |
 | Source | `test/01_unit/app/office/md_wysiwyg_render_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -54,23 +78,13 @@ graphical glue (feature: markdown_wysiwyg_graphical_render_app_2026-06-15).
 
 #### paints markdown through the same cpu_simd renderer with absolute black glyph ink
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- paints markdown through the same cpu_simd renderer with absolute black glyph ink
-   - Expected: pixels.len() equals `200 * 60`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("paints markdown through the same cpu_simd renderer with absolute black glyph ink")
 # One render proves the whole oracle (size + ink + absolute black glyph +
 # surviving white page); T1/T2 previously re-rendered identical content.
 val pixels = _render_markdown("Hello body paragraph text", 200, 60)
@@ -89,19 +103,13 @@ expect(_count_color(pixels, 0xFFFFFFFFu32)).to_be_greater_than(0)
 
 #### paints a heading line to pixels (the formerly-crashing case)
 
-- paints a heading line to pixels (the formerly-crashing case)
-   - Expected: pixels.len() equals `200 * 80`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("paints a heading line to pixels (the formerly-crashing case)")
 # `# ...` was the crash case and is the feature doc's own example. Prove
 # it now paints end-to-end through the same app renderer path.
 val pixels = _render_markdown("# Heading\nbody text", 200, 80)
@@ -116,19 +124,13 @@ expect(_pixels_equal(pixels, body_only)).to_be(false)
 
 #### decodes HTML entities so escaped chars paint as single glyphs
 
-- decodes HTML entities so escaped chars paint as single glyphs
-   - Expected: esc.len() equals `240 * 40`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("decodes HTML entities so escaped chars paint as single glyphs")
 # Markdown body escaping turns `&` into `&amp;` inside the preview HTML.
 # The renderer must DECODE that back to a single `&` glyph, not paint the
 # literal 5-char `&amp;`. Oracle: 8 ampersands and 8 reference glyphs
@@ -148,19 +150,13 @@ expect(esc_ink).to_be_less_than(plain_ink * 3)
 
 #### wraps a long line inside the surface instead of clipping the right edge
 
-- wraps a long line inside the surface instead of clipping the right edge
-   - Expected: narrow.len() equals `240 * 100`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("wraps a long line inside the surface instead of clipping the right edge")
 # A long line at a narrow width must WRAP so every glyph paints; it must
 # not run off the right edge and clip (web_render_no_line_wrapping_right_edge_clip).
 # Oracle: the same text rendered on a narrow-but-tall surface preserves its
@@ -186,19 +182,13 @@ expect(narrow_ink * 10).to_be_greater_than(wide_ink * 9)
 
 #### preserves leading indentation in fenced code blocks
 
-- preserves leading indentation in fenced code blocks
-   - Expected: indented.len() equals `200 * 32`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("preserves leading indentation in fenced code blocks")
 # Inside a ``` fence, lines render as preformatted monospace and keep their
 # indentation (web_render_preformatted_whitespace_not_preserved). Oracle:
 # an indented code line's first black glyph sits well to the right of an
@@ -223,18 +213,13 @@ expect(indented_col).to_be_greater_than(plain_col + 30)
 
 #### reserves wrapped-text height so a following block does not overlap
 
-- reserves wrapped-text height so a following block does not overlap
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("reserves wrapped-text height so a following block does not overlap")
 # A block whose inline text wraps to multiple lines must reserve N lines
 # of height; otherwise the next block is placed over the wrapped tail
 # (web_render_line_height_overlap_at_bottom). Narrow width forces the
@@ -256,20 +241,13 @@ expect(yb).to_be_greater_than(ya + ha - 1)
 
 #### renders different markdown to different framebuffers
 
-- renders different markdown to different framebuffers
-   - Expected: a.len() equals `200 * 60`
-   - Expected: b.len() equals `200 * 60`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders different markdown to different framebuffers")
 val a = _render_markdown("Hello body paragraph text", 200, 60)
 val b = _render_markdown("A completely different sentence", 200, 60)
 expect(a.len()).to_equal(200 * 60)
@@ -295,56 +273,8 @@ expect(_count_non_bg(b, 0xFFFFFFFFu32)).to_be_greater_than(0)
 
 ## Related Documentation
 
-- **Requirements:** `N/A — implementation/architecture evidence for the markdown ->`
-- **Design:** `doc/04_architecture/ui/simple_gui_stack.md`
+- **Requirements:** [N/A — implementation/architecture evidence for the markdown ->](N/A — implementation/architecture evidence for the markdown ->)
+- **Design:** [doc/04_architecture/ui/simple_gui_stack.md](doc/04_architecture/ui/simple_gui_stack.md)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `42b5afe0c2c57a4747d9fd9d1d72e027402c92f011354b12527571a0e0b99eb6`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `42b5afe0c2c57a4747d9fd9d1d72e027402c92f011354b12527571a0e0b99eb6`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `42b5afe0c2c57a4747d9fd9d1d72e027402c92f011354b12527571a0e0b99eb6`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/office/md_wysiwyg_render_spec.spl
-mirror: doc/06_spec/01_unit/app/office/md_wysiwyg_render_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/office/md_wysiwyg_render_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/office/md_wysiwyg_render_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/office/md_wysiwyg_render_spec.spl:91:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'paints markdown through the same cpu_simd renderer with absolute black glyph ink' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/office/md_wysiwyg_render_spec.spl:107:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'paints a heading line to pixels (the formerly-crashing case)' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/office/md_wysiwyg_render_spec.spl:119:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'decodes HTML entities so escaped chars paint as single glyphs' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

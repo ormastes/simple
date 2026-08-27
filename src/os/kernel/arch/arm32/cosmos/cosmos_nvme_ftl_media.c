@@ -1,6 +1,7 @@
 #include <stdint.h>
 
 #include "cosmos_nvme_ftl_media.h"
+#include "cosmos_nvme_media_policy.h"
 
 #ifndef COSMOS_NVME_FTL_MEDIA_DMA_H2D
 #define COSMOS_NVME_FTL_MEDIA_DMA_H2D \
@@ -33,7 +34,7 @@ struct cosmos_nvme_ftl_media_dsm_range {
 };
 
 static unsigned long long media_u64(unsigned int low, unsigned int high) {
-    return ((unsigned long long)high << 32U) | (unsigned long long)low;
+    return cosmos_nvme_media_policy_u64(low, high);
 }
 
 static unsigned int media_u32_le(const unsigned char *bytes) {
@@ -75,45 +76,27 @@ static void media_copy_from_dma(void *destination, unsigned int address,
     }
 }
 
-static int media_address_set_valid(
-    unsigned int data_address, unsigned int spare_address,
-    unsigned int completion_address, unsigned int status_report_address,
-    unsigned int error_info_address) {
-    return data_address != 0U &&
-        (data_address & (COSMOS_NFC_PAGE_DATA_BYTES - 1U)) == 0U &&
-        spare_address != 0U &&
-        (spare_address & (COSMOS_NFC_PAGE_SPARE_BYTES - 1U)) == 0U &&
-        completion_address != 0U &&
-        (completion_address & (sizeof(unsigned int) - 1U)) == 0U &&
-        status_report_address != 0U &&
-        (status_report_address & (sizeof(unsigned int) - 1U)) == 0U &&
-        error_info_address != 0U &&
-        (error_info_address & (sizeof(unsigned int) - 1U)) == 0U;
-}
-
 static int media_command_span(const struct cosmos_nvme_ftl_media *media,
                               const struct cosmos_nvme_command *command,
                               unsigned long long *lba,
                               unsigned int *lba_count) {
-    unsigned long long end;
     unsigned int count;
+    int status;
 
-    if (media == 0 || command == 0 || command->namespace_id !=
-            COSMOS_NVME_NAMESPACE_ID || command->data_bytes == 0U ||
-        (command->data_bytes % COSMOS_FTL_NVME_BLOCK_BYTES) != 0U) {
-        return COSMOS_INVALID;
+    status = cosmos_nvme_media_policy_command_span_status(
+        media != 0 ? 1U : 0U, command != 0 ? 1U : 0U,
+        command != 0 ? command->namespace_id : 0U,
+        command != 0 ? command->data_bytes : 0U,
+        command != 0 ? command->slot_tag : 0U,
+        command != 0 ? command->lba_low : 0U,
+        command != 0 ? command->lba_high : 0U,
+        media != 0 ? media->namespace_lba_low : 0U,
+        media != 0 ? media->namespace_lba_high : 0U);
+    if (status != COSMOS_OK) {
+        return status;
     }
     count = command->data_bytes / COSMOS_FTL_NVME_BLOCK_BYTES;
-    if (count == 0U || count > COSMOS_NVME_FTL_MEDIA_MAX_LBAS ||
-        command->slot_tag > COSMOS_PCIE_HOST_DMA_SLOT_MASK) {
-        return COSMOS_INVALID;
-    }
     *lba = media_u64(command->lba_low, command->lba_high);
-    end = *lba + (unsigned long long)count;
-    if (end < *lba || end > media_u64(media->namespace_lba_low,
-                                      media->namespace_lba_high)) {
-        return COSMOS_INVALID;
-    }
     *lba_count = count;
     return COSMOS_OK;
 }
@@ -132,8 +115,8 @@ static int media_nfc_read(struct cosmos_nvme_ftl_media *media,
     struct cosmos_nfc_io io;
     struct cosmos_nfc_ecc ecc;
     unsigned int attempt;
-    unsigned int limit = media->nfc_retry_limit == 0U
-        ? COSMOS_NVME_FTL_MEDIA_DEFAULT_RETRIES : media->nfc_retry_limit;
+    unsigned int limit = cosmos_nvme_media_policy_retry_limit(
+        media->nfc_retry_limit);
     int status;
 
     if (needs_refresh != 0) {
@@ -150,7 +133,8 @@ static int media_nfc_read(struct cosmos_nvme_ftl_media *media,
     io.status_report_address = media->status_report_address;
     for (attempt = 0U; attempt < limit; ++attempt) {
         status = COSMOS_NVME_FTL_MEDIA_NFC_READ(&io, &ecc);
-        if (status != COSMOS_RETRY || attempt + 1U == limit) {
+        if (cosmos_nvme_media_policy_retry_terminal(
+                status, attempt, limit)) {
             if (status == COSMOS_OK && needs_refresh != 0) {
                 *needs_refresh = ecc.needs_refresh != 0U ? 1U : 0U;
             }
@@ -163,10 +147,10 @@ static int media_nfc_read(struct cosmos_nvme_ftl_media *media,
 static int media_read_mapped_page(struct cosmos_nvme_ftl_media *media,
                                   unsigned int ppa, unsigned int lpn,
                                   unsigned int *needs_refresh) {
-    unsigned int actual_lpn;
+    unsigned int actual_lpn = 0U;
     unsigned int attempt;
-    unsigned int limit = media->nfc_retry_limit == 0U
-        ? COSMOS_NVME_FTL_MEDIA_DEFAULT_RETRIES : media->nfc_retry_limit;
+    unsigned int limit = cosmos_nvme_media_policy_retry_limit(
+        media->nfc_retry_limit);
     unsigned long long generation;
     int status;
 
@@ -180,9 +164,10 @@ static int media_read_mapped_page(struct cosmos_nvme_ftl_media *media,
         status = media->ftl->backend.read_page_tag(
             media->ftl->backend.context, ppa, &actual_lpn, &generation,
             needs_refresh);
-        if (status != COSMOS_RETRY || attempt + 1U == limit) {
-            return status == COSMOS_OK && actual_lpn != lpn
-                ? COSMOS_HW_ERROR : status;
+        if (cosmos_nvme_media_policy_retry_terminal(
+                status, attempt, limit)) {
+            return cosmos_nvme_media_policy_mapped_read_status(
+                status, actual_lpn, lpn);
         }
     }
     return COSMOS_RETRY;
@@ -192,8 +177,8 @@ static int media_nfc_program(struct cosmos_nvme_ftl_media *media,
                              unsigned int ppa) {
     struct cosmos_nfc_io io;
     unsigned int attempt;
-    unsigned int limit = media->nfc_retry_limit == 0U
-        ? COSMOS_NVME_FTL_MEDIA_DEFAULT_RETRIES : media->nfc_retry_limit;
+    unsigned int limit = cosmos_nvme_media_policy_retry_limit(
+        media->nfc_retry_limit);
     int status;
 
     if (media_page_row(ppa, &io.channel, &io.way, &io.row_address) !=
@@ -207,7 +192,8 @@ static int media_nfc_program(struct cosmos_nvme_ftl_media *media,
     io.status_report_address = media->status_report_address;
     for (attempt = 0U; attempt < limit; ++attempt) {
         status = COSMOS_NVME_FTL_MEDIA_NFC_PROGRAM(&io);
-        if (status != COSMOS_RETRY || attempt + 1U == limit) {
+        if (cosmos_nvme_media_policy_retry_terminal(
+                status, attempt, limit)) {
             return status;
         }
     }
@@ -220,8 +206,8 @@ static int media_dma(struct cosmos_nvme_ftl_media *media,
                      unsigned int to_device) {
     int status;
 
-    if (command_offset > COSMOS_PCIE_HOST_DMA_AUTO_OFFSET_MAX ||
-        device_offset > COSMOS_NVME_FTL_MEDIA_PAGE_LBAS - 1U) {
+    if (!cosmos_nvme_media_policy_dma_offsets_valid(
+            command_offset, device_offset)) {
         return COSMOS_INVALID;
     }
     status = to_device
@@ -243,24 +229,23 @@ static int media_page_prepare(struct cosmos_nvme_ftl_media *media,
                               unsigned int page_count, int write,
                               unsigned int *refresh_ppa) {
     unsigned int ppa;
+    unsigned int action;
     int status;
-    int mapped = 0;
 
     if (refresh_ppa != 0) {
         *refresh_ppa = COSMOS_FTL_PPA_NONE;
     }
     status = cosmos_ftl_lookup(media->ftl, lpn, &ppa);
-    if (status == COSMOS_OK) {
-        mapped = 1;
-    } else if (status != COSMOS_UNAVAILABLE) {
+    action = cosmos_nvme_media_policy_page_action(
+        status, write != 0 ? 1U : 0U, page_offset, page_count);
+    if (action == COSMOS_NVME_MEDIA_PAGE_PROPAGATE) {
         return status;
     }
-    if (write && page_offset == 0U && page_count ==
-            COSMOS_NVME_FTL_MEDIA_PAGE_LBAS) {
+    if (action == COSMOS_NVME_MEDIA_PAGE_FULL_WRITE) {
         media_zero(media->spare_address, COSMOS_NFC_PAGE_SPARE_BYTES);
         return COSMOS_OK;
     }
-    if (mapped) {
+    if (action == COSMOS_NVME_MEDIA_PAGE_READ_MAPPED) {
         unsigned int needs_refresh;
 
         status = media_read_mapped_page(
@@ -286,9 +271,19 @@ static int media_commit(struct cosmos_nvme_ftl_media *media,
 
 static int media_begin(struct cosmos_nvme_ftl_media *media,
                        unsigned int retry_limit) {
-    if (media == 0 || media->ftl == 0 ||
-        __atomic_exchange_n(&media->busy, 1U, __ATOMIC_ACQUIRE) != 0U) {
-        return COSMOS_RETRY;
+    unsigned int prior_busy;
+    int status;
+
+    if (media == 0) {
+        return cosmos_nvme_media_policy_begin_status(0U, 0U, 0U);
+    }
+    if (media->ftl == 0) {
+        return cosmos_nvme_media_policy_begin_status(1U, 0U, 0U);
+    }
+    prior_busy = __atomic_exchange_n(&media->busy, 1U, __ATOMIC_ACQUIRE);
+    status = cosmos_nvme_media_policy_begin_status(1U, 1U, prior_busy);
+    if (status != COSMOS_OK) {
+        return status;
     }
     media->nfc_retry_limit = retry_limit;
     return COSMOS_OK;
@@ -312,8 +307,8 @@ static int media_rw(struct cosmos_nvme_ftl_media *media,
         return status;
     }
     status = media_begin(media,
-        (command->control & COSMOS_NVME_RW_LR) != 0U ? 1U :
-            COSMOS_NVME_FTL_MEDIA_DEFAULT_RETRIES);
+        cosmos_nvme_media_policy_command_retry_limit(
+            command->control, COSMOS_NVME_RW_LR));
     if (status != COSMOS_OK) {
         return status;
     }
@@ -323,14 +318,11 @@ static int media_rw(struct cosmos_nvme_ftl_media *media,
             COSMOS_NVME_FTL_MEDIA_PAGE_LBAS);
         unsigned int page_offset = (unsigned int)(lba %
             COSMOS_NVME_FTL_MEDIA_PAGE_LBAS);
-        unsigned int page_count = COSMOS_NVME_FTL_MEDIA_PAGE_LBAS -
-            page_offset;
+        unsigned int page_count = cosmos_nvme_media_policy_page_count(
+            page_offset, remaining);
         unsigned int refresh_ppa = COSMOS_FTL_PPA_NONE;
         unsigned int index;
 
-        if (page_count > remaining) {
-            page_count = remaining;
-        }
         status = media_page_prepare(media, lpn, page_offset, page_count,
                                     write, write ? 0 : &refresh_ppa);
         if (status != COSMOS_OK) {
@@ -381,24 +373,24 @@ static int media_zeroes(struct cosmos_nvme_ftl_media *media,
     unsigned int remaining;
     int status;
 
-    if (media == 0 || command == 0 || command->namespace_id !=
-            COSMOS_NVME_NAMESPACE_ID || command->data_bytes != 0U) {
-        return COSMOS_INVALID;
+    status = cosmos_nvme_media_policy_zeroes_span_status(
+        media != 0 ? 1U : 0U, command != 0 ? 1U : 0U,
+        command != 0 ? command->namespace_id : 0U,
+        command != 0 ? command->data_bytes : 0U,
+        command != 0 ? command->slot_tag : 0U,
+        command != 0 ? command->lba_low : 0U,
+        command != 0 ? command->lba_high : 0U,
+        command != 0 ? command->nlb : 0U,
+        media != 0 ? media->namespace_lba_low : 0U,
+        media != 0 ? media->namespace_lba_high : 0U);
+    if (status != COSMOS_OK) {
+        return status;
     }
     count = command->nlb + 1U;
-    if (count == 0U || count > COSMOS_NVME_FTL_MEDIA_MAX_LBAS ||
-        command->slot_tag > COSMOS_PCIE_HOST_DMA_SLOT_MASK) {
-        return COSMOS_INVALID;
-    }
     lba = media_u64(command->lba_low, command->lba_high);
-    if (lba + count < lba || lba + count >
-            media_u64(media->namespace_lba_low,
-                      media->namespace_lba_high)) {
-        return COSMOS_INVALID;
-    }
     status = media_begin(media,
-        (command->control & COSMOS_NVME_WRITE_ZEROES_LR) != 0U ? 1U :
-            COSMOS_NVME_FTL_MEDIA_DEFAULT_RETRIES);
+        cosmos_nvme_media_policy_command_retry_limit(
+            command->control, COSMOS_NVME_WRITE_ZEROES_LR));
     if (status != COSMOS_OK) {
         return status;
     }
@@ -408,16 +400,12 @@ static int media_zeroes(struct cosmos_nvme_ftl_media *media,
             COSMOS_NVME_FTL_MEDIA_PAGE_LBAS);
         unsigned int page_offset = (unsigned int)(lba %
             COSMOS_NVME_FTL_MEDIA_PAGE_LBAS);
-        unsigned int page_count = COSMOS_NVME_FTL_MEDIA_PAGE_LBAS -
-            page_offset;
+        unsigned int page_count = cosmos_nvme_media_policy_page_count(
+            page_offset, remaining);
         unsigned int index;
 
-        if (page_count > remaining) {
-            page_count = remaining;
-        }
         if ((command->control & COSMOS_NVME_WRITE_ZEROES_DEAC) != 0U &&
-            page_offset == 0U && page_count ==
-                COSMOS_NVME_FTL_MEDIA_PAGE_LBAS) {
+            cosmos_nvme_media_policy_full_page(page_offset, page_count)) {
             status = cosmos_ftl_discard_page(media->ftl, lpn);
         } else {
             status = media_page_prepare(media, lpn, page_offset, page_count,
@@ -444,15 +432,9 @@ static int media_zeroes(struct cosmos_nvme_ftl_media *media,
 static int media_dsm_range_valid(
     const struct cosmos_nvme_ftl_media *media,
     const struct cosmos_nvme_ftl_media_dsm_range *range) {
-    unsigned long long end;
-
-    if (range->attributes != 0U || range->length == 0U) {
-        return 0;
-    }
-    end = range->starting_lba + (unsigned long long)range->length;
-    return end >= range->starting_lba && end <=
-        media_u64(media->namespace_lba_low,
-                  media->namespace_lba_high);
+    return cosmos_nvme_media_policy_dsm_range_valid(
+        range->attributes, range->length, range->starting_lba,
+        media->namespace_lba_low, media->namespace_lba_high);
 }
 
 int cosmos_nvme_ftl_media_init(
@@ -460,7 +442,8 @@ int cosmos_nvme_ftl_media_init(
     unsigned int data_address, unsigned int spare_address,
     unsigned int completion_address, unsigned int status_report_address,
     unsigned int error_info_address) {
-    if (media == 0 || ftl == 0 || !media_address_set_valid(
+    if (!cosmos_nvme_media_policy_init_valid(
+            media != 0 ? 1U : 0U, ftl != 0 ? 1U : 0U,
             data_address, spare_address, completion_address,
             status_report_address, error_info_address)) {
         return COSMOS_INVALID;
@@ -520,16 +503,13 @@ int cosmos_nvme_ftl_media_deallocate(
     unsigned int offset;
     int status;
 
-    if (media == 0 || command == 0 || command->namespace_id !=
-            COSMOS_NVME_NAMESPACE_ID ||
-        (command->dataset_attributes & COSMOS_NVME_DSM_ATTRIBUTE_DEALLOCATE)
-            == 0U ||
-        (command->dataset_attributes & ~COSMOS_NVME_DSM_ATTRIBUTE_MASK) != 0U
-            || command->dataset_range_count == 0U ||
-        command->dataset_range_count > COSMOS_NVME_MAX_DSM_RANGES ||
-        command->data_bytes != command->dataset_range_count *
-            COSMOS_NVME_DSM_RANGE_BYTES ||
-        command->slot_tag > COSMOS_PCIE_HOST_DMA_SLOT_MASK) {
+    if (!cosmos_nvme_media_policy_deallocate_valid(
+            media != 0 ? 1U : 0U, command != 0 ? 1U : 0U,
+            command != 0 ? command->namespace_id : 0U,
+            command != 0 ? command->dataset_attributes : 0U,
+            command != 0 ? command->dataset_range_count : 0U,
+            command != 0 ? command->data_bytes : 0U,
+            command != 0 ? command->slot_tag : 0U)) {
         return COSMOS_INVALID;
     }
     range_count = command->dataset_range_count;
@@ -539,12 +519,10 @@ int cosmos_nvme_ftl_media_deallocate(
         return status;
     }
     for (offset = 0U; offset < bytes; offset += COSMOS_NFC_PAGE_DATA_BYTES) {
-        unsigned int chunk = bytes - offset;
+        unsigned int chunk = cosmos_nvme_media_policy_chunk_bytes(
+            bytes - offset);
         unsigned int chunk_index = offset / COSMOS_FTL_NVME_BLOCK_BYTES;
 
-        if (chunk > COSMOS_NFC_PAGE_DATA_BYTES) {
-            chunk = COSMOS_NFC_PAGE_DATA_BYTES;
-        }
         status = media_dma(media, command, chunk_index, 0U, 1);
         if (status != COSMOS_OK) {
             break;
@@ -571,13 +549,11 @@ int cosmos_nvme_ftl_media_deallocate(
                 unsigned int page_offset = (unsigned int)(
                     range.starting_lba % COSMOS_NVME_FTL_MEDIA_PAGE_LBAS);
                 unsigned int page_count =
-                    COSMOS_NVME_FTL_MEDIA_PAGE_LBAS - page_offset;
+                    cosmos_nvme_media_policy_page_count(
+                        page_offset, range.length);
 
-                if (page_count > range.length) {
-                    page_count = range.length;
-                }
-                if (page_offset == 0U && page_count ==
-                        COSMOS_NVME_FTL_MEDIA_PAGE_LBAS) {
+                if (cosmos_nvme_media_policy_full_page(
+                        page_offset, page_count)) {
                     status = cosmos_ftl_discard_page(media->ftl, lpn);
                 } else {
                     status = media_page_prepare(media, lpn, page_offset,

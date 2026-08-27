@@ -1,16 +1,62 @@
-"""Pure CUDA-module cache bookkeeping.
+"""CUDA Session — Primary Context, PTX Module Cache, Kernel Launch
 
-The former `CudaComputeSession` declared nine providerless CUDA functions with
-incompatible ad-hoc signatures.  Production does not import that execution
-façade; retaining it would let an unresolved foreign call fabricate a scalar or
-text result.  Real CUDA execution is owned by the typed engine2d/CUDA surfaces.
+@tag:stdlib
+@tag:gpu
 
-This module intentionally preserves only the allocation-free, bounded cache
-bookkeeping used by the module-cache contract.  It contains no SFFI boundary.
+Retains the CUDA primary context for a device, caches loaded PTX modules
+and kernel handles, and tracks allocation/launch statistics.
+
+Usage:
+    val session = CudaComputeSession.create(0, "managed")
+    val err = session.init_context()
+    val mod = session.load_ptx("fill", ptx_src)
+    val kern = session.get_kernel(mod, "fill_kernel")
+    val launch_err = session.launch(kern, 16, 16, 16, 16)
 """
 
 # ============================================================================
-# CudaModuleCache — flat fields for up to 4 cached module identities
+# Extern declarations
+# ============================================================================
+
+extern fn rt_cuda_primary_ctx_retain(device_id: i64) -> i64
+extern fn rt_cuda_primary_ctx_release(device_id: i64) -> i64
+extern fn rt_cuda_module_load(ctx: i64, ptx_source: text) -> i64
+extern fn rt_cuda_kernel_get(module: i64, name: text) -> i64
+extern fn rt_cuda_kernel_launch(kernel: i64, grid_x: i64, grid_y: i64, block_x: i64, block_y: i64) -> text
+extern fn rt_cuda_alloc_device(ctx: i64, size_bytes: i64) -> i64
+extern fn rt_cuda_memcpy_d2h(dst_offset: i64, src_ptr: i64, size: i64) -> text
+extern fn rt_cuda_stream_sync(ctx: i64) -> text
+extern fn rt_cuda_device_name(device_id: i64) -> text
+
+fn cuda_session_primary_ctx_retain(device_id: i64) -> i64:
+    rt_cuda_primary_ctx_retain(device_id)
+
+fn cuda_session_primary_ctx_release(device_id: i64) -> i64:
+    rt_cuda_primary_ctx_release(device_id)
+
+fn cuda_session_module_load(ctx: i64, ptx_source: text) -> i64:
+    rt_cuda_module_load(ctx, ptx_source)
+
+fn cuda_session_kernel_get(module: i64, name: text) -> i64:
+    rt_cuda_kernel_get(module, name)
+
+fn cuda_session_kernel_launch(kernel: i64, grid_x: i64, grid_y: i64, block_x: i64, block_y: i64) -> text:
+    rt_cuda_kernel_launch(kernel, grid_x, grid_y, block_x, block_y)
+
+fn cuda_session_alloc_device(ctx: i64, size_bytes: i64) -> i64:
+    rt_cuda_alloc_device(ctx, size_bytes)
+
+fn cuda_session_memcpy_d2h(dst_offset: i64, src_ptr: i64, size: i64) -> text:
+    rt_cuda_memcpy_d2h(dst_offset, src_ptr, size)
+
+fn cuda_session_stream_sync(ctx: i64) -> text:
+    rt_cuda_stream_sync(ctx)
+
+fn cuda_session_device_name(device_id: i64) -> text:
+    rt_cuda_device_name(device_id)
+
+# ============================================================================
+# CudaModuleCache — flat fields for up to 4 cached modules
 # ============================================================================
 
 class CudaModuleCache:
@@ -69,11 +115,13 @@ impl CudaModuleCache:
         0
 
 # ============================================================================
-# CudaComputeSession — compatibility cache owner, not a CUDA execution API
+# CudaComputeSession
 # ============================================================================
 
 class CudaComputeSession:
     device_id: i64
+    ctx_handle: i64
+    device_name: text
     mode: text
     module_cache: CudaModuleCache
     cache_reject_count: i64
@@ -83,6 +131,8 @@ impl CudaComputeSession:
     static fn create(device_id: i64, mode: text) -> CudaComputeSession:
         CudaComputeSession(
             device_id: device_id,
+            ctx_handle: 0,
+            device_name: "",
             mode: mode,
             module_cache: CudaModuleCache.create(),
             cache_reject_count: 0,

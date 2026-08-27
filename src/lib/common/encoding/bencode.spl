@@ -1,5 +1,3 @@
-use std.common.encoding.utf8.{text_codepoints}
-
 # Bencode Encoder / Decoder
 # Implements the BitTorrent Bencode format (BEP 3):
 #   https://www.bittorrent.org/beps/bep_0003.html
@@ -86,23 +84,8 @@ fn _benc_err(e: BencodeError) -> _BencDecResult:
 # ============================================================================
 
 fn _benc_char_at(s: text, i: i64) -> i64:
-    """Return the byte value at BYTE offset i (matching every caller's
-    `.length()`-bound loop, and matching `data.substring(cur, cur+slen)`
-    in _benc_decode_str_at, which is byte-indexed).
-    Was `s[i].ord()`: plain single-index text access is CHARACTER-indexed
-    on this engine (confirmed: "café"[3] is the whole 2-byte "é", not a
-    byte) while `.length()` returns BYTE length -- every decode function
-    below (_benc_decode_int_at/_benc_decode_str_at/_benc_decode_value_at/
-    _benc_decode_list_at/_benc_decode_dict_at, all mutually recursive)
-    walks `pos`/`cur` bounded by that byte length while reading through
-    this single helper, so fixing this one function fixes all of them at
-    once. Reachable from real bencode parsing (e.g. .torrent file
-    content, which is fundamentally binary and can contain any UTF-8
-    string value once represented as `text`) -- see
-    doc/08_tracking/bug/bracket_slice_byte_index_survey_2026-07-29.md and
-    bracket_slice_fix_pass_4_2026-07-29.md (where this exact function was
-    identified and deferred)."""
-    s.bytes()[i]
+    """Return the ordinal of s[i]."""
+    s[i].ord()
 
 fn _benc_is_digit(c: i64) -> bool:
     c >= 48 and c <= 57
@@ -236,23 +219,11 @@ fn bencode_encode_dict(keys: [text], values: [text]) -> text:
 # ============================================================================
 
 fn _benc_text_to_bytes(s: text) -> [u8]:
-    """Convert text to [u8] (byte values, masked to 8 bits per character's
-    codepoint -- NOT a real UTF-8 re-encode; see the bound-fix note
-    below)."""
-    # Bounded by CHARACTER count (text_codepoints(s).len()), not
-    # `s.length()` (BYTE count). `s[i]` (single-index) is CHARACTER-indexed
-    # on this engine (confirmed: "café"[3] is the whole "é", not a byte) --
-    # the old byte-length bound let `i` run past the last valid character
-    # index for any multi-byte input (e.g. "café" is 4 characters but 5
-    # bytes), silently appending a spurious extra `ch.ord() & 0xFF` from
-    # the out-of-range read instead of stopping at 4 characters. This is a
-    # bound fix only, matching this function's own pre-existing "masked to
-    # 8 bits" (i.e. not real UTF-8) design -- see
-    # doc/08_tracking/bug/bracket_slice_byte_index_survey_2026-07-29.md.
-    val char_count = text_codepoints(s).len()
+    """Convert text to [u8] (UTF-8 byte values, masked to 8 bits)."""
     var result: [u8] = []
     var i = 0
-    while i < char_count:
+    val slen = s.length()
+    while i < slen:
         val ch = s[i]
         result.push(ch.ord() & 0xFF)
         i = i + 1
@@ -283,7 +254,7 @@ fn _benc_decode_int_at(data: text, pos: i64) -> _BencDecResult:
     Returns ok with BInt(value) and consumed = bytes read."""
     val dlen = data.length()
     # pos must point to 'i'
-    if pos < 0 or pos >= dlen:
+    if pos >= dlen:
         return _benc_err(BencodeError.UnexpectedEnd)
     if _benc_char_at(data, pos) != _benc_char_i():
         return _benc_err(BencodeError.InvalidChar(pos))
@@ -350,26 +321,15 @@ fn _benc_decode_str_at(data: text, pos: i64) -> _BencDecResult:
     """Decode a bencode byte string starting at pos (which must be a digit).
     Returns ok with BStr(value) and consumed = bytes read."""
     val dlen = data.length()
-    if pos < 0 or pos >= dlen:
+    if pos >= dlen:
         return _benc_err(BencodeError.UnexpectedEnd)
     if not _benc_is_digit(_benc_char_at(data, pos)):
         return _benc_err(BencodeError.InvalidChar(pos))
-    if _benc_char_at(data, pos) == _benc_char_zero():
-        val next_pos = pos + 1
-        if next_pos >= dlen:
-            return _benc_err(BencodeError.UnexpectedEnd)
-        if _benc_char_at(data, next_pos) != _benc_char_colon():
-            return _benc_err(BencodeError.InvalidLength)
     # Parse length
     var cur = pos
     var slen: i64 = 0
     while (cur < dlen and _benc_is_digit(_benc_char_at(data, cur))):
-        val digit = _benc_digit_val(_benc_char_at(data, cur))
-        if slen > 922337203685477580:
-            return _benc_err(BencodeError.InvalidLength)
-        if slen == 922337203685477580 and digit > 7:
-            return _benc_err(BencodeError.InvalidLength)
-        slen = slen * 10 + digit
+        slen = slen * 10 + _benc_digit_val(_benc_char_at(data, cur))
         cur = cur + 1
     # Expect ':'
     if cur >= dlen:
@@ -391,7 +351,7 @@ fn _benc_decode_str_at(data: text, pos: i64) -> _BencDecResult:
 fn _benc_decode_value_at(data: text, pos: i64) -> _BencDecResult:
     """Decode any bencode value starting at pos."""
     val dlen = data.length()
-    if pos < 0 or pos >= dlen:
+    if pos >= dlen:
         return _benc_err(BencodeError.UnexpectedEnd)
     val ch = _benc_char_at(data, pos)
     if ch == _benc_char_i():
@@ -408,7 +368,7 @@ fn _benc_decode_value_at(data: text, pos: i64) -> _BencDecResult:
 fn _benc_decode_list_at(data: text, pos: i64) -> _BencDecResult:
     """Decode a bencode list starting at pos (which must be 'l')."""
     val dlen = data.length()
-    if pos < 0 or pos >= dlen:
+    if pos >= dlen:
         return _benc_err(BencodeError.UnexpectedEnd)
     if _benc_char_at(data, pos) != _benc_char_l():
         return _benc_err(BencodeError.InvalidChar(pos))
@@ -435,7 +395,7 @@ fn _benc_decode_list_at(data: text, pos: i64) -> _BencDecResult:
 fn _benc_decode_dict_at(data: text, pos: i64) -> _BencDecResult:
     """Decode a bencode dictionary starting at pos (which must be 'd')."""
     val dlen = data.length()
-    if pos < 0 or pos >= dlen:
+    if pos >= dlen:
         return _benc_err(BencodeError.UnexpectedEnd)
     if _benc_char_at(data, pos) != _benc_char_d():
         return _benc_err(BencodeError.InvalidChar(pos))

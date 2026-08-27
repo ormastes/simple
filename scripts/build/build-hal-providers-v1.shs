@@ -1,0 +1,38 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+output_dir=${1:-"$repo_root/build/bootstrap/hal-providers-v1"}
+mode=${2:-all}
+work=$(mktemp -d "${TMPDIR:-/tmp}/hal-providers-v1.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+mkdir -p "$output_dir"
+
+case "$mode" in all|native-only) ;; *) echo 'usage: build-hal-providers-v1.shs [output-dir] [all|native-only]' >&2; exit 64;; esac
+
+"${CC:-cc}" -std=c11 -O3 -DNDEBUG -Wall -Wextra -Werror -pedantic \
+    -DHAL_PROVIDER_KIND=1 \
+    "$repo_root/src/app/hal_provider/hal_provider_worker_v1.c" \
+    -o "$work/hal-provider-c-v1"
+"${RUSTC:-rustc}" -C opt-level=3 -C panic=abort -C overflow-checks=on \
+    "$repo_root/src/app/hal_provider/hal_provider_worker_v1.rs" \
+    -o "$work/hal-provider-rust-v1"
+
+if [ "$mode" = all ]; then
+    simple_bin=${SIMPLE_BIN:-"$repo_root/bin/simple"}
+    [ -x "$simple_bin" ] || { echo 'FAIL: pure-Simple compiler is unavailable; use native-only only for C/Rust development checks' >&2; exit 2; }
+    "$simple_bin" native-build --source "$repo_root/src/compiler" \
+        --source "$repo_root/src/app" --source "$repo_root/src/lib" \
+        --entry-closure --entry "$repo_root/src/app/hal_provider/pure_worker_v1.spl" \
+        --strip --output "$work/hal-provider-pure-v1"
+fi
+
+for provider in c rust; do
+    chmod 0755 "$work/hal-provider-$provider-v1"
+    mv "$work/hal-provider-$provider-v1" "$output_dir/hal-provider-$provider-v1"
+done
+if [ "$mode" = all ]; then
+    chmod 0755 "$work/hal-provider-pure-v1"
+    mv "$work/hal-provider-pure-v1" "$output_dir/hal-provider-pure-v1"
+fi
+printf '%s\n' "$output_dir"

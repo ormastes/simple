@@ -91,24 +91,7 @@ Host native window command JSON uses `WebRenderHostWindowCommand` and `web_rende
 
 ## WM API
 
-`src/os/services/wm/wm_service.spl` and `src/os/compositor/wm_core.spl` are the shared WM authority targets. `src/os/compositor/host_compositor_entry.spl` now uses the real `WmService` as its lifecycle handle and converts host bridge messages plus pointer-driven drag/resize into shared `WmAction` lifecycle operations. `src/os/desktop/shell.spl` routes remote create, create-web, destroy, focus, resize, move, set-title, minimize, maximize, restore, and update-tree compositor mutation through `apply_wm_action_to_compositor(...)` and keeps shell-owned side effects local. `src/os/compositor/wm_action_applier.spl` owns the shared remote update-tree materialization and the lifecycle/pointer helpers used by both `HostCompositor` and the SimpleOS QEMU WM evidence path. `src/os/compositor/simple_web_window_renderer.spl` remains the richer host-capable Simple Web content renderer; `src/os/compositor/shared_mdi_framebuffer_scene.spl` is the shared framebuffer-safe chrome/layout/content renderer for host direct-draw chrome and QEMU evidence. Remaining divergence is adapter-owned: host cached web pixels and native event/process plumbing, QEMU framebuffer backend/config, and the QEMU entry's direct use of shared scene/pointer helpers instead of constructing `SimpleOsGuiAdapter`.
-
-### Resolution And DPI Contract
-
-WM performance work must preserve output quality. A change is not an acceptable
-optimization if it lowers logical size, physical pixel size, DPI, text
-readability, theme fidelity, animation semantics, or renderer feature coverage.
-Host and SimpleOS WM targets must be designed for 8K-class desktops and higher
-(7680x4320 and above) and for at least 300 DPI content. Evidence may use smaller
-smoke fixtures only when explicitly labeled as smoke coverage; completion and
-performance claims must keep the requested target resolution and pixel density.
-
-Allowed optimizations remove real overhead: avoiding duplicate full-frame
-copies, avoiding per-pixel FFI, using retained/dirty rendering, batching spans,
-and sharing renderer/lifecycle code. Forbidden optimizations include shrinking
-the framebuffer, rendering fewer pixels than requested, replacing text with
-markers, bypassing CSS/theme application when the lane claims CSS coverage, or
-using hardcoded/dummy WM rectangles as completion evidence.
+`src/os/services/wm/wm_service.spl` and `src/os/compositor/wm_core.spl` are the shared WM authority targets. `src/os/compositor/host_compositor_entry.spl` now uses the real `WmService` as its lifecycle handle and converts host bridge messages plus pointer-driven drag/resize into shared `WmAction` lifecycle operations. `src/os/desktop/shell.spl` routes remote create, create-web, destroy, focus, resize, move, set-title, minimize, maximize, restore, and update-tree compositor mutation through `apply_wm_action_to_compositor(...)` and keeps shell-owned side effects local. `src/os/compositor/wm_action_applier.spl` owns the shared remote update-tree materialization. `src/os/compositor/simple_web_window_renderer.spl` is the SimpleOS adapter that turns common web render requests into compositor pixels. Remaining host WM work should keep moving host-native input/surface policy into shared WM paths and keep platform effects below the adapter boundary.
 
 The host adapter uses `HostedWindow` only as the platform projection of
 `WmLifecycleWindowState`. Conversion helpers
@@ -128,39 +111,6 @@ host-side lifecycle entry points are:
 Host process launch failure windows, native backend construction, event-loop
 pumping, and presentation remain adapter-owned side effects. They are not WM
 policy and must not duplicate lifecycle rules.
-
-### 2026-07-06 QEMU Render Path
-
-`shared_mdi_framebuffer_scene.spl` is the shared desktop renderer used by the
-x86_64 QEMU WM evidence path. Its freestanding content path draws Simple
-Web-style app areas directly through `CompositorBackend`, using compiled colors
-and shared MDI surface data only. This keeps the baremetal lane free of
-host-only `rt_file_exists`, theme-package file reads, host env probes, and
-runtime web-render queues.
-
-The host adapter is allowed to render window content with the richer
-`simple_web_window_renderer.spl` cached pixel path because host file/env/runtime
-facades are available there. The design boundary is source ownership, not byte
-identity of every presentation backend: shared WM chrome/layout/content source
-is common, while host/native and SimpleOS differ only in adapter effects and
-backend configuration.
-
-`SimpleOsGuiAdapter` is the tested SimpleOS-style bridge projection over
-`HostCompositor`: `deliver_bridge_request(...)` converts compositor bridge
-methods into shared WM lifecycle actions, `deliver_pointer_move(...)` and
-`deliver_left_button(...)` use the same pointer helpers, and
-`render_framebuffer_frame(...)` presents through the shared host compositor
-render path. The x86_64 QEMU evidence entry is deliberately thinner than that
-host-side wrapper because the baremetal lane has no host window/event loop, but
-it still enters the same Simple GUI internal-window scene before framebuffer
-drawing: lifecycle windows are converted by
-`render_shared_mdi_framebuffer_scene_for_lifecycle_windows(...)` to render
-windows, then to `simple_gui_internal_window_scene(...)` through
-`render_shared_mdi_framebuffer_scene_for_windows(...)` and
-`render_shared_mdi_framebuffer_scene_for_simple_gui_scene(...)`. This is the
-required shared rendering contract; host and SimpleOS may differ in adapter
-effects and backend configuration, not in WM policy or internal-window scene
-shape.
 
 ## Baremetal Overlay Design Boundary
 

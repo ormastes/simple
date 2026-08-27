@@ -2,14 +2,32 @@
 
 > Tests covering NewSessionTicket — RFC 8446 §4.6.1.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+```sdn id=new_session_ticket_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+new_session_ticket_spec -> std
+new_session_ticket_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=new_session_ticket_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# New Session Ticket Specification
+# new_session_ticket_spec
+
+Verifies the new session ticket behaviour end to end so maintainers of this
 
 ## Scenarios
 
@@ -365,23 +383,8 @@ expect(_nst_handshake_decode_to_store(rms)).to_equal(true)
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/tls13/new_session_ticket_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering NewSessionTicket — RFC 8446 §4.6.1.
-- NewSessionTicket — RFC 8446 §4.6.1
-
-## Scenario Summary
-
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 19 |
-| Active scenarios | 19 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
 
 
 </details>

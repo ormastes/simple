@@ -1,6 +1,6 @@
-# SimpleOS Render and SIMD Evidence
+# Simpleos Render Evidence Specification
 
-> Validates the portable QEMU/board identity contract and target-native SIMD
+> <details>
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,22 +9,7 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# SimpleOS Render and SIMD Evidence
-
-Validates the portable QEMU/board identity contract and target-native SIMD
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/01_unit/lib/common/renderdoc/simpleos_render_evidence_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-Validates the portable QEMU/board identity contract and target-native SIMD
-execution receipts independently from any live host or board run.
+# Simpleos Render Evidence Specification
 
 ## Scenarios
 
@@ -32,7 +17,6 @@ execution receipts independently from any live host or board run.
 
 #### should validate a correlated QEMU target record
 
-- should validate a correlated QEMU target record
 - Prepare correlated guest serial and QMP evidence
    - Expected: validate_simpleos_render_target_evidence(evidence).code equals `pass`
    - Expected: simpleos_render_target_status(evidence) equals `qemu-verified`
@@ -41,12 +25,10 @@ execution receipts independently from any live host or board run.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB REQ-016
-step("should validate a correlated QEMU target record")
 step("Prepare correlated guest serial and QMP evidence")
 val evidence = target_evidence("qemu", "", "", EVIDENCE_HASH, "boot-1")
 expect(validate_simpleos_render_target_evidence(evidence).code).to_equal("pass")
@@ -57,7 +39,6 @@ expect(simpleos_render_target_status(evidence)).to_equal("qemu-verified")
 
 #### should validate a complete physical-board record
 
-- should validate a complete physical-board record
 - Prepare identified board boot capture and transcript evidence
    - Expected: simpleos_render_target_status(evidence) equals `board-verified`
 
@@ -65,12 +46,10 @@ expect(simpleos_render_target_status(evidence)).to_equal("qemu-verified")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB REQ-019
-step("should validate a complete physical-board record")
 step("Prepare identified board boot capture and transcript evidence")
 val evidence = target_evidence("physical-board", "kv260-1", EVIDENCE_HASH, EVIDENCE_HASH, "boot-1")
 expect(simpleos_render_target_status(evidence)).to_equal("board-verified")
@@ -83,7 +62,6 @@ expect(simpleos_render_target_status(evidence)).to_equal("board-verified")
 
 #### should reject physical-board evidence without board identity
 
-- should reject physical-board evidence without board identity
 - Remove board identity from a physical run
    - Expected: validate_simpleos_render_target_evidence(evidence).code equals `missing-board-identity`
 
@@ -91,12 +69,10 @@ expect(simpleos_render_target_status(evidence)).to_equal("board-verified")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should reject physical-board evidence without board identity")
 step("Remove board identity from a physical run")
 val evidence = target_evidence("physical-board", "", "", EVIDENCE_HASH, "boot-1")
 expect(validate_simpleos_render_target_evidence(evidence).code).to_equal("missing-board-identity")
@@ -112,7 +88,6 @@ expect(validate_simpleos_render_target_evidence(evidence).code).to_equal("missin
 
 #### should identify an invalid physical-board serial hash exactly
 
-- should identify an invalid physical-board serial hash exactly
 - Corrupt only the board serial digest
    - Expected: result.code equals `missing-board-identity`
    - Expected: result.path equals `board_serial_hash`
@@ -121,12 +96,10 @@ expect(validate_simpleos_render_target_evidence(evidence).code).to_equal("missin
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should identify an invalid physical-board serial hash exactly")
 step("Corrupt only the board serial digest")
 val evidence = target_evidence(
     "physical-board", "kv260-1", "not-a-sha256", EVIDENCE_HASH, "boot-1")
@@ -145,7 +118,6 @@ expect(result.path).to_equal("board_serial_hash")
 
 #### should reject guest and external capture hash disagreement
 
-- should reject guest and external capture hash disagreement
 - Pair the guest receipt with another framebuffer
    - Expected: validate_simpleos_render_target_evidence(evidence).code equals `guest-capture-mismatch`
 
@@ -153,12 +125,10 @@ expect(result.path).to_equal("board_serial_hash")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should reject guest and external capture hash disagreement")
 step("Pair the guest receipt with another framebuffer")
 val evidence = target_evidence("qemu", "", "", OTHER_HASH, "boot-1")
 expect(validate_simpleos_render_target_evidence(evidence).code).to_equal("guest-capture-mismatch")
@@ -174,8 +144,8 @@ expect(validate_simpleos_render_target_evidence(evidence).code).to_equal("guest-
 
 #### should reject a missing guest rendering-buffer hash
 
-- should reject a missing guest rendering-buffer hash
 - Remove the guest framebuffer digest from an otherwise valid receipt
+- var evidence = target evidence
    - Expected: validate_simpleos_render_target_evidence(evidence).code equals `missing-guest-pixel-evidence`
    - Expected: simpleos_render_target_status(evidence) equals `fail`
 
@@ -183,12 +153,10 @@ expect(validate_simpleos_render_target_evidence(evidence).code).to_equal("guest-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should reject a missing guest rendering-buffer hash")
 step("Remove the guest framebuffer digest from an otherwise valid receipt")
 var evidence = target_evidence("qemu", "", "", EVIDENCE_HASH, "boot-1")
 evidence.guest_pixel_hash = ""
@@ -206,8 +174,8 @@ expect(simpleos_render_target_status(evidence)).to_equal("fail")
 
 #### should reject a CPU mirror labeled as guest readback
 
-- should reject a CPU mirror labeled as guest readback
 - Replace device-origin guest pixels with a CPU mirror
+- var evidence = target evidence
    - Expected: validate_simpleos_render_target_evidence(evidence).code equals `not-guest-device-readback`
    - Expected: simpleos_render_target_status(evidence) equals `fail`
 
@@ -215,12 +183,10 @@ expect(simpleos_render_target_status(evidence)).to_equal("fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should reject a CPU mirror labeled as guest readback")
 step("Replace device-origin guest pixels with a CPU mirror")
 var evidence = target_evidence("qemu", "", "", EVIDENCE_HASH, "boot-1")
 evidence.guest_readback_source = "cpu_mirror"
@@ -238,8 +204,8 @@ expect(simpleos_render_target_status(evidence)).to_equal("fail")
 
 #### should reject a noncanonical rendering-buffer format
 
-- should reject a noncanonical rendering-buffer format
 - Relabel ARGB evidence as an incompatible pixel format
+- var evidence = target evidence
    - Expected: validate_simpleos_render_target_evidence(evidence).code equals `unsupported-pixel-format`
    - Expected: simpleos_render_target_status(evidence) equals `fail`
 
@@ -247,12 +213,10 @@ expect(simpleos_render_target_status(evidence)).to_equal("fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should reject a noncanonical rendering-buffer format")
 step("Relabel ARGB evidence as an incompatible pixel format")
 var evidence = target_evidence("qemu", "", "", EVIDENCE_HASH, "boot-1")
 evidence.format = "rgb565"
@@ -270,8 +234,8 @@ expect(simpleos_render_target_status(evidence)).to_equal("fail")
 
 #### should reject device readback without guest driver identity
 
-- should reject device readback without guest driver identity
 - Remove the driver identity from an otherwise valid guest receipt
+- var evidence = target evidence
    - Expected: validate_simpleos_render_target_evidence(evidence).code equals `missing-driver-identity`
    - Expected: simpleos_render_target_status(evidence) equals `fail`
 
@@ -279,12 +243,10 @@ expect(simpleos_render_target_status(evidence)).to_equal("fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should reject device readback without guest driver identity")
 step("Remove the driver identity from an otherwise valid guest receipt")
 var evidence = target_evidence("qemu", "", "", EVIDENCE_HASH, "boot-1")
 evidence.driver_id = ""
@@ -302,20 +264,18 @@ expect(simpleos_render_target_status(evidence)).to_equal("fail")
 
 #### should reject a missing external capture pixel hash
 
-- should reject a missing external capture pixel hash
 - Remove the decoded capture framebuffer digest
+- var evidence = target evidence
    - Expected: validate_simpleos_render_target_evidence(evidence).code equals `missing-capture-pixel-evidence`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should reject a missing external capture pixel hash")
 step("Remove the decoded capture framebuffer digest")
 var evidence = target_evidence("qemu", "", "", EVIDENCE_HASH, "boot-1")
 evidence.capture_pixel_hash = ""
@@ -332,12 +292,14 @@ expect(validate_simpleos_render_target_evidence(evidence).code).to_equal("missin
 
 #### should require complete guest display-path identity
 
-- should require complete guest display-path identity
 - Remove each controller, scanout, and resource identity field
+- var controller = target evidence
    - Expected: controller_result.code equals `missing-display-path-identity`
    - Expected: controller_result.path equals `display_controller`
+- var scanout = target evidence
    - Expected: scanout_result.code equals `missing-display-path-identity`
    - Expected: scanout_result.path equals `scanout_id`
+- var resource = target evidence
    - Expected: resource_result.code equals `missing-display-path-identity`
    - Expected: resource_result.path equals `resource_id`
    - Expected: simpleos_render_target_status(resource) equals `fail`
@@ -346,12 +308,10 @@ expect(validate_simpleos_render_target_evidence(evidence).code).to_equal("missin
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB REQ-018
-step("should require complete guest display-path identity")
 step("Remove each controller, scanout, and resource identity field")
 var controller = target_evidence("qemu", "", "", EVIDENCE_HASH, "boot-1")
 controller.display_controller = ""
@@ -383,12 +343,14 @@ expect(simpleos_render_target_status(resource)).to_equal("fail")
 
 #### should require complete guest memory-path identity
 
-- should require complete guest memory-path identity
 - Remove each DMA, cache, and IOMMU mode
+- var dma = target evidence
    - Expected: dma_result.code equals `missing-memory-path-identity`
    - Expected: dma_result.path equals `dma_mode`
+- var cache = target evidence
    - Expected: cache_result.code equals `missing-memory-path-identity`
    - Expected: cache_result.path equals `cache_mode`
+- var iommu = target evidence
    - Expected: iommu_result.code equals `missing-memory-path-identity`
    - Expected: iommu_result.path equals `iommu_mode`
    - Expected: simpleos_render_target_status(iommu) equals `fail`
@@ -397,12 +359,10 @@ expect(simpleos_render_target_status(resource)).to_equal("fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should require complete guest memory-path identity")
 step("Remove each DMA, cache, and IOMMU mode")
 var dma = target_evidence("qemu", "", "", EVIDENCE_HASH, "boot-1")
 dma.dma_mode = ""
@@ -434,8 +394,8 @@ expect(simpleos_render_target_status(iommu)).to_equal("fail")
 
 #### should require boot transport for QEMU and physical boards
 
-- should require boot transport for QEMU and physical boards
 - Remove the boot mechanism from each runtime kind
+- var qemu = target evidence
    - Expected: qemu_result.code equals `missing-boot-transport`
    - Expected: qemu_result.path equals `boot_transport`
    - Expected: board_result.code equals `missing-boot-transport`
@@ -445,12 +405,10 @@ expect(simpleos_render_target_status(iommu)).to_equal("fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should require boot transport for QEMU and physical boards")
 step("Remove the boot mechanism from each runtime kind")
 var qemu = target_evidence("qemu", "", "", EVIDENCE_HASH, "boot-1")
 qemu.boot_transport = ""
@@ -476,8 +434,8 @@ expect(simpleos_render_target_status(board)).to_equal("fail")
 
 #### should require an external capture tool for every runtime
 
-- should require an external capture tool for every runtime
 - Remove the QEMU framebuffer capture tool
+- var evidence = target evidence
    - Expected: result.code equals `missing-capture-tool`
    - Expected: result.path equals `capture_tool`
    - Expected: simpleos_render_target_status(evidence) equals `fail`
@@ -486,12 +444,10 @@ expect(simpleos_render_target_status(board)).to_equal("fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should require an external capture tool for every runtime")
 step("Remove the QEMU framebuffer capture tool")
 var evidence = target_evidence("qemu", "", "", EVIDENCE_HASH, "boot-1")
 evidence.capture_tool = ""
@@ -511,12 +467,14 @@ expect(simpleos_render_target_status(evidence)).to_equal("fail")
 
 #### should reject nonpositive geometry with exact field paths
 
-- should reject nonpositive geometry with exact field paths
 - Invalidate width, height, and stride independently
+- var width = target evidence
    - Expected: width_result.code equals `invalid-dimensions`
    - Expected: width_result.path equals `width`
+- var height = target evidence
    - Expected: height_result.code equals `invalid-dimensions`
    - Expected: height_result.path equals `height`
+- var stride = target evidence
    - Expected: stride_result.code equals `invalid-dimensions`
    - Expected: stride_result.path equals `stride`
 
@@ -524,12 +482,10 @@ expect(simpleos_render_target_status(evidence)).to_equal("fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should reject nonpositive geometry with exact field paths")
 step("Invalidate width, height, and stride independently")
 var width = target_evidence("qemu", "", "", EVIDENCE_HASH, "boot-1")
 width.width = 0
@@ -560,10 +516,11 @@ expect(stride_result.path).to_equal("stride")
 
 #### should reject framebuffer byte-size arithmetic overflow
 
-- should reject framebuffer byte-size arithmetic overflow
 - Overflow row bytes and then total frame bytes
+- var row = target evidence
    - Expected: row_result.code equals `invalid-dimensions`
    - Expected: row_result.path equals `width`
+- var frame = target evidence
    - Expected: frame_result.code equals `frame-byte-size-overflow`
    - Expected: frame_result.path equals `height`
    - Expected: simpleos_render_target_status(frame) equals `fail`
@@ -572,12 +529,10 @@ expect(stride_result.path).to_equal("stride")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should reject framebuffer byte-size arithmetic overflow")
 step("Overflow row bytes and then total frame bytes")
 var row = target_evidence("qemu", "", "", EVIDENCE_HASH, "boot-1")
 row.width = 2305843009213693952
@@ -603,10 +558,11 @@ expect(simpleos_render_target_status(frame)).to_equal("fail")
 
 #### should require platform model and revision for every runtime
 
-- should require platform model and revision for every runtime
 - Remove QEMU machine model and revision independently
+- var model = target evidence
    - Expected: model_result.code equals `missing-platform-identity`
    - Expected: model_result.path equals `board_model`
+- var revision = target evidence
    - Expected: revision_result.code equals `missing-platform-identity`
    - Expected: revision_result.path equals `board_revision`
    - Expected: simpleos_render_target_status(revision) equals `fail`
@@ -615,12 +571,10 @@ expect(simpleos_render_target_status(frame)).to_equal("fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should require platform model and revision for every runtime")
 step("Remove QEMU machine model and revision independently")
 var model = target_evidence("qemu", "", "", EVIDENCE_HASH, "boot-1")
 model.board_model = ""
@@ -646,14 +600,18 @@ expect(simpleos_render_target_status(revision)).to_equal("fail")
 
 #### should accept supported targets and reject unknown target identity
 
-- should accept supported targets and reject unknown target identity
 - Exercise every supported architecture and reject unknown target fields
+- var aarch64 = target evidence
    - Expected: validate_simpleos_render_target_evidence(aarch64).code equals `pass`
+- var rv64 = target evidence
    - Expected: validate_simpleos_render_target_evidence(rv64).code equals `pass`
+- var runtime = target evidence
    - Expected: runtime_result.code equals `invalid-runtime`
    - Expected: runtime_result.path equals `runtime_kind`
+- var architecture = target evidence
    - Expected: architecture_result.code equals `invalid-architecture`
    - Expected: architecture_result.path equals `architecture`
+- var firmware = target evidence
    - Expected: firmware_result.code equals `invalid-firmware-hash`
    - Expected: firmware_result.path equals `firmware_hash`
 
@@ -661,12 +619,10 @@ expect(simpleos_render_target_status(revision)).to_equal("fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should accept supported targets and reject unknown target identity")
 step("Exercise every supported architecture and reject unknown target fields")
 var aarch64 = target_evidence("qemu", "", "", EVIDENCE_HASH, "boot-1")
 aarch64.architecture = "aarch64"
@@ -705,7 +661,6 @@ expect(firmware_result.path).to_equal("firmware_hash")
 
 #### should reject missing boot correlation
 
-- should reject missing boot correlation
 - Remove the boot identity from QEMU evidence
    - Expected: validate_simpleos_render_target_evidence(evidence).code equals `missing-correlation`
 
@@ -713,12 +668,10 @@ expect(firmware_result.path).to_equal("firmware_hash")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should reject missing boot correlation")
 step("Remove the boot identity from QEMU evidence")
 val evidence = target_evidence("qemu", "", "", EVIDENCE_HASH, "")
 expect(validate_simpleos_render_target_evidence(evidence).code).to_equal("missing-correlation")
@@ -734,11 +687,12 @@ expect(validate_simpleos_render_target_evidence(evidence).code).to_equal("missin
 
 #### should reject capture identity disagreement
 
-- should reject capture identity disagreement
 - Pair a serial receipt with a different captured frame
+- var evidence = target evidence
    - Expected: frame_result.code equals `frame-correlation-mismatch`
    - Expected: frame_result.path equals `capture_frame_id`
 - Pair a serial receipt with a different captured boot
+- var boot evidence = target evidence
    - Expected: boot_result.code equals `frame-correlation-mismatch`
    - Expected: boot_result.path equals `capture_boot_id`
 
@@ -746,12 +700,10 @@ expect(validate_simpleos_render_target_evidence(evidence).code).to_equal("missin
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should reject capture identity disagreement")
 step("Pair a serial receipt with a different captured frame")
 var evidence = target_evidence("qemu", "", "", EVIDENCE_HASH, "boot-1")
 evidence.capture_frame_id = "frame-2"
@@ -777,27 +729,32 @@ expect(boot_result.path).to_equal("capture_boot_id")
 
 #### should report the exact invalid receipt field
 
-- should report the exact invalid receipt field
 - Invalidate each field formerly hidden by a compound guard
+- var frame id = target evidence
    - Expected: validate_simpleos_render_target_evidence(frame_id).path equals `frame_id`
+- var capture frame id = target evidence
    - Expected: validate_simpleos_render_target_evidence(capture_frame_id).path equals `capture_frame_id`
+- var surface = target evidence
    - Expected: validate_simpleos_render_target_evidence(surface).path equals `surface_handle`
+- var sequence = target evidence
    - Expected: validate_simpleos_render_target_evidence(sequence).path equals `present_sequence`
+- var serial hash = target evidence
    - Expected: validate_simpleos_render_target_evidence(serial_hash).path equals `serial_log_hash`
+- var capture kind = target evidence
    - Expected: validate_simpleos_render_target_evidence(capture_kind).path equals `capture_kind`
+- var capture hash = target evidence
    - Expected: validate_simpleos_render_target_evidence(capture_hash).path equals `capture_hash`
+- var oracle hash = target evidence
    - Expected: validate_simpleos_render_target_evidence(oracle_hash).path equals `oracle_hash`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should report the exact invalid receipt field")
 step("Invalidate each field formerly hidden by a compound guard")
 var frame_id = target_evidence("qemu", "", "", EVIDENCE_HASH, "boot-1")
 frame_id.frame_id = ""
@@ -839,7 +796,6 @@ expect(validate_simpleos_render_target_evidence(oracle_hash).path).to_equal("ora
 
 #### should reject non-hex evidence hashes
 
-- should reject non-hex evidence hashes
 - Replace a capture digest with a same-length non-hex string
    - Expected: validate_simpleos_render_target_evidence(evidence).code equals `missing-capture-evidence`
 
@@ -847,12 +803,10 @@ expect(validate_simpleos_render_target_evidence(oracle_hash).path).to_equal("ora
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should reject non-hex evidence hashes")
 step("Replace a capture digest with a same-length non-hex string")
 val evidence = target_evidence("qemu", "", "", "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg", "boot-1")
 expect(validate_simpleos_render_target_evidence(evidence).code).to_equal("missing-capture-evidence")
@@ -864,7 +818,6 @@ expect(validate_simpleos_render_target_evidence(evidence).code).to_equal("missin
 
 #### should validate x86 AVX2 vector chunks for every operation
 
-- should validate x86 AVX2 vector chunks for every operation
 - Prepare x86 AVX2 runtime-owner counters and exact pixels
    - Expected: validate_simpleos_simd_render_evidence(simd_evidence("x86_64", "avx2", required_kernels(), EVIDENCE_HASH)).code equals `pass`
 
@@ -872,12 +825,10 @@ expect(validate_simpleos_render_target_evidence(evidence).code).to_equal("missin
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB REQ-020
-step("should validate x86 AVX2 vector chunks for every operation")
 step("Prepare x86 AVX2 runtime-owner counters and exact pixels")
 expect(validate_simpleos_simd_render_evidence(simd_evidence("x86_64", "avx2", required_kernels(), EVIDENCE_HASH)).code).to_equal("pass")
 ```
@@ -886,14 +837,17 @@ expect(validate_simpleos_simd_render_evidence(simd_evidence("x86_64", "avx2", re
 
 #### should report the exact missing guest identity field
 
-- should report the exact missing guest identity field
 - Invalidate each guest identity field independently
+- var image = simd evidence
    - Expected: image_result.code equals `missing-guest-identity`
    - Expected: image_result.operation equals `guest_image_hash`
+- var boot = simd evidence
    - Expected: boot_result.code equals `missing-guest-identity`
    - Expected: boot_result.operation equals `boot_id`
+- var frame = simd evidence
    - Expected: frame_result.code equals `missing-guest-identity`
    - Expected: frame_result.operation equals `frame_id`
+- var surface = simd evidence
    - Expected: surface_result.code equals `missing-guest-identity`
    - Expected: surface_result.operation equals `surface_handle`
 
@@ -901,12 +855,10 @@ expect(validate_simpleos_simd_render_evidence(simd_evidence("x86_64", "avx2", re
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should report the exact missing guest identity field")
 step("Invalidate each guest identity field independently")
 var image = simd_evidence("x86_64", "avx2", required_kernels(), EVIDENCE_HASH)
 image.guest_image_hash = ""
@@ -937,10 +889,10 @@ expect(surface_result.operation).to_equal("surface_handle")
 
 #### should validate AArch64 NEON vector chunks
 
-- should validate AArch64 NEON vector chunks
 - Prepare AArch64 NEON runtime-owner counters
    - Expected: validate_simpleos_simd_render_evidence(simd_evidence("aarch64", "neon", required_kernels(), EVIDENCE_HASH)).code equals `pass`
 - Distinguish detected ISA disagreement from an incompatible ISA
+- var detected = simd evidence
    - Expected: detected_result.code equals `isa-mismatch`
    - Expected: detected_result.operation equals `detected_isa`
    - Expected: pair_result.code equals `isa-mismatch`
@@ -950,12 +902,10 @@ expect(surface_result.operation).to_equal("surface_handle")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should validate AArch64 NEON vector chunks")
 step("Prepare AArch64 NEON runtime-owner counters")
 expect(validate_simpleos_simd_render_evidence(simd_evidence("aarch64", "neon", required_kernels(), EVIDENCE_HASH)).code).to_equal("pass")
 
@@ -975,7 +925,6 @@ expect(pair_result.operation).to_equal("actual_arch.detected_isa")
 
 #### should validate RV64 RVV vector chunks
 
-- should validate RV64 RVV vector chunks
 - Prepare vector-enabled RV64 runtime-owner counters
    - Expected: validate_simpleos_simd_render_evidence(simd_evidence("rv64", "rvv", required_kernels(), EVIDENCE_HASH)).code equals `pass`
 
@@ -983,12 +932,10 @@ expect(pair_result.operation).to_equal("actual_arch.detected_isa")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should validate RV64 RVV vector chunks")
 step("Prepare vector-enabled RV64 runtime-owner counters")
 expect(validate_simpleos_simd_render_evidence(simd_evidence("rv64", "rvv", required_kernels(), EVIDENCE_HASH)).code).to_equal("pass")
 ```
@@ -1000,24 +947,23 @@ expect(validate_simpleos_simd_render_evidence(simd_evidence("rv64", "rvv", requi
 
 #### should reject wrapper dispatch without actual vector chunks
 
-- should reject wrapper dispatch without actual vector chunks
 - Set fill dispatch positive while its vector chunks remain zero
    - Expected: result.code equals `zero-vector-chunks`
    - Expected: result.operation equals `fill.vector_chunks`
 - Report the exact invalid dispatch and lane counters
+- var dispatch = make simd kernel evidence
    - Expected: validate_simpleos_simd_render_evidence(simd_evidence("x86_64", "avx2", dispatch_kernels, EVIDENCE_HASH)).operation equals `fill.dispatch_calls`
+- var lanes = make simd kernel evidence
    - Expected: validate_simpleos_simd_render_evidence(simd_evidence("x86_64", "avx2", lane_kernels, EVIDENCE_HASH)).operation equals `fill.vector_lanes`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should reject wrapper dispatch without actual vector chunks")
 step("Set fill dispatch positive while its vector chunks remain zero")
 val kernels = [make_simd_kernel_evidence("fill", 0, 0, ""), make_simd_kernel_evidence("copy", 4, 0, ""), make_simd_kernel_evidence("alpha", 4, 0, ""), make_simd_kernel_evidence("scroll", 4, 0, "")]
 val result = validate_simpleos_simd_render_evidence(simd_evidence("x86_64", "avx2", kernels, EVIDENCE_HASH))
@@ -1046,7 +992,6 @@ expect(validate_simpleos_simd_render_evidence(simd_evidence("x86_64", "avx2", la
 
 #### should reject required scalar fallback
 
-- should reject required scalar fallback
 - Report the exact alpha fallback counter
    - Expected: counter_result.code equals `required-operation-scalar-fallback`
    - Expected: counter_result.operation equals `alpha.scalar_fallback_calls`
@@ -1058,12 +1003,10 @@ expect(validate_simpleos_simd_render_evidence(simd_evidence("x86_64", "avx2", la
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should reject required scalar fallback")
 step("Report the exact alpha fallback counter")
 val counter_kernels = [make_simd_kernel_evidence("fill", 4, 0, ""), make_simd_kernel_evidence("copy", 4, 0, ""), make_simd_kernel_evidence("alpha", 4, 1, ""), make_simd_kernel_evidence("scroll", 4, 0, "")]
 val counter_result = validate_simpleos_simd_render_evidence(simd_evidence("aarch64", "neon", counter_kernels, EVIDENCE_HASH))
@@ -1087,19 +1030,23 @@ expect(reason_result.operation).to_equal("alpha.fallback_reason")
 
 #### should reject exact-pixel disagreement
 
-- should reject exact-pixel disagreement
 - Change the SIMD output hash while counters remain positive
    - Expected: output_result.code equals `simd-oracle-mismatch`
    - Expected: output_result.operation equals `simd_output_hash`
+- var qmp = simd evidence
    - Expected: qmp_result.code equals `simd-oracle-mismatch`
    - Expected: qmp_result.operation equals `qmp_capture_hash`
+- var mismatch = simd evidence
    - Expected: mismatch_result.code equals `simd-oracle-mismatch`
    - Expected: mismatch_result.operation equals `mismatch_count`
 - Report the exact malformed pixel-evidence hash
+- var scalar hash = simd evidence
    - Expected: scalar_result.code equals `invalid-output-hash`
    - Expected: scalar_result.operation equals `scalar_oracle_hash`
+- var simd hash = simd evidence
    - Expected: simd_result.code equals `invalid-output-hash`
    - Expected: simd_result.operation equals `simd_output_hash`
+- var capture hash = simd evidence
    - Expected: capture_result.code equals `invalid-output-hash`
    - Expected: capture_result.operation equals `qmp_capture_hash`
 
@@ -1107,12 +1054,10 @@ expect(reason_result.operation).to_equal("alpha.fallback_reason")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB REQ-021
-step("should reject exact-pixel disagreement")
 step("Change the SIMD output hash while counters remain positive")
 val output_result = validate_simpleos_simd_render_evidence(simd_evidence("rv64", "rvv", required_kernels(), OTHER_HASH))
 expect(output_result.code).to_equal("simd-oracle-mismatch")
@@ -1160,7 +1105,6 @@ expect(capture_result.operation).to_equal("qmp_capture_hash")
 
 #### should reject duplicate SIMD operations
 
-- should reject duplicate SIMD operations
 - Duplicate fill while omitting scroll
    - Expected: validate_simpleos_simd_render_evidence(simd_evidence("x86_64", "avx2", kernels, EVIDENCE_HASH)).code equals `duplicate-required-operation`
 - Report each missing required operation
@@ -1174,12 +1118,10 @@ expect(capture_result.operation).to_equal("qmp_capture_hash")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should reject duplicate SIMD operations")
 step("Duplicate fill while omitting scroll")
 val kernels = [make_simd_kernel_evidence("fill", 4, 0, ""), make_simd_kernel_evidence("fill", 4, 0, ""), make_simd_kernel_evidence("copy", 4, 0, ""), make_simd_kernel_evidence("alpha", 4, 0, "")]
 expect(validate_simpleos_simd_render_evidence(simd_evidence("x86_64", "avx2", kernels, EVIDENCE_HASH)).code).to_equal("duplicate-required-operation")
@@ -1205,6 +1147,22 @@ expect(missing_result.operation).to_equal("scroll")
 
 </details>
 
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/01_unit/lib/common/renderdoc/simpleos_render_evidence_spec.spl` |
+| Updated | 2026-07-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering:
+- SimpleOS portable rendering evidence
+- SimpleOS target-native SIMD evidence
+
 ## Scenario Summary
 
 | Metric | Count |
@@ -1217,65 +1175,3 @@ expect(missing_result.operation).to_equal("scroll")
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-LIB`
-- `REQ-016`
-- `REQ-018`
-- `REQ-019`
-- `REQ-020`
-- `REQ-021`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `b38e1f83499b2605ff6400e38e11baf7d795ea131b57605559eea2aa06bab59a`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `b38e1f83499b2605ff6400e38e11baf7d795ea131b57605559eea2aa06bab59a`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `b38e1f83499b2605ff6400e38e11baf7d795ea131b57605559eea2aa06bab59a`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/lib/common/renderdoc/simpleos_render_evidence_spec.spl
-mirror: doc/06_spec/01_unit/lib/common/renderdoc/simpleos_render_evidence_spec.md (current)
-findings: 8 blockers: 0
-  narrative=100 structure=70 oracle=100
-  traceability=100 evidence=100 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/common/renderdoc/simpleos_render_evidence_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/common/renderdoc/simpleos_render_evidence_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/common/renderdoc/simpleos_render_evidence_spec.spl:71:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should validate a correlated QEMU target record' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/lib/common/renderdoc/simpleos_render_evidence_spec.spl:79:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should validate a complete physical-board record' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/lib/common/renderdoc/simpleos_render_evidence_spec.spl:87:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject physical-board evidence without board identity' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/lib/common/renderdoc/simpleos_render_evidence_spec.spl:95:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should identify an invalid physical-board serial hash exactly' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/lib/common/renderdoc/simpleos_render_evidence_spec.spl:106:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject guest and external capture hash disagreement' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/lib/common/renderdoc/simpleos_render_evidence_spec.spl:114:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject a missing guest rendering-buffer hash' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-<!-- sspec-maintain:scorecard:end -->

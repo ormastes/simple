@@ -1,0 +1,448 @@
+#!/bin/sh
+# Scoped Cosmos SMP/GIC pure-policy parity, execution-counter, object, and link gate.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+checker=$root/scripts/check/check-cosmos-smp-gic-policy.shs
+evidence_helper=$root/scripts/check/lib/riscv-hal-migration-evidence.shs
+stage3_helper=$root/scripts/check/lib/bootstrap-stage3-provenance.shs
+stage4_helper=$root/scripts/check/lib/stage4-candidate-provenance.shs
+source_dir=$root/src/os/kernel/arch/arm32/cosmos
+test_dir=$root/test/02_integration/os/cosmos
+policy_rel=src/os/kernel/arch/arm32/cosmos/cosmos_smp_gic_policy.spl
+policy=$root/$policy_rel
+c_bridge=$source_dir/cosmos_smp_gic.c
+header=$source_dir/cosmos_smp_gic_policy.h
+oracle=$test_dir/cosmos_smp_gic_policy_oracle.c
+oracle_dump=$test_dir/cosmos_smp_gic_policy_oracle_dump.c
+simple_dump=$test_dir/cosmos_smp_gic_policy_parity_dump.spl
+unit_spec=$root/test/01_unit/os/arch/arm32/cosmos_smp_gic_policy_spec.spl
+link_test=$test_dir/cosmos_smp_gic_policy_link_test.c
+production_build=$source_dir/build.shs
+production_receipt=$source_dir/cosmos_build_receipt.shs
+production_link_gate=$test_dir/run_cosmos_storage_link_contract_test.shs
+cosmos_hal_header=$source_dir/cosmos_hal.h
+pcie_regs_header=$source_dir/cosmos_pcie_regs.h
+mode=admitted
+
+case ${1:-} in
+    "") ;;
+    --seed-diagnostic) mode=seed-diagnostic ;;
+    *) echo "usage: $0 [--seed-diagnostic]" >&2; exit 2 ;;
+esac
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/cosmos-smp-gic-policy.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+fail() {
+    echo "STATUS: FAIL cosmos SMP/GIC policy: $*" >&2
+    exit 1
+}
+
+blocked() {
+    echo "STATUS: BLOCKED cosmos SMP/GIC policy: $*" >&2
+    exit 2
+}
+
+[ -f "$evidence_helper" ] || blocked "canonical evidence helper unavailable"
+command -v sha256sum >/dev/null 2>&1 || blocked "sha256sum unavailable"
+evidence_helper_sha=$(sha256sum "$evidence_helper" | awk '{print $1}')
+. "$evidence_helper"
+hal_migration_verify_expected_hash \
+    "$evidence_helper" "$evidence_helper_sha" evidence-helper
+HAL_MIGRATION_LANE=cosmos_smp_gic_policy
+export HAL_MIGRATION_LANE
+
+if [ "$mode" = admitted ]; then
+    [ "${SIMPLE_STAGE4_BIN+x}" = x ] && [ -n "$SIMPLE_STAGE4_BIN" ] ||
+        blocked "set SIMPLE_STAGE4_BIN to an admitted pure-Simple Stage-4 compiler"
+    simple=$(hal_migration_canonical_file "$SIMPLE_STAGE4_BIN") ||
+        blocked "cannot resolve Stage-4 compiler canonically"
+    [ -x "$simple" ] || blocked "Stage-4 compiler is not executable: $simple"
+    provenance=${simple}.provenance.env
+    [ -f "$provenance" ] ||
+        blocked "adjacent Stage-4 provenance is missing: $provenance"
+    [ -f "$stage3_helper" ] && [ -f "$stage4_helper" ] ||
+        blocked "Stage-4 provenance helpers unavailable"
+
+    hal_migration_begin_input_freeze "$tmp/evidence-inputs.tsv"
+    hal_migration_capture_input checker "$checker"
+    hal_migration_capture_input evidence_helper "$evidence_helper"
+    hal_migration_capture_input stage3_helper "$stage3_helper"
+    hal_migration_capture_input stage4_helper "$stage4_helper"
+    hal_migration_capture_input stage4_binary "$simple"
+    hal_migration_capture_input stage4_provenance "$provenance"
+    hal_migration_capture_input simple_owner "$policy"
+    hal_migration_capture_input c_bridge "$c_bridge"
+    hal_migration_capture_input abi_header "$header"
+    hal_migration_capture_input cosmos_hal_header "$cosmos_hal_header"
+    hal_migration_capture_input pcie_regs_header "$pcie_regs_header"
+    hal_migration_capture_input c_oracle "$oracle"
+    hal_migration_capture_input c_oracle_vector_driver "$oracle_dump"
+    hal_migration_capture_input simple_vector_driver "$simple_dump"
+    hal_migration_capture_input simple_unit_spec "$unit_spec"
+    hal_migration_capture_input mixed_link_driver "$link_test"
+    hal_migration_capture_input production_build_gate "$production_build"
+    hal_migration_capture_input production_receipt_gate "$production_receipt"
+    hal_migration_capture_input production_link_gate "$production_link_gate"
+    hal_migration_seal_input_freeze
+
+    BOOTSTRAP_STAGE3_FACADE_PATH=$stage3_helper
+    STAGE4_PROVENANCE_HELPER_PATH=$stage4_helper
+    export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+    . "$stage3_helper"
+    . "$stage4_helper"
+    stage4_verify_candidate_provenance "$provenance" "$simple" "$root" ||
+        blocked "compiler is not an admitted pure-Simple Stage-4 candidate"
+    case $("$simple" --version 2>&1 || true) in
+        *"Rust-built Simple binary is a bootstrap seed"*|*"bootstrap seed only"*)
+            blocked "a bootstrap seed cannot prove the pure-Simple policy" ;;
+    esac
+    simple_sha=$(hal_migration_frozen_hash stage4_binary "$simple")
+    provenance_sha=$(hal_migration_frozen_hash stage4_provenance "$provenance")
+    is_seed=false
+else
+    simple=${SIMPLE_BIN:-$root/bin/simple}
+    [ -x "$simple" ] || blocked "Simple compiler unavailable: $simple"
+    case $("$simple" --version 2>&1 || true) in
+        *"Rust-built Simple binary is a bootstrap seed"*|*"bootstrap seed only"*)
+            is_seed=true ;;
+        *) is_seed=false ;;
+    esac
+fi
+
+command -v cc >/dev/null 2>&1 || blocked "host C compiler unavailable"
+command -v nm >/dev/null 2>&1 || blocked "nm unavailable"
+command -v readelf >/dev/null 2>&1 || blocked "readelf unavailable"
+
+cat > "$tmp/decision-names" <<'EOF'
+00 limit.words-nonzero
+01 limit.words-within-max
+02 target.word-zero
+03 generation.wrap
+04 release.cpu-primary
+05 release.entry-present
+06 release.stack-present
+07 release.entry-aligned
+08 release.stack-aligned
+09 secondary.success
+10 ack.state-acked
+11 ack.generation-matches
+12 pcie.words-valid
+13 pcie.word-in-range
+14 quiesce.handler-ok
+15 quiesce.spurious
+16 quiesce.cpu-local
+EOF
+
+while read -r id name; do
+    grep -Fqx "# D$id $name" "$policy" ||
+        fail "named decision D$id $name is not pinned"
+    number=${id#0}
+    [ -n "$number" ] || number=0
+    count=$(grep -Fc "_policy_coverage_record(${number}u32," "$policy" || true)
+    [ "$count" -eq 1 ] ||
+        fail "decision D$id must have exactly one production recording site (found $count)"
+done < "$tmp/decision-names"
+
+cat > "$tmp/policy-symbols" <<'EOF'
+cosmos_gic_limit_words
+cosmos_gic_words_from_typer
+cosmos_gic_target_for_word
+cosmos_smp_next_generation
+cosmos_smp_release_request_valid
+cosmos_smp_ready_observed
+cosmos_smp_secondary_state
+cosmos_smp_ack_observed
+cosmos_smp_poll_allowed
+cosmos_gic_irq_id
+cosmos_gic_irq_is_spurious
+cosmos_gic_disable_offset
+cosmos_gic_disable_mask
+cosmos_gic_byte_shift
+cosmos_gic_config_shift
+cosmos_gic_priority_offset
+cosmos_gic_target_offset
+cosmos_gic_config_offset
+cosmos_gic_priority_value
+cosmos_gic_target_cpu0_value
+cosmos_gic_level_config_value
+cosmos_gic_pcie_irq_in_range
+cosmos_gic_eoir_required
+cosmos_gic_quiesce_kind
+EOF
+
+cat > "$tmp/all-exports" <<'EOF'
+cosmos_smp_gic_policy_coverage_reset
+cosmos_smp_gic_policy_coverage_mask
+cosmos_smp_gic_policy_coverage_required
+cosmos_smp_gic_policy_coverage_decisions
+EOF
+cat "$tmp/policy-symbols" >> "$tmp/all-exports"
+
+[ "$(wc -l < "$tmp/policy-symbols" | tr -d ' ')" -eq 24 ] ||
+    fail "policy symbol inventory is not 24 functions"
+[ "$(wc -l < "$tmp/all-exports" | tr -d ' ')" -eq 28 ] ||
+    fail "full export inventory is not 28 functions"
+
+while read -r symbol; do
+    grep -Fq "name: \"$symbol\"" "$policy" ||
+        fail "Simple export missing: $symbol"
+    grep -Eq "^(void|int|unsigned int|unsigned long long) $symbol\\(" "$header" ||
+        fail "C declaration missing: $symbol"
+done < "$tmp/all-exports"
+
+while read -r symbol; do
+    if grep -Eq "^(static )?(unsigned int|int) $symbol\\(" "$c_bridge"; then
+        fail "C bridge still defines scalar policy body: $symbol"
+    fi
+done < "$tmp/policy-symbols"
+grep -Fq '#include "cosmos_smp_gic_policy.h"' "$c_bridge" ||
+    fail "C bridge does not consume the pure-policy ABI"
+grep -Fq -- '--entry "$SCRIPT_DIR/cosmos_smp_gic_policy.spl"' \
+    "$production_build" || fail "production build omits SMP/GIC policy entry"
+grep -Fq 'OBJECTS="$OBJECTS $OBJ/cosmos_smp_gic_policy_simple.o"' \
+    "$production_build" || fail "production link omits SMP/GIC policy object"
+for source in cosmos_smp_gic.c cosmos_smp_gic_policy.h \
+        cosmos_smp_gic_policy.spl; do
+    grep -Eq "^[[:space:]]+$source( \\\\)?$" "$production_receipt" ||
+        fail "production receipt omits $source"
+done
+grep -Fq 'cosmos_smp_gic_policy.spl:cosmos_smp_gic_policy_simple.o' \
+    "$production_link_gate" ||
+    fail "production storage link gate omits SMP/GIC policy object"
+
+cc -std=c11 -O2 -Wall -Wextra -Werror -Wpedantic -Wshadow \
+    -Wconversion -Wstrict-prototypes -DCOSMOS_CONTRACT_TEST \
+    -I"$source_dir" -c "$c_bridge" -o "$tmp/cosmos_smp_gic_contract.o"
+
+nm -u "$tmp/cosmos_smp_gic_contract.o" |
+    awk '{ print $NF }' | LC_ALL=C sort -u > "$tmp/c-bridge-undefined"
+while read -r symbol; do
+    grep -Fxq "$symbol" "$tmp/policy-symbols" ||
+        fail "C contract bridge has non-policy dependency: $symbol"
+done < "$tmp/c-bridge-undefined"
+[ "$(wc -l < "$tmp/c-bridge-undefined" | tr -d ' ')" -gt 0 ] ||
+    fail "C contract bridge has zero pure-policy dependencies"
+
+cc -std=c11 -O2 -Wall -Wextra -Werror -Wpedantic -Wshadow \
+    -Wconversion -Wstrict-prototypes -I"$source_dir" \
+    "$oracle" "$oracle_dump" -o "$tmp/oracle-dump"
+"$tmp/oracle-dump" > "$tmp/c-oracle.out"
+parity_vectors=$(wc -l < "$tmp/c-oracle.out" | tr -d ' ')
+[ "$parity_vectors" -eq 234 ] ||
+    fail "C oracle vector inventory changed: $parity_vectors != 234"
+
+coverage_clang=
+coverage_profdata=
+coverage_cov=
+for version in 20 19 18 17 16 15 14; do
+    if command -v "clang-$version" >/dev/null 2>&1 &&
+            command -v "llvm-profdata-$version" >/dev/null 2>&1 &&
+            command -v "llvm-cov-$version" >/dev/null 2>&1; then
+        coverage_clang=clang-$version
+        coverage_profdata=llvm-profdata-$version
+        coverage_cov=llvm-cov-$version
+        break
+    fi
+done
+[ -n "$coverage_clang" ] ||
+    blocked "matching Clang/LLVM coverage toolchain unavailable"
+
+"$coverage_clang" -O0 -g -fprofile-instr-generate -fcoverage-mapping \
+    -I"$source_dir" "$oracle" "$oracle_dump" -o "$tmp/oracle-coverage"
+LLVM_PROFILE_FILE="$tmp/oracle.profraw" "$tmp/oracle-coverage" >/dev/null
+"$coverage_profdata" merge -sparse "$tmp/oracle.profraw" \
+    -o "$tmp/oracle.profdata"
+"$coverage_cov" report "$tmp/oracle-coverage" \
+    -instr-profile="$tmp/oracle.profdata" "$oracle" \
+    > "$tmp/oracle-coverage.txt"
+branch_pair=$(awk '
+    $1 ~ /cosmos_smp_gic_policy_oracle[.]c$/ {
+        print $(NF - 2), $(NF - 1)
+    }
+' "$tmp/oracle-coverage.txt")
+set -- $branch_pair
+[ "$#" -eq 2 ] || fail "cannot parse frozen C oracle branch denominator"
+c_branch_total=$1
+c_branch_missed=$2
+c_branch_hit=$((c_branch_total - c_branch_missed))
+[ "$c_branch_total" -eq 34 ] ||
+    fail "frozen C oracle branch denominator changed: $c_branch_total != 34"
+[ "$c_branch_hit" -eq "$c_branch_total" ] ||
+    fail "frozen C oracle branches incomplete: $c_branch_hit/$c_branch_total"
+echo "cosmos_smp_gic_c_oracle_branches=$c_branch_hit/$c_branch_total"
+
+if [ "$mode" = admitted ]; then
+    [ "$is_seed" = false ] || blocked "admitted compiler resolved to a bootstrap seed"
+fi
+
+(cd "$root" && SIMPLE_LIB=src "$simple" run \
+    test/02_integration/os/cosmos/cosmos_smp_gic_policy_parity_dump.spl \
+    --no-session-daemon) > "$tmp/simple-run.out" 2>&1 ||
+    fail "pure-Simple parity driver failed"
+grep '^P|' "$tmp/simple-run.out" > "$tmp/simple-policy.out"
+cmp -s "$tmp/c-oracle.out" "$tmp/simple-policy.out" ||
+    fail "pure-Simple output diverges from the frozen pre-migration C oracle"
+
+coverage=$(awk -F'|' '$1 == "COVERAGE" { print $2, $3, $4 }' \
+    "$tmp/simple-run.out" | tail -n 1)
+set -- $coverage
+[ "$#" -eq 3 ] || fail "runtime decision counter record missing"
+actual_mask=$1
+required_mask=$2
+decision_count=$3
+[ "$decision_count" -eq 17 ] || fail "runtime decision denominator is not 17"
+[ "$required_mask" -eq 17179869183 ] || fail "required outcome mask is not 34 bits"
+[ "$actual_mask" -eq "$required_mask" ] ||
+    fail "actual execution outcomes incomplete: mask=$actual_mask required=$required_mask"
+
+(cd "$root" && SIMPLE_LIB=src "$simple" test \
+    test/01_unit/os/arch/arm32/cosmos_smp_gic_policy_spec.spl \
+    --quick --no-limits --no-session-daemon) > "$tmp/unit.out" 2>&1 ||
+    fail "pure-Simple policy unit spec failed"
+
+if [ "$mode" = seed-diagnostic ]; then
+    echo "cosmos_smp_gic_seed_diagnostic_parity=$parity_vectors/$parity_vectors"
+    echo "cosmos_smp_gic_seed_diagnostic_outcomes=34/34"
+    echo "STATUS: DIAGNOSTIC cosmos SMP/GIC policy; Rust seed results are non-acceptance evidence"
+    exit 0
+fi
+
+build_object() {
+    target=$1
+    cache=$2
+    output=$3
+    (cd "$root" && SIMPLE_LIB=src "$simple" native-build \
+        --backend llvm \
+        --source "$source_dir" \
+        --entry-closure \
+        --entry "$policy" \
+        --target "$target" \
+        --emit-object \
+        --no-mangle \
+        --cache-dir "$cache" \
+        -o "$output")
+}
+
+validate_object() {
+    object=$1
+    machine=$2
+    symbols=$tmp/$(basename "$object").symbols
+    readelf -sW "$object" > "$symbols"
+    readelf -hW "$object" | grep -Eq 'Type:[[:space:]]+REL' ||
+        fail "$object is not relocatable"
+    readelf -hW "$object" | grep -Eq "Machine:[[:space:]]+$machine" ||
+        fail "$object has wrong machine"
+    while read -r symbol; do
+        awk -v symbol="$symbol" \
+            '$4 == "FUNC" && $5 == "GLOBAL" && $6 == "DEFAULT" &&
+             $7 != "UND" && $8 == symbol { count++ }
+             END { exit count != 1 }' "$symbols" ||
+            fail "$object does not define exactly one $symbol"
+    done < "$tmp/all-exports"
+    undefined=$(awk '$7 == "UND" && $8 != "" { print $8 }' "$symbols" |
+        LC_ALL=C sort -u)
+    [ -z "$undefined" ] || fail "$object has undefined symbols: $undefined"
+    awk '$7 != "UND" && ($8 == "main" || $8 == "_start" ||
+                          $8 == "__simple_main" || $8 ~ /^rt_/) { bad = 1 }
+         END { exit bad }' "$symbols" ||
+        fail "$object defines a forbidden entry/runtime symbol"
+}
+
+host_object=$tmp/cosmos_smp_gic_policy_host.o
+arm_object=$tmp/cosmos_smp_gic_policy_arm.o
+build_object x86_64-unknown-linux-gnu "$tmp/host-cache" "$host_object"
+validate_object "$host_object" 'Advanced Micro Devices X86-64'
+
+cc -std=c11 -O2 -Wall -Wextra -Werror -Wpedantic -Wshadow \
+    -Wconversion -Wstrict-prototypes -I"$source_dir" \
+    "$link_test" "$tmp/cosmos_smp_gic_contract.o" "$host_object" \
+    -o "$tmp/mixed-link-test"
+"$tmp/mixed-link-test" > "$tmp/mixed-link.out"
+grep -Fqx 'STATUS: PASS cosmos SMP/GIC mixed-object policy link' \
+    "$tmp/mixed-link.out" || fail "host mixed-object link did not execute"
+
+build_object armv7-unknown-none-eabi "$tmp/arm-cache" "$arm_object"
+validate_object "$arm_object" 'ARM'
+clang_bin=${CLANG:-}
+if [ -z "$clang_bin" ]; then
+    for candidate in clang-20 clang-19 clang-18 clang; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            clang_bin=$candidate
+            break
+        fi
+    done
+fi
+[ -n "$clang_bin" ] || blocked "ARM C compiler unavailable"
+lld_bin=${LLD:-}
+if [ -z "$lld_bin" ]; then
+    for candidate in ld.lld-20 ld.lld-19 ld.lld-18 ld.lld; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            lld_bin=$candidate
+            break
+        fi
+    done
+fi
+[ -n "$lld_bin" ] || blocked "LLD unavailable"
+
+"$clang_bin" --target=armv7-none-eabi -mcpu=cortex-a9 -marm \
+    -ffreestanding -nostdlib -fno-builtin -Wall -Wextra -Werror \
+    -DCOSMOS_CONTRACT_TEST -I"$source_dir" -c "$c_bridge" \
+    -o "$tmp/cosmos_smp_gic_contract_arm.o"
+"$lld_bin" -r "$tmp/cosmos_smp_gic_contract_arm.o" "$arm_object" \
+    -o "$tmp/cosmos_smp_gic_policy_combined_arm.o"
+while read -r symbol; do
+    readelf -sW "$tmp/cosmos_smp_gic_policy_combined_arm.o" |
+        awk -v symbol="$symbol" \
+            '$7 != "UND" && $8 == symbol { count++ }
+             END { exit count != 1 }' ||
+        fail "ARM combined link does not resolve exactly one $symbol"
+done < "$tmp/c-bridge-undefined"
+
+evidence=$root/build/coverage/cosmos-smp-gic-policy
+receipt=$evidence/receipt.sdn
+payload=$tmp/receipt.payload
+{
+    echo "schema=cosmos-smp-gic-policy-evidence-v2"
+    echo "status=pass"
+    echo "claim_scope=24-scalar-smp-gic-policy-functions-plus-contract-bridge"
+    echo "whole_hal_claim=false"
+    echo "board_evidence=separate-unavailable"
+    echo "compiler_authority=admitted-pure-simple-stage4"
+    echo "stage4_binary_path=$simple"
+    echo "stage4_binary_sha256=$simple_sha"
+    echo "stage4_provenance_path=$provenance"
+    echo "stage4_provenance_sha256=$provenance_sha"
+    echo "parity_oracle=frozen-pre-migration-c"
+    echo "parity_vectors=$parity_vectors"
+    echo "measurement=actual-production-predicate-execution-mask"
+    echo "c_oracle_llvm_branches_hit=$c_branch_hit"
+    echo "c_oracle_llvm_branches_total=$c_branch_total"
+    echo "semantic_decisions=17"
+    echo "outcomes_hit=34"
+    echo "outcomes_total=34"
+    echo "policy_source=$policy_rel"
+    echo "policy_source_sha256=$(hal_migration_frozen_hash simple_owner "$policy")"
+    echo "oracle_source_sha256=$(hal_migration_frozen_hash c_oracle "$oracle")"
+    echo "evidence_input_manifest_sha256=$HAL_MIGRATION_INPUT_MANIFEST_SHA256"
+    frozen_input_count=0
+    while IFS="	" read -r input_label input_sha input_path; do
+        echo "evidence_input_${input_label}_path=$input_path"
+        echo "evidence_input_${input_label}_sha256=$input_sha"
+        frozen_input_count=$((frozen_input_count + 1))
+    done < "$HAL_MIGRATION_INPUT_MANIFEST"
+    echo "evidence_input_count=$frozen_input_count"
+    while read -r id name; do echo "decision_$id=$name"; done < "$tmp/decision-names"
+} > "$payload"
+
+stage4_verify_candidate_provenance "$provenance" "$simple" "$root" ||
+    fail "admitted Stage-4 provenance changed before receipt publication"
+hal_migration_revalidate_inputs_before_receipt
+hal_migration_publish_receipt "$receipt" "$payload"
+
+echo "cosmos_smp_gic_oracle_parity=$parity_vectors/$parity_vectors"
+echo "cosmos_smp_gic_actual_outcomes=34/34"
+echo "cosmos_smp_gic_host_link=pass"
+echo "cosmos_smp_gic_arm_relocatable_link=pass"
+echo "STATUS: PASS cosmos SMP/GIC pure policy"

@@ -2,12 +2,9 @@
 
 > Tests covering Metal MSL renderer processing backend.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+## Host-independent NFR gate
 
-<details>
-<summary>Full Scenario Manual</summary>
+Run `SIMPLE_LIB=src bin/simple test test/05_perf/processing/metal_msl_generation_perf_spec.spl --mode=interpreter` with the admitted pure-selfhost binary. It requires 512 deterministic generations, average latency below 10 ms, procfs `VmHWM` incremental peak RSS below 8 MiB, and semantic-key invalidation for changed ProcessingIR values/counts. Seed-runner measurements are diagnostic only.
 
 # Processing Metal Msl Backend Specification
 

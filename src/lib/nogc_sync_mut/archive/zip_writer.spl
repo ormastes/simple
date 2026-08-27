@@ -7,7 +7,7 @@
 #
 # Usage:
 #   var zip = ZipWriter.new()
-#   zip.add_file("hello.txt", zip_writer_text_to_bytes("Hello, world!"))
+#   zip.add_file("hello.txt", text_to_bytes("Hello, world!"))
 #   zip.add_directory("subdir/")
 #   zip.add_file_from_disk("data.bin", "/path/to/data.bin")
 #   zip.write("output.zip")
@@ -15,7 +15,7 @@
 use app.io.{file_read, file_write, file_exists}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]
-use std.io_runtime.{file_write_bytes}
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 
 # ============================================================================
 # Constants
@@ -42,7 +42,7 @@ fn crc32(data: [u8]) -> u32:
         crc = crc xor byte_val
         var bit = 0
         while bit < 8:
-            if (crc & 1) != 0:
+            if (crc and 1) != 0:
                 crc = (crc >> 1) xor 0xEDB88320
             else:
                 crc = crc >> 1
@@ -70,7 +70,7 @@ struct ZipEntry:
 #
 # Example:
 #   var zip = ZipWriter.new()
-#   zip.add_file("README.txt", zip_writer_text_to_bytes("Hello"))
+#   zip.add_file("README.txt", text_to_bytes("Hello"))
 #   zip.add_directory("lib/")
 #   zip.write("archive.zip")
 struct ZipWriter:
@@ -162,7 +162,7 @@ impl ZipWriter:
             val entry = self.entries[i]
             local_offsets.push(output.len())
 
-            val path_bytes = zip_writer_text_to_bytes(entry.path)
+            val path_bytes = text_to_bytes(entry.path)
             val compressed_size = entry.data.len() as u32
             val uncompressed_size = entry.data.len() as u32
 
@@ -195,7 +195,7 @@ impl ZipWriter:
         while i < self.entries.len():
             val entry = self.entries[i]
             val local_offset = local_offsets[i]
-            val path_bytes = zip_writer_text_to_bytes(entry.path)
+            val path_bytes = text_to_bytes(entry.path)
             val compressed_size = entry.data.len() as u32
             val uncompressed_size = entry.data.len() as u32
 
@@ -242,7 +242,7 @@ impl ZipWriter:
         write_u16_le(output, 0)                          # comment length
 
         # Write to disk
-        val ok = file_write_bytes(output_path, output)
+        val ok = rt_file_write_bytes(output_path, output)
         if not ok:
             return Err("Failed to write ZIP file: {output_path}")
 
@@ -258,36 +258,32 @@ impl ZipWriter:
 
 # Write a u16 value in little-endian to a byte array.
 fn write_u16_le(buf: [u8], value: u16):
-    buf.push((value & 0xFF) as u8)
-    buf.push(((value >> 8) & 0xFF) as u8)
+    buf.push((value and 0xFF) as u8)
+    buf.push(((value >> 8) and 0xFF) as u8)
 
 # Write a u32 value in little-endian to a byte array.
 fn write_u32_le(buf: [u8], value: u32):
-    buf.push((value & 0xFF) as u8)
-    buf.push(((value >> 8) & 0xFF) as u8)
-    buf.push(((value >> 16) & 0xFF) as u8)
-    buf.push(((value >> 24) & 0xFF) as u8)
+    buf.push((value and 0xFF) as u8)
+    buf.push(((value >> 8) and 0xFF) as u8)
+    buf.push(((value >> 16) and 0xFF) as u8)
+    buf.push(((value >> 24) and 0xFF) as u8)
 
 # Read a u16 from bytes at the given offset (little-endian).
 fn read_u16_le(data: [u8], offset: i64) -> u16:
-    if offset < 0 or offset + 1 >= data.len():
-        return 0
     val b0 = data[offset] as u16
     val b1 = (data[offset + 1] as u16) << 8
-    b0 | b1
+    b0 or b1
 
 # Read a u32 from bytes at the given offset (little-endian).
 fn read_u32_le(data: [u8], offset: i64) -> u32:
-    if offset < 0 or offset + 3 >= data.len():
-        return 0
     val b0 = data[offset] as u32
     val b1 = (data[offset + 1] as u32) << 8
     val b2 = (data[offset + 2] as u32) << 16
     val b3 = (data[offset + 3] as u32) << 24
-    b0 | b1 | b2 | b3
+    b0 or b1 or b2 or b3
 
 # Convert text to bytes (UTF-8).
-fn zip_writer_text_to_bytes(t: text) -> [u8]:
+fn text_to_bytes(t: text) -> [u8]:
     var bytes: [u8] = []
     var i = 0
     while i < t.len():

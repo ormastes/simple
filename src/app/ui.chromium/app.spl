@@ -24,20 +24,13 @@ use os.compositor.compositor.{Compositor}
 use os.compositor.hosted_input_backend.{HostedInputBackend}
 use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
 
-@unsafe(reason: "raw Winit loop creation ABI; zero sentinel reports provider or initialization failure and positive handle is owned until loop release", capabilities: [ffi])
 extern fn rt_winit_event_loop_new() -> i64
-@unsafe(reason: "raw Winit window creation ABI; borrows title for the call, zero sentinel reports failure, and positive handle is owned until window release", capabilities: [ffi])
 extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
-@unsafe(reason: "raw Winit event admission ABI; negative sentinel reports invalid loop/provider, zero means no event, and positive event is owned until release", capabilities: [ffi])
 extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
-@unsafe(reason: "raw Winit event-kind ABI; negative sentinel reports stale event handle", capabilities: [ffi])
 extern fn rt_winit_event_get_type(ev: i64) -> i64
-@unsafe(reason: "raw Winit event release status ABI; false sentinel reports stale handle", capabilities: [ffi])
-extern fn rt_winit_event_free(ev: i64) -> bool
-@unsafe(reason: "raw Winit window release status ABI; false sentinel reports stale handle", capabilities: [ffi])
-extern fn rt_winit_window_free(win: i64) -> bool
-@unsafe(reason: "raw Winit loop release status ABI; false sentinel reports stale handle", capabilities: [ffi])
-extern fn rt_winit_event_loop_free(el: i64) -> bool
+extern fn rt_winit_event_free(ev: i64)
+extern fn rt_winit_window_free(win: i64)
+extern fn rt_winit_event_loop_free(el: i64)
 
 val EVT_CLOSE: i64 = 3
 val CHROMIUM_WINDOW_TITLE: text = "Simple Browser (V3 chromium shell)"
@@ -177,22 +170,13 @@ impl ChromiumApp:
         val w: i64 = CHROMIUM_WINDOW_WIDTH
         val h: i64 = CHROMIUM_WINDOW_HEIGHT
 
-        var event_loop: i64 = 0
-        unsafe(capabilities: [ffi]):
-            event_loop = rt_winit_event_loop_new()
+        val event_loop = rt_winit_event_loop_new()
         if event_loop == 0:
             return Err("failed to create winit event loop")
 
-        var window: i64 = 0
-        unsafe(capabilities: [ffi]):
-            window = rt_winit_window_new(
-                event_loop, w, h, CHROMIUM_WINDOW_TITLE)
+        val window = rt_winit_window_new(event_loop, w, h, CHROMIUM_WINDOW_TITLE)
         if window == 0:
-            var released = false
-            unsafe(capabilities: [ffi]):
-                released = rt_winit_event_loop_free(event_loop)
-            if not released:
-                return Err("failed to create window and release winit event loop")
+            rt_winit_event_loop_free(event_loop)
             return Err("failed to create chromium host window")
 
         val w32: i32 = w.to_i32()
@@ -256,7 +240,7 @@ impl ChromiumApp:
             running: true
         ))
 
-    me render_active_tab() -> bool:
+    me render_active_tab():
         """M6 wire-up: route the active tab's dirty flag through the compositor.
 
         On each frame the compositor renders only when the active tab is
@@ -270,17 +254,15 @@ impl ChromiumApp:
         """
         if self.tab_manager.is_empty():
             self.compositor.render_all()
-            return self.backend.present_to_window()
+            self.backend.present_to_window()
+            return
         val tab = self.tab_manager.active_tab()
         if tab.dirty:
             self.compositor.render_all()
-            val presented = self.backend.present_to_window()
-            if presented:
-                self.tab_manager.active_tab().clear_dirty()
-            return presented
-        true
+            self.backend.present_to_window()
+            self.tab_manager.active_tab().clear_dirty()
 
-    me run() -> bool:
+    me run():
         """Render-and-present loop.
 
         M1 has no interactivity requirement, but we still pump the winit
@@ -297,24 +279,12 @@ impl ChromiumApp:
         """
         # Initial frame so the window is not blank before the first event.
         # The initial tab created in `new()` starts dirty, so this is safe.
-        var presentation_ok = self.render_active_tab()
-        if not presentation_ok:
-            self.running = false
+        self.render_active_tab()
 
         while self.running:
-            var ev: i64 = -1
-            unsafe(capabilities: [ffi]):
-                ev = rt_winit_event_loop_poll_events(self.event_loop, 100)
-            while ev > 0:
-                var event_type: i64 = -1
-                unsafe(capabilities: [ffi]):
-                    event_type = rt_winit_event_get_type(ev)
-                if event_type < 0:
-                    unsafe(capabilities: [ffi]):
-                        rt_winit_event_free(ev)
-                    presentation_ok = false
-                    self.running = false
-                    break
+            var ev = rt_winit_event_loop_poll_events(self.event_loop, 100)
+            while ev != 0:
+                val event_type = rt_winit_event_get_type(ev)
                 # M2: feed the raw winit event type through the chromium
                 # event bridge so modifier-tracked UIEvents are produced
                 # even for events the compositor's HostedInputBackend
@@ -336,30 +306,17 @@ impl ChromiumApp:
                     self.handle_ui_event(ui_event)
                 if event_type == EVT_CLOSE:
                     self.running = false
-                var released = false
-                unsafe(capabilities: [ffi]):
-                    released = rt_winit_event_free(ev)
-                if not released:
-                    presentation_ok = false
-                    self.running = false
+                rt_winit_event_free(ev)
                 if not self.running:
                     break
-                unsafe(capabilities: [ffi]):
-                    ev = rt_winit_event_loop_poll_events(self.event_loop, 100)
-
-            if ev < 0:
-                presentation_ok = false
-                self.running = false
+                ev = rt_winit_event_loop_poll_events(self.event_loop, 100)
 
             if self.running:
-                presentation_ok = self.render_active_tab()
-                if presentation_ok:
-                    thread_sleep(16)
-                else:
-                    self.running = false
+                self.render_active_tab()
+                thread_sleep(16)
 
-        val shutdown_ok = self.shutdown()
-        presentation_ok and shutdown_ok
+        self.shutdown()
+        presentation_ok
 
     me handle_ui_event(event: UIEvent):
         """Route a translated UIEvent into the compositor / shell.
@@ -422,12 +379,8 @@ impl ChromiumApp:
         val _ok = self.tab_manager.switch_to(idx)
         return idx
 
-    me shutdown() -> bool:
+    me shutdown():
         """Clean window teardown — no orphan threads (M1 acceptance)."""
         self.compositor.stop()
-        var window_released = false
-        var loop_released = false
-        unsafe(capabilities: [ffi]):
-            window_released = rt_winit_window_free(self.window)
-            loop_released = rt_winit_event_loop_free(self.event_loop)
-        window_released and loop_released
+        rt_winit_window_free(self.window)
+        rt_winit_event_loop_free(self.event_loop)

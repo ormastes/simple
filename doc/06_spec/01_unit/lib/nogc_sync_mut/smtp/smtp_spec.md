@@ -1,6 +1,29 @@
-# smtp_spec
+# Smtp Specification
 
-> Purpose: Prove that SMTP command serialization — exact RFC 5321 wire bytes.
+> <details>
+
+<!-- sdn-diagram:id=smtp_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=smtp_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+smtp_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=smtp_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,23 +32,7 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# smtp_spec
-
-Purpose: Prove that SMTP command serialization — exact RFC 5321 wire bytes.
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/01_unit/lib/nogc_sync_mut/smtp/smtp_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-Purpose: Prove that SMTP command serialization — exact RFC 5321 wire bytes.
-Audience: compiler and tooling engineers who maintain this spec.
+# Smtp Specification
 
 ## Scenarios
 
@@ -33,26 +40,13 @@ Audience: compiler and tooling engineers who maintain this spec.
 
 #### HELO command
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- HELO command
-- Verify: HELO command
-   - Expected: smtp_command_helo("mail.example.com") equals `HELO mail.example.com\r\n`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("HELO command")
-step("Verify: HELO command")
-# @req: REQ-LIB-NOGC-SYNC-MUT-001
 expect(smtp_command_helo("mail.example.com")).to_equal("HELO mail.example.com\r\n")
 ```
 
@@ -60,21 +54,13 @@ expect(smtp_command_helo("mail.example.com")).to_equal("HELO mail.example.com\r\
 
 #### EHLO command
 
-- EHLO command
-- Verify: EHLO command
-   - Expected: smtp_command_ehlo("client.example.com") equals `EHLO client.example.com\r\n`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("EHLO command")
-step("Verify: EHLO command")
 expect(smtp_command_ehlo("client.example.com")).to_equal("EHLO client.example.com\r\n")
 ```
 
@@ -82,21 +68,13 @@ expect(smtp_command_ehlo("client.example.com")).to_equal("EHLO client.example.co
 
 #### MAIL FROM command
 
-- MAIL FROM command
-- Verify: MAIL FROM command
-   - Expected: smtp_command_mail_from("sender@example.com") equals `MAIL FROM:<sender@example.com>\r\n`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("MAIL FROM command")
-step("Verify: MAIL FROM command")
 expect(smtp_command_mail_from("sender@example.com")).to_equal("MAIL FROM:<sender@example.com>\r\n")
 ```
 
@@ -104,21 +82,13 @@ expect(smtp_command_mail_from("sender@example.com")).to_equal("MAIL FROM:<sender
 
 #### RCPT TO command
 
-- RCPT TO command
-- Verify: RCPT TO command
-   - Expected: smtp_command_rcpt_to("rcpt@example.com") equals `RCPT TO:<rcpt@example.com>\r\n`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("RCPT TO command")
-step("Verify: RCPT TO command")
 expect(smtp_command_rcpt_to("rcpt@example.com")).to_equal("RCPT TO:<rcpt@example.com>\r\n")
 ```
 
@@ -126,21 +96,13 @@ expect(smtp_command_rcpt_to("rcpt@example.com")).to_equal("RCPT TO:<rcpt@example
 
 #### DATA command
 
-- DATA command
-- Verify: DATA command
-   - Expected: smtp_command_data() equals `DATA\r\n`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("DATA command")
-step("Verify: DATA command")
 expect(smtp_command_data()).to_equal("DATA\r\n")
 ```
 
@@ -148,21 +110,13 @@ expect(smtp_command_data()).to_equal("DATA\r\n")
 
 #### QUIT command
 
-- QUIT command
-- Verify: QUIT command
-   - Expected: smtp_command_quit() equals `QUIT\r\n`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("QUIT command")
-step("Verify: QUIT command")
 expect(smtp_command_quit()).to_equal("QUIT\r\n")
 ```
 
@@ -170,21 +124,13 @@ expect(smtp_command_quit()).to_equal("QUIT\r\n")
 
 #### RSET command
 
-- RSET command
-- Verify: RSET command
-   - Expected: smtp_command_rset() equals `RSET\r\n`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("RSET command")
-step("Verify: RSET command")
 expect(smtp_command_rset()).to_equal("RSET\r\n")
 ```
 
@@ -192,21 +138,13 @@ expect(smtp_command_rset()).to_equal("RSET\r\n")
 
 #### NOOP command
 
-- NOOP command
-- Verify: NOOP command
-   - Expected: smtp_command_noop() equals `NOOP\r\n`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("NOOP command")
-step("Verify: NOOP command")
 expect(smtp_command_noop()).to_equal("NOOP\r\n")
 ```
 
@@ -214,21 +152,13 @@ expect(smtp_command_noop()).to_equal("NOOP\r\n")
 
 #### STARTTLS command
 
-- STARTTLS command
-- Verify: STARTTLS command
-   - Expected: smtp_command_starttls() equals `STARTTLS\r\n`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("STARTTLS command")
-step("Verify: STARTTLS command")
 expect(smtp_command_starttls()).to_equal("STARTTLS\r\n")
 ```
 
@@ -236,21 +166,13 @@ expect(smtp_command_starttls()).to_equal("STARTTLS\r\n")
 
 #### AUTH PLAIN command
 
-- AUTH PLAIN command
-- Verify: AUTH PLAIN command
-   - Expected: smtp_command_auth_plain() equals `AUTH PLAIN\r\n`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("AUTH PLAIN command")
-step("Verify: AUTH PLAIN command")
 expect(smtp_command_auth_plain()).to_equal("AUTH PLAIN\r\n")
 ```
 
@@ -258,21 +180,13 @@ expect(smtp_command_auth_plain()).to_equal("AUTH PLAIN\r\n")
 
 #### AUTH LOGIN command
 
-- AUTH LOGIN command
-- Verify: AUTH LOGIN command
-   - Expected: smtp_command_auth_login() equals `AUTH LOGIN\r\n`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("AUTH LOGIN command")
-step("Verify: AUTH LOGIN command")
 expect(smtp_command_auth_login()).to_equal("AUTH LOGIN\r\n")
 ```
 
@@ -280,21 +194,13 @@ expect(smtp_command_auth_login()).to_equal("AUTH LOGIN\r\n")
 
 #### DATA terminator is CRLF.CRLF
 
-- DATA terminator is CRLF.CRLF
-- Verify: DATA terminator is CRLF.CRLF
-   - Expected: message_terminate() equals `\r\n.\r\n`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("DATA terminator is CRLF.CRLF")
-step("Verify: DATA terminator is CRLF.CRLF")
 expect(message_terminate()).to_equal("\r\n.\r\n")
 ```
 
@@ -304,21 +210,13 @@ expect(message_terminate()).to_equal("\r\n.\r\n")
 
 #### parse code from single-line 220 response
 
-- parse code from single-line 220 response
-- Verify: parse code from single-line 220 response
-   - Expected: response_parse_code("220 mail.example.com ESMTP ready\r\n") equals `220`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("parse code from single-line 220 response")
-step("Verify: parse code from single-line 220 response")
 expect(response_parse_code("220 mail.example.com ESMTP ready\r\n")).to_equal(220)
 ```
 
@@ -326,21 +224,13 @@ expect(response_parse_code("220 mail.example.com ESMTP ready\r\n")).to_equal(220
 
 #### parse code from 250 response
 
-- parse code from 250 response
-- Verify: parse code from 250 response
-   - Expected: response_parse_code("250 OK\r\n") equals `250`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("parse code from 250 response")
-step("Verify: parse code from 250 response")
 expect(response_parse_code("250 OK\r\n")).to_equal(250)
 ```
 
@@ -348,21 +238,13 @@ expect(response_parse_code("250 OK\r\n")).to_equal(250)
 
 #### parse code from 500 error
 
-- parse code from 500 error
-- Verify: parse code from 500 error
-   - Expected: response_parse_code("500 Syntax error\r\n") equals `500`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("parse code from 500 error")
-step("Verify: parse code from 500 error")
 expect(response_parse_code("500 Syntax error\r\n")).to_equal(500)
 ```
 
@@ -370,21 +252,13 @@ expect(response_parse_code("500 Syntax error\r\n")).to_equal(500)
 
 #### parse message from 250 OK
 
-- parse message from 250 OK
-- Verify: parse message from 250 OK
-   - Expected: response_parse_message("250 OK\r\n") equals `OK\r\n`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("parse message from 250 OK")
-step("Verify: parse message from 250 OK")
 expect(response_parse_message("250 OK\r\n")).to_equal("OK\r\n")
 ```
 
@@ -392,21 +266,13 @@ expect(response_parse_message("250 OK\r\n")).to_equal("OK\r\n")
 
 #### parse message from 220 banner
 
-- parse message from 220 banner
-- Verify: parse message from 220 banner
-   - Expected: msg.starts_with("mail.example.com") is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("parse message from 220 banner")
-step("Verify: parse message from 220 banner")
 val msg = response_parse_message("220 mail.example.com ESMTP\r\n")
 expect(msg.starts_with("mail.example.com")).to_equal(true)
 ```
@@ -415,21 +281,13 @@ expect(msg.starts_with("mail.example.com")).to_equal(true)
 
 #### single-line response is NOT multiline
 
-- single-line response is NOT multiline
-- Verify: single-line response is NOT multiline
-   - Expected: response_is_multiline("250 OK\r\n") is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("single-line response is NOT multiline")
-step("Verify: single-line response is NOT multiline")
 expect(response_is_multiline("250 OK\r\n")).to_equal(false)
 ```
 
@@ -437,21 +295,13 @@ expect(response_is_multiline("250 OK\r\n")).to_equal(false)
 
 #### multiline response detected by dash at position 3
 
-- multiline response detected by dash at position 3
-- Verify: multiline response detected by dash at position 3
-   - Expected: response_is_multiline("250-STARTTLS\r\n") is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("multiline response detected by dash at position 3")
-step("Verify: multiline response detected by dash at position 3")
 expect(response_is_multiline("250-STARTTLS\r\n")).to_equal(true)
 ```
 
@@ -459,21 +309,13 @@ expect(response_is_multiline("250-STARTTLS\r\n")).to_equal(true)
 
 #### multiline continuation line
 
-- multiline continuation line
-- Verify: multiline continuation line
-   - Expected: response_is_multiline("250-SIZE 14680064\r\n") is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("multiline continuation line")
-step("Verify: multiline continuation line")
 expect(response_is_multiline("250-SIZE 14680064\r\n")).to_equal(true)
 ```
 
@@ -481,21 +323,13 @@ expect(response_is_multiline("250-SIZE 14680064\r\n")).to_equal(true)
 
 #### last line of multiline is not multiline
 
-- last line of multiline is not multiline
-- Verify: last line of multiline is not multiline
-   - Expected: response_is_multiline("250 AUTH PLAIN LOGIN\r\n") is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("last line of multiline is not multiline")
-step("Verify: last line of multiline is not multiline")
 expect(response_is_multiline("250 AUTH PLAIN LOGIN\r\n")).to_equal(false)
 ```
 
@@ -505,21 +339,13 @@ expect(response_is_multiline("250 AUTH PLAIN LOGIN\r\n")).to_equal(false)
 
 #### 220 is success code
 
-- 220 is success code
-- Verify: 220 is success code
-   - Expected: smtp_is_success_code(220) is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("220 is success code")
-step("Verify: 220 is success code")
 expect(smtp_is_success_code(220)).to_equal(true)
 ```
 
@@ -527,21 +353,13 @@ expect(smtp_is_success_code(220)).to_equal(true)
 
 #### 250 is success code
 
-- 250 is success code
-- Verify: 250 is success code
-   - Expected: smtp_is_success_code(250) is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("250 is success code")
-step("Verify: 250 is success code")
 expect(smtp_is_success_code(250)).to_equal(true)
 ```
 
@@ -549,21 +367,13 @@ expect(smtp_is_success_code(250)).to_equal(true)
 
 #### 354 is not a 2xx success code (it is a 3xx positive intermediate)
 
-- 354 is not a 2xx success code (it is a 3xx positive intermediate)
-- Verify: 354 is not a 2xx success code (it is a 3xx positive intermediate)
-   - Expected: smtp_is_success_code(354) is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("354 is not a 2xx success code (it is a 3xx positive intermediate)")
-step("Verify: 354 is not a 2xx success code (it is a 3xx positive intermediate)")
 expect(smtp_is_success_code(354)).to_equal(false)
 ```
 
@@ -571,21 +381,13 @@ expect(smtp_is_success_code(354)).to_equal(false)
 
 #### 421 is error code
 
-- 421 is error code
-- Verify: 421 is error code
-   - Expected: smtp_is_error_code(421) is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("421 is error code")
-step("Verify: 421 is error code")
 expect(smtp_is_error_code(421)).to_equal(true)
 ```
 
@@ -593,21 +395,13 @@ expect(smtp_is_error_code(421)).to_equal(true)
 
 #### 500 is error code
 
-- 500 is error code
-- Verify: 500 is error code
-   - Expected: smtp_is_error_code(500) is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("500 is error code")
-step("Verify: 500 is error code")
 expect(smtp_is_error_code(500)).to_equal(true)
 ```
 
@@ -615,21 +409,13 @@ expect(smtp_is_error_code(500)).to_equal(true)
 
 #### 550 is error code
 
-- 550 is error code
-- Verify: 550 is error code
-   - Expected: smtp_is_error_code(550) is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("550 is error code")
-step("Verify: 550 is error code")
 expect(smtp_is_error_code(550)).to_equal(true)
 ```
 
@@ -637,21 +423,13 @@ expect(smtp_is_error_code(550)).to_equal(true)
 
 #### 220 is not error code
 
-- 220 is not error code
-- Verify: 220 is not error code
-   - Expected: smtp_is_error_code(220) is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("220 is not error code")
-step("Verify: 220 is not error code")
 expect(smtp_is_error_code(220)).to_equal(false)
 ```
 
@@ -659,21 +437,13 @@ expect(smtp_is_error_code(220)).to_equal(false)
 
 #### code description 250
 
-- code description 250
-- Verify: code description 250
-   - Expected: d.starts_with("Requested") is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("code description 250")
-step("Verify: code description 250")
 val d = smtp_code_description(250)
 expect(d.starts_with("Requested")).to_equal(true)
 ```
@@ -682,21 +452,13 @@ expect(d.starts_with("Requested")).to_equal(true)
 
 #### code description 354 mentions CRLF
 
-- code description 354 mentions CRLF
-- Verify: code description 354 mentions CRLF
-   - Expected: d.starts_with("Start") is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("code description 354 mentions CRLF")
-step("Verify: code description 354 mentions CRLF")
 val d = smtp_code_description(354)
 expect(d.starts_with("Start")).to_equal(true)
 ```
@@ -707,21 +469,13 @@ expect(d.starts_with("Start")).to_equal(true)
 
 #### initial state is INITIAL
 
-- initial state is INITIAL
-- Verify: initial state is INITIAL
-   - Expected: s equals `INITIAL`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("initial state is INITIAL")
-step("Verify: initial state is INITIAL")
 val s = smtp_session_new()
 expect(s).to_equal("INITIAL")
 ```
@@ -730,21 +484,13 @@ expect(s).to_equal("INITIAL")
 
 #### after HELO state is HELO
 
-- after HELO state is HELO
-- Verify: after HELO state is HELO
-   - Expected: smtp_session_after_helo() equals `HELO`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("after HELO state is HELO")
-step("Verify: after HELO state is HELO")
 expect(smtp_session_after_helo()).to_equal("HELO")
 ```
 
@@ -752,21 +498,13 @@ expect(smtp_session_after_helo()).to_equal("HELO")
 
 #### after MAIL state is MAIL
 
-- after MAIL state is MAIL
-- Verify: after MAIL state is MAIL
-   - Expected: smtp_session_after_mail() equals `MAIL`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("after MAIL state is MAIL")
-step("Verify: after MAIL state is MAIL")
 expect(smtp_session_after_mail()).to_equal("MAIL")
 ```
 
@@ -774,21 +512,13 @@ expect(smtp_session_after_mail()).to_equal("MAIL")
 
 #### after RCPT state is RCPT
 
-- after RCPT state is RCPT
-- Verify: after RCPT state is RCPT
-   - Expected: smtp_session_after_rcpt() equals `RCPT`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("after RCPT state is RCPT")
-step("Verify: after RCPT state is RCPT")
 expect(smtp_session_after_rcpt()).to_equal("RCPT")
 ```
 
@@ -796,23 +526,13 @@ expect(smtp_session_after_rcpt()).to_equal("RCPT")
 
 #### can_mail only in HELO state
 
-- can_mail only in HELO state
-- Verify: can_mail only in HELO state
-   - Expected: smtp_can_mail("HELO") is true
-   - Expected: smtp_can_mail("INITIAL") is false
-   - Expected: smtp_can_mail("MAIL") is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("can_mail only in HELO state")
-step("Verify: can_mail only in HELO state")
 expect(smtp_can_mail("HELO")).to_equal(true)
 expect(smtp_can_mail("INITIAL")).to_equal(false)
 expect(smtp_can_mail("MAIL")).to_equal(false)
@@ -822,21 +542,13 @@ expect(smtp_can_mail("MAIL")).to_equal(false)
 
 #### can_rcpt in MAIL state
 
-- can_rcpt in MAIL state
-- Verify: can_rcpt in MAIL state
-   - Expected: smtp_can_rcpt("MAIL") is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("can_rcpt in MAIL state")
-step("Verify: can_rcpt in MAIL state")
 expect(smtp_can_rcpt("MAIL")).to_equal(true)
 ```
 
@@ -844,21 +556,13 @@ expect(smtp_can_rcpt("MAIL")).to_equal(true)
 
 #### can_rcpt in RCPT state (multiple recipients)
 
-- can_rcpt in RCPT state (multiple recipients)
-- Verify: can_rcpt in RCPT state (multiple recipients)
-   - Expected: smtp_can_rcpt("RCPT") is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("can_rcpt in RCPT state (multiple recipients)")
-step("Verify: can_rcpt in RCPT state (multiple recipients)")
 expect(smtp_can_rcpt("RCPT")).to_equal(true)
 ```
 
@@ -866,21 +570,13 @@ expect(smtp_can_rcpt("RCPT")).to_equal(true)
 
 #### can_rcpt not in HELO state
 
-- can_rcpt not in HELO state
-- Verify: can_rcpt not in HELO state
-   - Expected: smtp_can_rcpt("HELO") is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("can_rcpt not in HELO state")
-step("Verify: can_rcpt not in HELO state")
 expect(smtp_can_rcpt("HELO")).to_equal(false)
 ```
 
@@ -888,22 +584,13 @@ expect(smtp_can_rcpt("HELO")).to_equal(false)
 
 #### can_data only in RCPT state
 
-- can_data only in RCPT state
-- Verify: can_data only in RCPT state
-   - Expected: smtp_can_data("RCPT") is true
-   - Expected: smtp_can_data("MAIL") is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("can_data only in RCPT state")
-step("Verify: can_data only in RCPT state")
 expect(smtp_can_data("RCPT")).to_equal(true)
 expect(smtp_can_data("MAIL")).to_equal(false)
 ```
@@ -914,22 +601,13 @@ expect(smtp_can_data("MAIL")).to_equal(false)
 
 #### body without dots is unchanged before terminator
 
-- body without dots is unchanged before terminator
-- Verify: body without dots is unchanged before terminator
-   - Expected: stuffed.starts_with("Hello world\r\n") is true
-   - Expected: stuffed.ends_with("\r\n.\r\n") is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("body without dots is unchanged before terminator")
-step("Verify: body without dots is unchanged before terminator")
 val body = "Hello world\r\n"
 val stuffed = smtp_dot_stuff(body)
 expect(stuffed.starts_with("Hello world\r\n")).to_equal(true)
@@ -940,21 +618,13 @@ expect(stuffed.ends_with("\r\n.\r\n")).to_equal(true)
 
 #### line beginning with dot gets extra dot
 
-- line beginning with dot gets extra dot
-- Verify: line beginning with dot gets extra dot
-   - Expected: stuffed.index_of("\r\n..line with dot\r\n") != -1 is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("line beginning with dot gets extra dot")
-step("Verify: line beginning with dot gets extra dot")
 val body = "line one\r\n.line with dot\r\nline three\r\n"
 val stuffed = smtp_dot_stuff(body)
 expect(stuffed.index_of("\r\n..line with dot\r\n") != -1).to_equal(true)
@@ -964,21 +634,13 @@ expect(stuffed.index_of("\r\n..line with dot\r\n") != -1).to_equal(true)
 
 #### dot-only line becomes double-dot
 
-- dot-only line becomes double-dot
-- Verify: dot-only line becomes double-dot
-   - Expected: stuffed.index_of("\r\n..\r\n") != -1 is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("dot-only line becomes double-dot")
-step("Verify: dot-only line becomes double-dot")
 val body = "before\r\n.\r\nafter\r\n"
 val stuffed = smtp_dot_stuff(body)
 expect(stuffed.index_of("\r\n..\r\n") != -1).to_equal(true)
@@ -988,21 +650,13 @@ expect(stuffed.index_of("\r\n..\r\n") != -1).to_equal(true)
 
 #### terminator CRLF.CRLF appended
 
-- terminator CRLF.CRLF appended
-- Verify: terminator CRLF.CRLF appended
-   - Expected: stuffed.ends_with("\r\n.\r\n") is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("terminator CRLF.CRLF appended")
-step("Verify: terminator CRLF.CRLF appended")
 val stuffed = smtp_dot_stuff("hello\r\n")
 expect(stuffed.ends_with("\r\n.\r\n")).to_equal(true)
 ```
@@ -1011,21 +665,13 @@ expect(stuffed.ends_with("\r\n.\r\n")).to_equal(true)
 
 #### undot reverses dot-stuffing
 
-- undot reverses dot-stuffing
-- Verify: undot reverses dot-stuffing
-   - Expected: restored equals `original`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("undot reverses dot-stuffing")
-step("Verify: undot reverses dot-stuffing")
 val original = "Hello\r\n.dotline\r\nend\r\n"
 val stuffed = smtp_dot_stuff(original)
 val restored = smtp_undot_stuff(stuffed)
@@ -1036,21 +682,13 @@ expect(restored).to_equal(original)
 
 #### undot strips terminator
 
-- undot strips terminator
-- Verify: undot strips terminator
-   - Expected: restored.ends_with("\r\n.\r\n") is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("undot strips terminator")
-step("Verify: undot strips terminator")
 val stuffed = "Hello\r\n.\r\n"
 val restored = smtp_undot_stuff(stuffed)
 expect(restored.ends_with("\r\n.\r\n")).to_equal(false)
@@ -1060,21 +698,13 @@ expect(restored.ends_with("\r\n.\r\n")).to_equal(false)
 
 #### undot on body with doubled-dot restores single
 
-- undot on body with doubled-dot restores single
-- Verify: undot on body with doubled-dot restores single
-   - Expected: restored.index_of("\r\n.doubly-dotted\r\n") != -1 is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("undot on body with doubled-dot restores single")
-step("Verify: undot on body with doubled-dot restores single")
 val body = "normal\r\n..doubly-dotted\r\n"
 val restored = smtp_undot_stuff(body)
 expect(restored.index_of("\r\n.doubly-dotted\r\n") != -1).to_equal(true)
@@ -1084,21 +714,13 @@ expect(restored.index_of("\r\n.doubly-dotted\r\n") != -1).to_equal(true)
 
 #### round-trip multi-line body with mixed dots
 
-- round-trip multi-line body with mixed dots
-- Verify: round-trip multi-line body with mixed dots
-   - Expected: restored equals `original`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("round-trip multi-line body with mixed dots")
-step("Verify: round-trip multi-line body with mixed dots")
 val original = "line1\r\n.sec\r\n..dbl\r\nnormal\r\n"
 val stuffed = smtp_dot_stuff(original)
 val restored = smtp_undot_stuff(stuffed)
@@ -1111,21 +733,13 @@ expect(restored).to_equal(original)
 
 #### valid address passes
 
-- valid address passes
-- Verify: valid address passes
-   - Expected: email_validate("user@example.com") is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("valid address passes")
-step("Verify: valid address passes")
 expect(email_validate("user@example.com")).to_equal(true)
 ```
 
@@ -1133,21 +747,13 @@ expect(email_validate("user@example.com")).to_equal(true)
 
 #### address without @ fails
 
-- address without @ fails
-- Verify: address without @ fails
-   - Expected: email_validate("userexample.com") is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("address without @ fails")
-step("Verify: address without @ fails")
 expect(email_validate("userexample.com")).to_equal(false)
 ```
 
@@ -1155,21 +761,13 @@ expect(email_validate("userexample.com")).to_equal(false)
 
 #### address without domain dot fails
 
-- address without domain dot fails
-- Verify: address without domain dot fails
-   - Expected: email_validate("user@localhost") is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("address without domain dot fails")
-step("Verify: address without domain dot fails")
 expect(email_validate("user@localhost")).to_equal(false)
 ```
 
@@ -1177,21 +775,13 @@ expect(email_validate("user@localhost")).to_equal(false)
 
 #### empty string fails
 
-- empty string fails
-- Verify: empty string fails
-   - Expected: email_validate("") is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("empty string fails")
-step("Verify: empty string fails")
 expect(email_validate("")).to_equal(false)
 ```
 
@@ -1199,21 +789,13 @@ expect(email_validate("")).to_equal(false)
 
 #### multiple @ fails
 
-- multiple @ fails
-- Verify: multiple @ fails
-   - Expected: email_validate("a@b@c.com") is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("multiple @ fails")
-step("Verify: multiple @ fails")
 expect(email_validate("a@b@c.com")).to_equal(false)
 ```
 
@@ -1221,23 +803,15 @@ expect(email_validate("a@b@c.com")).to_equal(false)
 
 #### subject injection stripped
 
-- subject injection stripped
-- Verify: subject injection stripped
-   - Expected: s.index_of("\r\n") equals `-1`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("subject injection stripped")
-step("Verify: subject injection stripped")
 val s = smtp_sanitize_smtp_subject("Hello\r\nBcc: evil@x.com")
-expect(s.index_of("\r\n")).to_equal(-1)
+expect(s.index_of("\r\n") == -1).to_equal(true)
 ```
 
 </details>
@@ -1246,21 +820,13 @@ expect(s.index_of("\r\n")).to_equal(-1)
 
 #### AUTH LOGIN username base64 — user encodes to dXNlcg==
 
-- AUTH LOGIN username base64 — user encodes to dXNlcg==
-- Verify: AUTH LOGIN username base64 — user encodes to dXNlcg==
-   - Expected: auth_login_encode_username("user") equals `dXNlcg==`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("AUTH LOGIN username base64 — user encodes to dXNlcg==")
-step("Verify: AUTH LOGIN username base64 — user encodes to dXNlcg==")
 expect(auth_login_encode_username("user")).to_equal("dXNlcg==")
 ```
 
@@ -1268,21 +834,13 @@ expect(auth_login_encode_username("user")).to_equal("dXNlcg==")
 
 #### AUTH LOGIN password base64 — pass encodes to cGFzcw==
 
-- AUTH LOGIN password base64 — pass encodes to cGFzcw==
-- Verify: AUTH LOGIN password base64 — pass encodes to cGFzcw==
-   - Expected: auth_login_encode_password("pass") equals `cGFzcw==`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("AUTH LOGIN password base64 — pass encodes to cGFzcw==")
-step("Verify: AUTH LOGIN password base64 — pass encodes to cGFzcw==")
 expect(auth_login_encode_password("pass")).to_equal("cGFzcw==")
 ```
 
@@ -1290,21 +848,13 @@ expect(auth_login_encode_password("pass")).to_equal("cGFzcw==")
 
 #### AUTH PLAIN base64 — NUL+user+NUL+pass encodes to AHVzZXIAcGFzcw==
 
-- AUTH PLAIN base64 — NUL+user+NUL+pass encodes to AHVzZXIAcGFzcw==
-- Verify: AUTH PLAIN base64 — NUL+user+NUL+pass encodes to AHVzZXIAcGFzcw==
-   - Expected: auth_plain_encode("user", "pass") equals `AHVzZXIAcGFzcw==`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("AUTH PLAIN base64 — NUL+user+NUL+pass encodes to AHVzZXIAcGFzcw==")
-step("Verify: AUTH PLAIN base64 — NUL+user+NUL+pass encodes to AHVzZXIAcGFzcw==")
 expect(auth_plain_encode("user", "pass")).to_equal("AHVzZXIAcGFzcw==")
 ```
 
@@ -1314,66 +864,42 @@ expect(auth_plain_encode("user", "pass")).to_equal("AHVzZXIAcGFzcw==")
 
 #### SMTPS implicit TLS port is 465
 
-- SMTPS implicit TLS port is 465
-- Verify: SMTPS implicit TLS port is 465
-   - Expected: smtps_default_port() equals `465`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("SMTPS implicit TLS port is 465")
-step("Verify: SMTPS implicit TLS port is 465")
-expect(smtps_default_port()).to_equal(465)  # oracle: 465 — named expected value from the requirement
+expect(smtps_default_port()).to_equal(465)
 ```
 
 </details>
 
 #### STARTTLS submission port is 587
 
-- STARTTLS submission port is 587
-- Verify: STARTTLS submission port is 587
-   - Expected: smtp_starttls_port() equals `587`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("STARTTLS submission port is 587")
-step("Verify: STARTTLS submission port is 587")
-expect(smtp_starttls_port()).to_equal(587)  # oracle: 587 — named expected value from the requirement
+expect(smtp_starttls_port()).to_equal(587)
 ```
 
 </details>
 
 #### SMTP cleartext port is 25
 
-- SMTP cleartext port is 25
-- Verify: SMTP cleartext port is 25
-   - Expected: smtp_cleartext_port() equals `25`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("SMTP cleartext port is 25")
-step("Verify: SMTP cleartext port is 25")
-expect(smtp_cleartext_port()).to_equal(25)  # oracle: 25 — named expected value from the requirement
+expect(smtp_cleartext_port()).to_equal(25)
 ```
 
 </details>
@@ -1382,21 +908,13 @@ expect(smtp_cleartext_port()).to_equal(25)  # oracle: 25 — named expected valu
 
 #### From header format
 
-- From header format
-- Verify: From header format
-   - Expected: header_from("alice@example.com") equals `From: alice@example.com\r\n`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("From header format")
-step("Verify: From header format")
 expect(header_from("alice@example.com")).to_equal("From: alice@example.com\r\n")
 ```
 
@@ -1404,21 +922,13 @@ expect(header_from("alice@example.com")).to_equal("From: alice@example.com\r\n")
 
 #### To header format
 
-- To header format
-- Verify: To header format
-   - Expected: header_to("bob@example.com") equals `To: bob@example.com\r\n`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("To header format")
-step("Verify: To header format")
 expect(header_to("bob@example.com")).to_equal("To: bob@example.com\r\n")
 ```
 
@@ -1426,25 +936,40 @@ expect(header_to("bob@example.com")).to_equal("To: bob@example.com\r\n")
 
 #### Subject header format
 
-- Subject header format
-- Verify: Subject header format
-   - Expected: header_subject("Hello World") equals `Subject: Hello World\r\n`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("Subject header format")
-step("Verify: Subject header format")
 expect(header_subject("Hello World")).to_equal("Subject: Hello World\r\n")
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/01_unit/lib/nogc_sync_mut/smtp/smtp_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering:
+- SMTP command serialization — exact RFC 5321 wire bytes
+- SMTP reply-code parsing
+- SMTP reply-code classification
+- SMTP session state machine
+- SMTP dot-stuffing (RFC 5321 §4.5.2)
+- SMTP email address validation
+- SMTP AUTH encoding
+- SMTP secure (SMTPS) port constants
+- SMTP message headers
 
 ## Scenario Summary
 
@@ -1458,55 +983,3 @@ expect(header_subject("Hello World")).to_equal("Subject: Hello World\r\n")
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-LIB`
-- `REQ-LIB-NOGC-SYNC-MUT-001`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `ad0e1df3c82d45c2854590288230b34e237c18bf36294b4d542db34d5cea3ccf`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `ad0e1df3c82d45c2854590288230b34e237c18bf36294b4d542db34d5cea3ccf`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `ad0e1df3c82d45c2854590288230b34e237c18bf36294b4d542db34d5cea3ccf`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/01_unit/lib/nogc_sync_mut/smtp/smtp_spec.spl
-mirror: doc/06_spec/01_unit/lib/nogc_sync_mut/smtp/smtp_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/nogc_sync_mut/smtp/smtp_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/nogc_sync_mut/smtp/smtp_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/nogc_sync_mut/smtp/smtp_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 4 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/lib/nogc_sync_mut/smtp/smtp_spec.spl:65:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'HELO command' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/nogc_sync_mut/smtp/smtp_spec.spl:72:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'EHLO command' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/nogc_sync_mut/smtp/smtp_spec.spl:78:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'MAIL FROM command' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

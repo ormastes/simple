@@ -1,7 +1,6 @@
 # Legacy MCP feature tests target a REMOVED API and assert nothing
 
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+**Status:** OPEN
 **Found:** 2026-08-04
 **Severity:** medium · **Area:** legacy feature suite / MCP server
 **Found during:** legacy-feature-test triage (`test/03_system/feature/lib/mcp`)

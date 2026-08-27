@@ -1,0 +1,313 @@
+# Canonical, lossless support for MIR declaration data.
+#
+# Declaration JSON is deliberately separate from the historical instruction
+# serializer: that compatibility format predates declaration metadata and has
+# lossy catch-all arms for newer MirType variants.
+
+use compiler.mir.mir_data.{MirModule}
+use compiler.mir.mir_types.*
+use compiler.mir.mir_json.{escape_json_string}
+use compiler.common.dependency.visibility.{Visibility}
+
+fn mir_append_declaration_shard(target: MirModule, source: MirModule,
+        defining_module: i64, defining_module_name: text) -> MirModule?:
+    if target.declaration_shard_index.contains(defining_module): return nil
+    var result = target
+    var index = result.declaration_shard_index
+    var shards = result.declaration_shards
+    index[defining_module] = shards.len()
+    shards.push(MirDeclarationShard(
+        defining_module = defining_module,
+        defining_module_name = defining_module_name,
+        statics = source.statics, constants = source.constants,
+        types = source.types, externs = source.externs,
+        actors = source.actors, bitfields = source.bitfields,
+        enum_extensions = source.enum_extensions,
+        declaration_metadata = source.declaration_metadata,
+    ))
+    result.declaration_shard_index = index
+    result.declaration_shards = shards
+    result
+
+fn md_q(value: text) -> text: "\"{escape_json_string(value)}\""
+fn md_b(value: bool) -> text: if value: "true" else: "false"
+fn md_sym(value: SymbolId) -> text: value.id.to_text()
+
+fn md_visibility(value: Visibility) -> text:
+    match value:
+        case Visibility.Public: md_q("Public")
+        case Visibility.Peer: md_q("Peer")
+        case Visibility.Up: md_q("Up")
+        case Visibility.Internal: md_q("Internal")
+        case Visibility.Package: md_q("Package")
+        case Visibility.Private: md_q("Private")
+
+fn md_texts(values: [text]) -> text:
+    var out: [text] = []
+    for value in values: out.push(md_q(value))
+    "[" + out.join(",") + "]"
+
+fn md_i64s(values: [i64]) -> text:
+    var out: [text] = []
+    for value in values: out.push(value.to_text())
+    "[" + out.join(",") + "]"
+
+fn md_const_value(value: MirConstValue) -> text:
+    match value:
+        case Int(v): "{\"Int\":" + v.to_text() + "}"
+        case Float(v): "{\"Float\":" + v.to_text() + "}"
+        case Bool(v): "{\"Bool\":" + md_b(v) + "}"
+        case Str(v): "{\"Str\":" + md_q(v) + "}"
+        case Array(values): "{\"Array\":" + md_const_values(values) + "}"
+        case Tuple(values): "{\"Tuple\":" + md_const_values(values) + "}"
+        case Struct(fields):
+            var rows: [text] = []
+            for key in fields.keys(): rows.push(md_q(key) + ":" + md_const_value(fields[key]))
+            rows = rows.sort()
+            "{\"Struct\":{" + rows.join(",") + "}}"
+        case Zero: md_q("Zero")
+
+fn md_const_values(values: [MirConstValue]) -> text:
+    var out: [text] = []
+    for value in values: out.push(md_const_value(value))
+    "[" + out.join(",") + "]"
+
+fn md_constant(value: MirConstant) -> text:
+    "{\"symbol\":" + md_sym(value.symbol) + ",\"name\":" + md_q(value.name) + ",\"type\":" + serialize_mir_declaration_type(value.type_) + ",\"value\":" + md_const_value(value.value) + "}"
+
+fn serialize_mir_declaration_signature(value: MirSignature) -> text:
+    var params: [text] = []
+    for param in value.params: params.push(serialize_mir_declaration_type(param))
+    "{\"params\":[" + params.join(",") + "],\"return_type\":" + serialize_mir_declaration_type(value.return_type) + ",\"is_variadic\":" + md_b(value.is_variadic) + "}"
+
+fn serialize_mir_declaration_type(value: MirType) -> text:
+    match value.kind:
+        case I8: md_q("I8")
+        case I16: md_q("I16")
+        case I32: md_q("I32")
+        case I64: md_q("I64")
+        case U8: md_q("U8")
+        case U16: md_q("U16")
+        case U32: md_q("U32")
+        case U64: md_q("U64")
+        case F32: md_q("F32")
+        case F64: md_q("F64")
+        case Bool: md_q("Bool")
+        case Char: md_q("Char")
+        case Unit: md_q("Unit")
+        case Vec4f: md_q("Vec4f")
+        case Vec8f: md_q("Vec8f")
+        case Vec4d: md_q("Vec4d")
+        case Vec4i: md_q("Vec4i")
+        case Vec8i: md_q("Vec8i")
+        case Never: md_q("Never")
+        case Ptr(t, m): "{\"Ptr\":{\"pointee\":" + serialize_mir_declaration_type(t) + ",\"mutable\":" + md_b(m) + "}}"
+        case Ref(t, m): "{\"Ref\":{\"referent\":" + serialize_mir_declaration_type(t) + ",\"mutable\":" + md_b(m) + "}}"
+        case FuncPtr(s): "{\"FuncPtr\":" + serialize_mir_declaration_signature(s) + "}"
+        case Array(t, n): "{\"Array\":{\"element\":" + serialize_mir_declaration_type(t) + ",\"size\":" + n.to_text() + "}}"
+        case Dict(k, v): "{\"Dict\":{\"key\":" + serialize_mir_declaration_type(k) + ",\"value\":" + serialize_mir_declaration_type(v) + "}}"
+        case Slice(t): "{\"Slice\":" + serialize_mir_declaration_type(t) + "}"
+        case Tuple(ts): "{\"Tuple\":" + md_types(ts) + "}"
+        case Struct(s): "{\"Struct\":" + md_sym(s) + "}"
+        case Enum(s): "{\"Enum\":" + md_sym(s) + "}"
+        case Result(ok, err): "{\"Result\":{\"ok\":" + serialize_mir_declaration_type(ok) + ",\"err\":" + serialize_mir_declaration_type(err) + "}}"
+        case Bits(w, s): "{\"Bits\":{\"width\":" + w.to_text() + ",\"signed\":" + md_b(s) + "}}"
+        case Union(ts): "{\"Union\":" + md_types(ts) + "}"
+        case Opaque(name): "{\"Opaque\":" + md_q(name) + "}"
+        case ScalableVec(t, n): "{\"ScalableVec\":{\"element\":" + serialize_mir_declaration_type(t) + ",\"min_lanes\":" + n.to_text() + "}}"
+        case Promise(t): "{\"Promise\":" + serialize_mir_declaration_type(t) + "}"
+        case Generator(y, r): "{\"Generator\":{\"yield\":" + serialize_mir_declaration_type(y) + ",\"return\":" + serialize_mir_declaration_type(r) + "}}"
+        case ActorType(t): "{\"ActorType\":" + serialize_mir_declaration_type(t) + "}"
+
+fn md_types(values: [MirType]) -> text:
+    var out: [text] = []
+    for value in values: out.push(serialize_mir_declaration_type(value))
+    "[" + out.join(",") + "]"
+
+fn serialize_mir_declaration_attribute(value: MirDeclarationAttribute) -> text:
+    "{\"name\":" + md_q(value.name) + ",\"argument\":" + md_q(value.argument) + ",\"expr_rows\":" + md_i64s(value.expr_rows) + ",\"span_row\":" + value.span_row.to_text() + "}"
+
+fn md_attributes(values: [MirDeclarationAttribute]) -> text:
+    var out: [text] = []
+    for value in values: out.push(serialize_mir_declaration_attribute(value))
+    "[" + out.join(",") + "]"
+
+fn serialize_mir_declaration_field(value: MirDeclarationField) -> text:
+    "{\"symbol\":" + md_sym(value.symbol) + ",\"name\":" + md_q(value.name) + ",\"type\":" + serialize_mir_declaration_type(value.type_) + ",\"visibility\":" + md_visibility(value.visibility) + ",\"is_public\":" + md_b(value.is_public) + ",\"is_volatile\":" + md_b(value.is_volatile) + ",\"has_bits_attr\":" + md_b(value.has_bits_attr) + ",\"bits_width\":" + value.bits_width.to_text() + ",\"has_fixed_address\":" + md_b(value.has_fixed_address) + ",\"fixed_address\":" + value.fixed_address.to_text() + ",\"has_default\":" + md_b(value.has_default) + ",\"default_expr_row\":" + value.default_expr_row.to_text() + ",\"bit_offset\":" + value.bit_offset.to_text() + ",\"bit_width\":" + value.bit_width.to_text() + ",\"has_source_bits\":" + md_b(value.has_source_bits) + ",\"source_bits\":" + value.source_bits.to_text() + ",\"is_reserved\":" + md_b(value.is_reserved) + ",\"span_row\":" + value.span_row.to_text() + "}"
+
+fn md_decl_fields(values: [MirDeclarationField]) -> text:
+    var out: [text] = []
+    for value in values: out.push(serialize_mir_declaration_field(value))
+    "[" + out.join(",") + "]"
+
+fn serialize_mir_extern_decl(value: MirExternDecl) -> text:
+    "{\"symbol\":" + md_sym(value.symbol) + ",\"name\":" + md_q(value.name) + ",\"defining_module\":" + value.defining_module.to_text() + ",\"defining_module_name\":" + md_q(value.defining_module_name) + ",\"overload_ordinal\":" + value.overload_ordinal.to_text() + ",\"signature\":" + serialize_mir_declaration_signature(value.signature) + ",\"linkage_name\":" + md_q(value.linkage_name) + ",\"linkage_kind\":" + md_q(value.linkage_kind) + ",\"visibility\":" + md_visibility(value.visibility) + ",\"span_row\":" + value.span_row.to_text() + "}"
+
+fn serialize_mir_actor_decl(value: MirActorDecl) -> text:
+    val message = if val t = value.message_type: serialize_mir_declaration_type(t) else: "null"
+    "{\"symbol\":" + md_sym(value.symbol) + ",\"name\":" + md_q(value.name) + ",\"defining_module\":" + value.defining_module.to_text() + ",\"defining_module_name\":" + md_q(value.defining_module_name) + ",\"visibility\":" + md_visibility(value.visibility) + ",\"has_message_type\":" + md_b(value.has_message_type) + ",\"message_type\":" + message + ",\"has_mailbox_capacity\":" + md_b(value.has_mailbox_capacity) + ",\"mailbox_capacity_expr_row\":" + value.mailbox_capacity_expr_row.to_text() + ",\"fields\":" + md_decl_fields(value.fields) + ",\"span_row\":" + value.span_row.to_text() + "}"
+
+fn serialize_mir_bitfield_decl(value: MirBitfieldDecl) -> text:
+    "{\"symbol\":" + md_sym(value.symbol) + ",\"name\":" + md_q(value.name) + ",\"defining_module\":" + value.defining_module.to_text() + ",\"defining_module_name\":" + md_q(value.defining_module_name) + ",\"visibility\":" + md_visibility(value.visibility) + ",\"storage_type\":" + serialize_mir_declaration_type(value.storage_type) + ",\"storage_bits\":" + value.storage_bits.to_text() + ",\"fields\":" + md_decl_fields(value.fields) + ",\"span_row\":" + value.span_row.to_text() + "}"
+
+fn serialize_mir_enum_extension_constructor(value: MirEnumExtensionConstructor) -> text:
+    "{\"symbol\":" + md_sym(value.symbol) + ",\"name\":" + md_q(value.name) + ",\"provider\":" + md_q(value.provider) + ",\"function_symbol\":" + md_sym(value.function_symbol) + ",\"variant_row\":" + value.variant_row.to_text() + ",\"payload_kind\":" + value.payload_kind.to_text() + ",\"has_discriminant\":" + md_b(value.has_discriminant) + ",\"discriminant_expr_row\":" + value.discriminant_expr_row.to_text() + ",\"payload_names\":" + md_texts(value.payload_names) + ",\"payload_types\":" + md_types(value.payload_types) + ",\"payload_span_rows\":" + md_i64s(value.payload_span_rows) + ",\"span_row\":" + value.span_row.to_text() + "}"
+
+fn serialize_mir_enum_extension_decl(value: MirEnumExtensionDecl) -> text:
+    var variants: [text] = []
+    var constructors: [text] = []
+    for variant in value.variants: variants.push(serialize_mir_variant_def(variant))
+    for ctor in value.constructors: constructors.push(serialize_mir_enum_extension_constructor(ctor))
+    "{\"defining_module\":" + value.defining_module.to_text() + ",\"target_module\":" + value.target_module.to_text() + ",\"target_symbol\":" + md_sym(value.target_symbol) + ",\"target_name\":" + md_q(value.target_name) + ",\"closure_kind\":" + value.closure_kind.to_text() + ",\"closure_name\":" + md_q(value.closure_name) + ",\"source_ordinal\":" + value.source_ordinal.to_text() + ",\"variants\":[" + variants.join(",") + "],\"constructors\":[" + constructors.join(",") + "],\"attributes\":" + md_attributes(value.attributes) + ",\"span_row\":" + value.span_row.to_text() + "}"
+
+fn serialize_mir_declaration_metadata_row(value: MirDeclarationMetadataRow) -> text:
+    "{\"kind\":" + value.kind.to_text() + ",\"defining_module\":" + value.defining_module.to_text() + ",\"owner_symbol\":" + value.owner_symbol.to_text() + ",\"name\":" + md_q(value.name) + ",\"text0\":" + md_q(value.text0) + ",\"text1\":" + md_q(value.text1) + ",\"flag0\":" + md_b(value.flag0) + ",\"flag1\":" + md_b(value.flag1) + ",\"flag2\":" + md_b(value.flag2) + ",\"value0\":" + value.value0.to_text() + ",\"value1\":" + value.value1.to_text() + ",\"value2\":" + value.value2.to_text() + ",\"value3\":" + value.value3.to_text() + ",\"value4\":" + value.value4.to_text() + ",\"value5\":" + value.value5.to_text() + ",\"child_range_kind\":" + value.child_range_kind.to_text() + ",\"child_range_start\":" + value.child_range_start.to_text() + ",\"child_range_len\":" + value.child_range_len.to_text() + ",\"span_row\":" + value.span_row.to_text() + ",\"resolved_type_slots\":" + md_i64s(value.resolved_type_slots) + ",\"resolved_types\":" + md_types(value.resolved_types) + ",\"resolved_range_slots\":" + md_i64s(value.resolved_range_slots) + ",\"resolved_range_starts\":" + md_i64s(value.resolved_range_starts) + ",\"resolved_range_counts\":" + md_i64s(value.resolved_range_counts) + ",\"resolved_range_types\":" + md_types(value.resolved_range_types) + "}"
+
+fn serialize_mir_static_decl(value: MirStatic) -> text:
+    val init = if val constant = value.init: md_constant(constant) else: "null"
+    "{\"symbol\":" + md_sym(value.symbol) + ",\"name\":" + md_q(value.name) + ",\"type\":" + serialize_mir_declaration_type(value.type_) + ",\"init\":" + init + ",\"is_mutable\":" + md_b(value.is_mutable) + ",\"alignment\":" + value.alignment.to_text() + ",\"visibility\":" + md_visibility(value.visibility) + ",\"is_volatile\":" + md_b(value.is_volatile) + ",\"has_fixed_address\":" + md_b(value.has_fixed_address) + ",\"fixed_address\":" + value.fixed_address.to_text() + ",\"has_runtime_init\":" + md_b(value.has_runtime_init) + ",\"runtime_init_expr_row\":" + value.runtime_init_expr_row.to_text() + ",\"defining_module\":" + value.defining_module.to_text() + ",\"defining_module_name\":" + md_q(value.defining_module_name) + "}"
+
+fn serialize_mir_field_def(value: MirFieldDef) -> text:
+    "{\"symbol\":" + md_sym(value.symbol) + ",\"name\":" + md_q(value.name) + ",\"type\":" + serialize_mir_declaration_type(value.type_) + ",\"offset\":" + value.offset.to_text() + ",\"has_bits_attr\":" + md_b(value.has_bits_attr) + ",\"bits_width\":" + value.bits_width.to_text() + ",\"visibility\":" + md_visibility(value.visibility) + ",\"is_public\":" + md_b(value.is_public) + ",\"is_volatile\":" + md_b(value.is_volatile) + ",\"has_fixed_address\":" + md_b(value.has_fixed_address) + ",\"fixed_address\":" + value.fixed_address.to_text() + ",\"has_default\":" + md_b(value.has_default) + ",\"default_expr_row\":" + value.default_expr_row.to_text() + ",\"has_source_bits\":" + md_b(value.has_source_bits) + ",\"source_bits\":" + value.source_bits.to_text() + ",\"is_reserved\":" + md_b(value.is_reserved) + ",\"span_row\":" + value.span_row.to_text() + "}"
+
+fn serialize_mir_variant_def(value: MirVariantDef) -> text:
+    val payload = if val t = value.payload: serialize_mir_declaration_type(t) else: "null"
+    "{\"symbol\":" + md_sym(value.symbol) + ",\"name\":" + md_q(value.name) + ",\"discriminant\":" + value.discriminant.to_text() + ",\"payload\":" + payload + ",\"payload_kind\":" + value.payload_kind.to_text() + ",\"has_discriminant\":" + md_b(value.has_discriminant) + ",\"has_resolved_discriminant\":" + md_b(value.has_resolved_discriminant) + ",\"discriminant_expr_row\":" + value.discriminant_expr_row.to_text() + ",\"payload_names\":" + md_texts(value.payload_names) + ",\"payload_types\":" + md_types(value.payload_types) + ",\"payload_span_rows\":" + md_i64s(value.payload_span_rows) + ",\"attributes\":" + md_attributes(value.attributes) + ",\"span_row\":" + value.span_row.to_text() + "}"
+
+fn serialize_mir_type_def(value: MirTypeDef) -> text:
+    var kind = ""
+    match value.kind:
+        case Struct(fields):
+            var rows: [text] = []
+            for field in fields: rows.push(serialize_mir_field_def(field))
+            kind = "{\"Struct\":[" + rows.join(",") + "]}"
+        case Enum(variants):
+            var rows: [text] = []
+            for variant in variants: rows.push(serialize_mir_variant_def(variant))
+            kind = "{\"Enum\":[" + rows.join(",") + "]}"
+        case Union(types): kind = "{\"Union\":" + md_types(types) + "}"
+    val base = if val t = value.base_type: serialize_mir_declaration_type(t) else: "null"
+    "{\"symbol\":" + md_sym(value.symbol) + ",\"name\":" + md_q(value.name) + ",\"kind\":" + kind + ",\"is_export_c\":" + md_b(value.is_export_c) + ",\"export_name\":" + md_q(value.export_name) + ",\"defining_module\":" + value.defining_module.to_text() + ",\"defining_module_name\":" + md_q(value.defining_module_name) + ",\"visibility\":" + md_visibility(value.visibility) + ",\"declaration_kind\":" + value.declaration_kind.to_text() + ",\"is_complete_open\":" + md_b(value.is_complete_open) + ",\"is_dynamic_open\":" + md_b(value.is_dynamic_open) + ",\"has_base_type\":" + md_b(value.has_base_type) + ",\"base_type\":" + base + ",\"trait_types\":" + md_types(value.trait_types) + ",\"declaration_fields\":" + md_decl_fields(value.declaration_fields) + ",\"attributes\":" + md_attributes(value.attributes) + "}"
+
+fn md_sorted(values: [text]) -> text:
+    var sorted = values
+    sorted = sorted.sort()
+    "[" + sorted.join(",") + "]"
+
+fn serialize_mir_declaration_shard(value: MirDeclarationShard) -> text:
+    val shard_module = MirModule(
+        name = value.defining_module_name, functions = {},
+        statics = value.statics, constants = value.constants,
+        types = value.types, externs = value.externs, actors = value.actors,
+        bitfields = value.bitfields, enum_extensions = value.enum_extensions,
+        declaration_metadata = value.declaration_metadata,
+    )
+    "{\"defining_module\":" + value.defining_module.to_text() +
+        ",\"declarations\":" + serialize_mir_module_declarations(shard_module) + "}"
+
+fn serialize_mir_module_declarations(module: MirModule) -> text:
+    var statics: [text] = []
+    var constants: [text] = []
+    var types: [text] = []
+    var externs: [text] = []
+    var actors: [text] = []
+    var bitfields: [text] = []
+    var extensions: [text] = []
+    var metadata: [text] = []
+    var shards: [text] = []
+    var shard_index: [text] = []
+    for value in module.statics.values(): statics.push(serialize_mir_static_decl(value))
+    for value in module.constants.values(): constants.push(md_constant(value))
+    for value in module.types.values(): types.push(serialize_mir_type_def(value))
+    for value in module.externs.values(): externs.push(serialize_mir_extern_decl(value))
+    for value in module.actors.values(): actors.push(serialize_mir_actor_decl(value))
+    for value in module.bitfields.values(): bitfields.push(serialize_mir_bitfield_decl(value))
+    for value in module.enum_extensions: extensions.push(serialize_mir_enum_extension_decl(value))
+    for value in module.declaration_metadata: metadata.push(serialize_mir_declaration_metadata_row(value))
+    for value in module.declaration_shards: shards.push(serialize_mir_declaration_shard(value))
+    for module_id in module.declaration_shard_index.keys():
+        shard_index.push("[" + module_id.to_text() + "," + module.declaration_shard_index[module_id].to_text() + "]")
+    "{\"schema\":\"mir-declarations-v1\",\"module\":" + md_q(module.name) + ",\"statics\":" + md_sorted(statics) + ",\"constants\":" + md_sorted(constants) + ",\"types\":" + md_sorted(types) + ",\"externs\":" + md_sorted(externs) + ",\"actors\":" + md_sorted(actors) + ",\"bitfields\":" + md_sorted(bitfields) + ",\"enum_extensions\":" + md_sorted(extensions) + ",\"declaration_metadata\":" + md_sorted(metadata) + ",\"declaration_shards\":" + md_sorted(shards) + ",\"declaration_shard_index\":" + md_sorted(shard_index) + "}"
+
+# Hashing the canonical byte representation guarantees the hash and codec
+# cannot drift in which scalar fields they consider structural.
+fn mir_declaration_structural_hash(module: MirModule) -> i64:
+    val encoded = serialize_mir_module_declarations(module)
+    var hash: i64 = 1469598103
+    var i: i64 = 0
+    while i < encoded.len():
+        hash = (hash * 131 + encoded.char_at(i).to_i64()) % 1000000007
+        i = i + 1
+    hash
+
+# A scalar visitor is intentionally representation-neutral: callers receive
+# a stable path and canonical scalar spelling without retaining MIR objects.
+fn visit_mir_declaration_scalars<C>(module: MirModule, ctx: C, visitor: fn(text, text, C) -> C) -> C:
+    var next = visitor("schema", "mir-declarations-v1", ctx)
+    next = visitor("module", module.name, next)
+    next = visitor("canonical_json", serialize_mir_module_declarations(module), next)
+    visitor("structural_hash", mir_declaration_structural_hash(module).to_text(), next)
+
+fn validate_mir_declarations(module: MirModule) -> [text]:
+    var errors: [text] = []
+    var shard_modules: Dict<i64, bool> = {}
+    var shard_offset: i64 = 0
+    for shard in module.declaration_shards:
+        if shard_modules.contains(shard.defining_module):
+            errors.push("duplicate declaration shard module `{shard.defining_module}`")
+        shard_modules[shard.defining_module] = true
+        if not module.declaration_shard_index.contains(shard.defining_module):
+            errors.push("declaration shard module `{shard.defining_module}` is absent from index")
+        elif module.declaration_shard_index[shard.defining_module] != shard_offset:
+            errors.push("declaration shard module `{shard.defining_module}` has wrong index offset")
+        val shard_module = MirModule(name: shard.defining_module_name,
+            functions: {}, statics: shard.statics, constants: shard.constants,
+            types: shard.types, externs: shard.externs, actors: shard.actors,
+            bitfields: shard.bitfields, enum_extensions: shard.enum_extensions,
+            declaration_metadata: shard.declaration_metadata)
+        for shard_error in validate_mir_declarations(shard_module):
+            errors.push("module `{shard.defining_module_name}`: " + shard_error)
+        shard_offset = shard_offset + 1
+    if module.declaration_shard_index.len() != module.declaration_shards.len():
+        errors.push("declaration shard index length differs from shard count")
+    for value in module.externs.values():
+        if value.name == "": errors.push("extern name must not be empty")
+        if value.symbol.id < 0: errors.push("extern `{value.name}` has invalid symbol")
+    for value in module.actors.values():
+        if value.has_message_type and value.message_type == nil: errors.push("actor `{value.name}` marks a missing message type present")
+        if not value.has_message_type and value.message_type != nil: errors.push("actor `{value.name}` carries a message type without presence")
+    for value in module.bitfields.values():
+        if value.storage_bits <= 0: errors.push("bitfield `{value.name}` has non-positive storage width")
+        for field in value.fields:
+            if field.bit_offset < 0 or field.bit_width <= 0: errors.push("bitfield `{value.name}` field `{field.name}` has invalid bit range")
+            if field.bit_offset + field.bit_width > value.storage_bits: errors.push("bitfield `{value.name}` field `{field.name}` exceeds storage width")
+    for value in module.enum_extensions:
+        for ctor in value.constructors:
+            if ctor.payload_names.len() != ctor.payload_types.len(): errors.push("enum extension constructor `{ctor.name}` payload name/type arity differs")
+            if ctor.payload_span_rows.len() != ctor.payload_types.len(): errors.push("enum extension constructor `{ctor.name}` payload span/type arity differs")
+    for value in module.declaration_metadata:
+        if value.child_range_len < 0 or (value.child_range_len > 0 and
+                value.child_range_start < 0):
+            errors.push("declaration metadata `{value.name}` has invalid child range")
+        if value.resolved_type_slots.len() != value.resolved_types.len():
+            errors.push("declaration metadata `{value.name}` resolved type slots are misaligned")
+        if value.resolved_range_slots.len() != value.resolved_range_starts.len() or
+                value.resolved_range_slots.len() != value.resolved_range_counts.len():
+            errors.push("declaration metadata `{value.name}` resolved ranges are misaligned")
+        for i in 0..value.resolved_range_starts.len():
+            val start = value.resolved_range_starts[i]
+            val count = value.resolved_range_counts[i]
+            if start < 0 or count < 0 or start + count > value.resolved_range_types.len():
+                errors.push("declaration metadata `{value.name}` resolved range is invalid")
+    errors
+
+export serialize_mir_declaration_type, serialize_mir_declaration_signature
+export serialize_mir_declaration_attribute, serialize_mir_declaration_field
+export serialize_mir_extern_decl, serialize_mir_actor_decl, serialize_mir_bitfield_decl
+export serialize_mir_enum_extension_constructor, serialize_mir_enum_extension_decl
+export serialize_mir_declaration_metadata_row, serialize_mir_static_decl
+export serialize_mir_declaration_shard
+export serialize_mir_field_def, serialize_mir_variant_def, serialize_mir_type_def
+export serialize_mir_module_declarations, mir_declaration_structural_hash
+export visit_mir_declaration_scalars, validate_mir_declarations
+export mir_append_declaration_shard

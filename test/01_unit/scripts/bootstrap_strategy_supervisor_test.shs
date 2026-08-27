@@ -1,0 +1,127 @@
+#!/bin/sh
+set -eu
+
+root=$(cd "$(dirname "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT INT TERM HUP
+
+fail() {
+  echo "bootstrap_strategy_supervisor_test: $*" >&2
+  exit 1
+}
+
+make_compiler() {
+  target=$1
+  mkdir -p "$(dirname "$target")"
+  cp "$tmp/fake-compiler" "$target"
+  chmod +x "$target"
+}
+
+cat >"$tmp/fake-compiler" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+  --version) echo fake-simple; exit 0 ;;
+  check)
+    [ "${2:-}" != src/app/mcp ] || kill -SEGV $$
+    exit 0
+    ;;
+  test) exit 0 ;;
+  native-build)
+    output=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in --output) shift; output=$1 ;; esac
+      shift
+    done
+    [ -n "$output" ] || exit 2
+    mkdir -p "$(dirname "$output")"
+    printf '#!/bin/sh\nexit 0\n' >"$output"
+    chmod +x "$output"
+    exit 0
+    ;;
+esac
+exit 0
+EOF
+chmod +x "$tmp/fake-compiler"
+
+cat >"$tmp/mock-child" <<'EOF'
+#!/bin/sh
+output=""
+for arg in "$@"; do case "$arg" in --output=*) output=${arg#*=} ;; esac; done
+base="$output/stage3/test-platform"
+mkdir -p "$base/stage2-admitted"
+cp "$MOCK_COMPILER" "$base/stage2-admitted/simple"
+chmod +x "$base/stage2-admitted/simple"
+sha=$(sha256sum "$base/stage2-admitted/simple" | awk '{print $1}')
+printf 'status=pass\ncandidate_sha256_after=%s\n' "$sha" >"$base/stage2-sanity.env"
+echo published >"$MOCK_EVENTS/phase2_published"
+sleep 2
+cp "$MOCK_COMPILER" "$base/simple"
+chmod +x "$base/simple"
+sha=$(sha256sum "$base/simple" | awk '{print $1}')
+printf 'status=pass\nstage3_sha256=%s\n' "$sha" >"$base/provenance.env"
+echo complete >"$MOCK_EVENTS/child_complete"
+EOF
+chmod +x "$tmp/mock-child"
+
+cat >"$tmp/mock-runner" <<'EOF'
+#!/bin/sh
+phase=""
+work=""
+for arg in "$@"; do
+  case "$arg" in --phase=*) phase=${arg#*=} ;; --work-root=*) work=${arg#*=} ;; esac
+done
+mkdir -p "$work"
+echo start >"$MOCK_EVENTS/${phase}_verification_started"
+if [ "$phase" = stage2 ] && [ ! -f "$MOCK_EVENTS/child_complete" ]; then
+  echo yes >"$MOCK_EVENTS/stage2_overlapped_stage3"
+fi
+printf 'overall=PASS\n' >"$work/summary.env"
+exit 0
+EOF
+chmod +x "$tmp/mock-runner"
+
+mkdir -p "$tmp/events"
+status=0
+MOCK_COMPILER="$tmp/fake-compiler" MOCK_EVENTS="$tmp/events" \
+  "$root/scripts/bootstrap/bootstrap-strategy.sh" \
+  --output="$tmp/bootstrap" --child-script="$tmp/mock-child" \
+  --verification-runner="$tmp/mock-runner" --evidence-root="$tmp/evidence" \
+  --platform=test-platform --poll-seconds=1 --memory-floor-mib=0 -- \
+  >/dev/null 2>&1 || status=$?
+[ "$status" -ne 0 ] || fail "missing Stage4 producer must prevent admission"
+grep -q '^strategy=normal$' "$tmp/evidence/terminal-summary.env" || fail "normal is not default"
+grep -q '^stage2_verification_status=0$' "$tmp/evidence/terminal-summary.env" || fail "stage2 verification missing"
+grep -q '^stage3_verification_status=0$' "$tmp/evidence/terminal-summary.env" || fail "stage3 verification missing"
+grep -q '^stage4_verification_status=BLOCKED:tools-only-producer-unavailable$' \
+  "$tmp/evidence/terminal-summary.env" || fail "Stage4 block missing"
+[ -f "$tmp/events/stage2_overlapped_stage3" ] || fail "stage2 work did not overlap Stage3 build"
+
+bad_status=0
+"$root/scripts/bootstrap/bootstrap-phase-verification.shs" --phase=stage2 \
+  --compiler="$tmp/fake-compiler" --compiler-sha256=0000 --strategy=normal \
+  --hash-policy=canonical --work-root="$tmp/hash-fail" --source-root="$tmp" \
+  --timeout-seconds=10 >/dev/null 2>&1 || bad_status=$?
+[ "$bad_status" -ne 0 ] || fail "canonical hash mismatch was accepted"
+
+actual_sha=$(sha256sum "$tmp/fake-compiler" | awk '{print $1}')
+matrix_status=0
+"$root/scripts/bootstrap/bootstrap-phase-verification.shs" --phase=stage2 \
+  --compiler="$tmp/fake-compiler" --compiler-sha256="$actual_sha" --strategy=full \
+  --hash-policy=canonical --work-root="$tmp/matrix" --source-root="$tmp" \
+  --timeout-seconds=10 >/dev/null 2>&1 || matrix_status=$?
+[ "$matrix_status" -ne 0 ] || fail "crashed task did not fail matrix"
+grep -q 'task=mcp_check|result=CRASH|status=139' "$tmp/matrix/summary.env" || fail "crash was not terminalized"
+grep -q 'task=lsp_build|result=PASS|status=0' "$tmp/matrix/summary.env" || fail "matrix stopped after crash"
+grep -q '^overall=FAIL$' "$tmp/matrix/summary.env" || fail "failed matrix summary missing"
+
+grep -q 'SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED' \
+  "$root/scripts/bootstrap/bootstrap-from-scratch.sh" ||
+  fail "ordinary bootstrap entry is not strategy-supervised"
+grep -q 'bootstrap-strategy.sh' \
+  "$root/scripts/bootstrap/bootstrap-from-scratch.sh" ||
+  fail "ordinary bootstrap entry does not invoke the strategy supervisor"
+grep -q 'env SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED=1' \
+  "$root/scripts/bootstrap/bootstrap-strategy.sh" ||
+  fail "strategy child lacks recursion guard"
+
+echo "bootstrap strategy supervisor: PASS"

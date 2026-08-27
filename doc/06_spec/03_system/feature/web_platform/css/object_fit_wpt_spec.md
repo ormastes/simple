@@ -1,17 +1,108 @@
-# CSS Replaced-Image Object Fit
+# Object Fit Wpt Specification
 
-> Proves contain and cover against admitted image resources through Web style and
+> <details>
+
+<!-- sdn-diagram:id=object_fit_wpt_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=object_fit_wpt_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+object_fit_wpt_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=object_fit_wpt_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# CSS Replaced-Image Object Fit
+# Object Fit Wpt Specification
 
-Proves contain and cover against admitted image resources through Web style and
+## Scenarios
+
+### WPT-derived CSS object-fit subset
+
+#### compute_object_fit pure function
+
+#### fill stretches to box dimensions
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = compute_object_fit(100.0, 50.0, 200.0, 200.0, "fill", "50% 50%")
+expect(approx(result.dest_width, 200.0)).to_equal(true)
+expect(approx(result.dest_height, 200.0)).to_equal(true)
+```
+
+</details>
+
+#### contain preserves aspect ratio within box
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = compute_object_fit(200.0, 100.0, 100.0, 100.0, "contain", "50% 50%")
+expect(approx(result.dest_width, 100.0)).to_equal(true)
+expect(approx(result.dest_height, 50.0)).to_equal(true)
+```
+
+</details>
+
+#### cover fills box preserving aspect ratio
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = compute_object_fit(200.0, 100.0, 100.0, 100.0, "cover", "50% 50%")
+expect(approx(result.dest_width, 200.0)).to_equal(true)
+expect(approx(result.dest_height, 100.0)).to_equal(true)
+```
+
+</details>
+
+#### none uses natural dimensions
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = compute_object_fit(50.0, 30.0, 100.0, 100.0, "none", "50% 50%")
+expect(approx(result.dest_width, 50.0)).to_equal(true)
+expect(approx(result.dest_height, 30.0)).to_equal(true)
+```
+
+</details>
 
 ## At a Glance
 
@@ -20,168 +111,23 @@ Proves contain and cover against admitted image resources through Web style and
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/feature/web_platform/css/object_fit_wpt_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-Proves contain and cover against admitted image resources through Web style and
-layout, canonical image Draw IR geometry and clipping, and exact expected-color
-Engine2D coverage/count. Intrinsic sizing without authored dimensions remains
-outside this slice.
+## Overview
 
-## Scenarios
-
-### REQ-WEB-BROWSER-003/004: CSS object-fit
-
-#### should contain a wide image and retain the content-box clip
-
-**Scenario capture:** artifact after_step
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-WEB-BROWSER-003/004
-```
-
-</details>
-
-#### should cover the image box and clip both horizontal edges
-
-- should cover the image box and clip both horizontal edges
-   - Artifact capture: after_step
-- Resolve cover through Web style and layout semantics
-   - Artifact capture: after_step
-- Lower the over-wide image through canonical clipped Draw IR
-   - Artifact capture: after_step
-- Execute the clipped cover image through Engine2D
-   - Artifact capture: after_step
-   - Evidence: artifact verified by 1 expected check
-   - Expected: rendered.skipped_command_count equals `0`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 44 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-SYSTEM
-step("should cover the image box and clip both horizontal edges")
-step("Resolve cover through Web style and layout semantics")
-val html = _object_fit_html("cover")
-expect(simple_web_layout_debug_layout_by_id(
-    html, 8, 8, "photo", "w"
-)).to_equal("6")
-expect(simple_web_layout_debug_layout_by_id(
-    html, 8, 8, "photo", "h"
-)).to_equal("6")
-
-step("Lower the over-wide image through canonical clipped Draw IR")
-val image = _object_fit_resource(0xFF2563EBu32)
-val composition = simple_web_layout_render_html_draw_ir_with_images(
-    html, 8, 8, [image]
-)
-val commands = composition.batches[0].commands
-val image_index = _object_fit_command_index(
-    commands, "photo_image"
-)
-expect(image_index).to_be_greater_than(-1)
-if image_index >= 0:
-    val command = commands[image_index]
-    expect([
-        command.x, command.y, command.width, command.height
-    ]).to_equal([-3, 0, 12, 6])
-    expect([
-        command.clip_rect.x, command.clip_rect.y,
-        command.clip_rect.width, command.clip_rect.height
-    ]).to_equal([0, 0, 6, 6])
-    expect(_object_fit_style(
-        command, "object-fit"
-    )).to_equal("cover")
-
-step("Execute the clipped cover image through Engine2D")
-val raster = Engine2dCompositorBackend.create_named(8, 8, "software")
-val rendered = raster.render_draw_ir_composition(
-    composition, [image]
-)
-raster.shutdown()
-expect(rendered.skipped_command_count).to_equal(0)
-expect(_object_fit_color_count(
-    rendered.pixels, 0xFF2563EBu32
-)).to_equal(36)
-```
-
-</details>
+Tests covering:
+- WPT-derived CSS object-fit subset
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-- `REQ-WEB-BROWSER-003/004`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `d868cd620504a3ce0c4283d602d6319e0bd07a079fcc8daddbf5dc0d79ab7b5a`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `d868cd620504a3ce0c4283d602d6319e0bd07a079fcc8daddbf5dc0d79ab7b5a`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `d868cd620504a3ce0c4283d602d6319e0bd07a079fcc8daddbf5dc0d79ab7b5a`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
-
-SSpec documentization score: 90/100
-source: test/03_system/feature/web_platform/css/object_fit_wpt_spec.spl
-mirror: doc/06_spec/03_system/feature/web_platform/css/object_fit_wpt_spec.md (current)
-findings: 7 blockers: 0
-  narrative=100 structure=80 oracle=90
-  traceability=100 evidence=90 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/web_platform/css/object_fit_wpt_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/web_platform/css/object_fit_wpt_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/web_platform/css/object_fit_wpt_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/feature/web_platform/css/object_fit_wpt_spec.spl:71:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should contain a wide image and retain the content-box clip' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-test/03_system/feature/web_platform/css/object_fit_wpt_spec.spl:71:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should contain a wide image and retain the content-box clip' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/feature/web_platform/css/object_fit_wpt_spec.spl:126:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should cover the image box and clip both horizontal edges' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/feature/web_platform/css/object_fit_wpt_spec.spl:126:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should cover the image box and clip both horizontal edges' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

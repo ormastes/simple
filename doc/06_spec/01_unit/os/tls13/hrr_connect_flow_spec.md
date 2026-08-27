@@ -1,6 +1,30 @@
 # Hrr Connect Flow Specification
 
-> Tests covering process_hrr_after_serverhello AC-1 second-HRR rejection, process_hrr_after_serverhello AC-2 same-group rejection, process_hrr_after_serverhello AC-3 CH2 routing for SECP256R1, process_hrr_after_serverhello AC-4 transcript replacement (§4.4.1).
+> 1. hs, body,  ch1 random
+
+<!-- sdn-diagram:id=hrr_connect_flow_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=hrr_connect_flow_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+hrr_connect_flow_spec -> std
+hrr_connect_flow_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=hrr_connect_flow_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,11 +41,8 @@
 
 #### rejects with unexpected_message when seen_hrr is already true
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- rejects with unexpected_message when seen_hrr is already true
+1. hs, body,  ch1 random
+2.  fresh x25519 pub
    - Expected: reason contains `unexpected_message`
    - Expected: reason contains `second HRR`
    - Expected: "expected Reject(second HRR)" equals `got Ok`
@@ -30,12 +51,10 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("rejects with unexpected_message when seen_hrr is already true")
 val hs = _hrr_p256_no_cookie_hs()
 val body = _hrr_p256_no_cookie_body()
 val r = process_hrr_after_serverhello(
@@ -58,7 +77,8 @@ else:
 
 #### rejects when HRR picks GROUP_X25519 and CH1 already offered X25519
 
-- rejects when HRR picks GROUP_X25519 and CH1 already offered X25519
+1. hs, body,  ch1 random
+2.  fresh x25519 pub
    - Expected: reason contains `illegal_parameter`
    - Expected: reason contains `X25519`
    - Expected: "expected Reject(same-group X25519)" equals `got Ok`
@@ -67,12 +87,10 @@ else:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("rejects when HRR picks GROUP_X25519 and CH1 already offered X25519")
 val hs = _hrr_x25519_no_cookie_hs()
 val body = _hrr_x25519_no_cookie_body()
 val r = process_hrr_after_serverhello(
@@ -93,7 +111,8 @@ else:
 
 #### rejects when HRR picks SECP256R1 and CH1 already offered SECP256R1
 
-- rejects when HRR picks SECP256R1 and CH1 already offered SECP256R1
+1. hs, body,  ch1 random
+2.  fresh x25519 pub
    - Expected: reason contains `illegal_parameter`
    - Expected: reason contains `secp256r1`
    - Expected: "expected Reject(same-group secp256r1)" equals `got Ok`
@@ -102,12 +121,10 @@ else:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("rejects when HRR picks SECP256R1 and CH1 already offered SECP256R1")
 val hs = _hrr_p256_no_cookie_hs()
 val body = _hrr_p256_no_cookie_body()
 val r = process_hrr_after_serverhello(
@@ -128,7 +145,8 @@ else:
 
 #### rejects when HRR picks an unadvertised group
 
-- rejects when HRR picks an unadvertised group
+1. hs, body,  ch1 random
+2.  fresh x25519 pub
    - Expected: reason contains `illegal_parameter`
    - Expected: reason contains `not in client supported_groups`
    - Expected: "expected Reject(unsupported group)" equals `got Ok`
@@ -137,12 +155,10 @@ else:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("rejects when HRR picks an unadvertised group")
 val hs = _hrr_unsupported_group_hs()
 val body = _hrr_unsupported_group_body()
 val r = process_hrr_after_serverhello(
@@ -163,7 +179,8 @@ else:
 
 #### builds CH2 with P-256 key_share when CH1 only advertised X25519
 
-- builds CH2 with P-256 key_share when CH1 only advertised X25519
+1. hs, body,  ch1 random
+2.  fresh x25519 pub
    - Expected: value.selected_group equals `GROUP_SECP256R1`
    - Expected: value.client_hello2_bytes[0] equals `0x01u8`
    - Expected: value.client_hello2_bytes[6 + i] equals `_ch1_random()[i]`
@@ -173,12 +190,10 @@ else:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("builds CH2 with P-256 key_share when CH1 only advertised X25519")
 val hs = _hrr_p256_no_cookie_hs()
 val body = _hrr_p256_no_cookie_body()
 val r = process_hrr_after_serverhello(
@@ -205,7 +220,8 @@ else:
 
 #### preserves CH1 client_random verbatim in CH2 (RFC 8446 §4.1.2)
 
-- preserves CH1 client_random verbatim in CH2 (RFC 8446 §4.1.2)
+1. hs, body,  ch1 random
+2.  fresh x25519 pub
    - Expected: value.client_hello2_bytes[6 + i] equals `_ch1_random()[i]`
    - Expected: "expected Ok" equals `got Reject`
 
@@ -213,12 +229,10 @@ else:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("preserves CH1 client_random verbatim in CH2 (RFC 8446 §4.1.2)")
 val hs = _hrr_p256_no_cookie_hs()
 val body = _hrr_p256_no_cookie_body()
 val r = process_hrr_after_serverhello(
@@ -240,19 +254,18 @@ else:
 
 #### echoes a non-empty cookie verbatim as a contiguous run inside CH2
 
-- echoes a non-empty cookie verbatim as a contiguous run inside CH2
+1. hs, body,  ch1 random
+2.  fresh x25519 pub
    - Expected: _contains_run(ch2, cookie) is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("echoes a non-empty cookie verbatim as a contiguous run inside CH2")
 val cookie: [u8] = [0xCAu8, 0xFEu8, 0xBAu8, 0xBEu8, 0x01u8, 0x02u8]
 val hs = _hrr_p256_with_cookie_hs(cookie)
 val body = _hrr_p256_with_cookie_body(cookie)
@@ -271,7 +284,8 @@ expect(_contains_run(ch2, cookie)).to_equal(true)
 
 #### transcript_seed starts with synthetic message_hash 0xfe 0x00 0x00 0x20 || Hash(CH1)
 
-- transcript_seed starts with synthetic message_hash 0xfe 0x00 0x00 0x20 || Hash(CH1)
+1. hs, body,  ch1 random
+2.  fresh x25519 pub
    - Expected: seed[0] equals `HS_MESSAGE_HASH)         # 0xfe`
    - Expected: seed[1] equals `0x00u8`
    - Expected: seed[2] equals `0x00u8`
@@ -283,12 +297,10 @@ expect(_contains_run(ch2, cookie)).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("transcript_seed starts with synthetic message_hash 0xfe 0x00 0x00 0x20 || Hash(CH1)")
 val hs = _hrr_p256_no_cookie_hs()
 val body = _hrr_p256_no_cookie_body()
 val r = process_hrr_after_serverhello(
@@ -316,7 +328,8 @@ else:
 
 #### transcript_seed appends HRR handshake bytes verbatim after synthetic prefix
 
-- transcript_seed appends HRR handshake bytes verbatim after synthetic prefix
+1. hs, body,  ch1 random
+2.  fresh x25519 pub
    - Expected: seed.len() equals `(36u64 + hs.len().to_u64())`
    - Expected: seed[36 + i] equals `hs[i]`
    - Expected: "expected Ok" equals `got Reject`
@@ -325,12 +338,10 @@ else:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("transcript_seed appends HRR handshake bytes verbatim after synthetic prefix")
 val hs = _hrr_p256_no_cookie_hs()
 val body = _hrr_p256_no_cookie_body()
 val r = process_hrr_after_serverhello(
@@ -359,12 +370,12 @@ else:
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/tls13/hrr_connect_flow_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering process_hrr_after_serverhello AC-1 second-HRR rejection, process_hrr_after_serverhello AC-2 same-group rejection, process_hrr_after_serverhello AC-3 CH2 routing for SECP256R1, process_hrr_after_serverhello AC-4 transcript replacement (§4.4.1).
+Tests covering:
 - process_hrr_after_serverhello AC-1 second-HRR rejection
 - process_hrr_after_serverhello AC-2 same-group rejection
 - process_hrr_after_serverhello AC-3 CH2 routing for SECP256R1
@@ -382,51 +393,3 @@ Tests covering process_hrr_after_serverhello AC-1 second-HRR rejection, process_
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `351346906e5ddce7060d1a39aab7c1b6ca97d02cb7fa94d4975600c51ca71f42`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `351346906e5ddce7060d1a39aab7c1b6ca97d02cb7fa94d4975600c51ca71f42`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `351346906e5ddce7060d1a39aab7c1b6ca97d02cb7fa94d4975600c51ca71f42`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/os/tls13/hrr_connect_flow_spec.spl
-mirror: doc/06_spec/01_unit/os/tls13/hrr_connect_flow_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/os/tls13/hrr_connect_flow_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/tls13/hrr_connect_flow_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/os/tls13/hrr_connect_flow_spec.spl:242:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects with unexpected_message when seen_hrr is already true' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/os/tls13/hrr_connect_flow_spec.spl:262:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects when HRR picks GROUP_X25519 and CH1 already offered X25519' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/os/tls13/hrr_connect_flow_spec.spl:280:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects when HRR picks SECP256R1 and CH1 already offered SECP256R1' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

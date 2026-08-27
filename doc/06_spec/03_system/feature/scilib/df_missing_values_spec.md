@@ -2,6 +2,29 @@
 
 > Validates is_na, fill_na, drop_na on Series and DataFrame.
 
+<!-- sdn-diagram:id=df_missing_values_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=df_missing_values_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+df_missing_values_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=df_missing_values_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 8 | 8 | 0 | 0 |
@@ -23,7 +46,7 @@ Validates is_na, fill_na, drop_na on Series and DataFrame.
 | Plan | doc/03_plan/agent_tasks/scilib_port_df.md |
 | Design | doc/05_design/science_math_lib_set.md |
 | Source | `test/03_system/feature/scilib/df_missing_values_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Validates is_na, fill_na, drop_na on Series and DataFrame.
@@ -34,26 +57,26 @@ Validates is_na, fill_na, drop_na on Series and DataFrame.
 
 #### returns Bool series marking missing positions
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- returns Bool series marking missing positions
+1. Symbol from
+2. [Float64 new
+3. [Bool new
+4. var na2 = s is na
    - Expected: na2.len() equals `Index.new(3)`
+5. var na3 = s is na
    - Expected: na3.values.flat_bool(0) equals `Bool.new(false)`
+6. var na4 = s is na
    - Expected: na4.values.flat_bool(1) equals `Bool.new(true)`
+7. var na5 = s is na
    - Expected: na5.values.flat_bool(2) equals `Bool.new(false)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns Bool series marking missing positions")
 val masked = Series.from_f64_masked(
     Symbol.from("x"),
     [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)],
@@ -75,20 +98,21 @@ expect(na5.values.flat_bool(2)).to_equal(Bool.new(false))
 
 #### returns all-false Bool series when no values are missing
 
-- returns all-false Bool series when no values are missing
+1. name: Symbol from
+2. values: [Float64 new
+3. var na = s is na
    - Expected: na.values.flat_bool(0) equals `Bool.new(false)`
+4. var na2 = s is na
    - Expected: na2.values.flat_bool(1) equals `Bool.new(false)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns all-false Bool series when no values are missing")
 val s = Series.from_values(
     name: Symbol.from("y"),
     values: [Float64.new(1.0), Float64.new(2.0)]
@@ -105,7 +129,9 @@ expect(na2.values.flat_bool(1)).to_equal(Bool.new(false))
 
 #### replaces missing Float64 values with fill value
 
-- replaces missing Float64 values with fill value
+1. Symbol from
+2. [Float64 new
+3. [Bool new
    - Expected: filled.get(Index.new(1)) equals `Float64.new(99.0)`
    - Expected: filled.is_missing(Index.new(1)).unwrap() is false
 
@@ -113,12 +139,10 @@ expect(na2.values.flat_bool(1)).to_equal(Bool.new(false))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("replaces missing Float64 values with fill value")
 val s = Series.from_f64_masked(
     Symbol.from("x"),
     [Float64.new(1.0), Float64.new(0.0), Float64.new(3.0)],
@@ -133,19 +157,19 @@ expect(filled.is_missing(Index.new(1)).unwrap()).to_equal(false)
 
 #### leaves non-missing values unchanged
 
-- leaves non-missing values unchanged
+1. Symbol from
+2. [Float64 new
+3. [Bool new
    - Expected: filled.get(Index.new(0)) equals `Float64.new(5.0)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("leaves non-missing values unchanged")
 val s = Series.from_f64_masked(
     Symbol.from("a"),
     [Float64.new(5.0), Float64.new(0.0)],
@@ -161,7 +185,15 @@ expect(filled.get(Index.new(0))).to_equal(Float64.new(5.0))
 
 #### returns boolean DataFrame with same schema
 
-- returns boolean DataFrame with same schema
+1. Symbol from
+2. [Float64 new
+3. [Bool new
+4. Symbol from
+5. [Int64 new
+6. [Bool new
+7. SeriesErased F64Series
+8. SeriesErased I64Series
+9. ]) unwrap
    - Expected: na_df.num_cols() equals `Index.new(2)`
    - Expected: col_a.values.flat_bool(1) equals `Bool.new(true)`
    - Expected: col_b.values.flat_bool(0) equals `Bool.new(false)`
@@ -170,12 +202,10 @@ expect(filled.get(Index.new(0))).to_equal(Float64.new(5.0))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns boolean DataFrame with same schema")
 val sa = Series.from_f64_masked(
     Symbol.from("a"),
     [Float64.new(1.0), Float64.new(0.0)],
@@ -206,7 +236,13 @@ expect(col_b.values.flat_bool(0)).to_equal(Bool.new(false))
 
 #### Any: drops rows where at least one column is missing
 
-- Any: drops rows where at least one column is missing
+1. Symbol from
+2. [Float64 new
+3. [Bool new
+4. Symbol from
+5. [Int64 new
+6. [Bool new
+7. ]) unwrap
    - Expected: out.num_rows() equals `Index.new(2)`
    - Expected: out.col(Symbol.from("x")).unwrap().get(Index.new(0)) equals `Float64.new(1.0)`
    - Expected: out.col(Symbol.from("x")).unwrap().get(Index.new(1)) equals `Float64.new(3.0)`
@@ -215,12 +251,10 @@ expect(col_b.values.flat_bool(0)).to_equal(Bool.new(false))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("Any: drops rows where at least one column is missing")
 val df = DataFrame.from_columns([
     SeriesErased.F64Series(Series.from_f64_masked(
         Symbol.from("x"),
@@ -243,19 +277,23 @@ expect(out.col(Symbol.from("x")).unwrap().get(Index.new(1))).to_equal(Float64.ne
 
 #### All: only drops rows where all columns are missing
 
-- All: only drops rows where all columns are missing
+1. Symbol from
+2. [Float64 new
+3. [Bool new
+4. Symbol from
+5. [Int64 new
+6. [Bool new
+7. ]) unwrap
    - Expected: out.num_rows() equals `Index.new(2)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("All: only drops rows where all columns are missing")
 val df = DataFrame.from_columns([
     SeriesErased.F64Series(Series.from_f64_masked(
         Symbol.from("x"),
@@ -276,19 +314,19 @@ expect(out.num_rows()).to_equal(Index.new(2))
 
 #### Any on frame with no missing values leaves all rows
 
-- Any on frame with no missing values leaves all rows
+1. name: Symbol from
+2. values: [Float64 new
+3. ]) unwrap
    - Expected: out.num_rows() equals `Index.new(2)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("Any on frame with no missing values leaves all rows")
 val df = DataFrame.from_columns([
     SeriesErased.F64Series(Series.from_values(
         name: Symbol.from("a"),
@@ -314,56 +352,8 @@ expect(out.num_rows()).to_equal(Index.new(2))
 
 ## Related Documentation
 
-- **Plan:** `doc/03_plan/agent_tasks/scilib_port_df.md`
-- **Design:** `doc/05_design/science_math_lib_set.md`
+- **Plan:** [doc/03_plan/agent_tasks/scilib_port_df.md](doc/03_plan/agent_tasks/scilib_port_df.md)
+- **Design:** [doc/05_design/science_math_lib_set.md](doc/05_design/science_math_lib_set.md)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `aa5756cf008184948853acc3f4cc67dd33ceb864f80e86f1235a1b11b63e13c3`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `aa5756cf008184948853acc3f4cc67dd33ceb864f80e86f1235a1b11b63e13c3`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `aa5756cf008184948853acc3f4cc67dd33ceb864f80e86f1235a1b11b63e13c3`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/scilib/df_missing_values_spec.spl
-mirror: doc/06_spec/03_system/feature/scilib/df_missing_values_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/scilib/df_missing_values_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/scilib/df_missing_values_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/scilib/df_missing_values_spec.spl:24:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns Bool series marking missing positions' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/scilib/df_missing_values_spec.spl:43:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns all-false Bool series when no values are missing' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/scilib/df_missing_values_spec.spl:56:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'replaces missing Float64 values with fill value' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

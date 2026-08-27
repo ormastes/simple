@@ -4,31 +4,28 @@ use compiler.backend.backend.vhdl_process.*
 
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirTerminator}
-use compiler.backend.backend.backend_types.{CompileError}
+use compiler.backend.backend_api.*
 use compiler.backend.vhdl.vhdl_builder.{VhdlBuilder}
+use .vhdl.vhdl_builder.{VhdlBuilder}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{VhdlResetPolarity, VhdlResetSynchrony}
-use compiler.backend.backend.vhdl_backend.{VhdlBackend, VhdlReturnAbi}
+use .vhdl_backend.{VhdlBackend, VhdlReturnAbi}
 
 impl VhdlBackend:
     fn compile_instruction(builder: VhdlBuilder, inst: MirInst) -> Result<(), CompileError>:
         """Compile a single MIR instruction to VHDL."""
         match inst.kind:
             case Const(dest, value, ty):
-                if self.active_inline_exprs.has(dest.id):
-                    return Ok(())
                 val dest_name = match self.local_to_vhdl(dest):
                     case Ok(result): result
                     case Err(err): return Err(err)
-                val vhdl_value = match self.const_value_to_vhdl_at(value, ty, inst.span):
+                val vhdl_value = match self.const_value_to_vhdl_at(value, ty, Some(inst.span)):
                     case Ok(result): result
                     case Err(err): return Err(err)
                 builder.emit_signal_assign(dest_name, vhdl_value)
 
             case Copy(dest, src) | Move(dest, src):
-                if self.active_inline_exprs.has(dest.id):
-                    return Ok(())
                 val dest_name = match self.local_to_vhdl(dest):
                     case Ok(result): result
                     case Err(err): return Err(err)
@@ -38,10 +35,10 @@ impl VhdlBackend:
                 builder.emit_signal_assign(dest_name, src_name)
 
             case Load(dest, ptr):
-                return Err(self.backend_error_at("Synthesizable VHDL backend does not support pointer Load lowering", inst.span))
+                return Err(self.backend_error_at("Synthesizable VHDL backend does not support pointer Load lowering", Some(inst.span)))
 
             case Store(ptr, value):
-                return Err(self.backend_error_at("Synthesizable VHDL backend does not support pointer Store lowering", inst.span))
+                return Err(self.backend_error_at("Synthesizable VHDL backend does not support pointer Store lowering", Some(inst.span)))
 
             case BinOp(dest, op, left, right) | CheckedBinOp(dest, op, left, right):
                 val dest_name = match self.local_to_vhdl(dest):
@@ -65,8 +62,6 @@ impl VhdlBackend:
                 builder.emit_signal_assign(dest_name, expr)
 
             case Cast(dest, operand, target) | Bitcast(dest, operand, target):
-                if self.active_inline_exprs.has(dest.id):
-                    return Ok(())
                 val dest_name = match self.local_to_vhdl(dest):
                     case Ok(result): result
                     case Err(err): return Err(err)
@@ -88,7 +83,7 @@ impl VhdlBackend:
                 val dest_type = match self.local_type(dest):
                     case Ok(result): result
                     case Err(err): return Err(err)
-                val aggregate = match self.aggregate_to_vhdl(kind, operands, dest_type, inst.span):
+                val aggregate = match self.aggregate_to_vhdl(kind, operands, dest_type, Some(inst.span)):
                     case Ok(result): result
                     case Err(err): return Err(err)
                 builder.emit_signal_assign(dest_name, aggregate)
@@ -172,8 +167,6 @@ impl VhdlBackend:
                 builder.emit_port_map_end()
 
             case VhdlResize(dest, operand, new_width, signed):
-                if self.active_inline_exprs.has(dest.id):
-                    return Ok(())
                 val dest_name = match self.local_to_vhdl(dest):
                     case Ok(result): result
                     case Err(err): return Err(err)
@@ -186,8 +179,6 @@ impl VhdlBackend:
                 builder.emit_signal_assign(dest_name, expr)
 
             case VhdlSlice(dest, signal, hi, lo):
-                if self.active_inline_exprs.has(dest.id):
-                    return Ok(())
                 val dest_name = match self.local_to_vhdl(dest):
                     case Ok(result): result
                     case Err(err): return Err(err)
@@ -208,24 +199,21 @@ impl VhdlBackend:
                 val dest_name = match self.local_to_vhdl(dest):
                     case Ok(result): result
                     case Err(err): return Err(err)
-                val joined = match self.concat_parts_to_vhdl(parts):
-                    case Ok(result): result
-                    case Err(err): return Err(err)
-                builder.emit_signal_assign(dest_name, joined)
+                var part_names: [text] = []
+                for p in parts:
+                    val part_name = match self.operand_to_vhdl(p):
+                        case Ok(result): result
+                        case Err(err): return Err(err)
+                    part_names = part_names.push(part_name)
+                builder.emit_concat(dest_name, part_names)
 
             case Nop:
                 ()
 
             case Call(dest, func, args):
-                if not self.call_is_lowered_hardware_entity(func):
-                    match dest:
-                        case Some(dest_id):
-                            if self.active_inline_exprs.has(dest_id.id):
-                                return Ok(())
-                        case None: ()
-                    match self.emit_entity_helper_call(builder, dest, func, args):
-                        case Ok(_): pass
-                        case Err(err): return Err(err)
+                match self.emit_entity_helper_call(builder, dest, func, args):
+                    case Ok(_): pass
+                    case Err(err): return Err(err)
 
             case _:
                 return Err(self.unsupported_vhdl_instruction_error(inst))
@@ -269,7 +257,7 @@ impl VhdlBackend:
             case Err(err): return Err(err)
         if self.active_return_abi.is_tuple:
             for field in self.active_return_abi.fields:
-                builder.emit_signal_assign(field.name, "{then_value}.{field.selector} when {cond_name} = '1' else {else_value}.{field.selector}")
+                builder.emit_signal_assign(field.name, "{then_value}.f{field.index} when {cond_name} = '1' else {else_value}.f{field.index}")
             return Ok(())
         builder.emit_signal_assign("result_out", "{then_value} when {cond_name} = '1' else {else_value}")
         Ok(())
@@ -291,10 +279,10 @@ impl VhdlBackend:
             val target_expr = match self.compile_return_block(builder, target.target):
                 case Ok(result): result
                 case Err(err): return Err(err)
-            val case_literal = match self.switch_case_value_to_vhdl(target.value, value_type):
+            val literal = match self.switch_case_value_to_vhdl(target.value, value_type):
                 case Ok(result): result
                 case Err(err): return Err(err)
-            expr = "{target_expr} when {value_expr} = {case_literal} else {expr}"
+            expr = "{target_expr} when {value_expr} = {literal} else {expr}"
             idx = idx - 1
         if self.active_return_abi.is_tuple:
             return Err(self.backend_error("VHDL tuple return switch lowering is not implemented in the pure Simple backend"))
@@ -311,11 +299,7 @@ impl VhdlBackend:
                 self.const_value_to_vhdl(MirConstValue.Int(value), ty)
 
     me switch_value_expr_to_vhdl(value: MirOperand, in_process: bool) -> Result<text, CompileError>:
-        val expr_result = if in_process:
-            self.process_operand_to_vhdl(value)
-        else:
-            self.operand_to_vhdl(value)
-        val expr = match expr_result:
+        val expr = match if in_process: self.process_operand_to_vhdl(value) else: self.operand_to_vhdl(value):
             case Ok(result): result
             case Err(err): return Err(err)
         val value_type = match self.operand_type(value):

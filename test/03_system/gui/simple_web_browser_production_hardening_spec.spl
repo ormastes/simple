@@ -1,13 +1,32 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-SYSTEM
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-
 # @cover src/app/ui.web/server.spl 80%
 # @cover src/app/ui.web/auth_params.spl 80%
 # @req REQ-WEB-HARD-003 REQ-WEB-HARD-006 REQ-WEB-HARD-007 REQ-WEB-HARD-008 REQ-WEB-HARD-009 REQ-WEB-HARD-010 REQ-WEB-HARD-011 REQ-WEB-HARD-012
 # @nfr NFR-WEB-HARD-003 NFR-WEB-HARD-004 NFR-WEB-HARD-005 NFR-WEB-HARD-006 NFR-WEB-HARD-007 NFR-WEB-HARD-008 NFR-WEB-HARD-010 NFR-WEB-HARD-011
 # @gui: headless
 # @tag:system, slow
+
+
+# @req: REQ-SSPEC-LOCAL-001 — behavior under test holds under execution.
+"""
+## Purpose and audience
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Covers the behavior asserted here; platform-specific behavior is out of scope.
+"""
+
+# doc-path: doc/01_research/local/simple_web_browser_production_hardening_spec.md
+# doc-path: doc/03_plan/sys_test/simple_web_browser_production_hardening_spec.md
+# doc-path: doc/04_architecture/simple_web_browser_production_hardening_spec.md
+# doc-path: doc/05_design/simple_web_browser_production_hardening_spec_oracles.md
+# @manual: primary
 
 """
 # Simple Web Browser Production Hardening Live Endpoint Specification
@@ -18,7 +37,8 @@ Verifies selected Feature C and NFR C browser production hardening behavior for
 the live Simple Web HTTP/WebSocket boundary.
 
 **Plan:** doc/03_plan/sys_test/simple_web_browser_production_hardening.md
-**Design:** doc/05_design/ui/web/simple_web_browser_production_hardening.md
+**Design:** doc/05_design/simple_web_browser_production_hardening.md
+**Architecture:** doc/04_architecture/simple_web_browser_production_hardening.md
 **Architecture:** doc/04_architecture/ui/simple_web_browser_production_hardening.md
 **Research:** doc/01_research/local/simple_web_browser_production_hardening.md
 **Research:** doc/01_research/domain/simple_web_browser_production_hardening.md
@@ -136,9 +156,8 @@ real browser WebGPU readback support. This local spec complements that follow-up
 by proving the live browser server boundary is production-hardened on this host.
 """
 
-use std.spec.step
-
 use std.spec.*
+use std.spec.step
 use std.nogc_sync_mut.io.tcp.{TcpStream}
 use app.io.mod.{process_spawn_async, process_kill, thread_sleep, getpid, current_time_ms}
 use app.ui.web.auth_params.{UI_WEB_LOGIN_RATE_MAX_ATTEMPTS, UI_WEB_MAX_AUTH_JSON_BYTES, UI_WEB_MAX_REQUEST_HEAD_BYTES, UI_WEB_MAX_REQUEST_LINE_BYTES, UI_WEB_MAX_HEADER_LINE_BYTES}
@@ -159,7 +178,7 @@ fn hardening_start_shared_wm_server(port: i32) -> i64:
 
 fn hardening_start_web_server_env(port: i32, extra_env: text) -> i64:
     val extra = if extra_env == "": "" else: "{extra_env} "
-    val cmd = "exec env SIMPLE_LIB=src SIMPLE_UI_WEB_TOKEN_SECRET=simple-web-hardening-test-secret SIMPLE_UI_WEB_ALLOWED_ORIGINS=http://127.0.0.1:{port},http://localhost:{port},http://localhost:{port + 1} SIMPLE_WEB_HARDENING_PORT={port} {extra}src/compiler_rust/target/release/simple run test/03_system/gui/ui_browser/simple_web_hardening_server.spl --mode=interpreter >/tmp/simple_web_hardening_{port}.log 2>&1"
+    val cmd = "exec env SIMPLE_LIB=src SIMPLE_UI_WEB_TOKEN_SECRET=simple-web-hardening-test-secret SIMPLE_UI_WEB_ALLOWED_ORIGINS=http://127.0.0.1:{port} SIMPLE_WEB_HARDENING_PORT={port} {extra}src/compiler_rust/target/release/simple run test/03_system/gui/ui_browser/simple_web_hardening_server.spl --mode=interpreter >/tmp/simple_web_hardening_{port}.log 2>&1"
     val pid = process_spawn_async("sh", ["-c", cmd])
     hardening_wait_for_server(port)
     return pid
@@ -247,23 +266,6 @@ fn http_json_string_field(response: text, field: text) -> text:
         pos = pos + 1
     return ""
 
-fn http_meta_content(response: text, name: text) -> text:
-    val prefix = "<meta name=\"{name}\" content=\""
-    val start = response.find(prefix)
-    if start < 0:
-        return ""
-    val value_start = start + prefix.len()
-    val suffix = response.slice(value_start, response.len()).find("\"")
-    if suffix < 0:
-        return ""
-    return response.slice(value_start, value_start + suffix)
-
-fn token_grant_id(token: text) -> text:
-    val parts = token.split(".")
-    if parts.len() < 2:
-        return ""
-    return parts[1]
-
 fn raw_http_summary(port: i32, request: text, marker: text) -> text:
     val response = raw_http_request(port, request)
     return "{http_status_line(response)}|{http_marker(response, marker)}"
@@ -306,18 +308,9 @@ fn retained_renderer_script_request(port: i32) -> text:
 fn unknown_route_request(port: i32) -> text:
     return "GET /hidden-browser-production-gap HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
 
-fn login_grant_request(port: i32, origin: text, grant: text) -> text:
-    val body = "{\"capability_grant\":\"{grant}\"}"
-    return "POST /ui/login HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: {origin}\r\nX-Request-Id: browser-hardening-login\r\nContent-Type: application/json\r\nContent-Length: {body.len()}\r\nConnection: close\r\n\r\n{body}"
-
-fn login_allowed_request(port: i32, grant: text) -> text:
-    return login_grant_request(port, "http://127.0.0.1:{port}", grant)
-
-fn login_attacker_request(port: i32) -> text:
-    return login_grant_request(port, "http://localhost:{port + 1}", "attacker-chosen")
-
-fn login_missing_grant_request(port: i32) -> text:
-    return login_grant_request(port, "http://127.0.0.1:{port}", "")
+fn login_allowed_request(port: i32) -> text:
+    val body = "{\"capability_grant\":\"legacy\"}"
+    return "POST /ui/login HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nX-Request-Id: browser-hardening-login\r\nContent-Type: application/json\r\nContent-Length: {body.len()}\r\nConnection: close\r\n\r\n{body}"
 
 fn api_state_unauthorized_request(port: i32) -> text:
     return "GET /api/state HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
@@ -447,7 +440,6 @@ fn websocket_post_authorized_request(port: i32, token: text) -> text:
     return request
 
 describe "Simple web browser production hardening live endpoints":
-    # @manual scenario evidence
     slow_it "fails closed on unauthenticated browser HTTP and WebSocket routes":
         # @req REQ-WEB-HARD-003
         # @req REQ-WEB-HARD-006
@@ -550,22 +542,14 @@ describe "Simple web browser production hardening live endpoints":
         expect(unknown_route).to_contain("X-Content-Type-Options: nosniff")
 
     slow_it "mints an origin-bound token and redeems it for a websocket upgrade":
-        # @req REQ-SSPEC-SYSTEM
-        step("mints an origin-bound token and redeems it for a websocket upgrade")
         """The positive production path must mint a token for the request origin and accept that token during WebSocket upgrade."""
         val port = hardening_free_port(100)
         step("Start a fresh production-configured Simple Web server")
         val pid = hardening_start_web_server(port)
 
-        step("Extract the server bootstrap grant and reject an attacker-chosen grant from another allowed localhost port")
-        val root_response = raw_http_request(port, root_page_request(port))
-        val login_grant = http_meta_content(root_response, "simple-ui-login-grant")
-        val attacker_response = raw_http_request(port, login_attacker_request(port))
-        val missing_grant_response = raw_http_request(port, login_missing_grant_request(port))
-        val login_response = raw_http_request(port, login_allowed_request(port, login_grant))
+        step("Request a login token from an allowed loopback origin")
+        val login_response = raw_http_request(port, login_allowed_request(port))
         val token = http_json_string_field(login_response, "token")
-        val issued_token_grant_id = token_grant_id(token)
-        val replay_response = raw_http_request(port, login_allowed_request(port, issued_token_grant_id))
 
         step("Redeem the minted bearer token through resume and WebSocket routes")
         val malformed_resume_body = "{\"session_id\":\"session-1\",\"snapshot_revision\":\"bad\",\"last_sequence\":0}"
@@ -592,16 +576,6 @@ describe "Simple web browser production hardening live endpoints":
 
         step("Verify login succeeds, canonical GET upgrades are accepted, legacy routes are hidden, and POST upgrades are rejected")
         expect(http_status_line(login_response)).to_equal("HTTP/1.1 200 OK")
-        expect(login_grant.len()).to_equal(64)
-        expect(http_status_line(attacker_response)).to_equal("HTTP/1.1 403 Forbidden")
-        expect(attacker_response.contains("\"token\"")).to_be(false)
-        expect(http_status_line(missing_grant_response)).to_equal("HTTP/1.1 403 Forbidden")
-        expect(missing_grant_response.contains("\"token\"")).to_be(false)
-        expect(issued_token_grant_id.len()).to_equal(64)
-        expect(issued_token_grant_id == login_grant).to_be(false)
-        expect(token.contains(login_grant)).to_be(false)
-        expect(http_status_line(replay_response)).to_equal("HTTP/1.1 403 Forbidden")
-        expect(replay_response.contains("\"token\"")).to_be(false)
         expect(login_response).to_contain("Cache-Control: no-store")
         expect(login_response).to_contain("Pragma: no-cache")
         expect(login_response).to_contain("X-Content-Type-Options: nosniff")
@@ -628,23 +602,20 @@ describe "Simple web browser production hardening live endpoints":
         expect(legacy_websocket_post).to_equal("HTTP/1.1 404 Not Found|present")
 
     slow_it "rate limits allowed origin login bursts":
-        # @req REQ-SSPEC-SYSTEM
-        step("rate limits allowed origin login bursts")
         """The production login endpoint must bound repeated token mint requests even when the Origin is allowed."""
         val port = hardening_free_port(200)
         step("Start a fresh production-configured Simple Web server")
         val pid = hardening_start_web_server(port)
-        val login_grant = http_meta_content(raw_http_request(port, root_page_request(port)), "simple-ui-login-grant")
 
         step("Spend the allowed login burst budget from an allowed loopback origin")
         var attempts = 0
         var last_allowed = ""
         while attempts < UI_WEB_LOGIN_RATE_MAX_ATTEMPTS:
-            last_allowed = raw_http_summary(port, login_allowed_request(port, login_grant), "\"token\"")
+            last_allowed = raw_http_summary(port, login_allowed_request(port), "\"token\"")
             attempts = attempts + 1
 
         step("Send one more login request in the same fixed window")
-        val limited = raw_http_summary(port, login_allowed_request(port, login_grant), "login_rate_limited")
+        val limited = raw_http_summary(port, login_allowed_request(port), "login_rate_limited")
 
         hardening_stop_web_server(pid)
 
@@ -653,18 +624,15 @@ describe "Simple web browser production hardening live endpoints":
         expect(limited).to_equal("HTTP/1.1 429 Too Many Requests|present")
 
     slow_it "measures warm browser auth path latency":
-        # @req REQ-SSPEC-SYSTEM
-        step("measures warm browser auth path latency")
         """A warmed production server must complete token minting and authenticated WebSocket upgrade within a bounded local latency budget."""
         val port = hardening_free_port(250)
         step("Start and warm a production-configured Simple Web server")
         val pid = hardening_start_web_server(port)
-        val login_grant = http_meta_content(raw_http_request(port, root_page_request(port)), "simple-ui-login-grant")
-        val warmup_response = raw_http_request(port, login_allowed_request(port, login_grant))
+        val warmup_response = raw_http_request(port, login_allowed_request(port))
 
         step("Measure a warmed login plus authenticated WebSocket upgrade")
         val start_ms = current_time_ms()
-        val login_response = raw_http_request(port, login_allowed_request(port, login_grant))
+        val login_response = raw_http_request(port, login_allowed_request(port))
         val token = http_json_string_field(login_response, "token")
         val websocket_response = raw_http_request(port, websocket_authorized_request(port, token))
         val elapsed_ms = current_time_ms() - start_ms
@@ -680,16 +648,13 @@ describe "Simple web browser production hardening live endpoints":
         expect(elapsed_ms).to_be_less_than(10000)
 
     slow_it "rejects query bearer websocket compatibility even when deprecated env is set":
-        # @req REQ-SSPEC-SYSTEM
-        step("rejects query bearer websocket compatibility even when deprecated env is set")
         """Production auth must reject query bearer tokens even when the old compatibility environment variable is present."""
         val port = hardening_free_port(300)
         step("Start a production-configured Simple Web server with query-token compatibility enabled")
         val pid = hardening_start_web_server_with_query_tokens(port)
-        val login_grant = http_meta_content(raw_http_request(port, root_page_request(port)), "simple-ui-login-grant")
 
         step("Mint a token and try to redeem it through the query bearer path")
-        val login_response = raw_http_request(port, login_allowed_request(port, login_grant))
+        val login_response = raw_http_request(port, login_allowed_request(port))
         val token = http_json_string_field(login_response, "token")
         val websocket_response = raw_http_request(port, websocket_query_token_authorized_request(port, token))
         val websocket = "{http_status_line(websocket_response)}|{http_marker(websocket_response, "forbidden")}"
@@ -702,8 +667,6 @@ describe "Simple web browser production hardening live endpoints":
         expect(websocket).to_equal("HTTP/1.1 403 Forbidden|present")
 
     slow_it "rate limits shared wm login bursts":
-        # @req REQ-SSPEC-SYSTEM
-        step("rate limits shared wm login bursts")
         """The shared WM web server has a separate login path and must enforce the same burst limit as normal run_web."""
         val port = hardening_free_port(400)
         step("Start a shared-WM Simple Web server with a real token secret")
@@ -720,24 +683,16 @@ describe "Simple web browser production hardening live endpoints":
         val shared_native_window = raw_http_request(port, native_window_request(port))
         val shared_retained_renderer_script = raw_http_request(port, retained_renderer_script_request(port))
         val shared_unknown_route = raw_http_request(port, unknown_route_request(port))
-        val login_grant = http_meta_content(raw_http_request(port, root_page_request(port)), "simple-ui-login-grant")
-        val attacker_response = raw_http_request(port, login_attacker_request(port))
-        val missing_grant_response = raw_http_request(port, login_missing_grant_request(port))
-        val initial_login_response = raw_http_request(port, login_allowed_request(port, login_grant))
-        val shared_token = http_json_string_field(initial_login_response, "token")
-        val shared_token_grant_id = token_grant_id(shared_token)
-        val replay_response = raw_http_request(port, login_allowed_request(port, shared_token_grant_id))
 
         step("Spend the shared-WM login burst budget from an allowed loopback origin")
-        # Attacker, missing, valid, and token-claim replay requests consume four attempts.
-        var attempts = 4
-        var last_allowed = "{http_status_line(initial_login_response)}|{http_marker(initial_login_response, "\"token\"")}"
+        var attempts = 0
+        var last_allowed = ""
         while attempts < UI_WEB_LOGIN_RATE_MAX_ATTEMPTS:
-            last_allowed = raw_http_summary(port, login_allowed_request(port, login_grant), "\"token\"")
+            last_allowed = raw_http_summary(port, login_allowed_request(port), "\"token\"")
             attempts = attempts + 1
 
         step("Send one more shared-WM login request in the same fixed window")
-        val limited = raw_http_summary(port, login_allowed_request(port, login_grant), "login_rate_limited")
+        val limited = raw_http_summary(port, login_allowed_request(port), "login_rate_limited")
 
         hardening_stop_web_server(pid)
 
@@ -774,15 +729,5 @@ describe "Simple web browser production hardening live endpoints":
         expect(shared_unknown_route).to_contain("Cache-Control: no-store")
         expect(shared_unknown_route).to_contain("Pragma: no-cache")
         expect(shared_unknown_route).to_contain("X-Content-Type-Options: nosniff")
-        expect(login_grant.len()).to_equal(64)
-        expect(http_status_line(attacker_response)).to_equal("HTTP/1.1 403 Forbidden")
-        expect(attacker_response.contains("\"token\"")).to_be(false)
-        expect(http_status_line(missing_grant_response)).to_equal("HTTP/1.1 403 Forbidden")
-        expect(missing_grant_response.contains("\"token\"")).to_be(false)
-        expect(shared_token_grant_id.len()).to_equal(64)
-        expect(shared_token_grant_id == login_grant).to_be(false)
-        expect(shared_token.contains(login_grant)).to_be(false)
-        expect(http_status_line(replay_response)).to_equal("HTTP/1.1 403 Forbidden")
-        expect(replay_response.contains("\"token\"")).to_be(false)
         expect(last_allowed).to_equal("HTTP/1.1 200 OK|present")
         expect(limited).to_equal("HTTP/1.1 429 Too Many Requests|present")

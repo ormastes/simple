@@ -358,12 +358,7 @@ bin/simple run src/os/port/llvm/build.spl -- --status
 bin/simple run src/os/port/llvm/test_smoke.spl
 ```
 
-Uses the fork revision pinned in `src/os/port/llvm/README.md`; the in-tree
-`patches/` files are porting notes, not an applicable patch bundle.
-
-Current evidence: `doc/09_report/simpleos_llvm_port_evidence_current_2026-07-02.md`
-records passing x86_64 SimpleOS Clang/LLD link smokes, compiler-rt builtins
-staging, and the aarch64 SimpleOS LLVM stage-2 cross build.
+Uses fork: `ormastes/llvm-project` (branch: `simpleos`)
 
 ### 4.5 Rust Cross-Build
 
@@ -388,17 +383,6 @@ Target specs: `src/os/toolchain/rust/`
 - `aarch64-unknown-simpleos.json`
 - `riscv64gc-unknown-simpleos.json`
 - `riscv32imac-unknown-simpleos.json`
-
-### Host-independent 32-bit bootstrap receipt contract
-
-`src/os/port/simpleos_32bit_bootstrap_contract.spl` is the canonical shared
-contract for x86_32, ARM32, and RV32 bootstrap evidence. Its v2 profile binds
-the freestanding target triple, ABI, linker emulation, sysroot/tool manifests,
-and QEMU executable. A receipt is valid only with distinct passing Phase 1/2
-hashes and parent lineage, no-stub mode, manifest/linker hashes, exit 37, and
-the same 16+ character nonce in guest-entry, filesystem-exec, reap, and final
-pass markers. Contract tests are offline evidence only. Live rows remain
-blocked in Todo 834-836 and must not be reported as bootstrap convergence.
 
 Uses fork: `ormastes/rust` (branch: `simpleos`)
 
@@ -443,7 +427,7 @@ bin/simple run examples/09_embedded/simple_os/build.spl -- --arch=x86_32
 bin/simple run examples/09_embedded/simple_os/build.spl -- --arch=i686
 ```
 
-The x86_32 lane uses `qemu-system-i386`, an ELF32 linker mode, and freestanding C/ASM boot support under `examples/09_embedded/simple_os/arch/x86_32/boot/`. The QEMU runner chooses LLVM for this lane by default because the current Cranelift object backend cannot initialize an i686 freestanding target. The `wm-simple-web` QMP check target (`build/os/simpleos_wm_simple_web_check_32.elf`) also defaults to LLVM so the live GUI evidence path exercises the x86_64 SimpleOS LLVM linker. The selected `simple` binary must be built with the Rust `llvm` feature and a discoverable LLVM 18 installation, for example by setting `LLVM_SYS_180_PREFIX` before running `cargo build --features llvm`.
+The x86_32 lane uses `qemu-system-i386`, an ELF32 linker mode, and freestanding C/ASM boot support under `examples/09_embedded/simple_os/arch/x86_32/boot/`. The QEMU runner chooses LLVM for this lane by default because the current Cranelift object backend cannot initialize an i686 freestanding target. The selected `simple` binary must be built with the Rust `llvm` feature and a discoverable LLVM 18 installation, for example by setting `LLVM_SYS_180_PREFIX` before running `cargo build --features llvm`.
 
 ### 4.8 Native Build Config
 
@@ -509,9 +493,6 @@ bin/simple os test --scenario=x64-desktop-disk
 
 bin/simple os build --scenario=x64-nvme-fat32
 bin/simple os test --scenario=x64-nvme-fat32
-
-bin/simple os build --scenario=x64-gpu-2d
-bin/simple os run --scenario=x64-gpu-2d
 ```
 
 `x64-desktop-disk` first looks for a release disk image, then uses the
@@ -523,29 +504,9 @@ per-platform media is created with:
 sh scripts/os/make_os_disk.shs 64 build/os/fat32-x86_64.img
 ```
 
-That `.shs` entrypoint validates its pinned payloads and invokes the still-live
-C compatibility image writer used by the QEMU/toolchain fixture. The canonical
-nested image path is pure Simple (`src/os/port/disk_image_bake.spl` and
-`src/os/port/disk_image.spl`); it does not require `mtools` or a loop mount.
-The compatibility writer emits the same readable VFAT names and fixed short
-aliases after validating the same pinned font bytes.
-
-Pure-Simple FAT32 supports ASCII VFAT long names for nested files and
-directories. The writer emits checksummed 13-code-unit LFN slots before a
-unique 8.3 alias, grows nested directories across FAT cluster chains, and
-rejects invalid names or fixed-root overflow. On x86_64, the post-bootstrap
-non-optional shared FAT driver must mount after direct bootstrap, then resolves
-LFNs and multi-cluster files first. It accepts an LFN only when every slot is
-ordered and structurally valid and its checksum matches the following 8.3
-entry; malformed chains safely expose only the 8.3 alias. The raw 8.3 reader
-remains the early-boot fallback. Non-ASCII UTF-16 LFNs are not yet supported.
-This contract covers prebuilt-media `readdir`/`stat`/`open`/`read`; in-guest
-create/mkdir/rename remains 8.3-only.
-
-`x64-gpu-2d` routes to
-`examples/09_embedded/simple_os/arch/x86_64/gpu_test_entry.spl`, emits
-`build/os/simpleos_gpu_test_x86_64.elf`, and launches QEMU with the
-`virtio-gpu` device plus `-vga none`.
+That `.shs` entrypoint populates the FAT32 image with host filesystem tools:
+`mtools` is preferred because it works on macOS and Linux without root, and
+Linux loop mount is the fallback.
 
 `x64-nvme-fat32` is the focused filesystem contract lane. It binds to
 `examples/09_embedded/simple_os/arch/x86_64/fs_test_entry.spl` and always uses
@@ -553,7 +514,7 @@ create/mkdir/rename remains 8.3-only.
 `NUMBERS.TXT`, and `HELLO.SPL`. The SPipe wrapper for filesystem variants is:
 
 ```bash
-bin/simple test test/03_system/os/os_filesystem_variants_spec.spl
+bin/simple test test/03_system/os_filesystem_variants_spec.spl
 ```
 
 That spec treats FAT32 as a QEMU-backed target variation and NVFS as an
@@ -574,11 +535,9 @@ Current status:
 
 - `Browser Demo`, `Hello World`, `File Manager`, and `Shell` are represented in
   the FAT32 manifest table for the disk-backed resident-manifest bridge
-- hosted SimpleOS startup is filesystem-backed (`source=filesystem`) and may
-  use mmap; it never selects the resident table
-- the kernel `spawn_binary()` path resolves direct ELF/SMF filesystem bytes
-  first; the legacy resident table is an explicit bare-metal-only fallback
-  (`source=baremetal_got`)
+- `spawn_binary()` currently resolves direct ELF bytes first, then consults the
+  disk-backed resident-manifest bridge, then falls back to the legacy builtin
+  resident registry
 - `browser_engine_in_qemu_spec.spl` is the right place for direct ELF boot
   coverage, not for packaged disk launch coverage
 - `simpleos_desktop_disk_boot_spec.spl` is the right place for disk-backed
@@ -588,7 +547,8 @@ That means:
 
 - the launcher/manifest path and the direct ELF path are now documented as
   different execution modes
-- Browser Demo is still transitional in the bare-metal compatibility lane
+- Browser Demo is still transitional because it appears in the resident-manifest
+  bridge and in legacy builtin fallback code
 - the next cleanup step is to remove Browser Demo from the fallback path once the
   packaged-app route is the only supported launch form for that app
 
@@ -794,6 +754,8 @@ Verify All  ──→ std.fs (file checks), std.process (tool checks)
 - [GUI Port README](../../../src/os/port/gui/README.md)
 - [Baremetal Guide](backend/baremetal.md)
 - [Platform Guide](platforms.md)
+
+---
 
 ## 8. GUI Desktop Environment
 

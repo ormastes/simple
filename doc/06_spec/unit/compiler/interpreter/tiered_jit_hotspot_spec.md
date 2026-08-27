@@ -635,25 +635,35 @@ expect(found_llvm_skip).to_equal(true)
 
 </details>
 
-#### does not add quarantined predicate promotion recommendations
+#### adds predicate promotion recommendations only for safe branch-select facts
 
 <details>
 <summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val cranelift = jit_hotspot_optimization_plan(hot_predicate_profile(256), hotspot_config(), true, true, "high")
 expect(cranelift.backend).to_equal("cranelift")
-expect(cranelift.plugin_recommendations.contains("simple-predicate-promote")).to_equal(false)
+expect(cranelift.plugin_recommendations.contains("simple-predicate-promote")).to_equal(true)
 
 val medium = jit_hotspot_optimization_plan(hot_predicate_profile(256), hotspot_config(), true, true, "medium")
 expect(medium.plugin_recommendations.contains("simple-predicate-promote")).to_equal(false)
+var found_cost_skip = false
+for decision in medium.skipped_plugin_recommendations:
+    if decision.stable_name == "simple-predicate-promote" and decision.reason == "cost budget exceeded":
+        found_cost_skip = true
+expect(found_cost_skip).to_equal(true)
 
 val llvm = jit_hotspot_optimization_plan(hot_predicate_profile(256), hotspot_config(), true, true, "high")
 expect(llvm.backend).to_equal("llvm")
 expect(llvm.plugin_recommendations.contains("simple-predicate-promote")).to_equal(false)
+var found_llvm_skip = false
+for decision in llvm.skipped_plugin_recommendations:
+    if decision.stable_name == "simple-predicate-promote" and decision.reason == "llvm_runs_if_conversion_and_select_promotion":
+        found_llvm_skip = true
+expect(found_llvm_skip).to_equal(true)
 ```
 
 </details>

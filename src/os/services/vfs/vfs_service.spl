@@ -15,7 +15,6 @@
 #   WRITE:  fd (u64) | data (bytes)
 #   CLOSE:  fd (u64)
 #   STAT:   path (text)
-#   STAT_NO_FOLLOW: path (text)
 #   READDIR: path (text)
 #   MKDIR:  path (text)
 #   UNLINK: path (text)
@@ -24,7 +23,6 @@
 #   MOUNT_LIST: (empty)
 #   CHMOD:  path (text) \0 mode (u16)
 #   SYMLINK: target (text) \0 link_path (text)
-#   READLINK: path (text)
 
 use os.services.vfs.vfs.{VfsManager, SeekWhence}
 use os.kernel.types.fs_types.{FileDescriptor, FileFlags, FsNode, FsNodeKind, DirEntry}
@@ -50,8 +48,6 @@ val VFS_SEEK: u32 = 11
 val VFS_CHMOD: u32 = 12
 val VFS_SYMLINK: u32 = 13
 val VFS_RMDIR: u32 = 14
-val VFS_READLINK: u32 = 17
-val VFS_STAT_NO_FOLLOW: u32 = 18
 
 # VFS_OPEN carries the kernel's POSIX O_* bit layout, never a service-private
 # flag encoding.  Keep this decoding boundary aligned with os.kernel.fd_table.
@@ -212,8 +208,6 @@ impl VfsService:
             VFS_CHMOD: self.dispatch_chmod(src_port, payload_addr, payload_len)
             VFS_SYMLINK: self.dispatch_symlink(src_port, payload_addr, payload_len)
             VFS_RMDIR: self.dispatch_rmdir(src_port, payload_addr, payload_len)
-            VFS_READLINK: self.dispatch_readlink(src_port, payload_addr, payload_len)
-            VFS_STAT_NO_FOLLOW: self.dispatch_stat_no_follow(src_port, payload_addr, payload_len)
             _: self.send_error_reply(src_port, STATUS_INVALID, "unknown VFS method")
 
     # ========================================================================
@@ -235,16 +229,9 @@ impl VfsService:
             truncate: (flags_raw & VFS_OPEN_O_TRUNC) != 0u32,
             directory: false
         )
-        var mgr = self.vfs
-        val opened = mgr.open(path, flags)
-        self.vfs = mgr
-        match opened:
+        match self.vfs.open(path, flags):
             Result.Ok(fd):
-                # Reply with the VFS handle (fd.node), which is what READ/
-                # WRITE/CLOSE/SEEK resolve through the handle table. fd.fd is
-                # only the per-process descriptor number and never identified
-                # a mount.
-                self.send_u64_reply(src_port, STATUS_OK, fd.node)
+                self.send_u64_reply(src_port, STATUS_OK, fd.fd.to_u64())
             Result.Err(e):
                 self.send_error_reply(src_port, STATUS_NOT_FOUND, e)
 
@@ -252,12 +239,10 @@ impl VfsService:
         """Parse READ request: fd(u64) | size(u64)."""
         val fd = _read_u64(payload_addr)
         val size = _read_u64(payload_addr + 8)
-        # Routed by VfsManager via the handle table (converged owner:
-        # os.kernel.fs.vfs_handle_table); the mounts[0] bypass is deleted.
-        var mgr = self.vfs
-        val result = mgr.read(fd, size)
-        self.vfs = mgr
-        match result:
+        # Find the mount for this fd and read
+        # For now use the fd's underlying handle directly
+        val mount = self.vfs.mounts[0]  # Simplified: use first mount
+        match mount.fs.read(fd, size):
             Result.Ok(data):
                 self.send_bytes_reply(src_port, STATUS_OK, data)
             Result.Err(e):
@@ -272,10 +257,8 @@ impl VfsService:
         while i < data_len:
             data.push(_read_u8(payload_addr + 8 + i.to_u64()))
             i = i + 1
-        var mgr = self.vfs
-        val result = mgr.write(fd, data)
-        self.vfs = mgr
-        match result:
+        val mount = self.vfs.mounts[0]
+        match mount.fs.write(fd, data):
             Result.Ok(written):
                 self.send_u64_reply(src_port, STATUS_OK, written)
             Result.Err(e):
@@ -284,10 +267,8 @@ impl VfsService:
     me dispatch_close(src_port: u64, payload_addr: u64, payload_len: u32):
         """Parse CLOSE request: fd(u64)."""
         val fd = _read_u64(payload_addr)
-        var mgr = self.vfs
-        val result = mgr.close(fd)
-        self.vfs = mgr
-        match result:
+        val mount = self.vfs.mounts[0]
+        match mount.fs.close(fd):
             Result.Ok(v):
                 self.send_u64_reply(src_port, STATUS_OK, 1)
             Result.Err(e):
@@ -313,54 +294,16 @@ impl VfsService:
             Result.Err(e):
                 self.send_error_reply(src_port, STATUS_NOT_FOUND, e)
 
-    me dispatch_stat_no_follow(src_port: u64, payload_addr: u64, payload_len: u32):
-        """Parse STAT_NO_FOLLOW request: path(text)."""
-        val path = _read_text(payload_addr, payload_len)
-        match self.vfs.stat_no_follow(path):
-            Result.Ok(node):
-                var reply: [u8] = []
-                val kind_val: u8 = match node.kind:
-                    FsNodeKind.File: 0
-                    FsNodeKind.Directory: 1
-                    FsNodeKind.Symlink: 2
-                    FsNodeKind.Device: 3
-                    FsNodeKind.Pipe: 4
-                reply.push(kind_val)
-                _push_u64(reply, node.size)
-                _push_u16(reply, node.permissions)
-                self.send_bytes_reply(src_port, STATUS_OK, reply)
-            Result.Err(e):
-                self.send_error_reply(src_port, STATUS_ERR, e)
-
     me dispatch_readdir(src_port: u64, payload_addr: u64, payload_len: u32):
         """Parse READDIR request: path(text)."""
         val path = _read_text(payload_addr, payload_len)
         match self.vfs.readdir(path):
             Result.Ok(entries):
-                # Encode as newline-separated ``kind:name`` entries into one
-                # bounded byte buffer. Avoid quadratic text concatenation and
-                # reject names the wire envelope cannot represent.
-                if entries.len().to_u64() > VFS_READDIR_ENTRY_MAX:
-                    self.send_error_reply(src_port, STATUS_INVALID, "directory exceeds entry limit")
-                    return
-                var reply: [u8] = []
-                var total_name_bytes: u64 = 0u64
-                var i: u64 = 0u64
+                # Encode as newline-separated "kind:name" entries
+                var reply_text = ""
+                var i = 0
                 while i < entries.len():
                     val entry = entries[i]
-                    val name_bytes = entry.name.len().to_u64()
-                    val name_unencodable = name_bytes == 0u64 or name_bytes > VFS_READDIR_NAME_BYTES_MAX or
-                        entry.name.contains("\0") or entry.name.contains("\n") or
-                        entry.name.contains("\r")
-                    if name_unencodable:
-                        self.send_error_reply(src_port, STATUS_INVALID, "directory contains unencodable entry")
-                        return
-                    val name_bytes_overflow = total_name_bytes > VFS_READDIR_TOTAL_NAME_BYTES_MAX or
-                        name_bytes > VFS_READDIR_TOTAL_NAME_BYTES_MAX - total_name_bytes
-                    if name_bytes_overflow:
-                        self.send_error_reply(src_port, STATUS_INVALID, "directory exceeds name byte limit")
-                        return
-                    total_name_bytes = total_name_bytes + name_bytes
                     val kind_val: u8 = match entry.node.kind:
                         FsNodeKind.File: 0
                         FsNodeKind.Directory: 1
@@ -368,15 +311,10 @@ impl VfsService:
                         FsNodeKind.Device: 3
                         FsNodeKind.Pipe: 4
                     if i > 0:
-                        reply.push(10u8)
-                    reply.push(48u8 + kind_val)
-                    reply.push(58u8)
-                    var name_index: u64 = 0u64
-                    while name_index < entry.name.len():
-                        reply.push(entry.name.byte_at(name_index))
-                        name_index = name_index + 1u64
+                        reply_text = reply_text + "\n"
+                    reply_text = reply_text + "{kind_val}:{entry.name}"
                     i = i + 1
-                self.send_bytes_reply(src_port, STATUS_OK, reply)
+                self.send_text_reply(src_port, STATUS_OK, reply_text)
             Result.Err(e):
                 self.send_error_reply(src_port, STATUS_NOT_FOUND, e)
 
@@ -475,10 +413,8 @@ impl VfsService:
             1: SeekWhence.Cur
             2: SeekWhence.End
             _: SeekWhence.Set
-        var mgr = self.vfs
-        val result = mgr.seek(fd, offset, whence)
-        self.vfs = mgr
-        match result:
+        val mount = self.vfs.mounts[0]
+        match mount.fs.seek(fd, offset, whence):
             Result.Ok(pos):
                 self.send_u64_reply(src_port, STATUS_OK, pos)
             Result.Err(e):

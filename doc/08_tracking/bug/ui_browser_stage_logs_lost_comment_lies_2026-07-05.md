@@ -1,7 +1,7 @@
 # UI Browser stage-by-stage logging documented but nonexistent
 
 ## Status
-RESOLVED (runtime-verified 2026-07-17).
+Open.
 
 ## Severity
 Medium-High — misleading documentation undermines diagnosing known hang bug.
@@ -22,7 +22,3 @@ During known CSS-quadratic first-frame hang, operator following documented comme
 
 ## Next Step
 Either re-add instrumentation via new std.debug stage tracer (P0 module in progress) and fix comment, or remove lying comment. Known issue: stage-logging was added earlier 2026-07-05 but lost (likely parallel-session working-copy clobber). Separately: add M9 smoke test to verify `_has_buffered_mouse` field read behavior.
-
-## Runtime verification (2026-07-17)
-
-Commit `e6de3effdb5` (2026-07-05) added `std.debug` `dbg_stage` tracer with real stage instrumentation in `app.spl` (parse_start/done, backend_create_start/done, window_created, first_frame_start/done, launch_start, file_checked). Runtime proof: called `dbg_stage` directly with `SIMPLE_DIAG=stage` env, received real stderr lines: `[browser] stage parse_start +0ms`, `[browser] stage parse_done +1ms`, `[browser] stage window_created +0ms`. Tracer is functional and properly integrated. `main.spl` comment rewritten to describe real tracer. RESOLVED.

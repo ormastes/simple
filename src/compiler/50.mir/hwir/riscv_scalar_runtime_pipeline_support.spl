@@ -1,0 +1,90 @@
+# Typed support owners for the decoded-uop -> runtime-ALU -> completion-skid seam.
+
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwConstant,
+    HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort}
+use compiler.mir.hwir.sequential.{HwSeqAssignment, HwSeqGuard,
+    HwSeqOutputBinding, HwSeqRule, HwSeqValue, HwSequentialModuleDef,
+    HwSequentialPlan, HwStateRegister}
+
+pub fn strict_riscv_scalar_runtime_accept_gate(module_name: text,
+    config: CoreConfig) -> Result<HwModuleDef, text>:
+    if module_name == "":
+        return Err("HWIR-E-RISCV-RUNTIME-ACCEPT-ID: runtime accept gate requires a module name")
+    val config_error = config.diagnostic(); if config_error != "": return Err(config_error)
+    val ports = [HwPort.input("provider_valid", "Bits", 1),
+        HwPort.input("completion_ready", "Bits", 1),
+        HwPort.output("uop_ready", "Bits", 1)]
+    val ops = [HwCombOp.binary("and", "uop_ready",
+        "provider_valid", "completion_ready", 1)]
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: ports.len(), signal_count: 0, register_count: 0,
+        comb_op_count: ops.len(), memory_count: 0, clock_domain_count: 1,
+        fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name), origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "atomic-accept"),
+                source_name: "riscv.scalar.runtime-alu.atomic-completion-accept")],
+        ports: ports, signals: [], constants: [], comb_ops: ops,
+        compare_ops: [], select_ops: [], clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic(); if diagnostic != "": return Err(diagnostic)
+    Ok(module)
+
+pub fn strict_riscv_scalar_runtime_fault_owner(module_name: text,
+    config: CoreConfig) -> Result<HwSequentialModuleDef, text>:
+    if module_name == "":
+        return Err("HWIR-E-RISCV-RUNTIME-FAULT-ID: runtime fault owner requires a module name")
+    val config_error = config.diagnostic(); if config_error != "": return Err(config_error)
+    val plan = HwSequentialPlan(owner_id: HwNodeId.child(module_name, "sequential"),
+        registers: [HwStateRegister(name: "fault_reg", bit_width: 1,
+            clock_domain: "default", reset_value: 0)], rules: [
+            HwSeqRule(name: "latch_fault", guards: [HwSeqGuard.high("fault_in")],
+                assignments: [HwSeqAssignment(destination: "fault_reg",
+                    value: HwSeqValue.copy("fault_in", 1))])],
+        outputs: [HwSeqOutputBinding.direct("protocol_fault", "fault_reg", 1)],
+        decoder_pins: [])
+    val module = HwSequentialModuleDef(node_id: HwNodeId.module_root(module_name),
+        entity_name: module_name, config: config, origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "sticky"),
+                source_name: "riscv.scalar.runtime-alu.sticky-protocol-fault")],
+        ports: [HwPort.input("clk", "Bits", 1), HwPort.input("rst", "Bits", 1),
+            HwPort.input("fault_in", "Bits", 1),
+            HwPort.output("protocol_fault", "Bits", 1)], datapath_signals: [],
+        datapath_constants: [], datapath_bit_vector_constants: [], datapath_comb_ops: [],
+        datapath_compare_ops: [], datapath_select_ops: [], datapath_bit_extract_ops: [],
+        datapath_fixed_slice_ops: [], plan: plan, child_entity: "",
+        child_graph_sha256: "")
+    val diagnostic = module.diagnostic(); if diagnostic != "": return Err(diagnostic)
+    Ok(module)
+
+pub fn strict_riscv_scalar_runtime_completion_defaults(module_name: text,
+    config: CoreConfig) -> Result<HwModuleDef, text>:
+    if module_name == "":
+        return Err("HWIR-E-RISCV-RUNTIME-DEFAULTS-ID: completion defaults require a module name")
+    val config_error = config.diagnostic(); if config_error != "": return Err(config_error)
+    val x = config.xlen
+    val fields = [("memory_address", x), ("memory_read_mask", 32),
+        ("memory_write_mask", 32), ("memory_read_data", x),
+        ("memory_write_data", x), ("execute_trap_valid", 1),
+        ("execute_trap_cause", x), ("execute_trap_tval", x),
+        ("memory_trap_valid", 1), ("memory_trap_cause", x),
+        ("memory_trap_tval", x), ("redirect_valid", 1), ("redirect_target", x)]
+    var ports: [HwPort] = []
+    var constants: [HwConstant] = []
+    var ops: [HwCombOp] = []
+    for field in fields:
+        val zero = "zero_" + field[0]
+        ports.push(HwPort.output(field[0], "Bits", field[1]))
+        constants.push(HwConstant.bits(zero, field[1], 0))
+        ops.push(HwCombOp.unary("passthrough", field[0], zero, field[1]))
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: ports.len(), signal_count: 0, register_count: 0,
+        comb_op_count: ops.len(), memory_count: 0, clock_domain_count: 1,
+        fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name), origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "no-side-effects"),
+                source_name: "riscv.scalar.runtime-alu.completion-defaults")],
+        ports: ports, signals: [], constants: constants, comb_ops: ops,
+        compare_ops: [], select_ops: [], clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic(); if diagnostic != "": return Err(diagnostic)
+    Ok(module)

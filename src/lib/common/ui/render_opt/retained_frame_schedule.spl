@@ -1,0 +1,77 @@
+# One backend-neutral scheduling receipt for retained Web/GUI/WM DrawIR.
+# Combines correctness admission with measured frame-budget admission without
+# changing DrawIR or silently dropping an over-budget frame.
+
+use common.ui.render_opt.retained_damage_plan.RetainedDamagePlanReceipt
+use common.ui.render_opt.damage_plan.DamageFramePlan
+use common.ui.render_opt.damage_budget.{
+    DamageBudgetReceipt, admit_damage_plan_budget,
+    DAMAGE_BUDGET_IDLE, DAMAGE_BUDGET_INVALID
+}
+
+val RETAINED_SCHEDULE_IDLE: i64 = 0
+val RETAINED_SCHEDULE_EXECUTE: i64 = 1
+val RETAINED_SCHEDULE_REJECT_STATE: i64 = 2
+val RETAINED_SCHEDULE_DEFER_BUDGET: i64 = 3
+val RETAINED_SCHEDULE_REJECT_PROFILE: i64 = 4
+
+class RetainedFrameSchedule:
+    status: i64
+    state_accepted: bool
+    execute_now: bool
+    reason: text
+    plan_mode: i64
+    plan_rects: [i64]
+    planned_pixels: i64
+    maximum_pixels: i64
+    predicted_ns: i64
+    budget_basis: text
+    # Preserve the canonical planner output for the executor.  Receipt fields
+    # remain available independently, but consumers must not rebuild tiles.
+    plan: DamageFramePlan
+
+fn _schedule(status: i64, state_accepted: bool, execute_now: bool,
+             reason: text, damage: RetainedDamagePlanReceipt,
+             budget: DamageBudgetReceipt) -> RetainedFrameSchedule:
+    RetainedFrameSchedule(
+        status: status, state_accepted: state_accepted,
+        execute_now: execute_now, reason: reason,
+        plan_mode: damage.plan.mode, plan_rects: damage.plan.rects,
+        planned_pixels: budget.planned_pixels,
+        maximum_pixels: budget.maximum_pixels,
+        predicted_ns: budget.predicted_ns,
+        budget_basis: budget.budget_basis,
+        plan: damage.plan)
+
+fn retained_frame_schedule(damage: RetainedDamagePlanReceipt,
+                           frame_budget_ns: i64,
+                           measured_row_width: i64,
+                           measured_row_p95_ns: i64,
+                           budget_basis: text) -> RetainedFrameSchedule:
+    val budget = admit_damage_plan_budget(
+        damage.plan, frame_budget_ns, measured_row_width,
+        measured_row_p95_ns, budget_basis)
+    if not damage.accepted:
+        return _schedule(
+            RETAINED_SCHEDULE_REJECT_STATE, false, false,
+            "retained-state-rejected", damage, budget)
+    if budget.status == DAMAGE_BUDGET_INVALID:
+        return _schedule(
+            RETAINED_SCHEDULE_REJECT_PROFILE, true, false,
+            "measurement-profile-invalid", damage, budget)
+    if budget.status == DAMAGE_BUDGET_IDLE:
+        return _schedule(
+            RETAINED_SCHEDULE_IDLE, true, false,
+            "retained-frame-idle", damage, budget)
+    if not budget.admitted:
+        return _schedule(
+            RETAINED_SCHEDULE_DEFER_BUDGET, true, false,
+            "measured-frame-budget-exceeded", damage, budget)
+    _schedule(
+        RETAINED_SCHEDULE_EXECUTE, true, true,
+        "execute-damage-plan", damage, budget)
+
+export RetainedFrameSchedule, retained_frame_schedule
+export RETAINED_SCHEDULE_IDLE, RETAINED_SCHEDULE_EXECUTE,
+       RETAINED_SCHEDULE_REJECT_STATE, RETAINED_SCHEDULE_DEFER_BUDGET,
+       RETAINED_SCHEDULE_REJECT_PROFILE

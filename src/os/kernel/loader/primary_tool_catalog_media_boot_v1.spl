@@ -1,0 +1,327 @@
+"""Loader-owned admission of the generic signed primary-tool media set.
+
+PTRD is snapshotted, decoded, and authenticated before any payload or SCR1 is
+opened.  Admission returns boot metadata only: all snapshot leases are closed,
+the diagnostic seals grant no payload or execution authority, and later launch
+must open once and reattest online through the executable-admission pipeline.
+This module never mutates or seals the catalog or claims target readiness.
+"""
+
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use std.common.crypto.ed25519.{pure_ed25519_verify}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.fs_driver.mount_table.{MountTable, StableFileSnapshotSealV1}
+use os.kernel.loader.authenticated_media_parser.{authenticated_media_hex_bytes_v1}
+use os.installer.simplebox_signed_catalog_provisioner_v1.{
+    SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1}
+use os.kernel.loader.executable_manifest_signature_verifier.{
+    ExecutableManifestTrustedSignerV1}
+use os.kernel.loader.primary_linux_tool_catalog_bundle_v1.{
+    PrimaryLinuxToolCatalogPlanV1, PrimaryLinuxToolCatalogPlanErrorV1,
+    PRIMARY_LINUX_TOOL_PAYLOAD_COUNT_V1,
+    primary_linux_tool_catalog_required_paths_v1,
+    primary_linux_tool_catalog_plan_v1}
+use os.kernel.loader.installed_artifact_catalog_boot_owner_v1.{
+    InstalledArtifactBootPolicyV1, InstalledArtifactBootRecordV1}
+use os.kernel.loader.primary_tool_release_descriptor_v1.{
+    PRIMARY_TOOL_RELEASE_PAYLOAD_MAX_BYTES_V1,
+    PRIMARY_TOOL_RELEASE_MEDIA_MAX_BYTES_V1,
+    primary_tool_release_descriptor_verify_v1,
+    primary_tool_release_descriptor_verify_media_observations_v1}
+use os.kernel.loader.primary_tool_release_descriptor_codec_v1.{
+    PRIMARY_TOOL_RELEASE_DESCRIPTOR_MAX_WIRE_BYTES_V1,
+    decode_primary_tool_release_descriptor_v1}
+use os.kernel.loader.signed_catalog_snapshot_reader_v1.{
+    signed_catalog_snapshot_read_v1, signed_catalog_snapshot_digest_v1}
+use os.kernel.loader.signed_catalog_scr1_decoder_v1.{
+    SignedCatalogScr1DecodedV1, signed_catalog_scr1_decode_v1,
+    signed_catalog_scr1_bind_digest_v1}
+
+pub const PRIMARY_TOOL_RELEASE_DESCRIPTOR_PATH_V1: text =
+    "/boot/catalog/primary_tool_release.ptrd"
+
+pub struct PrimaryToolCatalogMediaBootPolicyV1:
+    expected_target: ManifestTarget
+    ptrd_path: text
+    payload_paths: [text]
+    scr1_paths: [text]
+    ptrd_max_bytes: i64
+    payload_max_bytes: i64
+    scr1_max_bytes: i64
+    aggregate_max_bytes: i64
+    pinned_key_id: text
+    pinned_public_key_hex: text
+    pinned_public_key_sha256: text
+
+pub enum PrimaryToolCatalogMediaBootErrorV1:
+    None
+    PolicyRejected
+    DescriptorReadRejected
+    DescriptorRejected
+    DescriptorTrustRejected
+    PayloadReadRejected
+    Scr1ReadRejected
+    AggregateBoundsRejected
+    MediaRejected
+    Scr1Rejected
+    RecordSignatureRejected
+    PlanRejected
+
+pub struct PrimaryToolCatalogMediaBootResultV1:
+    """Authenticated boot metadata; observation seals are diagnostic only."""
+    ok: bool
+    error: PrimaryToolCatalogMediaBootErrorV1
+    reason: text
+    release_id: text
+    accepted_records: i64
+    plan: PrimaryLinuxToolCatalogPlanV1
+    payload_observations: [PrimaryToolCatalogMediaObservationV1]
+    scr1_observations: [PrimaryToolCatalogMediaObservationV1]
+
+pub struct PrimaryToolCatalogMediaObservationV1:
+    """Identity of a closed snapshot, never a retained execution lease."""
+    path: text
+    content_sha256: text
+    byte_count: i64
+    seal: StableFileSnapshotSealV1
+
+pub fn primary_tool_catalog_media_payload_paths_v1() -> [text]:
+    primary_linux_tool_catalog_required_paths_v1()
+
+pub fn primary_tool_catalog_media_scr1_paths_v1() -> [text]:
+    ["/boot/catalog/simplebox.scr1", "/boot/catalog/sha256sum.scr1",
+     "/boot/catalog/md5sum.scr1", "/boot/catalog/grep.scr1",
+     "/boot/catalog/ps.scr1"]
+
+fn _empty_plan_v1(target: ManifestTarget) -> PrimaryLinuxToolCatalogPlanV1:
+    PrimaryLinuxToolCatalogPlanV1(
+        ok: false, error: PrimaryLinuxToolCatalogPlanErrorV1.RecordCountMismatch,
+        policy: InstalledArtifactBootPolicyV1(
+            platform_target: target, required_canonical_paths: [], trust_roots: []),
+        records: [])
+
+fn _fail_v1(
+    target: ManifestTarget, error: PrimaryToolCatalogMediaBootErrorV1, reason: text,
+) -> PrimaryToolCatalogMediaBootResultV1:
+    PrimaryToolCatalogMediaBootResultV1(
+        ok: false, error: error, reason: reason, release_id: "",
+        accepted_records: 0, plan: _empty_plan_v1(target),
+        payload_observations: [], scr1_observations: [])
+
+fn _policy_root_v1(
+    policy: PrimaryToolCatalogMediaBootPolicyV1,
+) -> ExecutableManifestTrustedSignerV1?:
+    if policy.expected_target.os != "simpleos" or
+        policy.expected_target.abi != "simpleos" or
+        (policy.expected_target.arch != "x86" and
+         policy.expected_target.arch != "x86_64" and
+         policy.expected_target.arch != "arm" and
+         policy.expected_target.arch != "aarch64" and
+         policy.expected_target.arch != "riscv32" and
+         policy.expected_target.arch != "riscv64") or
+        policy.ptrd_path != PRIMARY_TOOL_RELEASE_DESCRIPTOR_PATH_V1 or
+        policy.payload_paths != primary_tool_catalog_media_payload_paths_v1() or
+        policy.scr1_paths != primary_tool_catalog_media_scr1_paths_v1() or
+        policy.ptrd_max_bytes != PRIMARY_TOOL_RELEASE_DESCRIPTOR_MAX_WIRE_BYTES_V1 or
+        policy.payload_max_bytes != PRIMARY_TOOL_RELEASE_PAYLOAD_MAX_BYTES_V1 or
+        policy.scr1_max_bytes != SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1 or
+        policy.aggregate_max_bytes != PRIMARY_TOOL_RELEASE_MEDIA_MAX_BYTES_V1 or
+        policy.pinned_key_id.len() == 0 or policy.pinned_key_id.len() > 128 or
+        policy.pinned_key_id.contains(":") or
+        policy.pinned_public_key_hex.len() != 64 or
+        policy.pinned_public_key_sha256.len() != 64:
+        return nil
+    val key = authenticated_media_hex_bytes_v1(policy.pinned_public_key_hex)
+    if key.len() != 32 or sha256_u8_hex(key) != policy.pinned_public_key_sha256:
+        return nil
+    Some(ExecutableManifestTrustedSignerV1(
+        key_id: policy.pinned_key_id, public_key: key))
+
+pub(package) fn primary_tool_catalog_media_aggregate_next_v1(
+    current_bytes: i64, payload_bytes: i64, scr1_bytes: i64,
+) -> i64?:
+    if current_bytes < 0 or payload_bytes <= 0 or scr1_bytes <= 0 or
+        payload_bytes > PRIMARY_TOOL_RELEASE_PAYLOAD_MAX_BYTES_V1 or
+        scr1_bytes > SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1 or
+        current_bytes > PRIMARY_TOOL_RELEASE_MEDIA_MAX_BYTES_V1 or
+        payload_bytes > PRIMARY_TOOL_RELEASE_MEDIA_MAX_BYTES_V1 - current_bytes:
+        return nil
+    val after_payload = current_bytes + payload_bytes
+    if scr1_bytes > PRIMARY_TOOL_RELEASE_MEDIA_MAX_BYTES_V1 - after_payload:
+        return nil
+    Some(after_payload + scr1_bytes)
+
+pub(package) fn primary_tool_catalog_media_observations_bounds_valid_v1(
+    payload_lengths: [i64], scr1_lengths: [i64],
+) -> bool:
+    """Apply the production five-row per-file and aggregate accounting seam."""
+    if payload_lengths.len() != PRIMARY_LINUX_TOOL_PAYLOAD_COUNT_V1 or
+        scr1_lengths.len() != PRIMARY_LINUX_TOOL_PAYLOAD_COUNT_V1:
+        return false
+    var aggregate: i64 = 0
+    var index: i64 = 0
+    while index < PRIMARY_LINUX_TOOL_PAYLOAD_COUNT_V1:
+        val next = primary_tool_catalog_media_aggregate_next_v1(
+            aggregate, payload_lengths[index], scr1_lengths[index])
+        if not next.?: return false
+        aggregate = next.unwrap()
+        index = index + 1
+    true
+
+fn _record_signature_valid_v1(
+    decoded: SignedCatalogScr1DecodedV1,
+    root: ExecutableManifestTrustedSignerV1,
+    root_sha256: text,
+) -> bool:
+    val record = decoded.record
+    val envelope = record.detached_signature.split(":")
+    if envelope.len() != 3 or envelope[0] != "ed25519" or
+        envelope[1] != root.key_id or
+        record.expected_trust_root_sha256 != root_sha256:
+        return false
+    val signature = authenticated_media_hex_bytes_v1(envelope[2])
+    signature.len() == 64 and
+        pure_ed25519_verify(root.public_key, decoded.sam1_bytes, signature)
+
+pub(package) fn primary_tool_catalog_media_boot_prepare_v1(
+    table: MountTable, policy: PrimaryToolCatalogMediaBootPolicyV1,
+) -> PrimaryToolCatalogMediaBootResultV1:
+    val root = _policy_root_v1(policy)
+    if not root.?:
+        return _fail_v1(
+            policy.expected_target, PrimaryToolCatalogMediaBootErrorV1.PolicyRejected,
+            "policy-rejected")
+    val pinned_root = root.unwrap()
+    val roots = [pinned_root]
+
+    val descriptor_snapshot = signed_catalog_snapshot_read_v1(
+        table, policy.ptrd_path,
+        policy.ptrd_max_bytes.to_u64())
+    if descriptor_snapshot.is_err():
+        return _fail_v1(
+            policy.expected_target,
+            PrimaryToolCatalogMediaBootErrorV1.DescriptorReadRejected,
+            "descriptor-read-rejected")
+    val decoded_descriptor = decode_primary_tool_release_descriptor_v1(
+        descriptor_snapshot.unwrap().bytes)
+    if not decoded_descriptor.ok:
+        return _fail_v1(
+            policy.expected_target, PrimaryToolCatalogMediaBootErrorV1.DescriptorRejected,
+            "descriptor-rejected")
+    val descriptor_check = primary_tool_release_descriptor_verify_v1(
+        decoded_descriptor.value, roots, policy.expected_target,
+        policy.pinned_key_id)
+    if not descriptor_check.ok:
+        return _fail_v1(
+            policy.expected_target,
+            PrimaryToolCatalogMediaBootErrorV1.DescriptorTrustRejected,
+            descriptor_check.reason)
+
+    var payload_observations: [PrimaryToolCatalogMediaObservationV1] = []
+    var payload_sha256: [text] = []
+    var payload_lengths: [i64] = []
+    var scr1_records: [[u8]] = []
+    var scr1_observations: [PrimaryToolCatalogMediaObservationV1] = []
+    var scr1_sha256: [text] = []
+    var scr1_lengths: [i64] = []
+    var aggregate_bytes: i64 = 0
+    var index: i64 = 0
+    while index < PRIMARY_LINUX_TOOL_PAYLOAD_COUNT_V1:
+        val payload = signed_catalog_snapshot_digest_v1(
+            table, policy.payload_paths[index],
+            policy.payload_max_bytes.to_u64())
+        if payload.is_err():
+            return _fail_v1(
+                policy.expected_target,
+                PrimaryToolCatalogMediaBootErrorV1.PayloadReadRejected,
+                "payload-read-rejected")
+        val scr1 = signed_catalog_snapshot_read_v1(
+            table, policy.scr1_paths[index],
+            policy.scr1_max_bytes.to_u64())
+        if scr1.is_err():
+            return _fail_v1(
+                policy.expected_target, PrimaryToolCatalogMediaBootErrorV1.Scr1ReadRejected,
+                "scr1-read-rejected")
+        val next = primary_tool_catalog_media_aggregate_next_v1(
+            aggregate_bytes, payload.unwrap().size.to_i64(),
+            scr1.unwrap().bytes.len())
+        if not next.?:
+            return _fail_v1(
+                policy.expected_target,
+                PrimaryToolCatalogMediaBootErrorV1.AggregateBoundsRejected,
+                "aggregate-bounds-rejected")
+        aggregate_bytes = next.unwrap()
+        payload_sha256.push(payload.unwrap().content_sha256)
+        payload_lengths.push(payload.unwrap().size.to_i64())
+        payload_observations.push(PrimaryToolCatalogMediaObservationV1(
+            path: policy.payload_paths[index],
+            content_sha256: payload.unwrap().content_sha256,
+            byte_count: payload.unwrap().size.to_i64(), seal: payload.unwrap().seal))
+        scr1_records.push(scr1.unwrap().bytes)
+        scr1_sha256.push(scr1.unwrap().seal.content_sha256)
+        scr1_lengths.push(scr1.unwrap().seal.size.to_i64())
+        scr1_observations.push(PrimaryToolCatalogMediaObservationV1(
+            path: policy.scr1_paths[index],
+            content_sha256: scr1.unwrap().seal.content_sha256,
+            byte_count: scr1.unwrap().seal.size.to_i64(), seal: scr1.unwrap().seal))
+        index = index + 1
+
+    if not primary_tool_catalog_media_observations_bounds_valid_v1(
+        payload_lengths, scr1_lengths):
+        return _fail_v1(
+            policy.expected_target,
+            PrimaryToolCatalogMediaBootErrorV1.AggregateBoundsRejected,
+            "aggregate-observations-rejected")
+
+    val media_check = primary_tool_release_descriptor_verify_media_observations_v1(
+        decoded_descriptor.value, roots, policy.expected_target,
+        policy.pinned_key_id, payload_sha256, payload_lengths,
+        scr1_sha256, scr1_lengths)
+    # The observation verifier deliberately repeats the bounded 4 KiB PTRD
+    # signature check.  Payloads are neither copied nor hashed a second time.
+    if not media_check.ok:
+        val error = if media_check.reason == "signature-invalid" or
+            media_check.reason == "trusted-signer-not-unique" or
+            media_check.reason == "trusted-signer-invalid":
+            PrimaryToolCatalogMediaBootErrorV1.DescriptorTrustRejected
+        else:
+            PrimaryToolCatalogMediaBootErrorV1.MediaRejected
+        return _fail_v1(policy.expected_target, error, media_check.reason)
+
+    var records: [InstalledArtifactBootRecordV1] = []
+    index = 0
+    while index < PRIMARY_LINUX_TOOL_PAYLOAD_COUNT_V1:
+        val decoded_scr1 = signed_catalog_scr1_decode_v1(scr1_records[index])
+        if not decoded_scr1.?:
+            return _fail_v1(
+                policy.expected_target, PrimaryToolCatalogMediaBootErrorV1.Scr1Rejected,
+                "scr1-rejected")
+        val binding = signed_catalog_scr1_bind_digest_v1(
+            decoded_scr1.unwrap(), decoded_descriptor.value.rows[index].payload_sha256,
+            payload_lengths[index], policy.expected_target, policy.payload_paths[index])
+        if not binding.?:
+            return _fail_v1(
+                policy.expected_target, PrimaryToolCatalogMediaBootErrorV1.Scr1Rejected,
+                "scr1-binding-rejected")
+        if not _record_signature_valid_v1(
+            binding.unwrap().decoded, pinned_root,
+            policy.pinned_public_key_sha256):
+            return _fail_v1(
+                policy.expected_target,
+                PrimaryToolCatalogMediaBootErrorV1.RecordSignatureRejected,
+                "record-signature-rejected")
+        records.push(binding.unwrap().decoded.record)
+        index = index + 1
+
+    val plan = primary_linux_tool_catalog_plan_v1(
+        policy.expected_target, roots, records)
+    if not plan.ok:
+        return _fail_v1(
+            policy.expected_target, PrimaryToolCatalogMediaBootErrorV1.PlanRejected,
+            "primary-tool-plan-rejected")
+    PrimaryToolCatalogMediaBootResultV1(
+        ok: true, error: PrimaryToolCatalogMediaBootErrorV1.None, reason: "",
+        release_id: decoded_descriptor.value.release_id,
+        accepted_records: records.len(), plan: plan,
+        payload_observations: payload_observations,
+        scr1_observations: scr1_observations)

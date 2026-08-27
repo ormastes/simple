@@ -25,7 +25,7 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -72,7 +72,7 @@ for i in 0..100:
         check(id == first_id) # Same ID for duplicates
 
 # Should only have 1 entry
-val strings = dict_keys(interner.str_to_id)
+val strings = dict_keys(interner.strings)
 check(strings.len() == 1)
 ```
 
@@ -219,7 +219,7 @@ for i in 0..50:
     val id = interner.intern(s)
 
     # Forward lookup: string -> id
-    val forward = interner.get_id(s)
+    val forward = interner.get(s)
     check(forward.?)
     check(forward? == id)
 
@@ -322,7 +322,7 @@ val id3 = interner.intern("third")
 check(id1 == 0)
 check(id2 == 1)
 check(id3 == 2)
-check(interner.next_id.value == 3)
+check(interner.next_id == 3)
 ```
 
 </details>

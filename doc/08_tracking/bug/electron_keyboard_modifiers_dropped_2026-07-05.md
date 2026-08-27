@@ -1,8 +1,5 @@
 # Electron keyboard input drops all modifier state and most non-printable keys
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
-
 ## Status
 Open.
 

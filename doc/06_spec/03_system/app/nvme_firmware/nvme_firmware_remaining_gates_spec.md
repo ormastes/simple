@@ -16,9 +16,7 @@ NVMe firmware remaining-gate orchestration.
 ## At a Glance
 
 | Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
+|---|---|
 | Source | `test/03_system/app/nvme_firmware/nvme_firmware_remaining_gates_spec.spl` |
 | Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |

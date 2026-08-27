@@ -1,6 +1,29 @@
 # Visibility Metadata Specification
 
-> Tests covering LSP Visibility Metadata.
+> 1. check
+
+<!-- sdn-diagram:id=visibility_metadata_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=visibility_metadata_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+visibility_metadata_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=visibility_metadata_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,22 +40,17 @@
 
 #### formats public symbols with exported provenance
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- formats public symbols with exported provenance
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats public symbols with exported provenance")
 val symbol = VisibilitySymbol(name: "Router", visibility: VisibilitySurface.Public)
 val detail = format_visibility_detail(symbol, "crate.sys.http", true)
 
@@ -44,18 +62,16 @@ check(detail.contains("exported from crate.sys.http"))
 
 #### formats boundary symbols with boundary provenance
 
-- formats boundary symbols with boundary provenance
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats boundary symbols with boundary provenance")
 val symbol = VisibilitySymbol(name: "route_debug", visibility: VisibilitySurface.Boundary)
 val detail = format_visibility_detail(symbol, "crate.sys.http", false)
 
@@ -66,18 +82,16 @@ check(detail == "boundary (boundary: crate.sys.http)")
 
 #### keeps private symbols private in metadata
 
-- keeps private symbols private in metadata
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("keeps private symbols private in metadata")
 val symbol = VisibilitySymbol(name: "internal_helper", visibility: VisibilitySurface.Private)
 val detail = format_visibility_detail(symbol, "crate.sys.http", false)
 
@@ -88,18 +102,21 @@ check(detail == "private")
 
 #### filters private symbols from completion and workspace symbol surfaces
 
-- filters private symbols from completion and workspace symbol surfaces
+1. check
+2. check
+3. check
+4. check
+5. check
+6. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("filters private symbols from completion and workspace symbol surfaces")
 check(should_include_in_completion(VisibilitySurface.Public))
 check(should_include_in_completion(VisibilitySurface.Boundary))
 check(not should_include_in_completion(VisibilitySurface.Private))
@@ -112,18 +129,17 @@ check(not should_include_in_workspace(VisibilitySurface.Private))
 
 #### ranks public before boundary before private
 
-- ranks public before boundary before private
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("ranks public before boundary before private")
 check(visibility_rank(VisibilitySurface.Public) < visibility_rank(VisibilitySurface.Boundary))
 check(visibility_rank(VisibilitySurface.Boundary) < visibility_rank(VisibilitySurface.Private))
 ```
@@ -132,18 +148,17 @@ check(visibility_rank(VisibilitySurface.Boundary) < visibility_rank(VisibilitySu
 
 #### ranks exact workspace matches before prefix and substring matches
 
-- ranks exact workspace matches before prefix and substring matches
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("ranks exact workspace matches before prefix and substring matches")
 val exact = workspace_match_rank("query", "query", VisibilitySurface.Public)
 val prefix = workspace_match_rank("query_visibility", "query", VisibilitySurface.Public)
 val substring = workspace_match_rank("visibility_query", "query", VisibilitySurface.Public)
@@ -156,18 +171,17 @@ check(prefix < substring)
 
 #### prefers more visible workspace results when match quality ties
 
-- prefers more visible workspace results when match quality ties
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("prefers more visible workspace results when match quality ties")
 val public_rank = workspace_match_rank("query_visibility", "query", VisibilitySurface.Public)
 val boundary_rank = workspace_match_rank("query_visibility", "query", VisibilitySurface.Boundary)
 val private_rank = workspace_match_rank("query_visibility", "query", VisibilitySurface.Private)
@@ -185,12 +199,12 @@ check(boundary_rank < private_rank)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/lsp/visibility_metadata_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering LSP Visibility Metadata.
+Tests covering:
 - LSP Visibility Metadata
 
 ## Scenario Summary
@@ -205,51 +219,3 @@ Tests covering LSP Visibility Metadata.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `5c34f97784795c5837ee4ec6d37968927551fff00304b317033efa5db40c479c`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `5c34f97784795c5837ee4ec6d37968927551fff00304b317033efa5db40c479c`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `5c34f97784795c5837ee4ec6d37968927551fff00304b317033efa5db40c479c`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/lsp/visibility_metadata_spec.spl
-mirror: doc/06_spec/01_unit/app/lsp/visibility_metadata_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/lsp/visibility_metadata_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/lsp/visibility_metadata_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/lsp/visibility_metadata_spec.spl:65:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'formats public symbols with exported provenance' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/lsp/visibility_metadata_spec.spl:74:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'formats boundary symbols with boundary provenance' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/lsp/visibility_metadata_spec.spl:82:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps private symbols private in metadata' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

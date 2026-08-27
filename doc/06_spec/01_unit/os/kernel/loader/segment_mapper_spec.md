@@ -1,6 +1,30 @@
 # Segment Mapper Specification
 
-> Tests covering segment_mapper, highest_loaded_address, map_segment validation, map_all no-op, map_stack validation.
+> _PT_LOAD → user address space mapper.""_
+
+<!-- sdn-diagram:id=segment_mapper_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=segment_mapper_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+segment_mapper_spec -> std
+segment_mapper_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=segment_mapper_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -14,24 +38,19 @@
 ## Scenarios
 
 ### segment_mapper
+_PT_LOAD → user address space mapper.""_
 
 ### highest_loaded_address
 
 #### returns 0 for an empty list
 
-- returns 0 for an empty list
-   - Expected: highest_loaded_address(segs) equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("returns 0 for an empty list")
 val segs: [UserLoadSegment] = []
 expect(highest_loaded_address(segs)).to_equal(0)
 ```
@@ -40,19 +59,13 @@ expect(highest_loaded_address(segs)).to_equal(0)
 
 #### returns page-aligned upper bound for a single segment
 
-- returns page-aligned upper bound for a single segment
-   - Expected: highest_loaded_address(segs) equals `0x3000`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("returns page-aligned upper bound for a single segment")
 # va=0x1000, memsz=0x2000 ⇒ end = 0x3000 (already page-aligned).
 val seg = UserLoadSegment(
     virt_addr: 0x1000,
@@ -70,19 +83,13 @@ expect(highest_loaded_address(segs)).to_equal(0x3000)
 
 #### rounds an unaligned upper bound up to the next page
 
-- rounds an unaligned upper bound up to the next page
-   - Expected: highest_loaded_address(segs) equals `0x3000`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("rounds an unaligned upper bound up to the next page")
 val seg = UserLoadSegment(
     virt_addr: 0x1000,
     mem_size: 0x1234,
@@ -100,19 +107,13 @@ expect(highest_loaded_address(segs)).to_equal(0x3000)
 
 #### takes the max across multiple segments
 
-- takes the max across multiple segments
-   - Expected: highest_loaded_address(segs) equals `0x5000`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("takes the max across multiple segments")
 val a = UserLoadSegment(
     virt_addr: 0x1000, mem_size: 0x1000, file_size: 0x1000,
     flags: 4, align: 0x1000, data: []
@@ -132,20 +133,13 @@ expect(highest_loaded_address(segs)).to_equal(0x5000)
 
 #### rejects a segment with file_size > mem_size
 
-- rejects a segment with file_size > mem_size
-   - Expected: msg contains `file_size`
-   - Expected: "expected Err, got Ok" equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("rejects a segment with file_size > mem_size")
 val bad = UserLoadSegment(
     virt_addr: 0x1000,
     mem_size: 0x100,
@@ -170,20 +164,13 @@ match r:
 
 #### returns Ok(0) on an empty segment list
 
-- returns Ok(0) on an empty segment list
-   - Expected: n equals `0`
-   - Expected: "expected Ok(0), got Err" equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("returns Ok(0) on an empty segment list")
 val as_handle = AddressSpace(phys_root: 0, id: 0)
 val segs: [UserLoadSegment] = []
 val bytes: [u8] = []
@@ -201,20 +188,13 @@ match r:
 
 #### rejects a zero-sized stack
 
-- rejects a zero-sized stack
-   - Expected: msg contains `stack_size`
-   - Expected: "expected Err, got Ok" equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("rejects a zero-sized stack")
 val as_handle = AddressSpace(phys_root: 0, id: 0)
 val r = map_stack(as_handle, 0x8000, 0, [])
 match r:
@@ -228,20 +208,13 @@ match r:
 
 #### rejects an initial frame larger than the stack
 
-- rejects an initial frame larger than the stack
-   - Expected: msg contains `initial stack`
-   - Expected: "expected Err, got Ok" equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("rejects an initial frame larger than the stack")
 val as_handle = AddressSpace(phys_root: 0, id: 0)
 val r = map_stack(as_handle, 0x8000, 2, [1u8, 2u8, 3u8])
 match r:
@@ -255,20 +228,13 @@ match r:
 
 #### rejects stack ranges that underflow
 
-- rejects stack ranges that underflow
-   - Expected: msg contains `underflows`
-   - Expected: "expected Err, got Ok" equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("rejects stack ranges that underflow")
 val as_handle = AddressSpace(phys_root: 0, id: 0)
 val r = map_stack(as_handle, 0x1000, 0x2000, [])
 match r:
@@ -287,12 +253,12 @@ match r:
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/kernel/loader/segment_mapper_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering segment_mapper, highest_loaded_address, map_segment validation, map_all no-op, map_stack validation.
+Tests covering:
 - segment_mapper
 - highest_loaded_address
 - map_segment validation
@@ -311,54 +277,3 @@ Tests covering segment_mapper, highest_loaded_address, map_segment validation, m
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-OS`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `37a31335ede8c8cfa63a5a51208b370155e18db61e4ea9ea1e220bf1ec1f44e2`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `37a31335ede8c8cfa63a5a51208b370155e18db61e4ea9ea1e220bf1ec1f44e2`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `37a31335ede8c8cfa63a5a51208b370155e18db61e4ea9ea1e220bf1ec1f44e2`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
-
-SSpec documentization score: 88/100
-source: test/01_unit/os/kernel/loader/segment_mapper_spec.spl
-mirror: doc/06_spec/01_unit/os/kernel/loader/segment_mapper_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=80
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/os/kernel/loader/segment_mapper_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/kernel/loader/segment_mapper_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/os/kernel/loader/segment_mapper_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/os/kernel/loader/segment_mapper_spec.spl:28:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns 0 for an empty list' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/os/kernel/loader/segment_mapper_spec.spl:34:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns page-aligned upper bound for a single segment' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/os/kernel/loader/segment_mapper_spec.spl:49:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rounds an unaligned upper bound up to the next page' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -11,17 +11,35 @@
 
 # simpleos_2d_showcase_spec
 
-SimpleOS 2D showcase and shared contract composition across draw, input, and audio.
+## Parser contract targets
+- Board checker matrix validates:
+  - missing board,
+  - unsupported board,
+  - runner-not-yet-implemented,
+  - board-not-connected when UNO Q is unattached.
+- Host GPU checker validates pass row contract (Linux row pass + render backend matrix).
+- Audio checker validates keyboard/pointer/controller receipts and playback/capture non-silent traces.
+- Host GPU metrics contract validates render sample count + p95 + RSS evidence (no hardcoded synthetic values).
+- RV64 checker validates font route, marker parsing, and keyboard/pointer correlation.
+- Showcase source contract validates DrawIR/event entrypoints plus keyboard modifier state routing (`alt_held`, `ctrl_held`) and host-side animation hooks (`web_animation_dirty_due`, `animation_frame_due`).
 
-## At a Glance
+## Lane status at handoff
+- Lane 1 (Linux/QEMU Vulkan): parser/self-test complete, live pass blocked by compiler/runtime admission.
+- Lane 2 (ARM64/QEMU event): parser/self-test complete, live pass blocked by compiler/runtime admission.
+- Lane 3 (macOS HVF): parser/test harness complete, emulator-only in this host context.
+- Lane 4 (UNO Q + showcase): parser/matrix complete; board pass intentionally blocked unless hardware is attached.
 
-| Field | Value |
-|-------|-------|
-| Category | Hardware & OS |
-| Status | Active |
-| Source | `test/03_system/os/qemu/simpleos_2d_showcase_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
+## What is done vs. still blocked
+- ✅ Done:
+  - 4-lane structure and artifacts exist.
+  - Board fail-closed matrix reasons are explicit.
+  - Linux QEMU rows are Vulkan-bound in parser evidence.
+  - Host/event/audio/font marker contracts are checked from shared checker code.
+- ⏸️ Still blocked:
+  - Fresh native PASS on this host for Linux/QEMU/ARM64 rows because pure-Simple compiler admission/runtime still needs to be installed end-to-end.
+  - macOS/uno-q native row execution cannot be completed on this host; macOS remains emulator-only here, and UNO Q is not attached.
+    - On this host, macOS row must stay `unsupported` or `blocked` and must only be promoted after a prepared-macOS host run with native contracts.
+  - No live animation frame counter proof yet in this environment (existing animation fixtures are contract-level only in this lane).
 
 SimpleOS 2D showcase and shared contract composition across draw, input, and audio.
 

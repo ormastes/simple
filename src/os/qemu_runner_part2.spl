@@ -49,48 +49,15 @@ use os.toolchain_vfs_probe_contract.{
 }
 use os.ssh_qemu_contract.{run_x64_ssh_probe}
 use hardware.riscv_common.core.riscv_formal.{verify_rv64_qemu_user_proof_contract}
-use std.io_runtime.{ dir_create_all, file_exists }
 
-@unsafe(reason: "foreign process execution and aggregate result are not artifact-verified", capabilities: [ffi])
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
-@unsafe(reason: "foreign filesystem deletion result is not artifact-verified", capabilities: [ffi])
 extern fn rt_file_delete(path: text) -> bool
-@unsafe(reason: "foreign filesystem write result is not artifact-verified", capabilities: [ffi])
 extern fn rt_file_write_text(path: text, content: text) -> bool
-@unsafe(reason: "foreign filesystem text result has ambiguous empty/error semantics", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text
-@unsafe(reason: "foreign environment lookup is process-global", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text?
-@unsafe(reason: "foreign environment mutation is process-global", capabilities: [ffi])
 extern fn rt_env_set(key: text, value: text) -> bool
-use std.io_runtime.{cwd as io_runtime_cwd}
-@unsafe(reason: "foreign wall-clock provider is not artifact-verified", capabilities: [ffi])
+extern fn rt_env_cwd() -> text
 extern fn rt_time_now_unix_micros() -> i64
-
-@always_inline
-fn _qemu_file_delete(path: text) -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_file_delete(path)
-
-@always_inline
-fn _qemu_file_write_text(path: text, content: text) -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_file_write_text(path, content)
-
-@always_inline
-fn _qemu_file_read_text(path: text) -> text:
-    unsafe(capabilities: [ffi]):
-        rt_file_read_text(path)
-
-@always_inline
-fn _qemu_env_get(key: text) -> text?:
-    unsafe(capabilities: [ffi]):
-        rt_env_get(key)
-
-@always_inline
-fn _qemu_env_set(key: text, value: text) -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_env_set(key, value)
 
 fn get_all_targets() -> [OsTarget]:
     """Returns all 6 architecture targets."""
@@ -143,7 +110,6 @@ var _last_successful_build_output: text = ""
 var _last_successful_build_backend: text = ""
 var _last_successful_build_target: text = ""
 
-@unsafe(reason: "launches the foreign compiler process through the selected backend", capabilities: [ffi])
 fn build_os(target: OsTarget) -> bool:
     build_os_with_backend(target, _os_build_backend_for_target(target))
 
@@ -194,7 +160,6 @@ fn os_native_build_args(target: OsTarget, backend: text) -> [text]:
     args.push(target.linker_script)
     args
 
-@unsafe(reason: "launches a foreign compiler process and consumes an aggregate result", capabilities: [ffi])
 fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     """Builds the OS kernel for the given target.
 
@@ -207,7 +172,7 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     val arch_label = arch_display_name(target.arch)
     val backend_name = if backend == "llvm": "llvm" else: "cranelift"
     val cached_build_matches = _last_successful_build_entry == target.entry and _last_successful_build_output == target.output and _last_successful_build_backend == backend_name and _last_successful_build_target == target.target_triple
-    if cached_build_matches and file_exists(target.output):
+    if cached_build_matches and rt_file_exists(target.output):
         print "[build][{arch_label}] phase=native-build cached output={target.output}"
         return true
     val build_marker = if _is_riscv64_live_helper_target(target): _ssh_live_build_marker_value(backend) else: ""
@@ -224,13 +189,13 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
         _last_successful_build_backend = backend_name
         _last_successful_build_target = target.target_triple
         return true
-    val old_bootstrap = _qemu_env_get("SIMPLE_BOOTSTRAP") ?? ""
-    val old_lib = _qemu_env_get("SIMPLE_LIB") ?? ""
-    val old_boot_minimal = _qemu_env_get("SIMPLE_BOOT_MINIMAL") ?? ""
-    val old_stub_env = _qemu_env_get("SIMPLE_ALLOW_FREESTANDING_STUBS") ?? ""
-    val old_log_mode = _qemu_env_get("SIMPLE_OS_LOG_MODE") ?? ""
-    val old_path = _qemu_env_get("PATH") ?? ""
-    val old_build_marker = _qemu_env_get("SIMPLE_SSH_LIVE_BUILD_MARKER") ?? ""
+    val old_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP") ?? ""
+    val old_lib = rt_env_get("SIMPLE_LIB") ?? ""
+    val old_boot_minimal = rt_env_get("SIMPLE_BOOT_MINIMAL") ?? ""
+    val old_stub_env = rt_env_get("SIMPLE_ALLOW_FREESTANDING_STUBS") ?? ""
+    val old_log_mode = rt_env_get("SIMPLE_OS_LOG_MODE") ?? ""
+    val old_path = rt_env_get("PATH") ?? ""
+    val old_build_marker = rt_env_get("SIMPLE_SSH_LIVE_BUILD_MARKER") ?? ""
     if not _prepare_build_output(target, build_marker):
         _cleanup_generated_build_helpers(build_marker)
         _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
@@ -270,7 +235,7 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
         _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
         return false
     print "[build][{arch_label}] phase=native-build OK elapsed_ms={elapsed_ms}"
-    if not file_exists(target.output):
+    if not rt_file_exists(target.output):
         _write_bootstrap_result(target, false, false, backend_name)
         print "[build][{arch_label}] phase=artifact FAILED output missing: {target.output}"
         _cleanup_generated_build_helpers(build_marker)
@@ -304,17 +269,15 @@ fn _native_build_stamp_content(target: OsTarget, backend_name: text, args: [text
 
 fn _write_native_build_stamp(target: OsTarget, content: text):
     val stamp_path = _native_build_stamp_path(target)
-    if not _qemu_file_write_text(stamp_path, content):
+    if not rt_file_write_text(stamp_path, content):
         print "[build] warning: could not write native-build stamp: {stamp_path}"
 
-@unsafe(reason: "launches a foreign filesystem-probe process and consumes an aggregate result", capabilities: [ffi])
 fn _path_newer_than_output(path: text, output: text) -> bool:
-    if not file_exists(path):
+    if not rt_file_exists(path):
         return false
     val (stdout, _stderr, exit_code) = rt_process_run_timeout("find", [path, "-newer", output, "-print", "-quit"], 10000)
     exit_code != 0 or stdout != ""
 
-@unsafe(reason: "launches foreign filesystem-probe processes for build inputs", capabilities: [ffi])
 fn _native_build_inputs_newer_than_output(target: OsTarget, simple_bin: text) -> bool:
     if _path_newer_than_output(target.linker_script, target.output):
         return true
@@ -325,37 +288,35 @@ fn _native_build_inputs_newer_than_output(target: OsTarget, simple_bin: text) ->
             return true
     false
 
-@unsafe(reason: "depends on foreign process probes for cache freshness", capabilities: [ffi])
 fn _native_build_cache_hit(target: OsTarget, expected_stamp: text, simple_bin: text) -> bool:
-    if not file_exists(target.output):
+    if not rt_file_exists(target.output):
         return false
     val stamp_path = _native_build_stamp_path(target)
-    if not file_exists(stamp_path):
+    if not rt_file_exists(stamp_path):
         return false
-    if _qemu_file_read_text(stamp_path) != expected_stamp:
+    if rt_file_read_text(stamp_path) != expected_stamp:
         return false
     not _native_build_inputs_newer_than_output(target, simple_bin)
 
 fn _objcopy_path_prefix() -> text:
     # macOS Homebrew locations
-    if file_exists("/opt/homebrew/opt/llvm/bin/llvm-objcopy"):
+    if rt_file_exists("/opt/homebrew/opt/llvm/bin/llvm-objcopy"):
         return "/opt/homebrew/opt/llvm/bin"
-    if file_exists("/usr/local/opt/llvm/bin/llvm-objcopy"):
+    if rt_file_exists("/usr/local/opt/llvm/bin/llvm-objcopy"):
         return "/usr/local/opt/llvm/bin"
     # Linux system locations (Debian/Ubuntu packaged LLVM)
-    if file_exists("/usr/bin/llvm-objcopy"):
+    if rt_file_exists("/usr/bin/llvm-objcopy"):
         return "/usr/bin"
-    if file_exists("/usr/lib/llvm-20/bin/llvm-objcopy"):
+    if rt_file_exists("/usr/lib/llvm-20/bin/llvm-objcopy"):
         return "/usr/lib/llvm-20/bin"
-    if file_exists("/usr/lib/llvm-19/bin/llvm-objcopy"):
+    if rt_file_exists("/usr/lib/llvm-19/bin/llvm-objcopy"):
         return "/usr/lib/llvm-19/bin"
-    if file_exists("/usr/lib/llvm-18/bin/llvm-objcopy"):
+    if rt_file_exists("/usr/lib/llvm-18/bin/llvm-objcopy"):
         return "/usr/lib/llvm-18/bin"
-    if file_exists("/usr/lib/llvm-17/bin/llvm-objcopy"):
+    if rt_file_exists("/usr/lib/llvm-17/bin/llvm-objcopy"):
         return "/usr/lib/llvm-17/bin"
     ""
 
-@unsafe(reason: "launches a foreign executable probe and consumes an aggregate result", capabilities: [ffi])
 fn _simple_binary_is_valid(candidate: text) -> bool:
     """Validate a candidate `simple` binary by running `<candidate> --version`.
 
@@ -364,12 +325,11 @@ fn _simple_binary_is_valid(candidate: text) -> bool:
     the Linux bootstrap binary at src/compiler_rust/target/release/simple
     was observed to do on 2026-04-13).
     """
-    if not file_exists(candidate):
+    if not rt_file_exists(candidate):
         return false
     val (stdout, _stderr, exit_code) = rt_process_run_timeout(candidate, ["--version"], 5000)
     exit_code == 0 and stdout != ""
 
-@unsafe(reason: "launches foreign executable probes and consumes aggregate results", capabilities: [ffi])
 fn _simple_binary_supports_backend(candidate: text, backend_name: text) -> bool:
     if not _simple_binary_is_valid(candidate):
         return false
@@ -393,9 +353,8 @@ fn _simple_binary_supports_backend(candidate: text, backend_name: text) -> bool:
         return false
     true
 
-@unsafe(reason: "launches foreign executable probes while selecting a compiler", capabilities: [ffi])
 fn _find_simple_binary() -> text:
-    val env_bin = _qemu_env_get("SIMPLE_BINARY") ?? ""
+    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
     if env_bin != "":
         return env_bin
     # Probe in priority order. Prefer freshly built local binaries first so
@@ -404,15 +363,9 @@ fn _find_simple_binary() -> text:
     # Each candidate is validated via `<candidate> --version` (exit 0 +
     # non-empty stdout) so stale or segfaulting binaries fall through.
     val candidates: [text] = [
-        "src/compiler_rust/target/debug/simple.exe",
         "src/compiler_rust/target/debug/simple",
-        "src/compiler_rust/target/bootstrap/simple.exe",
         "src/compiler_rust/target/bootstrap/simple",
-        "src/compiler_rust/target/release/simple.exe",
         "src/compiler_rust/target/release/simple",
-        "bin/release/x86_64-pc-windows-msvc/simple.exe",
-        "bin/release/aarch64-pc-windows-msvc/simple.exe",
-        "bin/simple.exe",
         "bin/simple",
         "bin/release/aarch64-apple-darwin-macho/simple",
         "bin/release/macos-arm64/simple",
@@ -425,25 +378,18 @@ fn _find_simple_binary() -> text:
             return cand
     "bin/simple"
 
-@unsafe(reason: "launches foreign executable/backend probes while selecting a compiler", capabilities: [ffi])
 fn _find_simple_binary_for_target(target: OsTarget, backend_name: text) -> text:
     if backend_name == "llvm" and target.arch == Architecture.X86 and _simple_binary_supports_backend("src/compiler_rust/target/bootstrap/simple", backend_name):
         return "src/compiler_rust/target/bootstrap/simple"
     if backend_name == "llvm" and _simple_binary_supports_backend("src/compiler_rust/target/release/simple", backend_name):
         return "src/compiler_rust/target/release/simple"
-    val env_bin = _qemu_env_get("SIMPLE_BINARY") ?? ""
+    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
     if env_bin != "" and _simple_binary_supports_backend(env_bin, backend_name):
         return env_bin
     val candidates: [text] = [
-        "src/compiler_rust/target/debug/simple.exe",
         "src/compiler_rust/target/debug/simple",
-        "src/compiler_rust/target/bootstrap/simple.exe",
         "src/compiler_rust/target/bootstrap/simple",
-        "src/compiler_rust/target/release/simple.exe",
         "src/compiler_rust/target/release/simple",
-        "bin/release/x86_64-pc-windows-msvc/simple.exe",
-        "bin/release/aarch64-pc-windows-msvc/simple.exe",
-        "bin/simple.exe",
         "bin/simple",
         "bin/release/aarch64-apple-darwin-macho/simple",
         "bin/release/macos-arm64/simple",
@@ -555,73 +501,73 @@ fn _simpleos_log_config_source(enabled: bool) -> text:
 
 fn _prepare_build_output(target: OsTarget, build_marker: text) -> bool:
     if file_exists(target.output):
-        if not _qemu_file_delete(target.output):
+        if not rt_file_delete(target.output):
             print "[build] could not remove stale artifact: {target.output}"
             return false
     if file_exists(_legacy_simpleos_log_config_path()):
-        _qemu_file_delete(_legacy_simpleos_log_config_path())
+        rt_file_delete(_legacy_simpleos_log_config_path())
     if not dir_create_all("build/os/generated/generated"):
         print "[build] could not create build/os/generated/generated"
         return false
-    if not _qemu_file_write_text(_simpleos_log_config_path(), _simpleos_log_config_source(_os_build_log_mode() == "on")):
+    if not rt_file_write_text(_simpleos_log_config_path(), _simpleos_log_config_source(_os_build_log_mode() == "on")):
         print "[build] could not write SimpleOS log compile config"
         return false
     if build_marker != "":
-        if not _qemu_file_write_text(_ssh_live_build_marker_path(), _ssh_live_build_marker_source(build_marker)):
+        if not rt_file_write_text(_ssh_live_build_marker_path(), _ssh_live_build_marker_source(build_marker)):
             print "[build] could not write SSH live build marker"
             return false
-        if not _qemu_env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", build_marker):
+        if not rt_env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", build_marker):
             print "[build] could not export SIMPLE_SSH_LIVE_BUILD_MARKER"
             return false
     true
 
 fn _cleanup_generated_build_helpers(build_marker: text):
     if file_exists(_simpleos_log_config_path()):
-        _qemu_file_delete(_simpleos_log_config_path())
+        rt_file_delete(_simpleos_log_config_path())
     if build_marker != "" and file_exists(_ssh_live_build_marker_path()):
-        _qemu_file_delete(_ssh_live_build_marker_path())
+        rt_file_delete(_ssh_live_build_marker_path())
     if build_marker != "":
-        _qemu_env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", "")
+        rt_env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", "")
 
 fn _restore_build_env(old_bootstrap: text, old_lib: text, old_boot_minimal: text, old_stub_env: text, old_log_mode: text, old_path: text, old_build_marker: text):
-    _qemu_env_set("SIMPLE_BOOTSTRAP", old_bootstrap)
-    _qemu_env_set("SIMPLE_LIB", old_lib)
-    _qemu_env_set("SIMPLE_BOOT_MINIMAL", old_boot_minimal)
-    _qemu_env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", old_stub_env)
-    _qemu_env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
-    _qemu_env_set("PATH", old_path)
-    _qemu_env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", old_build_marker)
+    rt_env_set("SIMPLE_BOOTSTRAP", old_bootstrap)
+    rt_env_set("SIMPLE_LIB", old_lib)
+    rt_env_set("SIMPLE_BOOT_MINIMAL", old_boot_minimal)
+    rt_env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", old_stub_env)
+    rt_env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
+    rt_env_set("PATH", old_path)
+    rt_env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", old_build_marker)
 
 fn _apply_build_env(target: OsTarget, objcopy_prefix: text) -> bool:
-    val cwd = io_runtime_cwd()
+    val cwd = rt_env_cwd()
     if _is_x86_64_kernel_target(target) or _is_x86_32_probe_target(target) or _uses_baremetal_wrapper_profile(target):
-        if not _qemu_env_set("SIMPLE_BOOTSTRAP", "1"):
+        if not rt_env_set("SIMPLE_BOOTSTRAP", "1"):
             return false
-        if not _qemu_env_set("SIMPLE_LIB", "{cwd}/src"):
+        if not rt_env_set("SIMPLE_LIB", "{cwd}/src"):
             return false
     if _is_arm_fs_exec_target(target):
-        if not _qemu_env_set("SIMPLE_BOOT_MINIMAL", "1"):
+        if not rt_env_set("SIMPLE_BOOT_MINIMAL", "1"):
             return false
-        if not _qemu_env_set("SIMPLE_LIB", "{cwd}/src"):
+        if not rt_env_set("SIMPLE_LIB", "{cwd}/src"):
             return false
     if _needs_arm_freestanding_stub_env(target):
-        if not _qemu_env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", "1"):
+        if not rt_env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", "1"):
             return false
     if _is_riscv_fs_exec_target(target) or _is_riscv64_hosted_target(target) or _is_riscv64_live_helper_target(target):
-        if not _qemu_env_set("SIMPLE_BOOT_MINIMAL", "1"):
+        if not rt_env_set("SIMPLE_BOOT_MINIMAL", "1"):
             return false
     if _needs_freestanding_stub_env(target):
-        if not _qemu_env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", "1"):
+        if not rt_env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", "1"):
             return false
-    if not _qemu_env_set("SIMPLE_OS_LOG_MODE", _os_build_log_mode()):
+    if not rt_env_set("SIMPLE_OS_LOG_MODE", _os_build_log_mode()):
         return false
     if objcopy_prefix != "":
-        val old_path = _qemu_env_get("PATH") ?? ""
+        val old_path = rt_env_get("PATH") ?? ""
         if old_path == "":
-            if not _qemu_env_set("PATH", objcopy_prefix):
+            if not rt_env_set("PATH", objcopy_prefix):
                 return false
         else:
-            if not _qemu_env_set("PATH", "{objcopy_prefix}:{old_path}"):
+            if not rt_env_set("PATH", "{objcopy_prefix}:{old_path}"):
                 return false
     true
 
@@ -829,25 +775,21 @@ fn _qemu_extra_enables_network(qemu_extra: [text]) -> bool:
 # Run
 # ===========================================================================
 
-@unsafe(reason: "launches a foreign QEMU process", capabilities: [ffi])
 fn run_os(target: OsTarget) -> bool:
     run_os_with_options(target, qemu_run_options_default())
 
-@unsafe(reason: "launches a foreign QEMU process", capabilities: [ffi])
 fn run_os_debug_gui(target: OsTarget) -> bool:
     run_os_with_options(target, qemu_run_options_debug_gui())
 
-@unsafe(reason: "launches a foreign QEMU process", capabilities: [ffi])
 fn run_os_headless(target: OsTarget) -> bool:
     run_os_with_options(target, qemu_run_options_headless())
 
-@unsafe(reason: "launches a foreign QEMU process and consumes an aggregate result", capabilities: [ffi])
 fn run_os_with_options(target: OsTarget, options: QemuRunOptions) -> bool:
     """Runs QEMU with the built kernel for the given target.
 
     Checks that the binary exists, then spawns QEMU. Returns true on success.
     """
-    if not file_exists(target.output):
+    if not rt_file_exists(target.output):
         print "[run] ERROR: kernel binary not found: {target.output}"
         print "[run] Run 'bin/simple os build --arch={arch_display_name(target.arch)}' first"
         return false

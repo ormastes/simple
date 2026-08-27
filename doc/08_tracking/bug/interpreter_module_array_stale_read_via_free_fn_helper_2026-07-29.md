@@ -1,49 +1,10 @@
 # Bug: instance method reads a stale module-level array through a free-function helper (interpreter)
 
-> **DID NOT REPRODUCE 2026-08-17.** `test/01_unit/lib/nogc_async_mut/async_spec.spl`:
-> `SPEC FILE VERDICT: declared>=10 executed=10 passed=10 failed=0 dropped=0` /
-> `Results: 10 total, 10 passed, 0 failed`. Not vacuous — 10 examples executed.
-> Binary `bin/release/x86_64-unknown-linux-gnu/simple`, 59,536,728 bytes, mtime
-> 2026-08-16 22:59:37. Candidate for close.
-
-
 - **Date:** 2026-07-29
-- Status: OPEN (P1)
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status:** open (worked around in `src/lib/nogc_async_mut/async/cancellation.spl`; root
   cause is in the interpreter, not fixable from pure Simple stdlib code)
 - **Severity:** CRITICAL — silently wrong results, no error, on the default test engine
 - **Found by:** lane G9 (mission-critical robustness campaign — cancellation semantics audit)
-
-## 2026-08-17 (lane w02/s6a) — live; masked by an in-source workaround
-
-Classified by CONTENT. `src/lib/nogc_async_mut/async/cancellation.spl` still
-documents and *implements* the workaround as load-bearing structure:
-`is_cancelled()` (`:84-115`) walks the parent chain with an **iterative inline
-`while`**, and the comment states the requirement literally — "entirely inline
-in this method body (no free-function indirection, no method-to-method recursion
-through a freshly-constructed instance either)" — citing this doc at `:98` and
-the depth-2 sibling
-`cancellation_token_two_level_propagation_stale_after_third_alloc_2026-07-29.md`
-at `:105`.
-
-This is the same pattern as the `backend_software.spl` kernel-table row in this
-slice: **the tree is green because the stdlib avoids the defective shape, not
-because the shape works.** Both rows are live, and both are a stale-read /
-lost-write-back through an intermediate interpreter frame — worth investigating
-as one root cause rather than two.
-
-**Out of scope for this lane** (root cause is the Rust tree-walk interpreter;
-this lane may only edit `src/lib/gc_async_mut/**` and
-`src/lib/nogc_async_mut/**`). Reverting `is_cancelled()` to the free-fn form to
-show RED would reintroduce a CRITICAL silently-wrong cancellation bug and was
-deliberately not done.
-
-**Not proven:** no execution evidence. `shape1` of the lane's `probe_a.spl`
-(same module-level `[bool]` registry, read once via a free-fn helper and once
-inline, after a `me`-method write) is the isolated reproducer, but it never got
-a slot — all six `test-slot.shs` slots were saturated for the whole session by
-parallel sessions running ~173 concurrent `bin/simple test` processes outside
-the cap.
 
 ## Symptom
 
@@ -209,48 +170,3 @@ instead: the 2026-07-29 update section of
 `doc/08_tracking/bug/cancellation_token_two_level_propagation_stale_after_third_alloc_2026-07-29.md`.
 Still not fixable from pure-Simple stdlib source; still belongs to the
 interpreter/compiler team.
-
-## 2026-08-17 (lane w04) — DID NOT REPRODUCE: classify as ALREADY-FIXED
-
-First execution evidence this doc has ever carried (all prior updates were
-source inspection only). Rebuilt the doc's own minimal shape as a standalone
-script and ran it on `bin/simple run`:
-
-```
-var _flags: [bool] = []
-fn alloc() -> i64:  ...            # both push forms tested, see below
-fn read_via_helper(id: i64) -> bool:
-    _flags[id]
-class Tok:
-    tid: i64
-    me set():             _flags[self.tid] = true
-    fn read_inline() -> bool:  _flags[self.tid]
-    fn read_helper() -> bool:  read_via_helper(self.tid)
-```
-
-Both push forms were tested, because this doc and its sibling disagreed about
-which was load-bearing:
-- in-place `_flags.push(false)`  -> `inline=true helper=true`
-- reassign `_flags = _flags.push(false)`, with THREE tokens allocated and the
-  middle one queried (the alloc-ordering condition from the depth-2 sibling
-  doc) -> `inline=true helper=true`
-
-The free-function helper and the inline read agree in every variant. The stale
-read is gone.
-
-**Consequence for `src/lib/nogc_async_mut/async/cancellation.spl`:** the
-inline-`while` workaround in `is_cancelled()` (`:84-115`) is now belt-and-braces
-rather than load-bearing *for this defect*. It was deliberately NOT reverted —
-the depth-2 sibling
-(`cancellation_token_two_level_propagation_stale_after_third_alloc_2026-07-29.md`)
-was not independently retested, and reverting to prove RED would risk
-reintroducing a CRITICAL cancellation bug for no gain.
-
-**Not the same root cause as
-`promise_new_push_reassign_same_scope_as_nested_closure_2026-07-29.md`.** That
-row was retested in the same session and is still LIVE; the two were previously
-suspected to be one defect. They are not — see that doc's 2026-08-17 update for
-the re-characterized trigger.
-
-Spec-level corroboration: `test/01_unit/lib/nogc_async_mut/async_spec.spl` ->
-`Results: 10 total, 10 passed, 0 failed`.

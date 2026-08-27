@@ -56,18 +56,22 @@ GPU claim is made here.
 - Regenerate the top eleven twice from the exact pinned XML bytes
    - Expected: rows.len() equals `1589`
    - Expected: row.contribution equals `expected_cldr_contribution(row)`
+- fail
    - Expected: first_bytes equals `second_bytes`
    - Expected: first_bytes equals `file_read_text(CLDR_RANKING)`
    - Expected: first_rows[i].language equals `evidence[i].language`
    - Expected: first_rows[i].likely_script equals `evidence[i].likely_script`
    - Expected: first_rows[i].total equals `evidence[i].literate_functional_total`
+- script totals = script totals + script script + "=" + script total to text
    - Expected: script_totals equals `evidence[i].script_totals`
+- fail
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 66 lines folded for reproduction.
+Runnable source: 64 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -185,7 +189,7 @@ for path in distribution_paths:
 expect(total_bytes).to_equal(51764704)
 expect(distribution_paths.len()).to_equal(57)
 expect(distribution_paths.len() + 2).to_equal(59)
-expect(distribution_bytes).to_equal(53433279)
+expect(distribution_bytes).to_equal(53433272)
 expect(distribution_bytes).to_be_less_than(80 * 1024 * 1024 + 1)
 ```
 
@@ -222,9 +226,9 @@ for dylib_path in browser_font_dylib_candidates():
     if file_exists(dylib_path) and not exercised:
         dylib_available = true
         val first_loaded = FontRasterizer.load(dylib_path, first_asset.local_path)
-        if first_loaded.loaded_generation <= 0:
+        if first_loaded == nil:
             fail("font rasterizer dylib exists but selected face A could not load")
-        var first = first_loaded
+        var first = first_loaded.?
         defer:
             if first.lib_handle != 0:
                 first.close()
@@ -232,10 +236,10 @@ for dylib_path in browser_font_dylib_candidates():
         expect(first.cache_identity()).to_equal("sha256={first_asset.sha256};axes={first_asset.default_axes}")
 
         val second_loaded = FontRasterizer.load(dylib_path, second_asset.local_path)
-        if second_loaded.loaded_generation <= 0:
+        if second_loaded == nil:
             first.close()
             fail("font rasterizer dylib exists but selected face B could not load")
-        var second = second_loaded
+        var second = second_loaded.?
         defer:
             if second.lib_handle != 0:
                 second.close()
@@ -252,7 +256,7 @@ for dylib_path in browser_font_dylib_candidates():
         first.close()
         expect(second.is_current()).to_be(true)
         expect(second.has_glyph(65)).to_be(true)
-        expect(second.rasterize(65, 24) == nil).to_be(false)
+        assert_not_equal(second.rasterize(65, 24), nil)
         second.close()
         exercised = true
 if not dylib_available:
@@ -316,6 +320,7 @@ expect_candidate_witness(assets, "Noto Emoji", "😀")
 
 - should reconstruct every compound outline reached by exact corpus mappings
 - Replay exact CORPUS mappings through the bounded Pure Simple glyf parser
+- expect compound corpus
 
 
 <details>

@@ -1,0 +1,595 @@
+# Simple Language Memory and Ownership - Test Specification
+
+> Purpose: reference_and_pointer_kinds_1
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 17 | 17 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Simple Language Memory and Ownership - Test Specification
+
+Purpose: reference_and_pointer_kinds_1
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Reference |
+| Type | Extracted Examples (Category B) |
+| Reference | memory.md |
+| Source | `test/03_system/feature/language/memory_spec.spl` |
+| Updated | 2026-08-22 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+Purpose: reference_and_pointer_kinds_1
+Audience: compiler and tooling engineers who maintain this spec
+
+# Simple Language Memory and Ownership - Test Specification
+
+**Status:** Reference
+**Feature IDs:**
+**Source:** memory.md
+**Type:** Extracted Examples (Category B)
+
+## Overview
+
+This file contains executable test cases extracted from memory.md.
+The original specification file remains as architectural reference documentation.
+
+**Note:** This is a test extraction file. For complete specification text,
+design rationale, and architecture, see doc/06_spec/feature/language/memory_spec.md
+
+## Extracted Test Cases
+
+17 test cases extracted covering:
+- Value semantics (stack allocation, copy on assign)
+- Reference semantics (heap allocation, shared ownership)
+- Option types (present/absent values without null)
+- Move semantics and ownership transfer
+- Borrow rules (immutable borrows coexist; mutable borrow is exclusive)
+- Lifetime tracking for safe resource cleanup
+
+## Syntax
+
+Value type — copied on assignment:
+
+    struct Point:
+        x: i64
+        y: i64
+
+    val a = Point(x: 1, y: 2)
+    val b = a      # independent copy; mutating b does not affect a
+
+Reference type — shared by default:
+
+    class Buffer:
+        var data: [u8]
+        me push(b: u8): self.data = self.data.push(b)
+
+    val r1 = Buffer.new()
+    val r2 = r1    # same heap object; r2.push() visible through r1
+
+Option type — no null pointers:
+
+    val found: Option<i64> = Some(42)
+    val empty: Option<i64> = None
+
+    val value = found.unwrap_or(0)   # => 42
+    empty.is_some()                  # => false
+
+## Examples
+
+    val opt = OptionI64.new(42)
+    opt.is_some()    # => true
+    opt.value()      # => 42
+
+    val none = OptionI64.none()
+    none.is_some()   # => false
+    none.value_or(0) # => 0
+
+## Key Concepts
+
+**Value semantics** — assignment copies the data. Two variables are fully
+independent after assignment. Mutations to one do not affect the other.
+
+**Reference semantics** — class instances are heap-allocated. Assignment
+copies the reference, not the data. Multiple variables can observe the same
+mutation.
+
+**Move semantics** — when ownership of a resource transfers, the source
+variable becomes invalid. The compiler enforces this statically.
+
+**Borrow rules** — a value can have many immutable borrows (`&T`) or exactly
+one mutable borrow (`&mut T`) active at a time, never both simultaneously.
+
+**Option<T>** — the type-safe null substitute. `None` instead of `null`;
+`Some(v)` wraps a present value. Unwrapping a `None` is a compile-time error
+unless the fallback path is handled.
+
+**Region-based GC** — the GC layer is opt-in; by default, the compiler uses
+reference counting with cycle detection for class types that escape to the
+heap. `NoGC` regions enable deterministic cleanup for embedded code.
+
+## Common Patterns
+
+Safe optional chaining (no null checks):
+
+    val user: Option<User> = find_user(id)
+    val name = user.map(|u| u.name).unwrap_or("anonymous")
+
+Early return on absent value:
+
+    fn get_age(id: i64) -> Option<i64>:
+        val user = find_user(id)?   # None propagates automatically
+        Some(user.age)
+
+Resource cleanup with `defer`:
+
+    fn process_file(path: text) -> Result<text, text>:
+        val f = open(path)?
+        defer f.close()
+        Ok(f.read_all())
+
+## Scenarios
+
+### Memory Spec
+
+#### reference_and_pointer_kinds_1
+
+- Verify: reference_and_pointer_kinds_1
+   - Expected: reference.read() equals `10)  # oracle: value fixed by the spec contract`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: reference_and_pointer_kinds_1")
+# @req: REQ-FEATURE-Memo-001
+val reference = ReferenceBox.new(10)
+expect(reference.read()).to_equal(10)  # oracle: value fixed by the spec contract
+```
+
+</details>
+
+#### reference_and_pointer_kinds_2
+
+- Verify: reference_and_pointer_kinds_2
+   - Expected: unique.is_moved() is false
+   - Expected: unique.take() equals `20)  # oracle: value fixed by the spec contract`
+   - Expected: unique.is_moved() is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: reference_and_pointer_kinds_2")
+# @req: REQ-FEATURE-Memo-001
+var unique = UniqueBox.new(20)
+expect(unique.is_moved()).to_equal(false)
+expect(unique.take()).to_equal(20)  # oracle: value fixed by the spec contract
+expect(unique.is_moved()).to_equal(true)
+```
+
+</details>
+
+#### reference_and_pointer_kinds_3
+
+- Verify: reference_and_pointer_kinds_3
+   - Expected: shared.read() equals `30)  # oracle: value fixed by the spec contract`
+   - Expected: cloned.read() equals `30)  # oracle: value fixed by the spec contract`
+   - Expected: cloned.ref_count equals `2)  # oracle: value fixed by the spec contract`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: reference_and_pointer_kinds_3")
+# @req: REQ-FEATURE-Memo-001
+val shared = SharedBox.new(30)
+val cloned = shared.clone_box()
+expect(shared.read()).to_equal(30)  # oracle: value fixed by the spec contract
+expect(cloned.read()).to_equal(30)  # oracle: value fixed by the spec contract
+expect(cloned.ref_count).to_equal(2)  # oracle: value fixed by the spec contract
+```
+
+</details>
+
+#### reference_and_pointer_kinds_4
+
+- Verify: reference_and_pointer_kinds_4
+   - Expected: weak.upgrade().is_some() is true
+   - Expected: weak.upgrade().is_none() is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: reference_and_pointer_kinds_4")
+# @req: REQ-FEATURE-Memo-001
+var weak = WeakBox.new(40)
+expect(weak.upgrade().is_some()).to_equal(true)
+weak.invalidate()
+expect(weak.upgrade().is_none()).to_equal(true)
+```
+
+</details>
+
+#### reference_and_pointer_kinds_5
+
+- Verify: reference_and_pointer_kinds_5
+   - Expected: pool.is_valid(handle) is true
+   - Expected: pool.get(handle).unwrap_or(-1) equals `50)  # oracle: value fixed by the spec contract`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: reference_and_pointer_kinds_5")
+# @req: REQ-FEATURE-Memo-001
+var pool = HandlePool.new()
+val handle = pool.allocate(50)
+expect(pool.is_valid(handle)).to_equal(true)
+expect(pool.get(handle).unwrap_or(-1)).to_equal(50)  # oracle: value fixed by the spec contract
+```
+
+</details>
+
+#### allocation_forms_new_variants_6
+
+- Verify: allocation_forms_new_variants_6
+   - Expected: unique.take() equals `60)  # oracle: value fixed by the spec contract`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: allocation_forms_new_variants_6")
+# @req: REQ-FEATURE-Memo-001
+var unique = UniqueBox.new(60)
+expect(unique.take()).to_equal(60)  # oracle: value fixed by the spec contract
+```
+
+</details>
+
+#### allocation_forms_new_variants_7
+
+- Verify: allocation_forms_new_variants_7
+   - Expected: shared.read() equals `70)  # oracle: value fixed by the spec contract`
+   - Expected: shared.clone_box().ref_count equals `2)  # oracle: value fixed by the spec contract`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: allocation_forms_new_variants_7")
+# @req: REQ-FEATURE-Memo-001
+val shared = SharedBox.new(70)
+expect(shared.read()).to_equal(70)  # oracle: value fixed by the spec contract
+expect(shared.clone_box().ref_count).to_equal(2)  # oracle: value fixed by the spec contract
+```
+
+</details>
+
+#### allocation_forms_new_variants_8
+
+- Verify: allocation_forms_new_variants_8
+   - Expected: weak.upgrade().unwrap_or(-1) equals `80)  # oracle: value fixed by the spec contract`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: allocation_forms_new_variants_8")
+# @req: REQ-FEATURE-Memo-001
+var weak = WeakBox.new(80)
+expect(weak.upgrade().unwrap_or(-1)).to_equal(80)  # oracle: value fixed by the spec contract
+```
+
+</details>
+
+#### allocation_forms_new_variants_9
+
+- Verify: allocation_forms_new_variants_9
+   - Expected: optional.is_some() is true
+   - Expected: optional.unwrap_or(0) equals `90)  # oracle: value fixed by the spec contract`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: allocation_forms_new_variants_9")
+# @req: REQ-FEATURE-Memo-001
+val optional = OptionI64.some(90)
+expect(optional.is_some()).to_equal(true)
+expect(optional.unwrap_or(0)).to_equal(90)  # oracle: value fixed by the spec contract
+```
+
+</details>
+
+#### allocation_forms_new_variants_10
+
+- Verify: allocation_forms_new_variants_10
+   - Expected: box.read().unwrap_or(-1) equals `100)  # oracle: value fixed by the spec contract`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: allocation_forms_new_variants_10")
+# @req: REQ-FEATURE-Memo-001
+var pool = HandlePool.new()
+val box = HandleBox.new(pool, 100)
+expect(box.read().unwrap_or(-1)).to_equal(100)  # oracle: value fixed by the spec contract
+```
+
+</details>
+
+#### global_handle_pools_11
+
+- Verify: global_handle_pools_11
+   - Expected: pool.next_id equals `0)  # oracle: value fixed by the spec contract`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: global_handle_pools_11")
+# @req: REQ-FEATURE-Memo-001
+val pool = HandlePool.new()
+expect(pool.next_id).to_equal(0)  # oracle: value fixed by the spec contract
+```
+
+</details>
+
+#### global_handle_pools_12
+
+- Verify: global_handle_pools_12
+   - Expected: pool.is_valid(h1) is true
+   - Expected: pool.is_valid(h2) is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: global_handle_pools_12")
+# @req: REQ-FEATURE-Memo-001
+var pool = HandlePool.new()
+val h1 = pool.allocate(110)
+val h2 = pool.allocate(120)
+expect(pool.is_valid(h1)).to_equal(true)
+expect(pool.is_valid(h2)).to_equal(true)
+```
+
+</details>
+
+#### global_handle_pools_13
+
+- Verify: global_handle_pools_13
+   - Expected: pool.get(handle).unwrap_or(-1) equals `130)  # oracle: value fixed by the spec contract`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: global_handle_pools_13")
+# @req: REQ-FEATURE-Memo-001
+var pool = HandlePool.new()
+val handle = pool.allocate(130)
+expect(pool.get(handle).unwrap_or(-1)).to_equal(130)  # oracle: value fixed by the spec contract
+```
+
+</details>
+
+#### global_handle_pools_14
+
+- Verify: global_handle_pools_14
+   - Expected: pool.is_valid(handle) is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: global_handle_pools_14")
+# @req: REQ-FEATURE-Memo-001
+var pool = HandlePool.new()
+val handle = pool.allocate(140)
+pool.free(handle)
+expect(pool.is_valid(handle)).to_equal(false)
+```
+
+</details>
+
+#### borrowing_15
+
+- Verify: borrowing_15
+   - Expected: session.can_write() is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: borrowing_15")
+# @req: REQ-FEATURE-Memo-001
+var session = BorrowSession.new(true)
+session.borrow()
+expect(session.can_write()).to_equal(true)
+```
+
+</details>
+
+#### example_game_entity_system_with_handles_16
+
+- Verify: example_game_entity_system_with_handles_16
+   - Expected: first equals `0)  # oracle: value fixed by the spec contract`
+   - Expected: second equals `1)  # oracle: value fixed by the spec contract`
+   - Expected: world.entity_count() equals `2)  # oracle: value fixed by the spec contract`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: example_game_entity_system_with_handles_16")
+# @req: REQ-FEATURE-Memo-001
+var world = World.new()
+val first = world.spawn_entity(5)
+val second = world.spawn_entity(8)
+expect(first).to_equal(0)  # oracle: value fixed by the spec contract
+expect(second).to_equal(1)  # oracle: value fixed by the spec contract
+expect(world.entity_count()).to_equal(2)  # oracle: value fixed by the spec contract
+```
+
+</details>
+
+#### note_on_option_types_17
+
+- Verify: note_on_option_types_17
+   - Expected: none_value.is_none() is true
+   - Expected: none_value.unwrap_or(17) equals `17)  # oracle: value fixed by the spec contract`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: note_on_option_types_17")
+# @req: REQ-FEATURE-Memo-001
+val none_value = OptionI64.none()
+expect(none_value.is_none()).to_equal(true)
+expect(none_value.unwrap_or(17)).to_equal(17)  # oracle: value fixed by the spec contract
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 17 |
+| Active scenarios | 17 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `54c7227d2b51a12abfb32f084105f6c0bc5865ebc2aaa846ad59569e14aae799`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `54c7227d2b51a12abfb32f084105f6c0bc5865ebc2aaa846ad59569e14aae799`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `54c7227d2b51a12abfb32f084105f6c0bc5865ebc2aaa846ad59569e14aae799`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **87/100**; effective score: **87/100**; blockers: **0**.
+
+SSpec documentization score: 87/100
+source: test/03_system/feature/language/memory_spec.spl
+mirror: doc/06_spec/03_system/feature/language/memory_spec.md (current)
+findings: 8 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=55 coverage=100 maintainability=45
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/language/memory_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
+  why: Source tokens alone do not prove reader-visible workflow structure.
+  improve: Use supported literal step calls and regenerate the manual.
+doc/06_spec/03_system/feature/language/memory_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/language/memory_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, traceability, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/language/memory_spec.spl:1:1: advice SSDOC-MNT-001 [maintainability] (-15): multiple scenarios form a flat, unfolded presentation
+  why: Long flat dumps obscure the primary workflow.
+  improve: Group secondary detail and keep the primary workflow visible.
+test/03_system/feature/language/memory_spec.spl:1:1: advice SSDOC-MNT-007 [maintainability] (-10): research, plan, architecture, or design metadata links are incomplete
+  why: Reviewers need selected lifecycle evidence, not inferred project state.
+  improve: Link the selected lifecycle artifacts or configure a reasoned scope suppression.
+test/03_system/feature/language/memory_spec.spl:302:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reference_and_pointer_kinds_1' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/language/memory_spec.spl:308:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reference_and_pointer_kinds_2' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/language/memory_spec.spl:316:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reference_and_pointer_kinds_3' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

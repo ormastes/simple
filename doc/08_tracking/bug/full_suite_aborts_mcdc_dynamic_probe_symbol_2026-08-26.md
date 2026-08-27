@@ -212,11 +212,11 @@ explanation.
 
 ## Impact
 
-In the recorded no-flag and directory-scoped runs, `bin/simple test` did not produce a tree verdict.
-That evidence does not justify claims about every invocation or explain sessions that did execute
-specs. No replayable workaround was retained: `--no-mcdc` is not a valid `test` option, and the
-reported directory-scoped attempts also aborted. A working workaround or alternate entry point has
-not been established.
+`bin/simple test` with no flags cannot produce a verdict for the tree. Any session reporting full
+suite results must be passing flags, using a different entry point, or reading a run that never
+executed. No workaround is known yet: the only flag tried, `--no-mcdc`, is not a valid `test`
+option, and the directory-scoped runs tested here abort too. A working workaround or alternate
+entry point has not been established.
 
 (The `--no-cover-check` half is separate and benign — a documented preflight gate fires because
 2113 system tests lack `# @cover`, and it announces itself and its bypass properly.)

@@ -318,6 +318,20 @@ for depth in 0..10:
 check(paths.len() == 100)
 ```
 
+<details>
+<summary>Rendered scenario source</summary>
+
+> var paths = []<br>
+> <br>
+> for depth in 0..10:<br>
+>     for item in 0..10:<br>
+>         val path = "level{depth}/ite$item$"<br>
+>         paths = paths.append(path)<br>
+> <br>
+> check(paths.len() == 100)
+
+</details>
+
 </details>
 
 
@@ -1013,28 +1027,6 @@ check(closed == 100)
 
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/02_integration/app/io_intensive_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering File I/O - Intensive, Directory Operations - Intensive, Process Execution - Intensive, Stream Processing - Intensive, Path Operations - Intensive, Error Handling - Intensive, Performance Testing - Intensive, Resource Management - Intensive.
-- File I/O - Intensive
-- Directory Operations - Intensive
-- Process Execution - Intensive
-- Stream Processing - Intensive
-- Path Operations - Intensive
-- Error Handling - Intensive
-- Performance Testing - Intensive
-- Resource Management - Intensive
 
 ## Scenario Summary
 

@@ -164,6 +164,16 @@ bounded instruction through `EnvAccessCapability` and hashes/truncates output
 into a typed receipt. Test leaves therefore describe interactions but cannot
 open files, read raw environment state, or spawn arbitrary processes.
 
+The source-realized environment vocabulary is a closed 24-kind set. The app
+host directly owns bounded environment, identity, repository, admitted-tool,
+and clock observations. Socket, device, MMIO, IRQ, and DMA instructions resolve
+only through the parent's immutable `(kind, resource, schema, bounds)` adapter
+set supplied with that plan; there is no ambient physical-adapter registry.
+Adapters retain all mutable handles; instructions and receipts contain no host
+pointer or descriptor. Execution stays sequential and parent-authoritative.
+Missing or unavailable physical authority produces a canonical actionable
+`Unsupported` receipt rather than falling through to a test double.
+
 RT profile/reason/bounds metadata is retained from declaration parsing through
 HIR semantic admission. The closure checker computes stable facts and requires
 explicit bound capabilities for otherwise forbidden allocation, blocking,

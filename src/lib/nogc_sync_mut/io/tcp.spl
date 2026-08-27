@@ -5,7 +5,6 @@
 
 use std.io.traits.{Read, Write, Close}
 use std.io.types.{IoError, IoErrorKind, Shutdown}
-use std.nogc_sync_mut.io.byte_append.{io_append_chunk}
 fn tcp_sub_bytes(data: [u8], start: i64, end: i64) -> [u8]:
     var result: [u8] = []
     var i = start
@@ -41,10 +40,23 @@ class TcpListener with Close:
         Returns:
             Result with TcpListener or error
         """
-        val fd = unsafe(capabilities: [ffi]):
-            rt_io_tcp_bind(addr)
+        val fd = rt_io_tcp_bind(addr)
         if fd < 0:
             return Err(IoError(kind: IoErrorKind.AddrInUse, message: "bind failed: {addr}", source: nil))
+        Ok(TcpListener(fd: fd, open: true))
+
+    static fn bind_reuseport(addr: text) -> Result<TcpListener, IoError>:
+        """Bind an independently owned SO_REUSEPORT listener.
+
+        The fd backend applies SO_REUSEPORT and SO_REUSEADDR before bind(),
+        then starts listening.  This wrapper deliberately returns the same
+        owned listener capability as ``bind``; callers never receive the raw
+        fd construction sequence.
+        """
+        val fd = tcp_backend_bind_with_reuseport(addr)
+        if fd < 0:
+            return Err(IoError(kind: IoErrorKind.AddrInUse,
+                message: "reuseport bind failed: {addr}", source: nil))
         Ok(TcpListener(fd: fd, open: true))
 
     fn accept() -> Result<TcpStream, IoError>:
@@ -55,8 +67,7 @@ class TcpListener with Close:
         """
         if not self.open:
             return Err(IoError(kind: IoErrorKind.Other, message: "listener is closed", source: nil))
-        val client_fd = unsafe(capabilities: [ffi]):
-            rt_io_tcp_accept(self.fd)
+        val client_fd = rt_io_tcp_accept(self.fd)
         if client_fd < 0:
             return Err(IoError(kind: IoErrorKind.Other, message: "accept failed", source: nil))
         Ok(TcpStream(fd: client_fd, open: true))
@@ -72,8 +83,7 @@ class TcpListener with Close:
         """
         if not self.open:
             return Err(IoError(kind: IoErrorKind.Other, message: "listener is closed", source: nil))
-        val client_fd = unsafe(capabilities: [ffi]):
-            rt_io_tcp_accept_timeout(self.fd, ms)
+        val client_fd = rt_io_tcp_accept_timeout(self.fd, ms)
         if client_fd < 0:
             return Err(IoError(kind: IoErrorKind.TimedOut, message: "accept timed out", source: nil))
         Ok(TcpStream(fd: client_fd, open: true))
@@ -103,8 +113,7 @@ class TcpListener with Close:
         Returns:
             Result with address string
         """
-        val addr = unsafe(capabilities: [ffi]):
-            rt_io_tcp_local_addr(self.fd)
+        val addr = rt_io_tcp_local_addr(self.fd)
         if addr == nil:
             return Err(IoError(kind: IoErrorKind.Other, message: "local_addr failed", source: nil))
         Ok(addr)
@@ -115,8 +124,7 @@ class TcpListener with Close:
         """Close listener."""
         if not self.open:
             return Ok(())
-        val ok = unsafe(capabilities: [ffi]):
-            rt_io_tcp_close(self.fd)
+        val ok = rt_io_tcp_close(self.fd)
         self.open = false
         if not ok:
             return Err(IoError(kind: IoErrorKind.Other, message: "close failed", source: nil))
@@ -165,8 +173,7 @@ class TcpStream with Read, Write, Close:
         Returns:
             Result with connected TcpStream
         """
-        val fd = unsafe(capabilities: [ffi]):
-            rt_io_tcp_connect(addr)
+        val fd = rt_io_tcp_connect(addr)
         if fd < 0:
             return Err(IoError(kind: IoErrorKind.ConnectionRefused, message: "connect failed: {addr}", source: nil))
         Ok(TcpStream(fd: fd, open: true))
@@ -181,8 +188,7 @@ class TcpStream with Read, Write, Close:
         Returns:
             Result with TcpStream or TimedOut error
         """
-        val fd = unsafe(capabilities: [ffi]):
-            rt_io_tcp_connect_timeout(addr, ms)
+        val fd = rt_io_tcp_connect_timeout(addr, ms)
         if fd < 0:
             return Err(IoError(kind: IoErrorKind.TimedOut, message: "connect timed out: {addr}", source: nil))
         Ok(TcpStream(fd: fd, open: true))
@@ -200,11 +206,10 @@ class TcpStream with Read, Write, Close:
         """
         if not self.open:
             return Err(IoError(kind: IoErrorKind.Other, message: "stream is closed", source: nil))
-        val data = unsafe(capabilities: [ffi]):
-            rt_io_tcp_read(self.fd, size)
-        if data == nil:
+        val data = rt_io_tcp_read(self.fd, size)
+        if data.len() < 0:
             return Err(IoError(kind: IoErrorKind.ConnectionReset, message: "read failed", source: nil))
-        Ok(data!)
+        Ok(data)
 
     fn read_exact(size: i64) -> Result<[u8], IoError>:
         """Read exactly size bytes.
@@ -220,14 +225,11 @@ class TcpStream with Read, Write, Close:
         var buf: [u8] = []
         var remaining = size
         while remaining > 0:
-            val chunk = unsafe(capabilities: [ffi]):
-                rt_io_tcp_read(self.fd, remaining)
-            if chunk == nil:
-                return Err(IoError(kind: IoErrorKind.ConnectionReset, message: "read_exact failed", source: nil))
-            if chunk!.len() == 0:
+            val chunk = rt_io_tcp_read(self.fd, remaining)
+            if chunk.len() == 0:
                 return Err(IoError(kind: IoErrorKind.UnexpectedEof, message: "read_exact: got {buf.len()} of {size} bytes", source: nil))
-            val _copied = io_append_chunk(buf, chunk!)
-            remaining = remaining - chunk!.len()
+            val _copied = io_append_chunk(buf, chunk)
+            remaining = remaining - chunk.len()
         Ok(buf)
 
     fn read_bytes(count: i32) -> Result<text, IoError>:
@@ -260,13 +262,10 @@ class TcpStream with Read, Write, Close:
             return Err(IoError(kind: IoErrorKind.Other, message: "stream is closed", source: nil))
         var buf: [u8] = []
         while true:
-            val chunk = unsafe(capabilities: [ffi]):
-                rt_io_tcp_read(self.fd, 8192)
-            if chunk == nil:
-                return Err(IoError(kind: IoErrorKind.ConnectionReset, message: "read_all failed", source: nil))
-            if chunk!.len() == 0:
+            val chunk = rt_io_tcp_read(self.fd, 8192)
+            if chunk.len() == 0:
                 break
-            val _copied = io_append_chunk(buf, chunk!)
+            val _copied = io_append_chunk(buf, chunk)
         Ok(buf)
 
     fn read_text() -> Result<text, IoError>:
@@ -276,7 +275,7 @@ class TcpStream with Read, Write, Close:
             Result with text
         """
         val bytes = self.read_all()?
-        val s = bytes_to_text(bytes)
+        val s = rt_bytes_to_text(bytes)
         Ok(s)
 
     fn read_line() -> Result<text, IoError>:
@@ -287,8 +286,7 @@ class TcpStream with Read, Write, Close:
         """
         if not self.open:
             return Err(IoError(kind: IoErrorKind.Other, message: "stream is closed", source: nil))
-        val line = unsafe(capabilities: [ffi]):
-            rt_io_tcp_read_line(self.fd)
+        val line = rt_io_tcp_read_line(self.fd)
         if line == nil:
             return Err(IoError(kind: IoErrorKind.UnexpectedEof, message: "end of stream", source: nil))
         Ok(line)
@@ -357,8 +355,8 @@ class TcpStream with Read, Write, Close:
                 rt_io_tcp_read(self.fd, remaining)
             if chunk == nil or chunk!.len() == 0:
                 return ""
-            val _copied = io_append_chunk(buf, chunk!)
-            remaining = remaining - chunk!.len()
+            val _copied = io_append_chunk(buf, chunk)
+            remaining = remaining - chunk.len()
         bytes_to_text(buf)
 
     # --- Write trait ---
@@ -374,8 +372,7 @@ class TcpStream with Read, Write, Close:
         """
         if not self.open:
             return Err(IoError(kind: IoErrorKind.Other, message: "stream is closed", source: nil))
-        val written = unsafe(capabilities: [ffi]):
-            rt_io_tcp_write(self.fd, data)
+        val written = rt_io_tcp_write(self.fd, data)
         if written < 0:
             return Err(IoError(kind: IoErrorKind.BrokenPipe, message: "write failed", source: nil))
         Ok(written)
@@ -394,8 +391,7 @@ class TcpStream with Read, Write, Close:
         var offset = 0
         while offset < data.len():
             val remaining = tcp_sub_bytes(data, offset, data.len())
-            val written = unsafe(capabilities: [ffi]):
-                rt_io_tcp_write(self.fd, remaining)
+            val written = rt_io_tcp_write(self.fd, remaining)
             if written <= 0:
                 return Err(IoError(kind: IoErrorKind.BrokenPipe, message: "write_all failed", source: nil))
             offset = offset + written
@@ -412,10 +408,9 @@ class TcpStream with Read, Write, Close:
         """
         if not self.open:
             return Err(IoError(kind: IoErrorKind.Other, message: "stream is closed", source: nil))
-        val written = unsafe(capabilities: [ffi]):
-            rt_io_tcp_write_text(self.fd, s)
-        if written != s.len():
-            return Err(IoError(kind: IoErrorKind.BrokenPipe, message: "write_text incomplete", source: nil))
+        val written = rt_io_tcp_write_text(self.fd, s)
+        if written <= 0:
+            return Err(IoError(kind: IoErrorKind.BrokenPipe, message: "write_text failed", source: nil))
         Ok(())
 
     fn write_text_status(s: text) -> bool:
@@ -433,8 +428,7 @@ class TcpStream with Read, Write, Close:
         """
         if not self.open:
             return Err(IoError(kind: IoErrorKind.Other, message: "stream is closed", source: nil))
-        val ok = unsafe(capabilities: [ffi]):
-            rt_io_tcp_flush(self.fd)
+        val ok = rt_io_tcp_flush(self.fd)
         if not ok:
             return Err(IoError(kind: IoErrorKind.Other, message: "flush failed", source: nil))
         Ok(())
@@ -445,8 +439,7 @@ class TcpStream with Read, Write, Close:
         """Close stream."""
         if not self.open:
             return Ok(())
-        val ok = unsafe(capabilities: [ffi]):
-            rt_io_tcp_close(self.fd)
+        val ok = rt_io_tcp_close(self.fd)
         self.open = false
         if not ok:
             return Err(IoError(kind: IoErrorKind.Other, message: "close failed", source: nil))
@@ -473,8 +466,7 @@ class TcpStream with Read, Write, Close:
         Returns:
             Result with address string
         """
-        val addr = unsafe(capabilities: [ffi]):
-            rt_io_tcp_peer_addr(self.fd)
+        val addr = rt_io_tcp_peer_addr(self.fd)
         if addr == nil:
             return Err(IoError(kind: IoErrorKind.Other, message: "peer_addr failed", source: nil))
         Ok(addr)
@@ -485,8 +477,7 @@ class TcpStream with Read, Write, Close:
         Returns:
             Result with address string
         """
-        val addr = unsafe(capabilities: [ffi]):
-            rt_io_tcp_local_addr(self.fd)
+        val addr = rt_io_tcp_local_addr(self.fd)
         if addr == nil:
             return Err(IoError(kind: IoErrorKind.Other, message: "local_addr failed", source: nil))
         Ok(addr)
@@ -500,8 +491,7 @@ class TcpStream with Read, Write, Close:
         Returns:
             Result or error
         """
-        val ok = unsafe(capabilities: [ffi]):
-            rt_io_tcp_set_nodelay(self.fd, enabled)
+        val ok = rt_io_tcp_set_nodelay(self.fd, enabled)
         if not ok:
             return Err(IoError(kind: IoErrorKind.Other, message: "set_nodelay failed", source: nil))
         Ok(())
@@ -515,9 +505,7 @@ class TcpStream with Read, Write, Close:
         Returns:
             Result or error
         """
-        val raw_ms = if ms.?: ms.unwrap() else: -1
-        val ok = unsafe(capabilities: [ffi]):
-            rt_io_tcp_set_read_timeout(self.fd, raw_ms)
+        val ok = rt_io_tcp_set_read_timeout(self.fd, ms)
         if not ok:
             return Err(IoError(kind: IoErrorKind.Other, message: "set_read_timeout failed", source: nil))
         Ok(())
@@ -538,9 +526,7 @@ class TcpStream with Read, Write, Close:
         Returns:
             Result or error
         """
-        val raw_ms = if ms.?: ms.unwrap() else: -1
-        val ok = unsafe(capabilities: [ffi]):
-            rt_io_tcp_set_write_timeout(self.fd, raw_ms)
+        val ok = rt_io_tcp_set_write_timeout(self.fd, ms)
         if not ok:
             return Err(IoError(kind: IoErrorKind.Other, message: "set_write_timeout failed", source: nil))
         Ok(())
@@ -558,8 +544,7 @@ class TcpStream with Read, Write, Close:
             case Shutdown.Read: 0
             case Shutdown.Write: 1
             case Shutdown.Both: 2
-        val ok = unsafe(capabilities: [ffi]):
-            rt_io_tcp_shutdown(self.fd, how_int)
+        val ok = rt_io_tcp_shutdown(self.fd, how_int)
         if not ok:
             return Err(IoError(kind: IoErrorKind.Other, message: "shutdown failed", source: nil))
         Ok(())
@@ -569,8 +554,7 @@ class TcpStream with Read, Write, Close:
 # ============================================================================
 
 fn tcp_backend_bind(addr: text) -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_io_tcp_bind(addr)
+    rt_io_tcp_bind(addr)
 
 fn tcp_backend_socket_create(family: i64) -> i64:
     """Create a raw TCP socket (not yet bound).
@@ -581,8 +565,7 @@ fn tcp_backend_socket_create(family: i64) -> i64:
     Returns:
         Socket fd or -1 on failure
     """
-    unsafe(capabilities: [ffi]):
-        rt_io_tcp_socket_create(family)
+    rt_io_tcp_socket_create(family)
 
 fn tcp_backend_bind_fd(fd: i64, addr: text) -> bool:
     """Bind a pre-created socket to an address.
@@ -594,8 +577,7 @@ fn tcp_backend_bind_fd(fd: i64, addr: text) -> bool:
     Returns:
         true on success
     """
-    unsafe(capabilities: [ffi]):
-        rt_io_tcp_bind_fd(fd, addr)
+    rt_io_tcp_bind_fd(fd, addr)
 
 fn tcp_backend_listen(fd: i64, backlog: i64) -> bool:
     """Start listening on a bound socket.
@@ -607,8 +589,7 @@ fn tcp_backend_listen(fd: i64, backlog: i64) -> bool:
     Returns:
         true on success
     """
-    unsafe(capabilities: [ffi]):
-        rt_io_tcp_listen(fd, backlog)
+    rt_io_tcp_listen(fd, backlog)
 
 fn tcp_backend_bind_with_reuseport(addr: text) -> i64:
     """Create socket, set SO_REUSEPORT + SO_REUSEADDR, then bind + listen.
@@ -627,109 +608,73 @@ fn tcp_backend_bind_with_reuseport(addr: text) -> i64:
     var family = 0
     if addr.contains("["):
         family = 1
-    val fd = unsafe(capabilities: [ffi]):
-        rt_io_tcp_socket_create(family)
+    val fd = rt_io_tcp_socket_create(family)
     if fd < 0:
         return -1
     tcp_backend_set_reuseport(fd, true)
     tcp_backend_set_reuseaddr(fd, true)
-    val bound = unsafe(capabilities: [ffi]):
-        rt_io_tcp_bind_fd(fd, addr)
-    if not bound:
-        unsafe(capabilities: [ffi]):
-            rt_io_tcp_close(fd)
+    if not rt_io_tcp_bind_fd(fd, addr):
+        rt_io_tcp_close(fd)
         return -1
-    val listening = unsafe(capabilities: [ffi]):
-        rt_io_tcp_listen(fd, 128)
-    if not listening:
-        unsafe(capabilities: [ffi]):
-            rt_io_tcp_close(fd)
+    if not rt_io_tcp_listen(fd, 128):
+        rt_io_tcp_close(fd)
         return -1
     fd
 
 fn tcp_backend_close(fd: i64) -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_io_tcp_close(fd)
+    rt_io_tcp_close(fd)
 
 fn tcp_backend_set_nonblocking(fd: i64, enabled: bool) -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_io_tcp_set_nonblocking(fd, enabled)
+    rt_io_tcp_set_nonblocking(fd, enabled)
 
 fn tcp_backend_set_reuseport(fd: i64, enabled: bool) -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_io_tcp_set_reuseport(fd, enabled)
+    rt_io_tcp_set_reuseport(fd, enabled)
 
 fn tcp_backend_set_reuseaddr(fd: i64, enabled: bool) -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_io_tcp_set_reuseaddr(fd, enabled)
+    rt_io_tcp_set_reuseaddr(fd, enabled)
 
 fn tcp_backend_set_nodelay(fd: i64, enabled: bool) -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_io_tcp_set_nodelay(fd, enabled)
+    rt_io_tcp_set_nodelay(fd, enabled)
 
 fn tcp_backend_local_addr(fd: i64) -> text?:
-    unsafe(capabilities: [ffi]):
-        rt_io_tcp_local_addr(fd)
+    rt_io_tcp_local_addr(fd)
 
 # ============================================================================
 # SFFI Functions
 # ============================================================================
 
 # TCP listener
-@unsafe(reason: "raw listener descriptor; negative sentinel means bind failed", capabilities: [ffi])
 extern fn rt_io_tcp_bind(addr: text) -> i64
-@unsafe(reason: "raw socket descriptor; negative sentinel means creation failed", capabilities: [ffi])
 extern fn rt_io_tcp_socket_create(family: i64) -> i64
-@unsafe(reason: "raw descriptor bind status; false means bind failed", capabilities: [ffi])
 extern fn rt_io_tcp_bind_fd(fd: i64, addr: text) -> bool
-@unsafe(reason: "raw descriptor listen status; false means listen failed", capabilities: [ffi])
 extern fn rt_io_tcp_listen(fd: i64, backlog: i64) -> bool
-@unsafe(reason: "raw accepted descriptor; negative sentinel means accept failed", capabilities: [ffi])
 extern fn rt_io_tcp_accept(fd: i64) -> i64
-@unsafe(reason: "raw accepted descriptor; negative sentinel conflates timeout and failure", capabilities: [ffi])
 extern fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64
 
 # TCP stream
-@unsafe(reason: "raw connected descriptor; negative sentinel means connect failed", capabilities: [ffi])
 extern fn rt_io_tcp_connect(addr: text) -> i64
-@unsafe(reason: "raw connected descriptor; negative sentinel conflates timeout and failure", capabilities: [ffi])
 extern fn rt_io_tcp_connect_timeout(addr: text, ms: i64) -> i64
-@unsafe(reason: "raw nullable owned byte result; nil is read failure and empty is EOF", capabilities: [ffi])
-extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]?
-@unsafe(reason: "raw nullable line result; nil conflates EOF and read failure", capabilities: [ffi])
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
 extern fn rt_io_tcp_read_line(fd: i64) -> text?
-@unsafe(reason: "raw byte-write count; negative sentinel means write failed", capabilities: [ffi])
 extern fn rt_io_tcp_write(fd: i64, data: [u8]) -> i64
-@unsafe(reason: "raw text-write count; negative sentinel means write failed", capabilities: [ffi])
 extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
-@unsafe(reason: "raw flush status; false means flush failed", capabilities: [ffi])
 extern fn rt_io_tcp_flush(fd: i64) -> bool
-@unsafe(reason: "raw descriptor close consumes one live descriptor; false means close failed", capabilities: [ffi])
 extern fn rt_io_tcp_close(fd: i64) -> bool
 
 # TCP metadata / options
-@unsafe(reason: "raw nullable local-address result; nil means lookup failed", capabilities: [ffi])
 extern fn rt_io_tcp_local_addr(fd: i64) -> text?
-@unsafe(reason: "raw nullable peer-address result; nil means lookup failed", capabilities: [ffi])
 extern fn rt_io_tcp_peer_addr(fd: i64) -> text?
-@unsafe(reason: "raw descriptor mode status; false means mutation failed", capabilities: [ffi])
 extern fn rt_io_tcp_set_nonblocking(fd: i64, enabled: bool) -> bool
-@unsafe(reason: "raw descriptor option status; false means mutation failed", capabilities: [ffi])
 extern fn rt_io_tcp_set_nodelay(fd: i64, enabled: bool) -> bool
-@unsafe(reason: "raw descriptor option status; false means mutation failed", capabilities: [ffi])
 extern fn rt_io_tcp_set_reuseport(fd: i64, enabled: bool) -> bool
-@unsafe(reason: "raw descriptor option status; false means mutation failed", capabilities: [ffi])
 extern fn rt_io_tcp_set_reuseaddr(fd: i64, enabled: bool) -> bool
-@unsafe(reason: "raw descriptor timeout status; false means mutation failed", capabilities: [ffi])
-extern fn rt_io_tcp_set_read_timeout(fd: i64, ms: i64) -> bool
-@unsafe(reason: "raw descriptor timeout status; false means mutation failed", capabilities: [ffi])
-extern fn rt_io_tcp_set_write_timeout(fd: i64, ms: i64) -> bool
-@unsafe(reason: "raw descriptor shutdown status; false means shutdown failed", capabilities: [ffi])
+extern fn rt_io_tcp_set_read_timeout(fd: i64, ms: i64?) -> bool
+extern fn rt_io_tcp_set_write_timeout(fd: i64, ms: i64?) -> bool
 extern fn rt_io_tcp_shutdown(fd: i64, how: i64) -> bool
 
 # Text/bytes conversion
-use std.common.string_core.{bytes_to_text}
-use std.common.string_core.{text_to_bytes}
+extern fn rt_bytes_to_text(data: [u8]) -> text
+extern fn rt_text_to_bytes(s: text) -> [u8]
 
 # ============================================================================
 # Resource Wrapper (Owning Handle Class) — WP-J
@@ -825,8 +770,8 @@ fn tcp_fd_read_bytes_or_empty(fd: i64, count: i32) -> text:
             rt_io_tcp_read(fd, remaining)
         if chunk == nil or chunk!.len() == 0:
             return ""
-        buf = buf + chunk!
-        remaining = remaining - chunk!.len()
+        buf = buf + chunk
+        remaining = remaining - chunk.len()
     bytes_to_text(buf)
 
 fn tcp_fd_read_text_or_empty(fd: i64, count: i32) -> text:

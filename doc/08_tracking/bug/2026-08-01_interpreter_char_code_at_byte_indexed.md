@@ -1,8 +1,7 @@
 # Pure-Simple interpreter `text.char_code_at` was BYTE-indexed (cross-lane divergence)
 
 - **Date:** 2026-08-01
-- Status: CLOSED (not reproducible)
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- **Status:** FIXED (behaviourally verified on the pure-Simple interpreter)
 - **Severity:** High — the canonical default lane was the wrong one
 - **Area:** `src/compiler/10.frontend/core/interpreter/`
 
@@ -162,10 +161,8 @@ does not enumerate the family leaves siblings.
 The interpreter currently matches the **runtime/native** side. Changing it to
 match the seed would break agreement with native/JIT, so it is left alone and
 flagged here instead. This is not a defect this interpreter introduced, and it
-must not be "fixed" on one side in isolation. A comment at the `char_at` arm
-points back to this document — it now lives in
-`_EvalOps/access_literal_assign_eval.spl:269-278` (it was in `eval_methods.spl`
-when this was written; that file has since been deleted).
+must not be "fixed" on one side in isolation. A comment at the `char_at` arm in
+`eval_methods.spl` points back to this document.
 
 ## Related / adjacent
 
@@ -179,17 +176,5 @@ family should treat them together.
 ## Files changed
 
 - `src/compiler/10.frontend/core/interpreter/_EvalOps/access_literal_assign_eval.spl` — the live copy; the fix that actually changed behaviour
-- `src/compiler/10.frontend/core/interpreter/eval_methods.spl` — the second copy, fixed identically; `char_at` divergence documented in place. **DELETED later the same day in `f97dfbbb8ee`** once it was established that *all four* of its functions (`eval_method_call`, `eval_method_with_args`, `eval_array_method`, `eval_text_method`), not just `eval_text_method`, were shadowed by `_EvalOps` copies. The "fixed identically" edit recorded here was therefore a no-op on behaviour — which is exactly the finding in the section above, and is why the "no observable change" measurement in this document is the load-bearing evidence, not the source review.
+- `src/compiler/10.frontend/core/interpreter/eval_methods.spl` — the second copy, fixed identically; `char_at` divergence documented in place
 - `test/01_unit/compiler/interpreter/text_char_code_at_codepoint_spec.spl` — new structural regression guard
-
-## Follow-up status (updated 2026-08-01)
-
-The follow-up filed above ("either de-duplicate `eval_text_method` or port the
-missing arms into the live copy") is **done**: `f97dfbbb8ee` ported `byte_at`,
-`slice`, `char_at`, `parse_int`, `to_upper`, `to_lower`, `to_string`, `find`,
-`find_str`, `rfind` and `last_index_of` into the live
-`_EvalOps/access_literal_assign_eval.spl` and deleted the dead duplicate. The
-structural spec `text_byte_at_dispatch_spec.spl` — noted above as guarding the
-copy that does not run — must be re-pointed at the live file, or it keeps
-guarding nothing. Consolidated write-up and the doc-contamination audit:
-`doc/08_tracking/bug/2026-08-01_interpreter_eval_text_method_duplicate_live_subset.md`.

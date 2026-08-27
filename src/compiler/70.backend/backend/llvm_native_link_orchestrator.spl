@@ -28,7 +28,7 @@ use compiler.tools.verify.allocator_symbol_scan.{flight_allocator_scan_for_profi
 # facade already used by the sibling llvm_backend_tools.spl for process_run);
 # resolves doc/08_tracking/bug/compiler_native_link_direct_runtime_facade_2026-07-12.md.
 use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_read, file_write, file_hash_sha256, file_size_raw, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_remove_all}
-use compiler.backend.backend.llvm_native_link_stage4_projection.{llvm_link_trace_enabled, llvm_configured_external_link_objects, llvm_external_provider_rpath_flags, llvm_external_provider_retained_symbols, llvm_stage4_final_requested_symbols, llvm_stage4_file_hash_rows, llvm_stage4_selected_archive_hash_rows, llvm_stage4_cleanup_candidate_inputs, llvm_stage4_profile_failure, llvm_stage4_receipt_failure, llvm_stage4_candidate_archive_inventory, llvm_stage4_project_selected_archives}
+use compiler.backend.backend.llvm_native_link_stage4_projection.{llvm_link_trace_enabled, llvm_configured_external_link_objects, llvm_external_provider_rpath_flags, llvm_external_provider_retained_symbols, llvm_auto_sealed_hal_archive, llvm_stage4_final_requested_symbols, llvm_stage4_file_hash_rows, llvm_stage4_selected_archive_hash_rows, llvm_stage4_cleanup_candidate_inputs, llvm_stage4_profile_failure, llvm_stage4_receipt_failure, llvm_stage4_candidate_archive_inventory, llvm_stage4_project_selected_archives}
 use compiler.backend.backend.llvm_native_link_stage4_archives.{llvm_stage4_compiler_backfill_failure, llvm_stage4_build_compiler_backfill_capsule, llvm_stage4_build_runtime_native_archive, llvm_stage4_build_runtime_legacy_compat_archive, llvm_stage4_build_contracts_provider_archive, llvm_stage4_build_process_provider_archive, llvm_stage4_build_dynload_provider_archive, llvm_stage4_build_font_provider_archive, llvm_stage4_build_memtrack_provider_archive, llvm_stage4_build_time_provider_archive, llvm_stage4_build_fork_provider_archive}
 use compiler.backend.backend.llvm_native_link_hosted_support.{NativeLinkOptions, compile_entry_point_c, native_all_allowed_for_runtime_bundle}
 use compiler.backend.backend.simpleos_native_symbols.{is_simpleos_x86_64_link, is_simpleos_arm64_link, is_simpleos_riscv64_link, is_simpleos_riscv32_link}
@@ -478,7 +478,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     # not pass them to cleanup_runtime_objects or delete them after linking.
     # They remain caller-owned; dynamic providers stay in the dependency table
     # while static providers contribute only extracted members.
-    val external_providers = match llvm_configured_external_link_objects():
+    var external_providers = match llvm_configured_external_link_objects():
         case Ok(paths): paths
         case Err(err):
             cleanup_runtime_objects(runtime_objects)
@@ -489,9 +489,19 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
             else:
                 file_delete(entry_obj_path)
             return Err(err)
+    val auto_hal_archive = match llvm_auto_sealed_hal_archive(user_objects):
+        case Ok(path): path
+        case Err(err):
+            cleanup_runtime_objects(runtime_objects)
+            if bootstrap_support_obj != "": file_delete(bootstrap_support_obj)
+            if stage4_requested: remove_file_if_exists(entry_obj_path)
+            else: file_delete(entry_obj_path)
+            return Err(err)
+    if auto_hal_archive != "" and not external_providers.contains(auto_hal_archive):
+        external_providers = external_providers.push(auto_hal_archive)
     for provider in external_providers:
         all_objects = all_objects.push(provider)
-    val retained_symbols = match llvm_external_provider_retained_symbols(external_providers):
+    var retained_symbols = match llvm_external_provider_retained_symbols(external_providers):
         case Ok(symbols): symbols
         case Err(err):
             cleanup_runtime_objects(runtime_objects)
@@ -502,6 +512,8 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
             else:
                 file_delete(entry_obj_path)
             return Err(err)
+    if auto_hal_archive != "" and not retained_symbols.contains("rt_hal_sealed_prepare_v1"):
+        retained_symbols = retained_symbols.push("rt_hal_sealed_prepare_v1")
     if trace:
         print "[LLVM-LINK] total objects: {all_objects.len()}"
 

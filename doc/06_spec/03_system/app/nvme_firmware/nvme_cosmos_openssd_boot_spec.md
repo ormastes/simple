@@ -3,17 +3,24 @@
 > Executes the host runtime ABI, MMIO, ARM abort, PCIe transport, FTL metadata, NVMe IO/admin callback-service, and SMP/cache integration drivers, boots the unbound QEMU image, builds the exact `openssd2-8ch8way-v3.0.0` silicon profile, inspects its ELF identity, runs packaging rejection checks, and guards the freestanding ARM ABI edges. The NVMe runners are host/ARM contract tests. The PCIe bridge decodes the controller transport but requires caller-provided media callbacks. The service objects, crash-consistent FTL metadata, physical NFC persistence backend, 4 KiB-to-16 KiB media adapter, and fail-closed UART foreground startup compile for the pinned silicon profile. Physical-board proof remains pending. Corrected bridge/admin runners cover Abort bits, Number of Queues NSID/max, CQ IEN/IV, SQ QPRIO, SMART NSID/RAE, PCIe zero-write retry boundaries, non-retryable post-start completion behavior, and PRP edges.
 
 | Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
+|-------|-------:|--------:|--------:|
 | 14 | 14 | 0 | 0 |
 
-<details>
-<summary>Full Scenario Manual</summary>
+## Scope
 
-# nvme_cosmos_openssd_boot_spec
+The executable spec runs the Cosmos host runtime ABI, MMIO, ARM abort, PCIe
+transport, FTL metadata, NVMe IO/admin callback-service, and SMP/cache integration drivers, boots the
+unbound QEMU image, builds and inspects the exact bound silicon profile, runs
+the boot package self-test, and checks ARM EABI edge coverage.
+All NVMe runners are host/ARM contract tests. The bridge decodes the real
+controller transport but requires mandatory caller-supplied media callbacks.
+The service objects, crash-consistent FTL metadata, physical NFC persistence
+backend, 4 KiB-to-16 KiB media adapter, and fail-closed UART foreground startup
+compile for the pinned silicon profile. Physical-board proof remains pending.
 
 Executes the host runtime ABI, MMIO, ARM abort, PCIe transport, FTL metadata, NVMe IO/admin callback-service, and SMP/cache integration drivers, boots the unbound QEMU image, builds the exact `openssd2-8ch8way-v3.0.0` silicon profile, inspects its ELF identity, runs packaging rejection checks, and guards the freestanding ARM ABI edges. The NVMe runners are host/ARM contract tests. The PCIe bridge decodes the controller transport but requires caller-provided media callbacks. The service objects, crash-consistent FTL metadata, physical NFC persistence backend, 4 KiB-to-16 KiB media adapter, and fail-closed UART foreground startup compile for the pinned silicon profile. Physical-board proof remains pending. Corrected bridge/admin runners cover Abort bits, Number of Queues NSID/max, CQ IEN/IV, SQ QPRIO, SMART NSID/RAE, PCIe zero-write retry boundaries, non-retryable post-start completion behavior, and PRP edges.
 
-## At a Glance
+Run only with a current pure-Simple bootstrap runner:
 
 | Field | Value |
 |-------|-------|
@@ -54,7 +61,8 @@ exits without running anything, which reads as a firmware-shaped false RED.
 
 `bin/simple test test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl --mode=interpreter`
 
-## Claim Boundary
+Source SHA-256: `787b546a04b4bfa1a02b940c9fce2ddcc801c5136bd42e119ae055c6ef781d54`.
+<!-- sspec-maintain:provenance:end -->
 
 Passing proves hardware-independent host and QEMU behavior, exact silicon
 profile compilation, ELF identity, and package validation. It does not prove
@@ -69,47 +77,21 @@ deployed `bin/simple` exists and this spec has not been executed or doc-generate
 
 ## Scenarios
 
-### Cosmos+ OpenSSD production HAL
+### 1. Host FSBL, NFC, and PCIe MMIO
 
-#### should execute the host FSBL, NFC, and PCIe MMIO state machines
+Runs:
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- should execute the host FSBL, NFC, and PCIe MMIO state machines
-- Compile and run the fail-closed host mock-MMIO integration driver
-   - Expected: code equals `0`
-- Verify all six bounded MMIO scenarios complete
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 15 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-012 REQ-SSPEC-SYSTEM NFR-012
-step("should execute the host FSBL, NFC, and PCIe MMIO state machines")
-step("Compile and run the fail-closed host mock-MMIO integration driver")
-val (out, err, code) = _run("sh " + HOST_MMIO)
-expect(code).to_equal(0)
-
-step("Verify all six bounded MMIO scenarios complete")
-expect(out).to_contain("PASS FSBL handoff and PCFG_DONE")
-expect(out).to_contain("PASS unconfigured PL fail-closed")
-expect(out).to_contain("PASS NFC bounded initialization")
-expect(out).to_contain("PASS NFC read/program/erase/ECC")
-expect(out).to_contain("PASS NFC timeout quarantine")
-expect(out).to_contain("PASS PCIe link/function/MSI/admin")
-expect(out).to_contain("STATUS: PASS cosmos host mock-MMIO integration")
-_expect_no_fail(out, err, "Cosmos host mock-MMIO integration")
+```sh
+sh test/02_integration/os/cosmos/run_cosmos_hal_mmio_test.shs
 ```
 
-</details>
+Requires all six case markers and the terminal marker
+`STATUS: PASS cosmos host mock-MMIO integration`, with exit `0` and no `FAIL`.
+The driver exercises valid and fail-closed FSBL handoff, bounded NFC setup,
+NFC read/program/erase/ECC, timeout quarantine, and PCIe
+link/function/MSI/admin state.
 
-#### should execute the standalone PCIe contract runner
+### 2. Standalone PCIe contract
 
 - should execute the standalone PCIe contract runner
 - Compile and run the bounded PCIe controller contract driver
@@ -144,9 +126,14 @@ expect(auto_out).to_contain(
 _expect_no_fail(auto_out, auto_err, "Cosmos PCIe AUTO completion")
 ```
 
-</details>
+Requires exit `0`, no `FAIL`, and `cosmos PCIe contract: PASS`. It validates
+HWH-bound IRQ `61` as level-high, stable endpoint snapshots, command FIFO plus
+16-DW SRAM fetch, two-word AUTO completion with captured-slot release, and
+direct/AUTO host-DMA FIFO ordering. CPU0 targeting is a local policy; IRQ `61` is only for
+configuration/link/error state, not command arrival. Board IRQ delivery, DMA
+data integrity, enumeration, reset, and recovery remain pending.
 
-#### should execute actual ARM prefetch and data abort entry paths
+### 3. ARM prefetch/data abort contract
 
 - should execute actual ARM prefetch and data abort entry paths
 - Run bounded QEMU injections through the production ARM vectors
@@ -171,9 +158,12 @@ expect(out).to_contain("cosmos ARM prefetch/data abort contract: PASS")
 _expect_no_fail(out, err, "Cosmos ARM abort contract")
 ```
 
-</details>
+Requires bounded QEMU execution, `prefetch: PASS`, `data: PASS`, and
+`cosmos ARM prefetch/data abort contract: PASS`. It enters through the
+production ARM vectors, checks captured syndrome/address/PC, and proves that
+neither exception resumes. Physical-board abort behavior remains pending.
 
-#### should execute the hardened NVMe IO callback service contract runner
+### 4. NVMe IO callback service contract
 
 - should execute the hardened NVMe IO callback service contract runner
 - Run bounded IO validation, identity, DMA-span, and publication tests
@@ -197,9 +187,15 @@ expect(out).to_contain("cosmos NVMe firmware ARM compile: PASS")
 _expect_no_fail(out, err, "Cosmos NVMe callback service contract")
 ```
 
-</details>
+Requires exit `0`, no `FAIL`, `cosmos NVMe firmware contract: PASS`, and
+`cosmos NVMe firmware ARM compile: PASS`. It covers bounded queue polling,
+queue/slot/sequence/CID identity, SCT/SC/DNR completion status, exact
+contiguous DMA span validation, distinct read/write media failures, basic Write
+Zeroes, DSM Deallocate callback semantics, and retry only
+before a provably uncommitted completion. The separate FTL scenario tests only
+the metadata core.
 
-#### should execute the crash-consistent FTL metadata contract runner
+### 5. FTL metadata contract
 
 - should execute the crash-consistent FTL metadata contract runner
 - Run PPA, journal, checkpoint, recovery, retirement, and fail-closed checks
@@ -275,9 +271,15 @@ expect(tx_out).to_contain(
 _expect_no_fail(tx_out, tx_err, "Cosmos FTL transaction recovery")
 ```
 
-</details>
+Requires all FTL host/ARM PASS pairs. It covers PPA geometry, journal ordering,
+dual-checkpoint recovery, torn-tail handling, retirement guards,
+fail-sticky ambiguous writes, 10% capacity reserve, bounded relocation, and
+erase-after-move ordering. Additional focused checks cover durable discard,
+64-bit journal reclamation, checkpoint trim-state reconstruction, whole-
+transaction journal reservation, torn physical holes, and trailing allocation
+recovery.
 
-#### should bind persistent NFC media and fail closed outside silicon
+### 6. Persistent NFC media and startup composition
 
 - should bind persistent NFC media and fail closed outside silicon
 - Run NFC wire-format, media staging, and startup composition checks
@@ -419,9 +421,19 @@ expect(link_out).to_contain(
 _expect_no_fail(link_out, link_err, "Cosmos storage production link")
 ```
 
-</details>
+Requires all host/ARM PASS pairs. It covers explicit little-endian metadata,
+program-once page tags, checkpoint/journal persistence and reclamation,
+4 KiB NVMe staging across 16 KiB NAND pages, LR retry policy, DSM discard, and
+QEMU fail-closed startup. Corrected-ECC reads relocate the current page through
+the FTL transaction path after host DMA completes; the old mapping remains
+authoritative if relocation fails. The focused runner rereads the relocated
+data, rejects a stale source PPA, injects a failed copy, and remounts/replays
+the surviving mapping. Silicon mounts and recovers existing metadata only; it
+never formats NAND automatically. Physical NAND correction, PCIe DMA data
+integrity, power-loss behavior, and endurance remain board-evidence
+requirements.
 
-#### should execute the PCIe-to-NVMe bridge contract runner
+### 7. PCIe-to-NVMe adapter contract
 
 - should execute the PCIe-to-NVMe bridge contract runner
 - Run DW0/DW1/DW6-DW12, AUTO-DMA PRP, and completion transport checks
@@ -456,9 +468,18 @@ expect(prp_out).to_contain(
 _expect_no_fail(prp_out, prp_err, "Cosmos NVMe PRP/control")
 ```
 
-</details>
+Requires `cosmos NVMe PCIe adapter contract: PASS` and
+`cosmos NVMe PCIe adapter ARM compile: PASS`. It decodes DW0, DW1, and
+DW6..DW12, preserves command identity, accepts direct PRP2 and controller-
+managed PRP-list pointers,
+maps controller completion publication into the IO core, checks PRP boundaries,
+decodes Write Zeroes and DSM Deallocate, forwards LR, enforces FUA through
+flush-before-completion, retries only before any completion write, and treats
+post-start completion failure as non-retryable. The pinned controller's AUTO
+DMA hardware walks PRP lists; firmware does not duplicate that parser. Media
+callbacks are mandatory, so this is not yet physical data-path evidence.
 
-#### should execute the NVMe admin callback core contract runner
+### 8. NVMe admin callback core
 
 - should execute the NVMe admin callback core contract runner
 - Run corrected bounded Identify, SMART, queue, feature, Abort, and AER checks
@@ -482,9 +503,15 @@ expect(out).to_contain("cosmos NVMe admin ARM compile: PASS")
 _expect_no_fail(out, err, "Cosmos NVMe admin contract")
 ```
 
-</details>
+Requires `cosmos NVMe admin contract: PASS` and
+`cosmos NVMe admin ARM compile: PASS`. It covers bounded Identify,
+SMART, queue lifecycle, Number-of-Queues features, Abort, AER, retry/latching,
+and explicit Invalid Opcode for unsupported format and firmware commands. Edge
+coverage includes Abort result bits, global NSID and maximum queue negotiation,
+CQ IEN/IV, SQ QPRIO, and SMART NSID/RAE. It has no PCIe/PRP or persistent
+media binding.
 
-#### should route the single PCIe command FIFO to admin or IO exactly once
+### 9. Single-owner NVMe dispatcher
 
 - should route the single PCIe command FIFO to admin or IO exactly once
 - Run queue-zero admin, IO, retry, terminal, and reserved-field routing checks
@@ -508,9 +535,13 @@ expect(out).to_contain("cosmos NVMe dispatcher ARM compile: PASS")
 _expect_no_fail(out, err, "Cosmos NVMe dispatcher contract")
 ```
 
-</details>
+Requires the dispatcher host/ARM PASS pair. It fetches each controller FIFO
+entry once, routes queue zero to admin and nonzero queues to IO, and prevents a
+pending or terminal completion from consuming another command. Physical queue
+register programming remains board-evidence work; UART foreground startup is
+source-bound and ARM-compiled.
 
-#### should execute the host SMP, GIC, MMU, and cache contracts
+### 10. Host SMP, GIC, MMU, and cache
 
 - should execute the host SMP, GIC, MMU, and cache contracts
 - Compile and run the host SMP/cache contract driver
@@ -536,9 +567,21 @@ expect(out).to_contain("STATUS: PASS cosmos SMP/cache contract")
 _expect_no_fail(out, err, "Cosmos host SMP/cache contract")
 ```
 
-</details>
+Requires exit `0`, no `FAIL`, and
+`STATUS: PASS cosmos SMP/cache contract`. The driver checks cache set/way and
+TTBR0 operands, SCU/ACTLR coherency ordering, GIC bounds, and the generation
+tagged CPU1 release/ACK protocol.
 
-#### should boot the unbound QEMU image with an exact software-only verdict
+The SMP/GIC policy owner is
+`src/os/kernel/arch/arm32/cosmos/cosmos_smp_gic_policy.spl`; its C ABI is
+`src/os/kernel/arch/arm32/cosmos/cosmos_smp_gic_policy.h`, and its focused gate
+is `scripts/check/check-cosmos-smp-gic-policy.shs`. That gate requires exact
+C-oracle versus Simple parity for 234 rows, execution of all 17 named policy
+decisions and all 34 outcomes, and atomic evidence publication bound to an
+admitted Stage-4 binary and its adjacent provenance. These scoped software
+counts are not whole-HAL or physical-board coverage.
+
+### 11. Unbound QEMU boot
 
 - should boot the unbound QEMU image with an exact software-only verdict
 - Build every Cosmos HAL unit and boot the Zynq QEMU machine
@@ -634,9 +677,18 @@ expect(elf_out).to_contain("bitstream=66e863b2ff2c0190928e3e71aeba9725551584cffc
 _expect_no_fail(elf_out, elf_err, "Cosmos silicon ELF inspection")
 ```
 
-</details>
+`COSMOS SILICON HAL CHECKS PASS` and every `FAIL` marker are forbidden.
 
-#### should reject invalid boot inputs and publish bound package metadata
+Boot admission and terminal-status policy are owned by
+`src/os/kernel/arch/arm32/cosmos/cosmos_boot_policy.spl` through
+`cosmos_boot_policy.h`; `cosmos_uart.c` remains the MMIO/assembly/ABI bridge.
+The focused `scripts/check/check-cosmos-boot-policy.shs` gate freezes 279
+independent C-versus-Simple parity rows, 38 named decisions/76 outcomes, and
+the independent C oracle's exact 68/68 LLVM branch outcomes. Its acceptance
+receipt requires an admitted Stage-4 binary with adjacent provenance and does
+not establish physical-board boot behavior.
+
+### 12. Exact bound silicon artifact
 
 - should reject invalid boot inputs and publish bound package metadata
 - Run ELF, bitstream, alias, Bootgen metadata, hash, and manifest checks
@@ -704,32 +756,48 @@ expect(boot).to_contain("cosmos_report_status(\"ARMv7 runtime\", runtime_status)
 expect(boot).to_contain("runtime_status == COSMOS_OK")
 ```
 
-</details>
+The note must bind the pinned upstream source commit and bitstream SHA-256:
 
-## Scenario Summary
+```text
+source=78601486bb5581e40628ec7e841dea8e97eff034
+bitstream=66e863b2ff2c0190928e3e71aeba9725551584cffc32854928946b1720cbf5c2
+```
 
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
+### 13. Boot package validation
 
+Runs:
 
-## Related Documentation
+```sh
+sh src/os/kernel/arch/arm32/cosmos/package_boot.shs --self-test
+```
 
-- **Requirements:** `doc/02_requirements/feature/cosmos_openssd_production_hal.md`
-- **Plan:** `doc/03_plan/sys_test/cosmos_openssd_production_hal.md`
-- **Design:** `doc/05_design/cosmos_openssd_production_hal.md`
+Requires exit `0`, no `FAIL`,
+`COSMOS_PACKAGE_PROVENANCE_PASS source=clean board=bound tools=clang,lld,bootgen`,
+and `STATUS: PASS cosmos-package-boot self-test`. The wrapper owns malformed
+ELF, profile, bitstream, alias, Bootgen metadata, complete compiled-source
+closure, clean revision, board/boot identity, tool identity, hash, missing-key,
+and manifest-mutation rejection coverage.
 
+### 14. ARM runtime ABI edges
 
-</details>
+The runtime runner executes memory/string aliases, division edges, and host/ARM
+unresolved-symbol checks. The spec also checks that `cosmos_runtime.c` retains the weak `__aeabi_idiv0` hook,
+unsigned and signed extrema, signed overflow convention, quotient/remainder
+packing, divide-by-zero behavior, and 64-bit remainder packing. It also checks
+that `cosmos_uart.c` executes `cosmos_runtime_selftest()` and reports the
+`ARMv7 runtime` status used by the QEMU scenario.
 
 <!-- sspec-maintain:traceability:start -->
 ## Traceability
 
-Requirements covered by the scenarios in this manual:
+Passing proves software behavior only. It does not prove physical NAND IO/ECC,
+PCIe enumeration/MSI/DMA/reset, CPU1 coherency, BootROM/FSBL boot, power-loss
+recovery, thermal behavior, or endurance. The board-only requirements
+`REQ-012` and `NFR-011` are intentionally excluded from executable `@req`
+traceability and remain pending until retained evidence from the identified
+Cosmos+ board satisfies the production guide. Neither host, QEMU, compile,
+synthetic Bootgen, source-check success, nor the host/ARM NVMe callback
+contract runner can satisfy them.
 
 - `REQ-SSPEC-SYSTEM`
 - `REQ-012`

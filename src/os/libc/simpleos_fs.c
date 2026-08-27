@@ -30,80 +30,6 @@ extern int64_t simpleos_syscall(int64_t id, int64_t a0, int64_t a1,
                                  int64_t a2, int64_t a3, int64_t a4);
 extern int errno;
 
-static int running_on_linux_host(void) {
-    return simpleos_syscall(4, 0, 0, 0, 0, 0) < 0;
-}
-
-static int64_t linux_syscall2(int64_t id, int64_t a0, int64_t a1) {
-#if defined(__x86_64__)
-    long ret;
-    __asm__ volatile("syscall"
-                     : "=a"(ret)
-                     : "a"(id), "D"(a0), "S"(a1)
-                     : "rcx", "r11", "memory");
-    return ret;
-#else
-    (void)id; (void)a0; (void)a1;
-    return -ENOSYS;
-#endif
-}
-
-static int64_t linux_syscall3(int64_t id, int64_t a0, int64_t a1, int64_t a2) {
-#if defined(__x86_64__)
-    long ret;
-    __asm__ volatile("syscall"
-                     : "=a"(ret)
-                     : "a"(id), "D"(a0), "S"(a1), "d"(a2)
-                     : "rcx", "r11", "memory");
-    return ret;
-#else
-    (void)id; (void)a0; (void)a1; (void)a2;
-    return -ENOSYS;
-#endif
-}
-
-struct linux_host_stat {
-    unsigned long st_dev;
-    unsigned long st_ino;
-    unsigned long st_nlink;
-    unsigned int st_mode;
-    unsigned int st_uid;
-    unsigned int st_gid;
-    int __pad0;
-    unsigned long st_rdev;
-    long st_size;
-    long st_blksize;
-    long st_blocks;
-    long st_atime;
-    long st_atime_nsec;
-    long st_mtime;
-    long st_mtime_nsec;
-    long st_ctime;
-    long st_ctime_nsec;
-    long __unused[3];
-};
-
-static int linux_host_stat_syscall(int64_t syscall_id, int64_t arg, struct stat *buf) {
-    struct linux_host_stat host;
-    int64_t r = linux_syscall2(syscall_id, arg, (int64_t)&host);
-    if (r < 0) { errno = (int)(-r); return -1; }
-    memset(buf, 0, sizeof(*buf));
-    buf->st_dev = (dev_t)host.st_dev;
-    buf->st_ino = (ino_t)host.st_ino;
-    buf->st_mode = (mode_t)host.st_mode;
-    buf->st_nlink = (nlink_t)host.st_nlink;
-    buf->st_uid = (uid_t)host.st_uid;
-    buf->st_gid = (gid_t)host.st_gid;
-    buf->st_rdev = (dev_t)host.st_rdev;
-    buf->st_size = (off_t)host.st_size;
-    buf->st_blksize = (blksize_t)host.st_blksize;
-    buf->st_blocks = (blkcnt_t)host.st_blocks;
-    buf->st_atime = (time_t)host.st_atime;
-    buf->st_mtime = (time_t)host.st_mtime;
-    buf->st_ctime = (time_t)host.st_ctime;
-    return 0;
-}
-
 /* ====================================================================
  * FILE struct definition
  *
@@ -120,7 +46,6 @@ static int linux_host_stat_syscall(int64_t syscall_id, int64_t arg, struct stat 
  * ==================================================================== */
 
 int stat(const char *path, struct stat *buf) {
-    if (running_on_linux_host()) return linux_host_stat_syscall(4, (int64_t)path, buf);
     int64_t r = simpleos_syscall(34, (int64_t)path, (int64_t)strlen(path),
                                   (int64_t)buf, 0, 0);
     if (r < 0) { errno = (int)(-r); return -1; }
@@ -128,7 +53,6 @@ int stat(const char *path, struct stat *buf) {
 }
 
 int fstat(int fd, struct stat *buf) {
-    if (running_on_linux_host()) return linux_host_stat_syscall(5, fd, buf);
     /* arg3=1 signals fd-mode to the kernel (SimpleOS doesn't distinguish yet) */
     int64_t r = simpleos_syscall(34, (int64_t)fd, 0, (int64_t)buf, 1, 0);
     if (r < 0) { errno = (int)(-r); return -1; }
@@ -172,8 +96,12 @@ struct dirent *readdir(DIR *dirp) {
 
     int64_t r = simpleos_syscall(36, d->fd, (int64_t)&d->entry,
                                   (int64_t)sizeof(struct dirent), 0, 0);
-    if (r <= 0) {
+    if (r == 0) {
         d->eof = 1;
+        return NULL;
+    }
+    if (r < 0) {
+        errno = (int)(-r);
         return NULL;
     }
     return &d->entry;
@@ -479,22 +407,12 @@ int unlink(const char *path) {
  * ==================================================================== */
 
 off_t lseek(int fd, off_t offset, int whence) {
-    if (running_on_linux_host()) {
-        int64_t r = linux_syscall3(8, fd, (int64_t)offset, whence);
-        if (r < 0) { errno = (int)(-r); return (off_t)-1; }
-        return (off_t)r;
-    }
     int64_t r = simpleos_syscall(46, fd, (int64_t)offset, whence, 0, 0);
     if (r < 0) { errno = (int)(-r); return (off_t)-1; }
     return (off_t)r;
 }
 
 int ftruncate(int fd, off_t length) {
-    if (running_on_linux_host()) {
-        int64_t r = linux_syscall2(77, fd, (int64_t)length);
-        if (r < 0) { errno = (int)(-r); return -1; }
-        return 0;
-    }
     int64_t r = simpleos_syscall(43, fd, (int64_t)length, 0, 0, 0);
     if (r < 0) { errno = (int)(-r); return -1; }
     return 0;

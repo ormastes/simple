@@ -1,6 +1,15 @@
 # Stage-2 build fails: incomplete `Mailbox` -> `PriorityMailbox` rename leaves a dangling symbol (2026-08-08)
 
-## RESOLVED (2026-08-08)
+## REGRESSED (2026-08-08)
+
+The original repair below was later undone when commit `78d303c0300`
+reintroduced the dead `src/lib/nogc_async_mut/mailbox.spl` file and its bare
+`Mailbox` export. The live priority implementation remains
+`mailbox_actor.spl`'s `PriorityMailbox`; the dead file must stay deleted.
+The focused `mailbox_spec.spl` now pins that absence and the surviving package
+export. Re-run the Stage-2 replay before returning this record to RESOLVED.
+
+## Prior repair (2026-08-08)
 
 Landed the exact fix shape validated by this doc's own "Auxiliary finding"
 scratch probe:

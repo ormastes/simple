@@ -1,0 +1,197 @@
+"""Bounded, fail-closed PostgreSQL connection state dispatcher.
+
+The transport owns sockets, TLS, authentication response encoding, and query
+execution. This module decides which typed action is legal for each frame.
+"""
+
+use nogc_sync_mut.database.postgres_mimic.wire.{
+    PGWIRE_DEFAULT_MAX_FRAME, PGWIRE_DEFAULT_MAX_PARAMETERS,
+    PgWireDecodeStatus, PgWireMessageKind, PgWireErrorCode, PgWireDecoder,
+    pgwire_decoder
+}
+
+enum PgWireSslPolicy:
+    Disabled
+    Optional
+    Required
+
+enum PgWireConnectionState:
+    AwaitStartup
+    AwaitTlsHandshake
+    AwaitAuthentication
+    Ready
+    Closed
+
+enum PgWireActionKind:
+    NeedMore
+    SendSslSupported
+    SendSslUnsupported
+    BeginAuthentication
+    DispatchSimpleQuery
+    Terminate
+    CancelUnsupported
+    RejectAndClose
+
+struct PgWireAction:
+    kind: PgWireActionKind
+    consumed: i64
+    required: i64
+    user: text
+    database: text
+    application_name: text
+    query: text
+    process_id: i64
+    secret_key: i64
+    error: PgWireErrorCode
+    detail: text
+
+fn pgwire_action(kind: PgWireActionKind, consumed: i64 = 0,
+        required: i64 = 0) -> PgWireAction:
+    PgWireAction(kind: kind, consumed: consumed, required: required, user: "", database: "",
+        application_name: "", query: "", process_id: 0, secret_key: 0,
+        error: PgWireErrorCode.None, detail: "")
+
+fn pgwire_close_action(error: PgWireErrorCode, detail: text) -> PgWireAction:
+    var action = pgwire_action(PgWireActionKind.RejectAndClose)
+    action.error = error
+    action.detail = detail
+    action
+
+class PgWireConnection:
+    state: PgWireConnectionState
+    ssl_policy: PgWireSslPolicy
+    tls_active: bool
+    max_frame: i64
+    max_parameters: i64
+    decoder: PgWireDecoder
+    last_action: PgWireAction
+
+    # Native backends only carry the small enum across the connection/transport
+    # module boundary.  The connection retains the aggregate and exposes owned
+    # scalar projections to its caller.
+    me dispatch_kind(bytes: [i64]) -> PgWireActionKind:
+        self.last_action = self.dispatch(bytes)
+        self.last_action.kind
+
+    me tls_established_kind() -> PgWireActionKind:
+        self.last_action = self.tls_established()
+        self.last_action.kind
+
+    me tls_failed_kind() -> PgWireActionKind:
+        self.last_action = self.tls_failed()
+        self.last_action.kind
+
+    me authentication_succeeded_kind() -> PgWireActionKind:
+        self.last_action = self.authentication_succeeded()
+        self.last_action.kind
+
+    me authentication_failed_kind() -> PgWireActionKind:
+        self.last_action = self.authentication_failed()
+        self.last_action.kind
+
+    fn action_consumed() -> i64: self.last_action.consumed
+    fn action_required() -> i64: self.last_action.required
+    fn action_user() -> text: self.last_action.user
+    fn action_database() -> text: self.last_action.database
+    fn action_application_name() -> text: self.last_action.application_name
+    fn action_query() -> text: self.last_action.query
+    fn action_process_id() -> i64: self.last_action.process_id
+    fn action_secret_key() -> i64: self.last_action.secret_key
+    fn action_error() -> PgWireErrorCode: self.last_action.error
+    fn action_detail() -> text: self.last_action.detail
+
+    me tls_established() -> PgWireAction:
+        if self.state != PgWireConnectionState.AwaitTlsHandshake:
+            self.state = PgWireConnectionState.Closed
+            return pgwire_close_action(PgWireErrorCode.UnsupportedProtocol,
+                "TLS acknowledgement is invalid in the current connection state")
+        self.tls_active = true
+        self.state = PgWireConnectionState.AwaitStartup
+        pgwire_action(PgWireActionKind.NeedMore, 0, 4)
+
+    me tls_failed() -> PgWireAction:
+        self.state = PgWireConnectionState.Closed
+        pgwire_close_action(PgWireErrorCode.UnsupportedProtocol, "TLS handshake failed")
+
+    me authentication_succeeded() -> PgWireAction:
+        if self.state != PgWireConnectionState.AwaitAuthentication:
+            self.state = PgWireConnectionState.Closed
+            return pgwire_close_action(PgWireErrorCode.UnsupportedProtocol,
+                "authentication acknowledgement is invalid in the current connection state")
+        self.state = PgWireConnectionState.Ready
+        pgwire_action(PgWireActionKind.NeedMore, 0, 5)
+
+    me authentication_failed() -> PgWireAction:
+        self.state = PgWireConnectionState.Closed
+        pgwire_close_action(PgWireErrorCode.UnsupportedProtocol, "authentication failed")
+
+    me dispatch(bytes: [i64]) -> PgWireAction:
+        if self.state == PgWireConnectionState.Closed:
+            return pgwire_close_action(PgWireErrorCode.UnsupportedProtocol, "connection is closed")
+        if self.state == PgWireConnectionState.AwaitTlsHandshake:
+            self.state = PgWireConnectionState.Closed
+            return pgwire_close_action(PgWireErrorCode.UnsupportedProtocol,
+                "frontend bytes arrived before TLS was established")
+        if self.state == PgWireConnectionState.AwaitAuthentication:
+            self.state = PgWireConnectionState.Closed
+            return pgwire_close_action(PgWireErrorCode.UnsupportedProtocol,
+                "frontend bytes arrived before authentication completed")
+
+        val decode_status = if self.state == PgWireConnectionState.AwaitStartup:
+            self.decoder.decode_startup(bytes, self.max_frame, self.max_parameters)
+        else:
+            self.decoder.decode_frontend(bytes, self.max_frame)
+        if decode_status == PgWireDecodeStatus.NeedMore:
+            return pgwire_action(PgWireActionKind.NeedMore, 0, self.decoder.required())
+        if decode_status == PgWireDecodeStatus.Rejected:
+            self.state = PgWireConnectionState.Closed
+            return pgwire_close_action(self.decoder.error(), self.decoder.detail())
+
+        val message_kind = self.decoder.message_kind()
+        if message_kind == PgWireMessageKind.SslRequest:
+            if self.tls_active:
+                self.state = PgWireConnectionState.Closed
+                return pgwire_close_action(PgWireErrorCode.UnsupportedProtocol, "repeated SSLRequest")
+            if self.ssl_policy == PgWireSslPolicy.Disabled:
+                return pgwire_action(PgWireActionKind.SendSslUnsupported, self.decoder.consumed())
+            self.state = PgWireConnectionState.AwaitTlsHandshake
+            return pgwire_action(PgWireActionKind.SendSslSupported, self.decoder.consumed())
+
+        if message_kind == PgWireMessageKind.CancelRequest:
+            self.state = PgWireConnectionState.Closed
+            var cancel = pgwire_action(PgWireActionKind.CancelUnsupported, self.decoder.consumed())
+            cancel.process_id = self.decoder.process_id()
+            cancel.secret_key = self.decoder.secret_key()
+            return cancel
+
+        if message_kind == PgWireMessageKind.Startup:
+            if self.ssl_policy == PgWireSslPolicy.Required and not self.tls_active:
+                self.state = PgWireConnectionState.Closed
+                return pgwire_close_action(PgWireErrorCode.UnsupportedProtocol, "TLS is required before startup")
+            self.state = PgWireConnectionState.AwaitAuthentication
+            var startup = pgwire_action(PgWireActionKind.BeginAuthentication, self.decoder.consumed())
+            startup.user = self.decoder.user()
+            startup.database = self.decoder.database()
+            startup.application_name = self.decoder.application_name()
+            return startup
+
+        if message_kind == PgWireMessageKind.SimpleQuery:
+            var query = pgwire_action(PgWireActionKind.DispatchSimpleQuery, self.decoder.consumed())
+            query.query = self.decoder.query()
+            return query
+        if message_kind == PgWireMessageKind.Terminate:
+            self.state = PgWireConnectionState.Closed
+            return pgwire_action(PgWireActionKind.Terminate, self.decoder.consumed())
+
+        self.state = PgWireConnectionState.Closed
+        pgwire_close_action(PgWireErrorCode.UnsupportedMessage, "message is invalid in the current connection state")
+
+fn pgwire_connection(ssl_policy: PgWireSslPolicy,
+        max_frame: i64 = PGWIRE_DEFAULT_MAX_FRAME,
+        max_parameters: i64 = PGWIRE_DEFAULT_MAX_PARAMETERS) -> PgWireConnection:
+    PgWireConnection(state: PgWireConnectionState.AwaitStartup, ssl_policy: ssl_policy,
+        tls_active: false, max_frame: max_frame, max_parameters: max_parameters,
+        decoder: pgwire_decoder(), last_action: pgwire_action(PgWireActionKind.NeedMore))
+
+export PgWireSslPolicy, PgWireConnectionState, PgWireActionKind, PgWireAction, PgWireConnection
+export pgwire_connection

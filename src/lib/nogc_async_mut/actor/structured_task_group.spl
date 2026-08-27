@@ -1,0 +1,88 @@
+# Actor-message adapter for the common structured owner/task lifecycle.
+#
+# Actor children carry the same fixed scalar wire record as hosted tasks. The
+# canonical ActorMailbox remains the bounded transport owner; this adapter only
+# converts its text argument representation and validates the owner lease.
+
+use std.actor.mailbox.{ActorMessage}
+use std.common.structural.parallel_commit.{
+    OwnerSnapshotV1,
+    ParallelResultKind,
+    StructuredSpawnReceiptV1,
+    StructuredTaskErrorCodeV1,
+    StructuredTaskGroupV1,
+    StructuredTaskWireResultV1,
+    StructuredWaitReceiptV1,
+    structured_task_error_reason,
+    structured_task_wire_from_words,
+    structured_task_wire_words
+}
+
+val STRUCTURED_ACTOR_RESULT_METHOD: text = "structured-task-result-v1"
+
+fn structured_actor_result_message(wire: StructuredTaskWireResultV1) -> ActorMessage:
+    """Encode a child-created scalar wire result as one actor message."""
+    var args: [text] = []
+    for word in structured_task_wire_words(wire):
+        args.push(word.to_string())
+    ActorMessage.fire_and_forget(STRUCTURED_ACTOR_RESULT_METHOD, args)
+
+fn structured_actor_result_wire(message: ActorMessage) -> StructuredTaskWireResultV1?:
+    """Decode only the reserved structured-result actor method."""
+    if message.method != STRUCTURED_ACTOR_RESULT_METHOD:
+        return nil
+    var words: [i64] = []
+    for arg in message.args:
+        val parsed = arg.parse_int()
+        if parsed == nil:
+            return nil
+        words.push(parsed as i64)
+    structured_task_wire_from_words(words)
+
+class ActorStructuredTaskGroupV1:
+    lifecycle: StructuredTaskGroupV1
+
+    static fn create(snapshot: OwnerSnapshotV1, capacity: i64,
+                     retain_failure_notifications: bool) -> ActorStructuredTaskGroupV1:
+        ActorStructuredTaskGroupV1(lifecycle: StructuredTaskGroupV1.create(
+            snapshot, capacity, retain_failure_notifications))
+
+    me reserve(write_region: i64, kind: ParallelResultKind,
+               deterministic_key: text) -> StructuredSpawnReceiptV1:
+        var lifecycle = self.lifecycle
+        val receipt = lifecycle.reserve(write_region, kind, deterministic_key)
+        self.lifecycle = lifecycle
+        receipt
+
+    me accept_result_message(task_id: i64, lease_token: i64,
+                             message: ActorMessage) -> bool:
+        """Accept one message dequeued by the canonical bounded actor mailbox."""
+        val wire_value = structured_actor_result_wire(message)
+        var lifecycle = self.lifecycle
+        if wire_value == nil:
+            val failed = lifecycle.fail_task(task_id, lease_token,
+                StructuredTaskErrorCodeV1.ActorResultRejected,
+                structured_task_error_reason(
+                    StructuredTaskErrorCodeV1.ActorResultRejected))
+            self.lifecycle = lifecycle
+            return failed
+        val accepted = lifecycle.publish_wire_result(task_id, lease_token,
+            wire_value as StructuredTaskWireResultV1)
+        self.lifecycle = lifecycle
+        accepted
+
+    me cancel_task(task_id: i64) -> bool:
+        var lifecycle = self.lifecycle
+        val cancelled = lifecycle.cancel_task(task_id)
+        self.lifecycle = lifecycle
+        cancelled
+
+    fn wait_all() -> StructuredWaitReceiptV1:
+        self.lifecycle.wait_all()
+
+    fn lifecycle_state() -> StructuredTaskGroupV1:
+        self.lifecycle
+
+export STRUCTURED_ACTOR_RESULT_METHOD
+export ActorStructuredTaskGroupV1
+export structured_actor_result_message, structured_actor_result_wire

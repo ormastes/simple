@@ -3,17 +3,17 @@
 # global functions (parseInt, parseFloat, isNaN, isFinite), prototypes,
 # and provides the top-level eval() entry point.
 
-use std.common.js.types.pair.{Pair}
-use std.common.js.types.js_types.JsValue
-use std.common.js.types.js_types.JsObject
-use std.common.js.types.js_types.JsProperty
-use std.common.js.types.ast_types.JsExpression
-use std.common.js.types.ast_types.JsStatement
+use std.js.types.pair.{Pair}
+use std.js.types.js_types.JsValue
+use std.js.types.js_types.JsObject
+use std.js.types.js_types.JsProperty
+use std.js.types.ast_types.JsExpression
+use std.js.types.ast_types.JsStatement
 use std.nogc_sync_mut.js.engine.interpreter.JsInterpreter
 use std.nogc_sync_mut.js.engine.interpreter_async.{JsInterpreter}
 use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}
 use std.nogc_sync_mut.js.engine.interpreter_exec.{JsInterpreter}
-use std.common.js.builtins.json.{json_parse}
+use std.js.builtins.json.{json_parse}
 use std.common.string_core.{char_code}
 # Load common engine modules LAST so their Logger/js_nan/etc. win over nogc versions
 use lib.common.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResult, BrowserError}
@@ -63,9 +63,6 @@ val NATIVE_PARSE_INT = -10
 val NATIVE_PARSE_FLOAT = -11
 val NATIVE_IS_NAN = -12
 val NATIVE_IS_FINITE = -13
-val NATIVE_STRING_CONSTRUCTOR = -14
-val NATIVE_NUMBER_CONSTRUCTOR = -15
-val NATIVE_BOOLEAN_CONSTRUCTOR = -16
 val NATIVE_MATH_FLOOR = -20
 val NATIVE_MATH_CEIL = -21
 val NATIVE_MATH_ROUND = -22
@@ -287,27 +284,6 @@ fn dispatch_native(fn_id: i64, args: [JsValue], logger: Logger) -> JsValue:
             return JsValue.Boolean(v: not not_finite)
         return JsValue.Boolean(v: false)
 
-    if fn_id == NATIVE_STRING_CONSTRUCTOR:
-        if args.len() > 0:
-            return JsValue.String(v: js_to_string(args.get(0)))
-        return JsValue.String(v: "")
-
-    if fn_id == NATIVE_NUMBER_CONSTRUCTOR:
-        if args.len() > 0:
-            return JsValue.Number(v: to_number(args.get(0)))
-        return JsValue.Number(v: 0.0)
-
-    if fn_id == NATIVE_BOOLEAN_CONSTRUCTOR:
-        if args.len() > 0:
-            match args.get(0):
-                JsValue.Undefined: return JsValue.Boolean(v: false)
-                JsValue.Null: return JsValue.Boolean(v: false)
-                JsValue.Boolean(b): return JsValue.Boolean(v: b)
-                JsValue.Number(n): return JsValue.Boolean(v: n != 0.0 and n != _RT_NAN)
-                JsValue.String(s): return JsValue.Boolean(v: s.len() > 0)
-                _: return JsValue.Boolean(v: true)
-        return JsValue.Boolean(v: false)
-
     if fn_id == NATIVE_MATH_FLOOR:
         if args.len() > 0:
             val n = to_number(args.get(0))
@@ -472,9 +448,6 @@ class JsRuntime:
         self._define_global_fn("isNaN", NATIVE_IS_NAN)
         self._define_global_fn("isFinite", NATIVE_IS_FINITE)
         self._define_global_fn("Symbol", NATIVE_SYMBOL)
-        self._define_global_fn("String", NATIVE_STRING_CONSTRUCTOR)
-        self._define_global_fn("Number", NATIVE_NUMBER_CONSTRUCTOR)
-        self._define_global_fn("Boolean", NATIVE_BOOLEAN_CONSTRUCTOR)
         self._define_global_fn("fetch", NATIVE_FETCH)
 
         # ── console object ───────────────────────────────────────────
@@ -650,12 +623,6 @@ class JsRuntime:
         self.interpreter = interpreter
         ran_count
 
-    me drain_pending_microtasks() -> bool:
-        var interpreter = self.interpreter
-        val ran = interpreter.drain_pending_microtasks()
-        self.interpreter = interpreter
-        ran
-
     # Call a function by its internal ID with given arguments
     me call(function_id: i64, args: [JsValue]) -> BrowserResult<JsValue>:
         var call_result = JsValue.Undefined
@@ -717,9 +684,3 @@ class JsRuntime:
     # Register a host-provided native function by name and callback ID
     me define_native_function(name: text, callback_id: i64):
         self._define_global_fn(name, callback_id)
-
-# Convenience factory for hosts outside this module: import aliasing does not
-# register constructors/enums (interpreter gap), so embedders that have their
-# own Logger type in scope construct the engine through this named function.
-pub fn js_runtime_with_default_logger(name: text) -> JsRuntime:
-    JsRuntime.new(Logger(name: name))

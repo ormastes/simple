@@ -1,0 +1,388 @@
+# Pure-Simple NVMe admin command policy for Cosmos+.
+#
+# C retains the public structs, queue storage, payload serialization, adapter
+# callbacks, and completion publication.  This module owns only deterministic
+# scalar validation/status/state decisions.  Every C export is allocation-free.
+
+pub val COSMOS_NVME_ADMIN_POLICY_DECISION_COUNT: u32 = 35u32
+
+val STATUS_CONTINUE: u32 = 0xFFFFFFFFu32
+val SCT_GENERIC: u32 = 0u32
+val SCT_COMMAND_SPECIFIC: u32 = 1u32
+val SC_SUCCESS: u32 = 0x00u32
+val SC_INVALID_OPCODE: u32 = 0x01u32
+val SC_INVALID_FIELD: u32 = 0x02u32
+val SC_DATA_TRANSFER_ERROR: u32 = 0x04u32
+val SC_INTERNAL_DEVICE_ERROR: u32 = 0x06u32
+val SC_INVALID_NAMESPACE_FORMAT: u32 = 0x0Bu32
+val SC_COMPLETION_QUEUE_INVALID: u32 = 0x00u32
+val SC_INVALID_QUEUE_IDENTIFIER: u32 = 0x01u32
+val SC_INVALID_QUEUE_SIZE: u32 = 0x02u32
+val SC_AER_LIMIT_EXCEEDED: u32 = 0x05u32
+val SC_INVALID_INTERRUPT_VECTOR: u32 = 0x08u32
+val SC_INVALID_LOG_PAGE: u32 = 0x09u32
+val SC_INVALID_QUEUE_DELETION: u32 = 0x0Cu32
+val SC_FEATURE_NOT_SAVEABLE: u32 = 0x0Du32
+val NAMESPACE_ID: u32 = 1u32
+val NAMESPACE_ALL: u32 = 0xFFFFFFFFu32
+val MAX_IO_QUEUES: u32 = 4u32
+val MAX_QUEUE_ENTRIES: u32 = 64u32
+val MAX_CID: u32 = 0xFFFFu32
+val DMA_ALIGNMENT: u32 = 4u32
+
+fn _status(sct: u32, sc: u32, dnr: u32) -> u32:
+    (dnr << 16u32) | (sct << 8u32) | sc
+
+@export("C", name: "cosmos_nvme_admin_policy_status_success")
+pub fn cosmos_nvme_admin_policy_status_success() -> u32:
+    _status(SCT_GENERIC, SC_SUCCESS, 0u32)
+
+@export("C", name: "cosmos_nvme_admin_policy_status_generic")
+pub fn cosmos_nvme_admin_policy_status_generic(sc: u32) -> u32:
+    _status(SCT_GENERIC, sc, 1u32)
+
+@export("C", name: "cosmos_nvme_admin_policy_status_specific")
+pub fn cosmos_nvme_admin_policy_status_specific(sc: u32) -> u32:
+    _status(SCT_COMMAND_SPECIFIC, sc, 1u32)
+
+@export("C", name: "cosmos_nvme_admin_policy_min")
+pub fn cosmos_nvme_admin_policy_min(left: u32, right: u32) -> u32:
+    if left < right: left else: right
+
+@export("C", name: "cosmos_nvme_admin_policy_power_of_two")
+pub fn cosmos_nvme_admin_policy_power_of_two(value: u32) -> i32:
+    if value != 0u32 and (value & (value - 1u32)) == 0u32: 1 else: 0
+
+@export("C", name: "cosmos_nvme_admin_policy_log2")
+pub fn cosmos_nvme_admin_policy_log2(value: u32) -> u32:
+    var remaining = value
+    var result = 0u32
+    while remaining > 1u32:
+        remaining = remaining >> 1u32
+        result = result + 1u32
+    result
+
+@export("C", name: "cosmos_nvme_admin_policy_no_payload")
+pub fn cosmos_nvme_admin_policy_no_payload(
+    low1: u32, high1: u32, low2: u32, high2: u32, bytes: u32
+) -> i32:
+    if low1 == 0u32 and high1 == 0u32 and low2 == 0u32 and
+        high2 == 0u32 and bytes == 0u32: 1 else: 0
+
+@export("C", name: "cosmos_nvme_admin_policy_queue_base_valid")
+pub fn cosmos_nvme_admin_policy_queue_base_valid(
+    low1: u32, high1: u32, low2: u32, high2: u32, bytes: u32
+) -> i32:
+    if bytes == 0u32 and low2 == 0u32 and high2 == 0u32 and
+        (low1 != 0u32 or high1 != 0u32) and (low1 & 0xFFFu32) == 0u32 and
+        high1 <= 0xFu32: 1 else: 0
+
+@export("C", name: "cosmos_nvme_admin_policy_opcode_supported")
+pub fn cosmos_nvme_admin_policy_opcode_supported(opcode: u32) -> i32:
+    if opcode == 0x00u32 or opcode == 0x01u32 or opcode == 0x02u32 or
+        opcode == 0x04u32 or opcode == 0x05u32 or opcode == 0x06u32 or
+        opcode == 0x08u32 or opcode == 0x09u32 or opcode == 0x0Au32 or
+        opcode == 0x0Cu32: 1 else: 0
+
+@export("C", name: "cosmos_nvme_admin_policy_payload_valid")
+pub fn cosmos_nvme_admin_policy_payload_valid(
+    low1: u32, high1: u32, low2: u32, high2: u32,
+    payload_bytes: u32, required_bytes: u32
+) -> i32:
+    if payload_bytes != required_bytes or (low1 == 0u32 and high1 == 0u32) or
+        (low1 & (DMA_ALIGNMENT - 1u32)) != 0u32:
+        return 0
+    val first_room = 4096u32 - (low1 & 0xFFFu32)
+    val has_second = low2 != 0u32 or high2 != 0u32
+    if required_bytes <= first_room:
+        return if not has_second: 1 else: 0
+    if has_second and (low2 & 0xFFFu32) == 0u32: 1 else: 0
+
+@export("C", name: "cosmos_nvme_admin_policy_queue_index_valid")
+pub fn cosmos_nvme_admin_policy_queue_index_valid(queue_id: u32) -> i32:
+    if queue_id != 0u32 and queue_id <= MAX_IO_QUEUES: 1 else: 0
+
+@export("C", name: "cosmos_nvme_admin_policy_queue_id_allowed")
+pub fn cosmos_nvme_admin_policy_queue_id_allowed(
+    negotiated_count: u32, queue_id: u32
+) -> i32:
+    if queue_id != 0u32 and queue_id <= negotiated_count and
+        queue_id <= MAX_IO_QUEUES: 1 else: 0
+
+@export("C", name: "cosmos_nvme_admin_policy_controller_namespace_valid")
+pub fn cosmos_nvme_admin_policy_controller_namespace_valid(namespace_id: u32) -> i32:
+    if namespace_id == 0u32 or namespace_id == NAMESPACE_ID: 1 else: 0
+
+@export("C", name: "cosmos_nvme_admin_policy_smart_namespace_valid")
+pub fn cosmos_nvme_admin_policy_smart_namespace_valid(namespace_id: u32) -> i32:
+    if namespace_id == NAMESPACE_ID or namespace_id == NAMESPACE_ALL: 1 else: 0
+
+@export("C", name: "cosmos_nvme_admin_policy_publish_state")
+pub fn cosmos_nvme_admin_policy_publish_state(post_result: u32) -> u32:
+    if post_result == 0u32: 0u32
+    else if post_result == 1u32: 1u32
+    else: 2u32
+
+@export("C", name: "cosmos_nvme_admin_policy_publish_result")
+pub fn cosmos_nvme_admin_policy_publish_result(post_result: u32) -> i32:
+    if post_result == 0u32: 0
+    else if post_result == 1u32: 5
+    else if post_result == 2u32: 6
+    else: 4
+
+@export("C", name: "cosmos_nvme_admin_policy_payload_status")
+pub fn cosmos_nvme_admin_policy_payload_status(valid: u32, payload_result: u32) -> u32:
+    if valid != 0u32 and payload_result == 0u32:
+        cosmos_nvme_admin_policy_status_success()
+    else:
+        cosmos_nvme_admin_policy_status_generic(SC_DATA_TRANSFER_ERROR)
+
+@export("C", name: "cosmos_nvme_admin_policy_identify_status")
+pub fn cosmos_nvme_admin_policy_identify_status(
+    namespace_id: u32, cdw10: u32, cdw11: u32, cdw12: u32, cdw13: u32
+) -> u32:
+    val cns = cdw10 & 0xFFu32
+    if (cdw10 & ~0xFFu32) != 0u32 or cdw11 != 0u32 or cdw12 != 0u32 or cdw13 != 0u32:
+        return cosmos_nvme_admin_policy_status_generic(SC_INVALID_FIELD)
+    if cns == 1u32:
+        if namespace_id != 0u32:
+            return cosmos_nvme_admin_policy_status_generic(SC_INVALID_NAMESPACE_FORMAT)
+        return cosmos_nvme_admin_policy_status_success()
+    if cns != 0u32:
+        return cosmos_nvme_admin_policy_status_generic(SC_INVALID_FIELD)
+    if namespace_id != NAMESPACE_ID:
+        return cosmos_nvme_admin_policy_status_generic(SC_INVALID_NAMESPACE_FORMAT)
+    cosmos_nvme_admin_policy_status_success()
+
+@export("C", name: "cosmos_nvme_admin_policy_get_log_status")
+pub fn cosmos_nvme_admin_policy_get_log_status(
+    namespace_id: u32, cdw10: u32, cdw11: u32, cdw12: u32, cdw13: u32
+) -> u32:
+    if cosmos_nvme_admin_policy_smart_namespace_valid(namespace_id) == 0:
+        return cosmos_nvme_admin_policy_status_generic(SC_INVALID_NAMESPACE_FORMAT)
+    if (cdw10 & 0xFFu32) != 0x02u32:
+        return cosmos_nvme_admin_policy_status_specific(SC_INVALID_LOG_PAGE)
+    if (cdw10 & 0x00007F00u32) != 0u32 or ((cdw10 >> 16u32) & 0xFFFFu32) != 127u32 or
+        cdw11 != 0u32 or cdw12 != 0u32 or cdw13 != 0u32:
+        return cosmos_nvme_admin_policy_status_generic(SC_INVALID_FIELD)
+    cosmos_nvme_admin_policy_status_success()
+
+@export("C", name: "cosmos_nvme_admin_policy_set_features_status")
+pub fn cosmos_nvme_admin_policy_set_features_status(
+    namespace_id: u32, cdw10: u32, cdw11: u32, cdw12: u32, cdw13: u32
+) -> u32:
+    if cosmos_nvme_admin_policy_controller_namespace_valid(namespace_id) == 0:
+        return cosmos_nvme_admin_policy_status_generic(SC_INVALID_NAMESPACE_FORMAT)
+    if (cdw10 & 0x7FFFFF00u32) != 0u32 or cdw12 != 0u32 or cdw13 != 0u32:
+        return cosmos_nvme_admin_policy_status_generic(SC_INVALID_FIELD)
+    if (cdw10 & 0xFFu32) != 0x07u32:
+        return cosmos_nvme_admin_policy_status_generic(SC_INVALID_FIELD)
+    if (cdw10 & 0x80000000u32) != 0u32:
+        return cosmos_nvme_admin_policy_status_specific(SC_FEATURE_NOT_SAVEABLE)
+    if (cdw11 & 0xFFFFu32) == 0xFFFFu32 or (cdw11 >> 16u32) == 0xFFFFu32:
+        return cosmos_nvme_admin_policy_status_generic(SC_INVALID_FIELD)
+    cosmos_nvme_admin_policy_status_success()
+
+@export("C", name: "cosmos_nvme_admin_policy_queue_count")
+pub fn cosmos_nvme_admin_policy_queue_count(cdw11: u32) -> u32:
+    val requested_sq = (cdw11 & 0xFFFFu32) + 1u32
+    val requested_cq = (cdw11 >> 16u32) + 1u32
+    cosmos_nvme_admin_policy_min(MAX_IO_QUEUES,
+        cosmos_nvme_admin_policy_min(requested_sq, requested_cq))
+
+@export("C", name: "cosmos_nvme_admin_policy_queue_result")
+pub fn cosmos_nvme_admin_policy_queue_result(queue_count: u32) -> u32:
+    (queue_count - 1u32) | ((queue_count - 1u32) << 16u32)
+
+@export("C", name: "cosmos_nvme_admin_policy_get_features_status")
+pub fn cosmos_nvme_admin_policy_get_features_status(
+    namespace_id: u32, cdw10: u32, cdw11: u32, cdw12: u32, cdw13: u32
+) -> u32:
+    if cosmos_nvme_admin_policy_controller_namespace_valid(namespace_id) == 0:
+        return cosmos_nvme_admin_policy_status_generic(SC_INVALID_NAMESPACE_FORMAT)
+    if (cdw10 & ~0x000007FFu32) != 0u32 or (cdw10 & 0xFFu32) != 0x07u32 or
+        ((cdw10 >> 8u32) & 0x7u32) != 0u32 or cdw11 != 0u32 or
+        cdw12 != 0u32 or cdw13 != 0u32:
+        return cosmos_nvme_admin_policy_status_generic(SC_INVALID_FIELD)
+    cosmos_nvme_admin_policy_status_success()
+
+@export("C", name: "cosmos_nvme_admin_policy_create_cq_status")
+pub fn cosmos_nvme_admin_policy_create_cq_status(
+    negotiated: u32, existing_valid: u32, namespace_id: u32,
+    cdw10: u32, cdw11: u32, cdw12: u32, cdw13: u32,
+    low1: u32, high1: u32, low2: u32, high2: u32, bytes: u32
+) -> u32:
+    val queue_id = cdw10 & 0xFFFFu32
+    val entries = (cdw10 >> 16u32) + 1u32
+    if namespace_id != 0u32 or cdw12 != 0u32 or cdw13 != 0u32 or
+        cosmos_nvme_admin_policy_queue_base_valid(low1, high1, low2, high2, bytes) == 0:
+        return cosmos_nvme_admin_policy_status_generic(SC_INVALID_FIELD)
+    if cosmos_nvme_admin_policy_queue_id_allowed(negotiated, queue_id) == 0:
+        return cosmos_nvme_admin_policy_status_specific(SC_INVALID_QUEUE_IDENTIFIER)
+    if entries == 0u32 or entries > MAX_QUEUE_ENTRIES:
+        return cosmos_nvme_admin_policy_status_specific(SC_INVALID_QUEUE_SIZE)
+    if (cdw11 & 1u32) == 0u32 or (cdw11 & 0x0000FFFCu32) != 0u32 or
+        ((cdw11 & 2u32) == 0u32 and (cdw11 >> 16u32) != 0u32):
+        return cosmos_nvme_admin_policy_status_generic(SC_INVALID_FIELD)
+    if (cdw11 & 2u32) != 0u32 and (cdw11 >> 16u32) != 0u32:
+        return cosmos_nvme_admin_policy_status_specific(SC_INVALID_INTERRUPT_VECTOR)
+    if existing_valid != 0u32:
+        return cosmos_nvme_admin_policy_status_specific(SC_INVALID_QUEUE_IDENTIFIER)
+    cosmos_nvme_admin_policy_status_success()
+
+@export("C", name: "cosmos_nvme_admin_policy_create_sq_status")
+pub fn cosmos_nvme_admin_policy_create_sq_status(
+    negotiated: u32, completion_valid: u32, existing_valid: u32,
+    namespace_id: u32, cdw10: u32, cdw11: u32, cdw12: u32, cdw13: u32,
+    low1: u32, high1: u32, low2: u32, high2: u32, bytes: u32
+) -> u32:
+    val queue_id = cdw10 & 0xFFFFu32
+    val entries = (cdw10 >> 16u32) + 1u32
+    val completion_queue_id = cdw11 >> 16u32
+    if namespace_id != 0u32 or cdw12 != 0u32 or cdw13 != 0u32 or
+        (cdw11 & 1u32) == 0u32 or (cdw11 & 0x0000FFF8u32) != 0u32 or
+        cosmos_nvme_admin_policy_queue_base_valid(low1, high1, low2, high2, bytes) == 0:
+        return cosmos_nvme_admin_policy_status_generic(SC_INVALID_FIELD)
+    if cosmos_nvme_admin_policy_queue_id_allowed(negotiated, queue_id) == 0 or
+        cosmos_nvme_admin_policy_queue_id_allowed(negotiated, completion_queue_id) == 0:
+        return cosmos_nvme_admin_policy_status_specific(SC_INVALID_QUEUE_IDENTIFIER)
+    if entries == 0u32 or entries > MAX_QUEUE_ENTRIES:
+        return cosmos_nvme_admin_policy_status_specific(SC_INVALID_QUEUE_SIZE)
+    if completion_valid == 0u32:
+        return cosmos_nvme_admin_policy_status_specific(SC_COMPLETION_QUEUE_INVALID)
+    if existing_valid != 0u32:
+        return cosmos_nvme_admin_policy_status_specific(SC_INVALID_QUEUE_IDENTIFIER)
+    cosmos_nvme_admin_policy_status_success()
+
+@export("C", name: "cosmos_nvme_admin_policy_delete_sq_status")
+pub fn cosmos_nvme_admin_policy_delete_sq_status(
+    negotiated: u32, existing_valid: u32, namespace_id: u32,
+    cdw10: u32, cdw11: u32, cdw12: u32, cdw13: u32,
+    low1: u32, high1: u32, low2: u32, high2: u32, bytes: u32
+) -> u32:
+    if namespace_id != 0u32 or (cdw10 >> 16u32) != 0u32 or cdw11 != 0u32 or
+        cdw12 != 0u32 or cdw13 != 0u32 or
+        cosmos_nvme_admin_policy_no_payload(low1, high1, low2, high2, bytes) == 0 or
+        cosmos_nvme_admin_policy_queue_id_allowed(negotiated, cdw10 & 0xFFFFu32) == 0 or
+        existing_valid == 0u32:
+        return cosmos_nvme_admin_policy_status_specific(SC_INVALID_QUEUE_IDENTIFIER)
+    cosmos_nvme_admin_policy_status_success()
+
+@export("C", name: "cosmos_nvme_admin_policy_delete_cq_status")
+pub fn cosmos_nvme_admin_policy_delete_cq_status(
+    negotiated: u32, existing_valid: u32, has_dependent_sq: u32,
+    namespace_id: u32, cdw10: u32, cdw11: u32, cdw12: u32, cdw13: u32,
+    low1: u32, high1: u32, low2: u32, high2: u32, bytes: u32
+) -> u32:
+    val base = cosmos_nvme_admin_policy_delete_sq_status(
+        negotiated, existing_valid, namespace_id, cdw10, cdw11, cdw12, cdw13,
+        low1, high1, low2, high2, bytes)
+    if base != cosmos_nvme_admin_policy_status_success():
+        return base
+    if has_dependent_sq != 0u32:
+        return cosmos_nvme_admin_policy_status_specific(SC_INVALID_QUEUE_DELETION)
+    cosmos_nvme_admin_policy_status_success()
+
+@export("C", name: "cosmos_nvme_admin_policy_abort_status")
+pub fn cosmos_nvme_admin_policy_abort_status(
+    negotiated: u32, target_sq_valid: u32, namespace_id: u32,
+    cdw10: u32, cdw11: u32, cdw12: u32, cdw13: u32
+) -> u32:
+    val target_queue_id = cdw10 >> 16u32
+    if namespace_id != 0u32 or cdw11 != 0u32 or cdw12 != 0u32 or cdw13 != 0u32:
+        return cosmos_nvme_admin_policy_status_generic(SC_INVALID_FIELD)
+    if target_queue_id != 0u32 and
+        (cosmos_nvme_admin_policy_queue_id_allowed(negotiated, target_queue_id) == 0 or
+         target_sq_valid == 0u32):
+        return cosmos_nvme_admin_policy_status_specific(SC_INVALID_QUEUE_IDENTIFIER)
+    cosmos_nvme_admin_policy_status_success()
+
+@export("C", name: "cosmos_nvme_admin_policy_abort_result")
+pub fn cosmos_nvme_admin_policy_abort_result(
+    target_queue_id: u32, target_cid: u32, aer_pending: u32, aer_cid: u32
+) -> u32:
+    if target_queue_id == 0u32 and aer_pending != 0u32 and aer_cid == target_cid:
+        0u32
+    else:
+        1u32
+
+@export("C", name: "cosmos_nvme_admin_policy_envelope_status")
+pub fn cosmos_nvme_admin_policy_envelope_status(
+    invalid_field: u32, queue_id: u32, cid: u32, opcode: u32,
+    low1: u32, high1: u32, low2: u32, high2: u32, bytes: u32
+) -> u32:
+    if invalid_field != 0u32 or queue_id != 0u32 or cid > MAX_CID:
+        return cosmos_nvme_admin_policy_status_generic(SC_INVALID_FIELD)
+    val no_payload = cosmos_nvme_admin_policy_no_payload(low1, high1, low2, high2, bytes) != 0
+    val payload_opcode = opcode == 0x06u32 or opcode == 0x02u32 or
+        opcode == 0x01u32 or opcode == 0x05u32
+    if not no_payload and cosmos_nvme_admin_policy_opcode_supported(opcode) != 0 and not payload_opcode:
+        return cosmos_nvme_admin_policy_status_generic(SC_INVALID_FIELD)
+    STATUS_CONTINUE
+
+@export("C", name: "cosmos_nvme_admin_policy_async_event_status")
+pub fn cosmos_nvme_admin_policy_async_event_status(
+    callback_present: u32, pending: u32, namespace_id: u32,
+    cdw10: u32, cdw11: u32, cdw12: u32, cdw13: u32
+) -> u32:
+    if callback_present == 0u32:
+        return cosmos_nvme_admin_policy_status_generic(SC_INVALID_OPCODE)
+    if namespace_id != 0u32 or cdw10 != 0u32 or cdw11 != 0u32 or
+        cdw12 != 0u32 or cdw13 != 0u32:
+        return cosmos_nvme_admin_policy_status_generic(SC_INVALID_FIELD)
+    if pending != 0u32:
+        return cosmos_nvme_admin_policy_status_specific(SC_AER_LIMIT_EXCEEDED)
+    STATUS_CONTINUE
+
+@export("C", name: "cosmos_nvme_admin_policy_init_values_valid")
+pub fn cosmos_nvme_admin_policy_init_values_valid(
+    blocks_low: u32, blocks_high: u32, block_bytes: u32
+) -> i32:
+    if (blocks_low != 0u32 or blocks_high != 0u32) and
+        cosmos_nvme_admin_policy_power_of_two(block_bytes) != 0: 1 else: 0
+
+@export("C", name: "cosmos_nvme_admin_policy_adapter_failure_status")
+pub fn cosmos_nvme_admin_policy_adapter_failure_status(result: i32) -> u32:
+    if result == 0: cosmos_nvme_admin_policy_status_success()
+    else: cosmos_nvme_admin_policy_status_generic(SC_INTERNAL_DEVICE_ERROR)
+
+# Test-only semantic probe.  Each id invokes production policy with a vector
+# chosen to exercise one named decision outcome; it has no mutable counters.
+pub fn cosmos_nvme_admin_policy_decision_probe(decision_id: u32, truth_case: u32) -> u32:
+    val t = truth_case != 0u32
+    if decision_id == 0u32: return if cosmos_nvme_admin_policy_power_of_two(if t: 8u32 else: 0u32) != 0: 1u32 else: 0u32
+    if decision_id == 1u32: return if cosmos_nvme_admin_policy_no_payload(if t: 0u32 else: 4u32, 0u32, 0u32, 0u32, 0u32) != 0: 1u32 else: 0u32
+    if decision_id == 2u32: return if cosmos_nvme_admin_policy_queue_base_valid(if t: 0x1000u32 else: 0x1004u32, 0u32, 0u32, 0u32, 0u32) != 0: 1u32 else: 0u32
+    if decision_id == 3u32: return if cosmos_nvme_admin_policy_opcode_supported(if t: 0x06u32 else: 0xFFu32) != 0: 1u32 else: 0u32
+    if decision_id == 4u32: return if cosmos_nvme_admin_policy_payload_valid(0x1000u32, 0u32, 0u32, 0u32, if t: 512u32 else: 4u32, 512u32) != 0: 1u32 else: 0u32
+    if decision_id == 5u32: return if cosmos_nvme_admin_policy_queue_index_valid(if t: 1u32 else: 0u32) != 0: 1u32 else: 0u32
+    if decision_id == 6u32: return if cosmos_nvme_admin_policy_queue_id_allowed(2u32, if t: 2u32 else: 3u32) != 0: 1u32 else: 0u32
+    if decision_id == 7u32: return if cosmos_nvme_admin_policy_controller_namespace_valid(if t: 0u32 else: 2u32) != 0: 1u32 else: 0u32
+    if decision_id == 8u32: return if cosmos_nvme_admin_policy_smart_namespace_valid(if t: NAMESPACE_ALL else: 0u32) != 0: 1u32 else: 0u32
+    if decision_id == 9u32: return if cosmos_nvme_admin_policy_publish_state(if t: 0u32 else: 2u32) == 0u32: 1u32 else: 0u32
+    if decision_id == 10u32: return if cosmos_nvme_admin_policy_payload_status(if t: 1u32 else: 0u32, 0u32) == cosmos_nvme_admin_policy_status_success(): 1u32 else: 0u32
+    if decision_id == 11u32: return if cosmos_nvme_admin_policy_identify_status(0u32, if t: 1u32 else: 0x101u32, 0u32, 0u32, 0u32) == cosmos_nvme_admin_policy_status_success(): 1u32 else: 0u32
+    if decision_id == 12u32: return if cosmos_nvme_admin_policy_identify_status(if t: 0u32 else: 1u32, 1u32, 0u32, 0u32, 0u32) == cosmos_nvme_admin_policy_status_success(): 1u32 else: 0u32
+    if decision_id == 13u32: return if cosmos_nvme_admin_policy_identify_status(NAMESPACE_ID, if t: 0u32 else: 2u32, 0u32, 0u32, 0u32) == cosmos_nvme_admin_policy_status_success(): 1u32 else: 0u32
+    if decision_id == 14u32: return if cosmos_nvme_admin_policy_get_log_status(if t: NAMESPACE_ALL else: 0u32, 0x007F0002u32, 0u32, 0u32, 0u32) == cosmos_nvme_admin_policy_status_success(): 1u32 else: 0u32
+    if decision_id == 15u32: return if cosmos_nvme_admin_policy_get_log_status(NAMESPACE_ALL, if t: 0x007F0002u32 else: 0x007F0003u32, 0u32, 0u32, 0u32) == cosmos_nvme_admin_policy_status_success(): 1u32 else: 0u32
+    if decision_id == 16u32: return if cosmos_nvme_admin_policy_set_features_status(if t: 0u32 else: 2u32, 7u32, 0u32, 0u32, 0u32) == cosmos_nvme_admin_policy_status_success(): 1u32 else: 0u32
+    if decision_id == 17u32: return if cosmos_nvme_admin_policy_set_features_status(0u32, if t: 7u32 else: 0x80000007u32, 0u32, 0u32, 0u32) == cosmos_nvme_admin_policy_status_success(): 1u32 else: 0u32
+    if decision_id == 18u32: return if cosmos_nvme_admin_policy_set_features_status(0u32, 7u32, if t: 0u32 else: 0xFFFFu32, 0u32, 0u32) == cosmos_nvme_admin_policy_status_success(): 1u32 else: 0u32
+    if decision_id == 19u32: return if cosmos_nvme_admin_policy_get_features_status(0u32, if t: 7u32 else: 0x107u32, 0u32, 0u32, 0u32) == cosmos_nvme_admin_policy_status_success(): 1u32 else: 0u32
+    if decision_id == 20u32: return if cosmos_nvme_admin_policy_create_cq_status(4u32, 0u32, 0u32, 1u32, 3u32, 0u32, 0u32, if t: 0x1000u32 else: 0x1004u32, 0u32, 0u32, 0u32, 0u32) == cosmos_nvme_admin_policy_status_success(): 1u32 else: 0u32
+    if decision_id == 21u32: return if cosmos_nvme_admin_policy_create_cq_status(4u32, 0u32, 0u32, if t: 1u32 else: 5u32, 3u32, 0u32, 0u32, 0x1000u32, 0u32, 0u32, 0u32, 0u32) == cosmos_nvme_admin_policy_status_success(): 1u32 else: 0u32
+    if decision_id == 22u32: return if cosmos_nvme_admin_policy_create_cq_status(4u32, 0u32, 0u32, if t: 1u32 else: (64u32 << 16u32) | 1u32, 3u32, 0u32, 0u32, 0x1000u32, 0u32, 0u32, 0u32, 0u32) == cosmos_nvme_admin_policy_status_success(): 1u32 else: 0u32
+    if decision_id == 23u32: return if cosmos_nvme_admin_policy_create_cq_status(4u32, 0u32, 0u32, 1u32, if t: 3u32 else: 7u32, 0u32, 0u32, 0x1000u32, 0u32, 0u32, 0u32, 0u32) == cosmos_nvme_admin_policy_status_success(): 1u32 else: 0u32
+    if decision_id == 24u32: return if cosmos_nvme_admin_policy_create_cq_status(4u32, if t: 0u32 else: 1u32, 0u32, 1u32, 3u32, 0u32, 0u32, 0x1000u32, 0u32, 0u32, 0u32, 0u32) == cosmos_nvme_admin_policy_status_success(): 1u32 else: 0u32
+    if decision_id == 25u32: return if cosmos_nvme_admin_policy_create_sq_status(4u32, if t: 1u32 else: 0u32, 0u32, 0u32, 1u32, 0x00010001u32, 0u32, 0u32, 0x1000u32, 0u32, 0u32, 0u32, 0u32) == cosmos_nvme_admin_policy_status_success(): 1u32 else: 0u32
+    if decision_id == 26u32: return if cosmos_nvme_admin_policy_create_sq_status(4u32, 1u32, if t: 0u32 else: 1u32, 0u32, 1u32, 0x00010001u32, 0u32, 0u32, 0x1000u32, 0u32, 0u32, 0u32, 0u32) == cosmos_nvme_admin_policy_status_success(): 1u32 else: 0u32
+    if decision_id == 27u32: return if cosmos_nvme_admin_policy_delete_sq_status(4u32, if t: 1u32 else: 0u32, 0u32, 1u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32) == cosmos_nvme_admin_policy_status_success(): 1u32 else: 0u32
+    if decision_id == 28u32: return if cosmos_nvme_admin_policy_delete_cq_status(4u32, 1u32, if t: 0u32 else: 1u32, 0u32, 1u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32) == cosmos_nvme_admin_policy_status_success(): 1u32 else: 0u32
+    if decision_id == 29u32: return if cosmos_nvme_admin_policy_abort_status(4u32, 1u32, if t: 0u32 else: 1u32, 0u32, 0u32, 0u32, 0u32) == cosmos_nvme_admin_policy_status_success(): 1u32 else: 0u32
+    if decision_id == 30u32: return if cosmos_nvme_admin_policy_abort_result(0u32, 2u32, 1u32, if t: 2u32 else: 3u32) == 0u32: 1u32 else: 0u32
+    if decision_id == 31u32: return if cosmos_nvme_admin_policy_envelope_status(if t: 0u32 else: 1u32, 0u32, 1u32, 0x09u32, 0u32, 0u32, 0u32, 0u32, 0u32) == STATUS_CONTINUE: 1u32 else: 0u32
+    if decision_id == 32u32: return if cosmos_nvme_admin_policy_async_event_status(if t: 1u32 else: 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32) == STATUS_CONTINUE: 1u32 else: 0u32
+    if decision_id == 33u32: return if cosmos_nvme_admin_policy_init_values_valid(if t: 1u32 else: 0u32, 0u32, 512u32) != 0: 1u32 else: 0u32
+    if decision_id == 34u32: return if cosmos_nvme_admin_policy_adapter_failure_status(if t: 0 else: 4) == cosmos_nvme_admin_policy_status_success(): 1u32 else: 0u32
+    0u32

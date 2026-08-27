@@ -2,6 +2,31 @@
 
 > Verifies that `.ui.sdn` layout files are correctly parsed into `UITree` structures. Tests the full pipeline: file loading, tree construction, property extraction, child traversal, and state initialization.
 
+<!-- sdn-diagram:id=sdn_parsing_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=sdn_parsing_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+sdn_parsing_spec -> std
+sdn_parsing_spec -> nogc_sync_mut
+sdn_parsing_spec -> common
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=sdn_parsing_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 18 | 18 | 0 | 0 |
@@ -26,7 +51,7 @@ Verifies that `.ui.sdn` layout files are correctly parsed into `UITree` structur
 | Design | N/A |
 | Research | N/A |
 | Source | `test/03_system/gui/sdn_parsing_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -44,24 +69,22 @@ property extraction, child traversal, and state initialization.
 
 #### parses successfully and returns Ok _(slow)_
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- parses successfully and returns Ok
+1. Ok
    - Expected: tree.title equals `Minimal`
    - Expected: tree.theme equals `glass_dark`
 
+2. Err
+
+3. fail
+
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses successfully and returns Ok")
 val result = parse_ui_to_tree("examples/06_io/ui/minimal.ui.sdn")
 match result:
     Ok(tree) :
@@ -81,18 +104,20 @@ match result:
 
 #### parsed tree root is not nil _(slow)_
 
-- parsed tree root is not nil
+1. Ok
+
+2. Err
+
+3. fail
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parsed tree root is not nil")
 val result = parse_ui_to_tree("examples/06_io/ui/minimal.ui.sdn")
 match result:
     Ok(tree) :
@@ -112,19 +137,21 @@ match result:
 
 #### parsed tree has a title property _(slow)_
 
-- parsed tree has a title property
+1. Ok
    - Expected: tree.title equals `Minimal`
+
+2. Err
+
+3. fail
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parsed tree has a title property")
 val result = parse_ui_to_tree("examples/06_io/ui/minimal.ui.sdn")
 match result:
     Ok(tree) :
@@ -143,18 +170,20 @@ match result:
 
 #### parsed tree has at least one child _(slow)_
 
-- parsed tree has at least one child
+1. Ok
+
+2. Err
+
+3. fail
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parsed tree has at least one child")
 val result = parse_ui_to_tree("examples/06_io/ui/minimal.ui.sdn")
 match result:
     Ok(tree) :
@@ -174,18 +203,20 @@ match result:
 
 #### contains a greeting text widget _(slow)_
 
-- contains a greeting text widget
+1. Ok
+
+2. Err
+
+3. fail
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("contains a greeting text widget")
 val result = parse_ui_to_tree("examples/06_io/ui/minimal.ui.sdn")
 match result:
     Ok(tree) :
@@ -213,20 +244,22 @@ match result:
 
 #### parses successfully and returns Ok _(slow)_
 
-- parses successfully and returns Ok
+1. Ok
    - Expected: tree.title equals `Simple UI Demo`
    - Expected: tree.theme equals `glass_dark`
 
+2. Err
+
+3. fail
+
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses successfully and returns Ok")
 val result = parse_ui_to_tree("examples/06_io/ui/demo.ui.sdn")
 match result:
     Ok(tree) :
@@ -246,18 +279,20 @@ match result:
 
 #### parsed tree root is not nil _(slow)_
 
-- parsed tree root is not nil
+1. Ok
+
+2. Err
+
+3. fail
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parsed tree root is not nil")
 val result = parse_ui_to_tree("examples/06_io/ui/demo.ui.sdn")
 match result:
     Ok(tree) :
@@ -277,19 +312,21 @@ match result:
 
 #### parsed tree has correct title _(slow)_
 
-- parsed tree has correct title
+1. Ok
    - Expected: tree.title equals `Simple UI Demo`
+
+2. Err
+
+3. fail
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parsed tree has correct title")
 val result = parse_ui_to_tree("examples/06_io/ui/demo.ui.sdn")
 match result:
     Ok(tree) :
@@ -308,19 +345,21 @@ match result:
 
 #### parsed tree has dark theme _(slow)_
 
-- parsed tree has dark theme
+1. Ok
    - Expected: tree.theme equals `glass_dark`
+
+2. Err
+
+3. fail
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parsed tree has dark theme")
 val result = parse_ui_to_tree("examples/06_io/ui/demo.ui.sdn")
 match result:
     Ok(tree) :
@@ -339,18 +378,20 @@ match result:
 
 #### widget tree has multiple children _(slow)_
 
-- widget tree has multiple children
+1. Ok
+
+2. Err
+
+3. fail
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("widget tree has multiple children")
 val result = parse_ui_to_tree("examples/06_io/ui/demo.ui.sdn")
 match result:
     Ok(tree) :
@@ -370,18 +411,20 @@ match result:
 
 #### all_widget_ids returns multiple ids _(slow)_
 
-- all_widget_ids returns multiple ids
+1. Ok
+
+2. Err
+
+3. fail
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("all_widget_ids returns multiple ids")
 val result = parse_ui_to_tree("examples/06_io/ui/demo.ui.sdn")
 match result:
     Ok(tree) :
@@ -401,18 +444,20 @@ match result:
 
 #### all_widget_ids includes status widget _(slow)_
 
-- all_widget_ids includes status widget
+1. Ok
+
+2. Err
+
+3. fail
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("all_widget_ids includes status widget")
 val result = parse_ui_to_tree("examples/06_io/ui/demo.ui.sdn")
 match result:
     Ok(tree) :
@@ -434,18 +479,20 @@ match result:
 
 #### returns Err for nonexistent file _(slow)_
 
-- returns Err for nonexistent file
+1. Err
+
+2. Ok
+
+3. fail
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns Err for nonexistent file")
 val result = parse_ui_to_tree("nonexistent/path/does_not_exist.ui.sdn")
 match result:
     Err(e) :
@@ -464,18 +511,20 @@ match result:
 
 #### error message contains useful information _(slow)_
 
-- error message contains useful information
+1. Err
+
+2. Ok
+
+3. fail
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("error message contains useful information")
 val result = parse_ui_to_tree("/tmp/no_such_file_12345.ui.sdn")
 match result:
     Err(e) :
@@ -496,18 +545,20 @@ match result:
 
 #### creates a UIState with focused_id set _(slow)_
 
-- creates a UIState with focused_id set
+1. Ok
+
+2. Err
+
+3. fail
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates a UIState with focused_id set")
 val result = parse_ui_to_tree("examples/06_io/ui/minimal.ui.sdn")
 match result:
     Ok(tree) :
@@ -528,19 +579,21 @@ match result:
 
 #### creates a UIState in Normal mode _(slow)_
 
-- creates a UIState in Normal mode
+1. Ok
    - Expected: state.mode_name() equals `NORMAL`
+
+2. Err
+
+3. fail
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates a UIState in Normal mode")
 val result = parse_ui_to_tree("examples/06_io/ui/minimal.ui.sdn")
 match result:
     Ok(tree) :
@@ -560,19 +613,21 @@ match result:
 
 #### creates a UIState with empty command buffer _(slow)_
 
-- creates a UIState with empty command buffer
+1. Ok
    - Expected: state.command_buffer equals ``
+
+2. Err
+
+3. fail
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates a UIState with empty command buffer")
 val result = parse_ui_to_tree("examples/06_io/ui/demo.ui.sdn")
 match result:
     Ok(tree) :
@@ -592,19 +647,21 @@ match result:
 
 #### state tree preserves the original title _(slow)_
 
-- state tree preserves the original title
+1. Ok
    - Expected: state.tree.title equals `Simple UI Demo`
+
+2. Err
+
+3. fail
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("state tree preserves the original title")
 val result = parse_ui_to_tree("examples/06_io/ui/demo.ui.sdn")
 match result:
     Ok(tree) :
@@ -631,51 +688,3 @@ match result:
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `704b210008ba36be715c135d5d06125fb4a466214485103f3ad51c1e2bfa53d4`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `704b210008ba36be715c135d5d06125fb4a466214485103f3ad51c1e2bfa53d4`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `704b210008ba36be715c135d5d06125fb4a466214485103f3ad51c1e2bfa53d4`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/gui/sdn_parsing_spec.spl
-mirror: doc/06_spec/03_system/gui/sdn_parsing_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/gui/sdn_parsing_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/gui/sdn_parsing_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/gui/sdn_parsing_spec.spl:45:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses successfully and returns Ok' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/gui/sdn_parsing_spec.spl:56:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parsed tree root is not nil' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/gui/sdn_parsing_spec.spl:67:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parsed tree has a title property' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

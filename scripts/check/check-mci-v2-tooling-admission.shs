@@ -8,6 +8,17 @@ child_ids='compiler-check lib-check mcp-check lsp-check bootstrap-essential boot
 scenarios='MCI-TOOL-001,MCI-TOOL-002,MCI-TOOL-003,MCI-NFR-001,MCI-NFR-002,MCI-NFR-005,MCI-NFR-006,MCI-NFR-013,MCI-NFR-014'
 capture_limit=16777216
 timeout_seconds=1800
+scan_count_limit=0
+warm_cli_min_samples=30
+warm_request_min_samples=1000
+warm_cli_p95_max_ms=250
+warm_cli_rss_max_kib=262144
+warm_mcp_startup_max_ms=500
+warm_mcp_request_p95_max_ms=100
+warm_mcp_rss_max_kib=524288
+warm_lsp_startup_max_ms=1500
+warm_lsp_request_p95_max_ms=150
+warm_lsp_rss_max_kib=786432
 
 usage() {
     echo "usage: $0 --evidence DIR --run-id ID --source-hash SHA256 --configuration-hash SHA256 --captured-at-utc-ns NS --valid-until-utc-ns NS [--simple-bin FILE] [--fixture-manifest FILE]" >&2
@@ -44,6 +55,52 @@ field() {
     [ "$(awk -F= -v key="$field_name" '$1 == key {n++} END {print n+0}' "$field_file")" -eq 1 ] || return 1
     sed -n "s/^${field_name}=//p" "$field_file"
 }
+quantile_file() {
+    q_file=$1 q_rank=$2
+    sort -n "$q_file" | sed -n "${q_rank}p"
+}
+validate_uint_file() {
+    validate_file=$1
+    [ -s "$validate_file" ] || return 1
+    awk 'NF != 1 || $1 !~ /^[0-9]+$/ { bad=1 } END { exit bad+0 }' "$validate_file"
+}
+build_warm_raw() {
+    warm_id=$1
+    raw_file="$work/raw/$warm_id.samples"
+    mkdir -p "$work/raw"
+    case "$warm_id" in
+        warm-cli)
+            source_file="$work/raw/warm-cli/warm_cli.samples"
+            [ -f "$source_file" ] || return 1
+            awk -F'|' 'NF == 2 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ { print $1 "|" $2 } NF != 2 || $1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ { bad=1 } END { if (NR == 0 || bad) exit 1 }' "$source_file" > "$raw_file" || return 1
+            sample_values="$work/raw/$warm_id.values"; rss_values="$work/raw/$warm_id.rss"
+            cut -d'|' -f1 "$raw_file" > "$sample_values"; cut -d'|' -f2 "$raw_file" > "$rss_values"
+            startup_p95=$(quantile_file "$sample_values" "$(( ($(wc -l < "$sample_values") * 95 + 99) / 100 ))")
+            ;;
+        warm-mcp|warm-lsp)
+            label=$(case "$warm_id" in warm-mcp) echo mcp;; warm-lsp) echo lsp;; esac)
+            source_dir="$work/raw/$warm_id"
+            [ -f "$source_dir/$label.request_ms" ] && [ -f "$source_dir/$label.startup_ms" ] && [ -f "$source_dir/$label.rss_kib" ] || return 1
+            validate_uint_file "$source_dir/$label.request_ms" || return 1
+            validate_uint_file "$source_dir/$label.startup_ms" || return 1
+            validate_uint_file "$source_dir/$label.rss_kib" || return 1
+            printf 'startup|%s\n' "$(sed -n '1p' "$source_dir/$label.startup_ms")" > "$raw_file"
+            awk '{ print "request|" $1 "|" r }' r="$(sed -n '1p' "$source_dir/$label.rss_kib")" "$source_dir/$label.request_ms" >> "$raw_file"
+            sample_values="$work/raw/$warm_id.values"; rss_values="$work/raw/$warm_id.rss"
+            cat "$source_dir/$label.request_ms" > "$sample_values"
+            printf '%s\n' "$(sed -n '1p' "$source_dir/$label.rss_kib")" > "$rss_values"
+            startup_p95=$(sed -n '1p' "$source_dir/$label.startup_ms")
+            ;;
+    esac
+    validate_uint_file "$sample_values" || return 1
+    samples=$(wc -l < "$sample_values" | tr -d ' ')
+    rank50=$(( (samples + 1) / 2 )); rank95=$(( (samples * 95 + 99) / 100 )); rank99=$(( (samples * 99 + 99) / 100 ))
+    p50=$(quantile_file "$sample_values" "$rank50"); p95=$(quantile_file "$sample_values" "$rank95"); p99=$(quantile_file "$sample_values" "$rank99")
+    max_rss=$(sort -n "$rss_values" | tail -1)
+    [ -n "$samples" ] && [ -n "$p50" ] && [ -n "$p95" ] && [ -n "$p99" ] && [ -n "$max_rss" ] || return 1
+    raw_relpath="raw/$warm_id.samples"
+    raw_sha=$(hash_file "$raw_file")
+}
 snapshot_file() {
     snapshot_source=$1 snapshot_target=$2
     regular_nonsymlink "$snapshot_source" || return 1
@@ -75,7 +132,7 @@ run_bounded() {
     cmd=$1 out=$2 err=$3; of=$work/out.fifo; ef=$work/err.fifo; mkfifo "$of" "$ef"
     awk -v n="$capture_limit" -v meta="$work/out.meta" '{s=$0 ORS;t+=length(s);if(w<n){r=n-w;printf "%s",substr(s,1,r);w+=length(s)}} END{print t+0 > meta}' <"$of" >"$out" & op=$!
     awk -v n="$capture_limit" -v meta="$work/err.meta" '{s=$0 ORS;t+=length(s);if(w<n){r=n-w;printf "%s",substr(s,1,r);w+=length(s)}} END{print t+0 > meta}' <"$ef" >"$err" & ep=$!
-    set +e; timeout -k 10 "$timeout_seconds" sh -c "$cmd" >"$of" 2>"$ef"; rc=$?; wait "$op"; orc=$?; wait "$ep"; erc=$?; set -e
+    set +e; timeout -k 10 "$timeout_seconds" sh -c "$cmd" >"$of" 2>"$ef"; rc=$?; wait "$op"; orc=$?; wait "$ep"; erc=$?
     rm -f "$of" "$ef"; [ "$orc" -eq 0 ] && [ "$erc" -eq 0 ] || return 125
     bounded_stdout_total=$(sed -n '1p' "$work/out.meta"); bounded_stderr_total=$(sed -n '1p' "$work/err.meta")
     bounded_overflow=false
@@ -85,7 +142,7 @@ run_bounded() {
 
 validate_manifest() {
     manifest=$1 expected_mode=$2
-    [ "$(field manifest_schema "$manifest" 2>/dev/null || true)" = mci-tooling-child-manifest-v1 ] || return 1
+    [ "$(field manifest_schema "$manifest" 2>/dev/null || true)" = mci-tooling-child-manifest-v2 ] || return 1
     [ "$(field producer_class "$manifest" 2>/dev/null || true)" = tooling-admission ] || return 1
     [ "$(field mode "$manifest" 2>/dev/null || true)" = "$expected_mode" ] || return 1
     [ "$(field run_id "$manifest" 2>/dev/null || true)" = "$run_id" ] || return 1
@@ -94,6 +151,18 @@ validate_manifest() {
     [ "$(field required_child_ids "$manifest" 2>/dev/null || true)" = "$child_ids" ] || return 1
     [ "$(field capture_limit_bytes "$manifest" 2>/dev/null || true)" = "$capture_limit" ] || return 1
     [ "$(field timeout_seconds "$manifest" 2>/dev/null || true)" = "$timeout_seconds" ] || return 1
+    [ "$(field scan_count_limit "$manifest" 2>/dev/null || true)" = "$scan_count_limit" ] || return 1
+    [ "$(field scan_count_policy "$manifest" 2>/dev/null || true)" = per-row-explicit ] || return 1
+    [ "$(field warm_cli_min_samples "$manifest" 2>/dev/null || true)" = "$warm_cli_min_samples" ] || return 1
+    [ "$(field warm_request_min_samples "$manifest" 2>/dev/null || true)" = "$warm_request_min_samples" ] || return 1
+    [ "$(field warm_cli_p95_max_ms "$manifest" 2>/dev/null || true)" = "$warm_cli_p95_max_ms" ] || return 1
+    [ "$(field warm_cli_rss_max_kib "$manifest" 2>/dev/null || true)" = "$warm_cli_rss_max_kib" ] || return 1
+    [ "$(field warm_mcp_startup_max_ms "$manifest" 2>/dev/null || true)" = "$warm_mcp_startup_max_ms" ] || return 1
+    [ "$(field warm_mcp_request_p95_max_ms "$manifest" 2>/dev/null || true)" = "$warm_mcp_request_p95_max_ms" ] || return 1
+    [ "$(field warm_mcp_rss_max_kib "$manifest" 2>/dev/null || true)" = "$warm_mcp_rss_max_kib" ] || return 1
+    [ "$(field warm_lsp_startup_max_ms "$manifest" 2>/dev/null || true)" = "$warm_lsp_startup_max_ms" ] || return 1
+    [ "$(field warm_lsp_request_p95_max_ms "$manifest" 2>/dev/null || true)" = "$warm_lsp_request_p95_max_ms" ] || return 1
+    [ "$(field warm_lsp_rss_max_kib "$manifest" 2>/dev/null || true)" = "$warm_lsp_rss_max_kib" ] || return 1
     manifest_rows=$(grep -c '^row=' "$manifest" || true)
     [ "$manifest_rows" -eq 17 ] || return 1
     for child_id in $child_ids; do
@@ -104,10 +173,50 @@ validate_manifest() {
         case "$1" in pass|blocked|fail) :;; *) return 1;; esac
         is_sha256 "$2" && is_sha256 "$3" && is_sha256 "$4" && is_sha256 "$6" || return 1
         for number in "$5" "$7" "$8" "$9" "${10}" "${11}" "${13}" "${14}" "${15}" "${16}" "${17}" "${18}" "${19}"; do is_uint "$number" || return 1; done
-        [ "$5" -le "$capture_limit" ] && [ "$7" -le "$capture_limit" ] && [ "${19}" -le 500 ] || return 1
+        [ "$5" -le "$capture_limit" ] && [ "$7" -le "$capture_limit" ] && [ "${13}" -eq "$scan_count_limit" ] && [ "${19}" -le 500 ] || return 1
+        case "$child_id" in
+            warm-cli) [ "${14}" -ge "$warm_cli_min_samples" ] && [ "${16}" -gt 0 ] && [ "${17}" -gt 0 ] && [ "${16}" -le "$warm_cli_p95_max_ms" ] && [ "${17}" -le "$warm_cli_rss_max_kib" ] || return 1 ;;
+            warm-mcp) [ "${14}" -ge "$warm_request_min_samples" ] && [ "${16}" -gt 0 ] && [ "${17}" -gt 0 ] && [ "${16}" -le "$warm_mcp_request_p95_max_ms" ] && [ "${17}" -le "$warm_mcp_rss_max_kib" ] || return 1 ;;
+            warm-lsp) [ "${14}" -ge "$warm_request_min_samples" ] && [ "${16}" -gt 0 ] && [ "${17}" -gt 0 ] && [ "${16}" -le "$warm_lsp_request_p95_max_ms" ] && [ "${17}" -le "$warm_lsp_rss_max_kib" ] || return 1 ;;
+            *) : ;;
+        esac
         case "${12}" in true|false) :;; *) return 1;; esac
         if [ "$1" = pass ]; then [ "${11}" -eq 0 ] && [ "${12}" = false ] || return 1; fi
     done
+    policy_rows=$(grep -c '^scan_policy=' "$manifest" || true)
+    [ "$policy_rows" -eq 17 ] || return 1
+    awk -F'|' -v ids="$child_ids" 'BEGIN { n=split(ids,a," "); for(i=1;i<=n;i++) expected[a[i]]=1 }
+        /^scan_policy=/ { id=substr($1,13); if (NF != 3 || $2 != "not-applicable" || $3 != "command-contract-v1" || !expected[id] || seen[id]++) bad=1 }
+        END { for(i=1;i<=n;i++) if (!seen[a[i]]) bad=1; exit bad+0 }' "$manifest" || return 1
+    metric_rows=$(grep -c '^metric=' "$manifest" || true)
+    [ "$metric_rows" -eq 3 ] || return 1
+    for warm_id in warm-cli warm-mcp warm-lsp; do
+        metric=$(sed -n "s/^metric=${warm_id}|//p" "$manifest")
+        [ "$(printf '%s\n' "$metric" | grep -c . || true)" -eq 1 ] || return 1
+        old_ifs=$IFS; IFS='|'; set -- $metric; IFS=$old_ifs
+        [ "$#" -eq 16 ] && [ "$1" = startup_p95_ms ] && is_uint "$2" && [ "$2" -gt 0 ] || return 1
+        [ "$3" = samples ] && is_uint "$4" && [ "$4" -ge 1 ] || return 1
+        [ "$5" = p50_ms ] && is_uint "$6" && [ "$6" -gt 0 ] || return 1
+        [ "$7" = p95_ms ] && is_uint "$8" && [ "$8" -gt 0 ] || return 1
+        [ "$9" = p99_ms ] && is_uint "${10}" && [ "${10}" -gt 0 ] || return 1
+        [ "${11}" = max_rss_kib ] && is_uint "${12}" && [ "${12}" -gt 0 ] || return 1
+        [ "${13}" = raw_relpath ] && [ "${14}" = "raw/$warm_id.samples" ] || return 1
+        [ "${15}" = raw_sha256 ] && is_sha256 "${16}" || return 1
+        case "$warm_id" in
+            warm-cli) [ "$2" -le "$warm_cli_p95_max_ms" ] && [ "$8" -le "$warm_cli_p95_max_ms" ] || return 1 ;;
+            warm-mcp) [ "$2" -le "$warm_mcp_startup_max_ms" ] && [ "$8" -le "$warm_mcp_request_p95_max_ms" ] || return 1 ;;
+            warm-lsp) [ "$2" -le "$warm_lsp_startup_max_ms" ] && [ "$8" -le "$warm_lsp_request_p95_max_ms" ] || return 1 ;;
+        esac
+    done
+    baseline_rows=$(grep -c '^baseline=' "$manifest" || true)
+    [ "$baseline_rows" -eq 3 ] || return 1
+    while IFS='|' read -r name p95_base rss_base; do
+        case "$name" in warm-cli|warm-mcp|warm-lsp) :;; *) return 1;; esac
+        is_uint "$p95_base" && is_uint "$rss_base" && [ "$p95_base" -gt 0 ] && [ "$rss_base" -gt 0 ] || return 1
+    done <<EOF
+$(sed -n 's/^baseline=//p' "$manifest")
+EOF
+    awk -F'[=|]' '/^metric=/{if ($2 !~ /^(warm-cli|warm-mcp|warm-lsp)$/ || $3 != "startup_p95_ms" || $4 !~ /^[0-9]+$/) exit 1} END{exit 0}' "$manifest" || return 1
     # No unknown, duplicate, skip, or ambiguous row may be hidden in the file.
     awk -F'[=|]' '/^row=/{print $2}' "$manifest" | sort > "$work/actual-ids"
     for child_id in $child_ids; do echo "$child_id"; done | sort > "$work/expected-ids"
@@ -200,20 +309,25 @@ command_for() {
         direct-env-staged) echo 'sh scripts/audit/direct-env-runtime-guard.shs --staged';;
         runtime-contract) echo 'sh scripts/check/check-runtime-contract-provider-native.shs';;
         artifact-execution) echo 'sh scripts/check/check-mcp-native-smoke.shs';;
-        warm-cli) echo "env SIMPLE_BINARY=$runner sh scripts/check/check-startup-size-performance-audit.shs";;
-        warm-mcp) echo 'env MCI_NFR_ONLY=mcp sh scripts/check/check-mcp-lsp-nfr-evidence.shs';;
-        warm-lsp) echo 'env MCI_NFR_ONLY=lsp sh scripts/check/check-mcp-lsp-nfr-evidence.shs';;
+        warm-cli) echo "env SIMPLE_BINARY=$runner RUNS=$warm_cli_min_samples BUILD_DIR=$work/raw/warm-cli WARM_CLI_BASELINE_P95_MS=${MCI_TOOLING_WARM_CLI_BASELINE_P95_MS:-0} WARM_CLI_BASELINE_RSS_KIB=${MCI_TOOLING_WARM_CLI_BASELINE_RSS_KIB:-0} sh scripts/check/check-startup-size-performance-audit.shs";;
+        warm-mcp) echo "env MCI_NFR_ONLY=mcp MCP_LSP_NFR_RAW_DIR=$work/raw/warm-mcp MCP_LSP_NFR_BASELINE_P95_MS=${MCI_TOOLING_WARM_MCP_BASELINE_P95_MS:-0} MCP_LSP_NFR_BASELINE_RSS_KIB=${MCI_TOOLING_WARM_MCP_BASELINE_RSS_KIB:-0} MCP_LSP_NFR_SAMPLES=$warm_request_min_samples MCP_LSP_NFR_STARTUP_MAX_MS=$warm_mcp_startup_max_ms MCP_LSP_NFR_REQUEST_P95_MAX_MS=$warm_mcp_request_p95_max_ms MCP_LSP_NFR_RSS_MAX_KIB=$warm_mcp_rss_max_kib sh scripts/check/check-mcp-lsp-nfr-evidence.shs";;
+        warm-lsp) echo "env MCI_NFR_ONLY=lsp MCP_LSP_NFR_RAW_DIR=$work/raw/warm-lsp MCP_LSP_NFR_BASELINE_P95_MS=${MCI_TOOLING_WARM_LSP_BASELINE_P95_MS:-0} MCP_LSP_NFR_BASELINE_RSS_KIB=${MCI_TOOLING_WARM_LSP_BASELINE_RSS_KIB:-0} MCP_LSP_NFR_SAMPLES=$warm_request_min_samples MCP_LSP_NFR_STARTUP_MAX_MS=$warm_lsp_startup_max_ms MCP_LSP_NFR_REQUEST_P95_MAX_MS=$warm_lsp_request_p95_max_ms MCP_LSP_NFR_RSS_MAX_KIB=$warm_lsp_rss_max_kib sh scripts/check/check-mcp-lsp-nfr-evidence.shs";;
     esac
 }
 
 {
-    echo 'manifest_schema=mci-tooling-child-manifest-v1'; echo 'producer_class=tooling-admission'; echo 'mode=live'; echo 'release_eligible=true'
+    echo 'manifest_schema=mci-tooling-child-manifest-v2'; echo 'producer_class=tooling-admission'; echo 'mode=live'; echo 'release_eligible=true'
     echo "run_id=$run_id"; echo "source_hash=$source_hash"; echo "configuration_hash=$configuration_hash"
     echo "required_child_ids=$child_ids"; echo "capture_limit_bytes=$capture_limit"; echo "timeout_seconds=$timeout_seconds"
+    echo "scan_count_limit=$scan_count_limit"; echo "scan_count_policy=per-row-explicit"; echo "warm_cli_min_samples=$warm_cli_min_samples"; echo "warm_request_min_samples=$warm_request_min_samples"
+    echo "warm_cli_p95_max_ms=$warm_cli_p95_max_ms"; echo "warm_cli_rss_max_kib=$warm_cli_rss_max_kib"
+    echo "warm_mcp_startup_max_ms=$warm_mcp_startup_max_ms"; echo "warm_mcp_request_p95_max_ms=$warm_mcp_request_p95_max_ms"; echo "warm_mcp_rss_max_kib=$warm_mcp_rss_max_kib"
+    echo "warm_lsp_startup_max_ms=$warm_lsp_startup_max_ms"; echo "warm_lsp_request_p95_max_ms=$warm_lsp_request_p95_max_ms"; echo "warm_lsp_rss_max_kib=$warm_lsp_rss_max_kib"
 } > "$work/manifest"
 result=pass
 cd "$repo_root"
 for child_id in $child_ids; do
+    status=pass
     command_text=$(command_for "$child_id"); command_sha=$(printf '%s' "$command_text" | { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; } | awk '{print $1}')
     stdout="$work/$child_id.stdout"; stderr="$work/$child_id.stderr"
     fixture_sha=$(printf '%s' "$source_hash|$configuration_hash|$child_id" | { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; } | awk '{print $1}')
@@ -229,16 +343,37 @@ for child_id in $child_ids; do
     [ "$bounded_overflow" = false ] || { status=blocked; result=blocked; }
     if [ "$stdout_bytes" -gt "$capture_limit" ] || [ "$stderr_bytes" -gt "$capture_limit" ]; then status=blocked; result=blocked; fi
     stdout_sha=$(hash_file "$stdout"); stderr_sha=$(hash_file "$stderr")
-    scan_count=$(grep -Eic 'scan|files? checked' "$stdout" "$stderr" 2>/dev/null || true)
-    samples=$(sed -n 's/^samples=//p' "$stdout" | tail -1); samples=${samples:-1}
-    p50=$(sed -n 's/^.*p50[^=]*=\([0-9][0-9]*\).*$/\1/p' "$stdout" | tail -1); p50=${p50:-0}
-    p95=$(sed -n 's/^.*p95[^=]*=\([0-9][0-9]*\).*$/\1/p' "$stdout" | tail -1); p95=${p95:-0}
-    max_rss=$(sed -n 's/^.*max_rss[^=]*=\([0-9][0-9]*\).*$/\1/p' "$stdout" | sort -n | tail -1); max_rss=${max_rss:-0}
-    baseline=$(sed -n 's/^.*baseline[^=]*=\([0-9][0-9]*\).*$/\1/p' "$stdout" | tail -1); baseline=${baseline:-$p95}
+    scan_count=$(sed -n 's/^scan_count=//p' "$stdout" | tail -1)
+    scan_count=${scan_count:-0}
+    samples=0; startup_p95=0; p50=0; p95=0; p99=0; max_rss=0; raw_sha=; raw_relpath=
+    case "$child_id" in
+        warm-cli|warm-mcp|warm-lsp)
+            if ! build_warm_raw "$child_id"; then status=blocked; result=blocked; fi
+            ;;
+    esac
+    is_uint "$scan_count" || scan_count=0
+    is_uint "$samples" || samples=0
+    is_uint "$startup_p95" || startup_p95=0
+    is_uint "$p50" || p50=0
+    is_uint "$p95" || p95=0
+    is_uint "$p99" || p99=0
+    is_uint "$max_rss" || max_rss=0
+    case "$child_id" in
+        warm-cli) [ "$samples" -ge "$warm_cli_min_samples" ] && [ "$startup_p95" -gt 0 ] && [ "$startup_p95" -le "$warm_cli_p95_max_ms" ] && [ "$p95" -gt 0 ] && [ "$p95" -le "$warm_cli_p95_max_ms" ] && [ "$max_rss" -gt 0 ] && [ "$max_rss" -le "$warm_cli_rss_max_kib" ] || { status=blocked; result=blocked; } ;;
+        warm-mcp) [ "$samples" -ge "$warm_request_min_samples" ] && [ "$startup_p95" -gt 0 ] && [ "$startup_p95" -le "$warm_mcp_startup_max_ms" ] && [ "$p95" -gt 0 ] && [ "$p95" -le "$warm_mcp_request_p95_max_ms" ] && [ "$max_rss" -gt 0 ] && [ "$max_rss" -le "$warm_mcp_rss_max_kib" ] || { status=blocked; result=blocked; } ;;
+        warm-lsp) [ "$samples" -ge "$warm_request_min_samples" ] && [ "$startup_p95" -gt 0 ] && [ "$startup_p95" -le "$warm_lsp_startup_max_ms" ] && [ "$p95" -gt 0 ] && [ "$p95" -le "$warm_lsp_request_p95_max_ms" ] && [ "$max_rss" -gt 0 ] && [ "$max_rss" -le "$warm_lsp_rss_max_kib" ] || { status=blocked; result=blocked; } ;;
+    esac
+    baseline=$(sed -n 's/^baseline_p95_ms=//p' "$stdout" | tail -1); baseline=${baseline:-0}
+    baseline_rss=$(sed -n 's/^baseline_rss_kib=//p' "$stdout" | tail -1); baseline_rss=${baseline_rss:-0}
+    case "$child_id" in warm-cli|warm-mcp|warm-lsp) [ "$baseline" -gt 0 ] && [ "$baseline_rss" -gt 0 ] || { status=blocked; result=blocked; };; esac
     regression_bp=0
     if [ "$baseline" -gt 0 ] && [ "$p95" -gt "$baseline" ]; then regression_bp=$(( (p95 - baseline) * 10000 / baseline )); fi
+    if [ "$baseline_rss" -gt 0 ] && [ "$max_rss" -gt "$baseline_rss" ]; then rss_regression_bp=$(( (max_rss - baseline_rss) * 10000 / baseline_rss )); else rss_regression_bp=0; fi
+    [ "$rss_regression_bp" -le "$regression_bp" ] || regression_bp=$rss_regression_bp
     [ "$regression_bp" -le 500 ] || { status=blocked; result=blocked; }
     echo "row=$child_id|$status|$command_sha|$fixture_sha|$stdout_sha|$stdout_bytes|$stderr_sha|$stderr_bytes|$start_ns|$end_ns|$duration_ns|$exit_code|$timed_out|$scan_count|$samples|$p50|$p95|$max_rss|$baseline|$regression_bp" >> "$work/manifest"
+    echo "scan_policy=$child_id|not-applicable|command-contract-v1" >> "$work/manifest"
+    case "$child_id" in warm-cli|warm-mcp|warm-lsp) echo "metric=$child_id|startup_p95_ms|$startup_p95|samples|$samples|p50_ms|$p50|p95_ms|$p95|p99_ms|$p99|max_rss_kib|$max_rss|raw_relpath|$raw_relpath|raw_sha256|$raw_sha" >> "$work/manifest"; echo "baseline=$child_id|$baseline|$baseline_rss" >> "$work/manifest";; esac
 done
 validate_manifest "$work/manifest" live || blocked 'internally produced child manifest failed validation'
 [ "$result" = pass ] || blocked 'one or more required tooling children failed, timed out, exceeded capture, or regressed beyond five percent'
@@ -246,6 +381,12 @@ validate_manifest "$work/manifest" live || blocked 'internally produced child ma
 mkdir "$work/generation"
 cp "$work/manifest" "$work/generation/manifest.env"
 for stream in "$work"/*.stdout "$work"/*.stderr; do cp "$stream" "$work/generation/$(basename "$stream")"; done
+mkdir "$work/generation/raw"
+for warm_id in warm-cli warm-mcp warm-lsp; do
+    raw_file="$work/raw/$warm_id.samples"
+    regular_nonsymlink "$raw_file" || blocked "missing canonical raw sample file: $warm_id"
+    cp -- "$raw_file" "$work/generation/raw/$warm_id.samples"
+done
 tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf "$work/tooling-generation-v1.tar" -C "$work/generation" .
 manifest_sha=$(hash_file "$work/tooling-generation-v1.tar")
 {
@@ -254,7 +395,7 @@ manifest_sha=$(hash_file "$work/tooling-generation-v1.tar")
     echo "run_id=$run_id"; echo "source_hash=$source_hash"; echo "configuration_hash=$configuration_hash"
     echo "captured_at_utc_ns=$captured_at"; echo "valid_until_utc_ns=$valid_until"; echo 'result=pass'
     echo "scenarios=$scenarios"; echo 'artifact_relpath=tooling-generation-v1.tar'; echo "artifact_sha256=$manifest_sha"
-    echo 'artifact_schema=mci-tooling-child-manifest-v1'; echo 'artifact_mode=live'; echo 'release_eligible=true'
+    echo 'artifact_schema=mci-tooling-child-manifest-v2'; echo 'artifact_mode=live'; echo 'release_eligible=true'
     echo 'receipt_hash=signer-must-canonicalize-hash-and-sign'
 } > "$work/tooling.unsigned.template"
 # The template is intentionally non-admissible (unsigned-template and invalid

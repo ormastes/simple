@@ -2,6 +2,29 @@
 
 > This specification keeps the multicore-green parallel-agent plan readable for future agents. The plan must use meaningful lane names instead of lettered or numbered labels, and each lane must remain tied to concrete deliverables and acceptance evidence.
 
+<!-- sdn-diagram:id=multicore_green_agent_plan_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=multicore_green_agent_plan_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+multicore_green_agent_plan_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=multicore_green_agent_plan_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 5 | 5 | 0 | 0 |
@@ -25,7 +48,7 @@ This specification keeps the multicore-green parallel-agent plan readable for fu
 | Design | doc/05_design/multicore_green.md |
 | Research | doc/01_research/local/multicore_green.md |
 | Source | `test/03_system/feature/usage/multicore_green_agent_plan_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -62,7 +85,7 @@ Run this guard after editing the multicore-green agent plan:
 ## TUI Capture
 
 ```text
-Simple Test Runner v1.0.0-RC
+Simple Test Runner v1.0.0-beta
 Running: test/03_system/feature/usage/multicore_green_agent_plan_spec.spl
 Multicore green agent plan contract PASSED
 Files: 1
@@ -134,7 +157,7 @@ Failed: 0
 ## Verification Expectations
 
 - Run this SSpec after editing the agent plan.
-- Regenerate `doc/06_spec/03_system/feature/usage/multicore_green_agent_plan_spec.md`
+- Regenerate `doc/06_spec/test/03_system/feature/usage/multicore_green_agent_plan_spec.md`
   after changing this SSpec.
 - Rerun `test/03_system/feature/usage/multicore_green_tracking_spec.spl` after
   adding this spec to the feature database.
@@ -153,11 +176,6 @@ Failed: 0
 
 #### uses meaningful lane headings instead of lettered agent names
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- uses meaningful lane headings instead of lettered agent names
 - Read the multicore-green parallel-agent plan
 - Verify each parallel lane uses a descriptive heading
 - Reject opaque lettered agent headings
@@ -171,12 +189,10 @@ Failed: 0
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses meaningful lane headings instead of lettered agent names")
 step("Read the multicore-green parallel-agent plan")
 val plan = plan_text()
 step("Verify each parallel lane uses a descriptive heading")
@@ -198,7 +214,6 @@ expect(absent_in_text(plan, "## Agent E:")).to_equal(1)
 
 #### keeps each lane tied to deliverables and acceptance evidence
 
-- keeps each lane tied to deliverables and acceptance evidence
 - Read the multicore-green parallel-agent plan
 - Verify the plan still names the canonical deliverable and evidence sections
    - Expected: absent_in_text(plan, "profile_report_contract_test.shs cross_language scripts/check/check-cross-language-perf.shs") equals `1`
@@ -210,12 +225,10 @@ expect(absent_in_text(plan, "## Agent E:")).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("keeps each lane tied to deliverables and acceptance evidence")
 step("Read the multicore-green parallel-agent plan")
 val plan = plan_text()
 step("Verify the plan still names the canonical deliverable and evidence sections")
@@ -268,7 +281,6 @@ expect(plan).to_contain("numeric-suffix API-alias rejection")
 
 #### uses meaningful lane names in sequencing and conflict ownership
 
-- uses meaningful lane names in sequencing and conflict ownership
 - Read the multicore-green parallel-agent plan
 - Verify merge sequencing uses named gates with descriptive lane names
 - Reject numbered merge-sequencing labels
@@ -284,12 +296,10 @@ expect(plan).to_contain("numeric-suffix API-alias rejection")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses meaningful lane names in sequencing and conflict ownership")
 step("Read the multicore-green parallel-agent plan")
 val plan = plan_text()
 step("Verify merge sequencing uses named gates with descriptive lane names")
@@ -318,7 +328,6 @@ expect(plan).to_contain("SimpleOS Green Carrier")
 
 #### keeps the public concurrency API naming rules visible
 
-- keeps the public concurrency API naming rules visible
 - Read the multicore-green parallel-agent plan
 - Verify semantic API names remain explicit
 - Verify numbered API names remain forbidden
@@ -327,12 +336,10 @@ expect(plan).to_contain("SimpleOS Green Carrier")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("keeps the public concurrency API naming rules visible")
 step("Read the multicore-green parallel-agent plan")
 val plan = plan_text()
 step("Verify semantic API names remain explicit")
@@ -349,7 +356,6 @@ expect(plan).to_contain("Do not use numbered API names to distinguish behavior."
 
 #### keeps tracker coverage for guide evidence boundaries
 
-- keeps tracker coverage for guide evidence boundaries
 - Read the tracker source and generated manual
 - Verify the guide-boundary scenario remains executable and visible
 - Verify the scenario still protects cooperative green from M:N claims
@@ -360,12 +366,10 @@ expect(plan).to_contain("Do not use numbered API names to distinguish behavior."
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("keeps tracker coverage for guide evidence boundaries")
 step("Read the tracker source and generated manual")
 val tracker = tracker_text()
 val manual = tracker_manual_text()
@@ -404,61 +408,10 @@ expect(tracker).to_contain("numeric-suffix concurrency aliases")
 
 ## Related Documentation
 
-- **Requirements:** `doc/02_requirements/feature/multicore_green.md`
-- **Plan:** `doc/03_plan/agent_tasks/multicore_green.md`
-- **Design:** `doc/05_design/multicore_green.md`
-- **Research:** `doc/01_research/local/multicore_green.md`
+- **Requirements:** [doc/02_requirements/feature/multicore_green.md](doc/02_requirements/feature/multicore_green.md)
+- **Plan:** [doc/03_plan/agent_tasks/multicore_green.md](doc/03_plan/agent_tasks/multicore_green.md)
+- **Design:** [doc/05_design/multicore_green.md](doc/05_design/multicore_green.md)
+- **Research:** [doc/01_research/local/multicore_green.md](doc/01_research/local/multicore_green.md)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `81f7806a5f519e0d1c0e91bdb3711467a4f3696ee2393cc8084fa89103dc13ca`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `81f7806a5f519e0d1c0e91bdb3711467a4f3696ee2393cc8084fa89103dc13ca`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `81f7806a5f519e0d1c0e91bdb3711467a4f3696ee2393cc8084fa89103dc13ca`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/03_system/feature/usage/multicore_green_agent_plan_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/multicore_green_agent_plan_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/multicore_green_agent_plan_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/multicore_green_agent_plan_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/multicore_green_agent_plan_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 12 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/feature/usage/multicore_green_agent_plan_spec.spl:155:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'uses meaningful lane headings instead of lettered agent names' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/multicore_green_agent_plan_spec.spl:174:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps each lane tied to deliverables and acceptance evidence' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/multicore_green_agent_plan_spec.spl:224:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'uses meaningful lane names in sequencing and conflict ownership' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

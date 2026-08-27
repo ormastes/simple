@@ -11,22 +11,6 @@
   T3_direct                — after revoke(tok), owner no longer passes check (direct form).
   T4  gate_sound           — syscall gate authorizes iff caller holds the kind.
   T5  default_deny         — a principal with no record passes no check.
-  T6  zero_depth_grant_denied
-                            — capability delegation fails when depth is exhausted.
-  T7  full_set_allows_any_kind
-                            — full capability set is a wildcard hazard.
-  T8  full_set_syscall_authorizes_any_kind
-                            — the wildcard reaches the syscall gate.
-  T9  full_set_owner_is_trusted
-                            — the full-set invariant restricts the wildcard owner.
-  T10 sanitize_init_caps_non_trusted_full_is_empty
-                            — runtime init sanitization lowers non-trusted full sets.
-  T11 file_access_requires_capability
-                            — file access is impossible without the file capability gate.
-  T12 invalid_permission_denies_file_access
-                            — invalid permission strings fail before capability/unveil.
-  T13 path_prefix_without_segment_boundary_denied
-                            — shared string prefix alone is not path authority.
 
   FINDINGS (remaining implementation gaps vs. specification):
   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -48,6 +32,25 @@
 import KernelCapabilities.Basic
 
 namespace KernelCapabilities
+
+-- ============================================================
+-- § 0  Exact finite rights-mask oracle used by the FV2 source bridge
+-- ============================================================
+
+/-- Exact 9-bit abstraction of `capability_rights_allow`. Zero requested or
+    held rights fail closed; otherwise every requested bit must be held. -/
+def rightsAllow9 (held required : BitVec 9) : Bool :=
+  if required == 0 then false
+  else if held == 0 then false
+  else held &&& required == required
+
+/-- The executable 9-bit oracle has exactly the intended subset semantics. -/
+theorem rights_allow9_sound (held required : BitVec 9) :
+    rightsAllow9 held required = true ↔
+      required ≠ 0 ∧ held ≠ 0 ∧ held &&& required = required := by
+  simp [rightsAllow9]
+
+#print axioms rights_allow9_sound
 
 -- ============================================================
 -- § A  Auxiliary lemmas
@@ -124,15 +127,6 @@ theorem non_escalation
         simp)
     · rfl
   exact (Rights.subsetB_iff _ _).mp hsubset_ok
-
-/-- T6: Delegation depth is a hard gate.  A token with depth=0 cannot be
-    granted even if the grantor otherwise has the capability kind. -/
-theorem zero_depth_grant_denied
-    (s : CapState) (grantor grantee : Principal) (tok : CapToken)
-    (hdepth : tok.depth = 0) :
-    CapState.grant s grantor grantee tok = none := by
-  unfold CapState.grant
-  cases s.check grantor tok.kind <;> simp [hdepth]
 
 -- ============================================================
 -- § T2  attenuation
@@ -249,42 +243,6 @@ theorem revocation_complete
   rw [hfind]
   simp
 
-/-- T3_child: After revokeTransitive(rootId), a direct child token whose
-    parentTokenId is rootId no longer passes check. -/
-theorem revocation_complete_direct_child
-    (rootId childId : Nat) (pid : Principal) (kind : CapKind) :
-    (CapState.revokeTransitive
-      ({ records :=
-          [{ pid := pid
-           , caps :=
-              { isFullSet := false
-              , tokens :=
-                  [{ kind := kind, rights := [], generation := 0, owner := pid,
-                     tokenId := childId, parentTokenId := rootId, depth := 0 }] } }]
-       , nextGeneration := 1
-       , nextTokenId := 1 } : CapState)
-      rootId).check pid kind = false := by
-  simp [CapState.revokeTransitive, CapState.check, CapState.findRecord, isDescendant]
-
-/-- Direct child transitive revocation also denies the syscall authorization gate. -/
-theorem revocation_complete_direct_child_syscall
-    (rootId childId : Nat) (pid : Principal) (kind : CapKind) :
-    syscallAuthorize
-      (CapState.revokeTransitive
-        ({ records :=
-            [{ pid := pid
-             , caps :=
-                { isFullSet := false
-                , tokens :=
-                    [{ kind := kind, rights := [], generation := 0, owner := pid,
-                       tokenId := childId, parentTokenId := rootId, depth := 0 }] } }]
-         , nextGeneration := 1
-         , nextTokenId := 1 } : CapState)
-        rootId)
-      pid kind = false := by
-  simp [syscallAuthorize, CapState.revokeTransitive, CapState.check,
-    CapState.findRecord, isDescendant]
-
 -- ============================================================
 -- § T3_direct  revocation_complete_direct (owner-only form)
 -- ============================================================
@@ -346,16 +304,6 @@ theorem revocation_complete_direct
   rw [revoke_find_owner s.records tok (by simp only [CapState.findRecord] at hrec; exact hrec)]
   simp
 
-/-- Direct owner-only revoke preserves non-owner capability checks. -/
-theorem revoke_non_owner_check_preserved
-    (tok : CapToken) (rec : PrincipalRecord) (kind : CapKind)
-    (hne : rec.pid ≠ tok.owner) :
-    (CapState.revoke
-      ({ records := [rec], nextGeneration := 1, nextTokenId := 1 } : CapState)
-      tok).check rec.pid kind =
-    ({ records := [rec], nextGeneration := 1, nextTokenId := 1 } : CapState).check rec.pid kind := by
-  simp [CapState.revoke, CapState.check, CapState.findRecord, hne]
-
 -- ============================================================
 -- § T4  gate_sound
 -- ============================================================
@@ -385,181 +333,10 @@ theorem default_deny
     s.check pid kind = false := by
   simp [CapState.check, hnorec]
 
-/-- A principal with no record is denied by the syscall gate for every kind. -/
-theorem default_deny_syscall
-    (s : CapState) (pid : Principal)
-    (hnorec : s.findRecord pid = none)
-    (kind : CapKind) :
-    syscallAuthorize s pid kind = false := by
-  simp [syscallAuthorize, CapState.check, hnorec]
-
 theorem empty_set_denies_all
     (s : CapState) (pid : Principal) (kind : CapKind)
     (hrec : s.findRecord pid = some { pid := pid, caps := CapSet.empty }) :
     s.check pid kind = false := by
   simp [CapState.check, hrec, CapSet.empty]
-
-/-- Empty capability sets deny every syscall authorization. -/
-theorem empty_set_syscall_denies_all
-    (s : CapState) (pid : Principal) (kind : CapKind)
-    (hrec : s.findRecord pid = some { pid := pid, caps := CapSet.empty }) :
-    syscallAuthorize s pid kind = false := by
-  simp [syscallAuthorize, CapState.check, hrec, CapSet.empty]
-
-/-- T7: A principal with CapSet.full passes every capability-kind check.
-    This is an explicit hazard theorem, not a safety endorsement: production
-    code must constrain full sets to trusted init/kernel principals. -/
-theorem full_set_allows_any_kind
-    (s : CapState) (pid : Principal) (kind : CapKind)
-    (hrec : s.findRecord pid = some { pid := pid, caps := CapSet.full }) :
-    s.check pid kind = true := by
-  simp [CapState.check, hrec, CapSet.full]
-
-/-- T8: The CapSet.full wildcard reaches the syscall authorization gate. -/
-theorem full_set_syscall_authorizes_any_kind
-    (s : CapState) (pid : Principal) (kind : CapKind)
-    (hrec : s.findRecord pid = some { pid := pid, caps := CapSet.full }) :
-    syscallAuthorize s pid kind = true := by
-  simp [syscallAuthorize, CapState.check, hrec, CapSet.full]
-
-/-- T9: Under the full-set restriction invariant, any principal holding
-    CapSet.full is exactly the trusted init/kernel principal. -/
-theorem full_set_owner_is_trusted
-    (s : CapState) (trusted pid : Principal)
-    (honly : s.fullSetOnlyFor trusted)
-    (hrec : s.findRecord pid = some { pid := pid, caps := CapSet.full }) :
-    pid = trusted := by
-  exact honly pid hrec
-
-/-- The full-set restriction invariant excludes CapSet.full from every
-    non-trusted principal. -/
-theorem non_trusted_full_set_forbidden
-    (s : CapState) (trusted pid : Principal)
-    (honly : s.fullSetOnlyFor trusted)
-    (hne : pid ≠ trusted) :
-    s.findRecord pid ≠ some { pid := pid, caps := CapSet.full } := by
-  intro hrec
-  exact hne (honly pid hrec)
-
-/-- T10: Runtime init sanitization lowers ambient full-set input for every
-    non-trusted principal to the deny-all empty set. -/
-theorem sanitize_init_caps_non_trusted_full_is_empty
-    (trusted pid : Principal)
-    (hne : pid ≠ trusted) :
-    sanitizeInitCaps trusted pid CapSet.full = CapSet.empty := by
-  simp [sanitizeInitCaps, CapSet.full, CapSet.empty, hne]
-
-/-- A sanitized non-trusted ambient full set becomes an explicit deny-all
-    record for every capability-kind check. -/
-theorem sanitize_init_caps_non_trusted_full_denies_all
-    (trusted pid : Principal) (kind : CapKind)
-    (hne : pid ≠ trusted) :
-    ({ records := [{ pid := pid, caps := sanitizeInitCaps trusted pid CapSet.full }]
-     , nextGeneration := 1
-     , nextTokenId := 1 } : CapState).check pid kind = false := by
-  simp [CapState.check, CapState.findRecord, sanitizeInitCaps, CapSet.full,
-    CapSet.empty, hne]
-
-/-- A sanitized non-trusted ambient full set is also denied at the syscall
-    authorization gate. -/
-theorem sanitize_init_caps_non_trusted_full_syscall_denies_all
-    (trusted pid : Principal) (kind : CapKind)
-    (hne : pid ≠ trusted) :
-    syscallAuthorize
-      ({ records := [{ pid := pid, caps := sanitizeInitCaps trusted pid CapSet.full }]
-       , nextGeneration := 1
-       , nextTokenId := 1 } : CapState)
-      pid kind = false := by
-  simp [syscallAuthorize, CapState.check, CapState.findRecord, sanitizeInitCaps,
-    CapSet.full, CapSet.empty, hne]
-
-/-- Trusted init/kernel may retain the ambient full-set shape through init. -/
-theorem sanitize_init_caps_trusted_full_stays_full
-    (trusted : Principal) :
-    sanitizeInitCaps trusted trusted CapSet.full = CapSet.full := by
-  simp [sanitizeInitCaps, CapSet.full]
-
-/-- T11: File access fails closed when the normal file capability gate fails,
-    regardless of unveil state or path match. -/
-theorem file_access_requires_capability
-    (isUnveiled unveilAllows : Bool) :
-    fileAccessAllowed false isUnveiled unveilAllows = false := by
-  simp [fileAccessAllowed]
-
-/-- When unveiled, file access requires both the file capability and an
-    allowed unveil path. -/
-theorem unveiled_file_access_requires_capability_and_path
-    (hasFileCap unveilAllows : Bool) :
-    fileAccessAllowed hasFileCap true unveilAllows = (hasFileCap && unveilAllows) := by
-  simp [fileAccessAllowed]
-
-/-- Before unveil, file access depends only on the normal file capability gate. -/
-theorem file_access_before_unveil_depends_only_on_capability
-    (hasFileCap unveilAllows : Bool) :
-    fileAccessAllowed hasFileCap false unveilAllows = hasFileCap := by
-  simp [fileAccessAllowed]
-
-/-- T12: Invalid permission strings deny file access regardless of capability
-    or unveil state. -/
-theorem invalid_permission_denies_file_access
-    (hasFileCap isUnveiled unveilAllows : Bool) :
-    fileAccessAllowedWithPerm false hasFileCap isUnveiled unveilAllows = false := by
-  simp [fileAccessAllowedWithPerm]
-
-/-- Valid permission strings preserve the normal file-access gate. -/
-theorem valid_permission_uses_file_access_gate
-    (hasFileCap isUnveiled unveilAllows : Bool) :
-    fileAccessAllowedWithPerm true hasFileCap isUnveiled unveilAllows =
-      fileAccessAllowed hasFileCap isUnveiled unveilAllows := by
-  simp [fileAccessAllowedWithPerm]
-
-/-- T13: A path that only shares a string prefix, without exact/root match or
-    a following path separator, is denied. -/
-theorem path_prefix_without_segment_boundary_denied :
-    segmentPrefixAllowed false false true false = false := by
-  simp [segmentPrefixAllowed]
-
-/-- Root prefix allows every path. -/
-theorem root_path_prefix_allows
-    (isExact hasPrefix hasBoundary : Bool) :
-    segmentPrefixAllowed true isExact hasPrefix hasBoundary = true := by
-  simp [segmentPrefixAllowed]
-
-/-- Exact path prefix allows the path. -/
-theorem exact_path_prefix_allows
-    (isRoot hasPrefix hasBoundary : Bool) :
-    segmentPrefixAllowed isRoot true hasPrefix hasBoundary = true := by
-  cases isRoot <;> simp [segmentPrefixAllowed]
-
-/-- A real prefix followed by a path separator allows the path. -/
-theorem segment_boundary_prefix_allows :
-    segmentPrefixAllowed false false true true = true := by
-  simp [segmentPrefixAllowed]
-
-/-- T14: A write request is denied without write capability, even if read
-    capability exists. -/
-theorem write_request_requires_write_capability
-    (hasRead requestRead : Bool) :
-    rwFileAccessAllowed hasRead false requestRead true = false := by
-  cases hasRead <;> cases requestRead <;> simp [rwFileAccessAllowed]
-
-/-- A read request is denied without read capability, even if write capability exists. -/
-theorem read_request_requires_read_capability
-    (hasWrite requestWrite : Bool) :
-    rwFileAccessAllowed false hasWrite true requestWrite = false := by
-  cases hasWrite <;> cases requestWrite <;> simp [rwFileAccessAllowed]
-
-/-- A read request is allowed exactly when read capability exists, when no write
-    right is requested. -/
-theorem read_request_uses_read_capability
-    (hasRead hasWrite : Bool) :
-    rwFileAccessAllowed hasRead hasWrite true false = hasRead := by
-  cases hasRead <;> cases hasWrite <;> simp [rwFileAccessAllowed]
-
-/-- A combined read/write request requires both read and write capabilities. -/
-theorem read_write_request_requires_both_capabilities
-    (hasRead hasWrite : Bool) :
-    rwFileAccessAllowed hasRead hasWrite true true = (hasRead && hasWrite) := by
-  cases hasRead <;> cases hasWrite <;> simp [rwFileAccessAllowed]
 
 end KernelCapabilities

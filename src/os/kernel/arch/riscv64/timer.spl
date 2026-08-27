@@ -28,10 +28,6 @@ use os.kernel.boot.mmio.{mmio_read64}
 # QEMU virt timer frequency (10 MHz)
 val TIMER_FREQ_HZ: u64 = 10000000
 
-# SBI defines an all-ones deadline as the portable way to leave the timer
-# pending strictly in the future while supervisor timer delivery is disabled.
-val TIMER_DISABLED_DEADLINE: u64 = 0xFFFFFFFFFFFFFFFF
-
 # CLINT memory-mapped timer (readable from S-mode on QEMU)
 val CLINT_BASE: u64 = 0x02000000
 val CLINT_MTIME: u64 = 0x0200BFF8       # 64-bit mtime register
@@ -52,7 +48,6 @@ struct Rv64Timer:
 # Global timer state
 var g_timer_freq: u64 = TIMER_FREQ_HZ
 var g_timer_interval: u64 = 0
-var g_timer_deadline: u64 = TIMER_DISABLED_DEADLINE
 
 # ============================================================================
 # Timer Tick Reading
@@ -91,12 +86,6 @@ fn _set_timer_relative(ticks_from_now: u64):
     val now = _read_time_csr()
     _set_timer_deadline(now + ticks_from_now)
 
-fn _arm_periodic_from_now():
-    """Arm the periodic timer and retain its absolute accounting boundary."""
-    val now = _read_time_csr()
-    g_timer_deadline = now + g_timer_interval
-    _set_timer_deadline(g_timer_deadline)
-
 # ============================================================================
 # Rv64Timer Implementation
 # ============================================================================
@@ -111,17 +100,6 @@ impl Rv64Timer:
         """
         g_timer_freq = TIMER_FREQ_HZ
 
-        if frequency_hz > g_timer_freq:
-            # Integer division would produce a zero interval.  Programming
-            # `now + 0` leaves STIP continuously pending and traps the kernel
-            # in the timer IRQ path before the scheduler can make progress.
-            # Retire any earlier deadline and keep delivery disabled instead.
-            g_timer_interval = 0
-            g_timer_deadline = TIMER_DISABLED_DEADLINE
-            csrc_sie(SIE_STIE)
-            _set_timer_deadline(TIMER_DISABLED_DEADLINE)
-            serial_writeln("[TIMER] Disabled: requested tick rate exceeds hardware counter frequency")
-            return
         if frequency_hz > 0:
             g_timer_interval = g_timer_freq / frequency_hz
         else:
@@ -131,7 +109,7 @@ impl Rv64Timer:
         csrs_sie(SIE_STIE)
 
         # Set first timer deadline
-        _arm_periodic_from_now()
+        _set_timer_relative(g_timer_interval)
 
         serial_writeln("[TIMER] Initialized: freq={TIMER_FREQ_HZ} Hz, interval={g_timer_interval} ticks ({frequency_hz} Hz tick)")
 
@@ -164,51 +142,25 @@ impl Rv64Timer:
     fn disable():
         """Disable S-mode timer interrupts."""
         csrc_sie(SIE_STIE)
-        g_timer_deadline = TIMER_DISABLED_DEADLINE
-        _set_timer_deadline(g_timer_deadline)
 
     fn enable():
-        """Re-arm from the current counter before enabling delivery."""
-        if g_timer_interval == 0:
-            return
-        _arm_periodic_from_now()
+        """Enable S-mode timer interrupts."""
         csrs_sie(SIE_STIE)
 
 # ============================================================================
 # Timer Interrupt Handler (called from trap dispatcher)
 # ============================================================================
 
-fn rv64_handle_timer_interrupt() -> u64:
+fn rv64_handle_timer_interrupt():
     """Handle S-mode timer interrupt.
 
-    Reprogram the next timer deadline and return elapsed scheduler periods.
+    Reprogram the next timer deadline and handle scheduling tick.
     Called from the trap vector when scause = 0x8000000000000005
     (interrupt bit set, code 5 = S-mode timer interrupt).
     """
-    # A zero interval is never a schedulable timer.  Quiesce both supervisor
-    # delivery and the SBI deadline so a stale/invalid initialization cannot
-    # turn one pending timer event into an unbounded interrupt storm.
-    if g_timer_interval == 0:
-        csrc_sie(SIE_STIE)
-        _set_timer_deadline(TIMER_DISABLED_DEADLINE)
-        return 0
+    # Set next timer deadline
+    if g_timer_interval > 0:
+        _set_timer_relative(g_timer_interval)
 
-    # Keep deadlines phase-locked to the previous boundary.  Returning the
-    # number of elapsed periods gives the scheduler bridge exact accounting
-    # without requiring it to reread the timer or copy scheduler state.  The
-    # division also replaces an unbounded catch-up loop on a delayed hart.
-    val now = _read_time_csr()
-    var elapsed: u64 = 1
-    if now > g_timer_deadline:
-        elapsed = elapsed + ((now - g_timer_deadline) / g_timer_interval)
-
-    val max_advance = (TIMER_DISABLED_DEADLINE - g_timer_deadline) / g_timer_interval
-    if elapsed > max_advance:
-        # Counter wrap is not expected during a boot, but fail to a fresh
-        # future deadline rather than programming an already-expired value.
-        g_timer_deadline = now + g_timer_interval
-    else:
-        g_timer_deadline = g_timer_deadline + (elapsed * g_timer_interval)
-    _set_timer_deadline(g_timer_deadline)
-
-    elapsed
+    # The scheduler hook would be called here
+    # scheduler_tick()

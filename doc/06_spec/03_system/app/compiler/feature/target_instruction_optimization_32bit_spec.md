@@ -46,7 +46,7 @@ expect(f).to_equal("X86_32")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -67,7 +67,7 @@ expect(f).to_equal("Aarch64")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -88,7 +88,7 @@ expect(f).to_equal("Arm32")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -109,7 +109,7 @@ expect(f).to_equal("Rv64")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -130,7 +130,7 @@ expect(f).to_equal("Rv32")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -151,7 +151,7 @@ expect(f).to_equal("Unknown")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -174,7 +174,7 @@ expect(f).to_equal("Unknown")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -196,7 +196,7 @@ expect(nm).to_equal("X86_64")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -218,7 +218,7 @@ expect(fs.triple).to_equal("x86_64-unknown-linux-gnu")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -242,7 +242,7 @@ expect(fs.triple).to_equal("aarch64-unknown-linux-gnu")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -265,7 +265,7 @@ expect(d.enabled).to_equal(true)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -289,7 +289,7 @@ expect(d.reason).to_contain("missing feature")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -313,7 +313,7 @@ expect(d.reason).to_contain("target")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -338,7 +338,7 @@ expect(d.enabled).to_equal(false)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -359,7 +359,7 @@ expect(p.result).to_equal("legal")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -380,7 +380,7 @@ expect(p.result).to_equal("legal")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -402,7 +402,7 @@ expect(p.reason).to_contain("pointer")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -425,7 +425,7 @@ expect(p.reason).to_contain("unknown")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -449,7 +449,7 @@ expect(plan.len()).to_be_greater_than(0)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -473,7 +473,7 @@ expect(plan.len()).to_equal(0)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -505,7 +505,7 @@ expect(found).to_equal(true)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -528,7 +528,7 @@ expect(d.enabled).to_equal(false)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -551,7 +551,7 @@ expect(d.enabled).to_equal(false)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -575,7 +575,7 @@ expect(d.enabled).to_equal(false)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -596,7 +596,7 @@ expect(r.optimized_runs).to_be_greater_than(0)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -620,7 +620,7 @@ expect(r.optimized_runs).to_be_greater_than(0)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -641,7 +641,7 @@ expect(ok).to_equal(true)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

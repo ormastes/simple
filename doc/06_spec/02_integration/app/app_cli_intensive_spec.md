@@ -844,29 +844,6 @@ for section in help_sections:
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/02_integration/app/app_cli_intensive_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering CLI Build Command - Intensive, CLI Test Command - Intensive, CLI Format Command - Intensive, CLI Stats Command - Intensive, CLI TODO Scanner - Intensive, CLI Bug Tracking - Intensive, CLI Release Command - Intensive, CLI Command Dispatch - Intensive, CLI Help System - Intensive.
-- CLI Build Command - Intensive
-- CLI Test Command - Intensive
-- CLI Format Command - Intensive
-- CLI Stats Command - Intensive
-- CLI TODO Scanner - Intensive
-- CLI Bug Tracking - Intensive
-- CLI Release Command - Intensive
-- CLI Command Dispatch - Intensive
-- CLI Help System - Intensive
-
 ## Scenario Summary
 
 | Metric | Count |

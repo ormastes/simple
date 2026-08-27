@@ -1,7 +1,6 @@
 # Native build monitor test-substring false kill
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+**Status:** SOURCE FIXED
 **Severity:** P1 — a healthy incremental build was terminated as a hung test
 
 ## Reproduction

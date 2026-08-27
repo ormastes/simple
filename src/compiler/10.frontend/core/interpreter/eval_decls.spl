@@ -62,6 +62,9 @@ fn eval_decl(did: i64) -> i64:
             init_val = eval_expr(body[0])
             if eval_had_error: return -1
         env_define_global(name, init_val)
+        val owner_module = decl_owner_module_get(did)
+        if owner_module != "":
+            env_define_global(owner_module + "." + name, init_val)
         return init_val
 
     if tag == EVAL_DECL_LAZY_VAL:
@@ -71,6 +74,9 @@ fn eval_decl(did: i64) -> i64:
         if lv_body.len() > 0:
             thunk_val = val_make_thunk(lv_body[0])
         env_define_global(lv_name, thunk_val)
+        val lv_owner_module = decl_owner_module_get(did)
+        if lv_owner_module != "":
+            env_define_global(lv_owner_module + "." + lv_name, thunk_val)
         return thunk_val
 
     if tag == DECL_VAR:
@@ -81,38 +87,18 @@ fn eval_decl(did: i64) -> i64:
             init_val = eval_expr(body[0])
             if eval_had_error: return -1
         env_define_global(name, init_val)
+        val var_owner_module = decl_owner_module_get(did)
+        if var_owner_module != "":
+            env_define_global(var_owner_module + "." + name, init_val)
         return init_val
 
     if tag == DECL_ENUM:
         # Register enum variants as constants
         val name = d_node.name
         val variants = d_node.field_names
-        val discriminant_exprs = d_node.field_defaults
-        var resolved_discriminants: [i64] = []
-        var next_discriminant: i64 = 0
         var vi: i64 = 0
         for variant_name in variants:
-            var discriminant = next_discriminant
-            if vi < discriminant_exprs.len() and discriminant_exprs[vi] >= 0:
-                val evaluated = eval_enum_discriminant_expr(
-                    discriminant_exprs[vi], name, variants[0:vi], resolved_discriminants
-                )
-                if not evaluated.valid:
-                    eval_set_error("enum " + name + " variant " + variant_name + ": " + evaluated.error)
-                    return -1
-                discriminant = evaluated.value
-            if discriminant < 0 or discriminant > 2147483647:
-                eval_set_error("enum " + name + " variant " + variant_name + " discriminant is outside 0..2147483647")
-                return -1
-            for prior_discriminant in resolved_discriminants:
-                if prior_discriminant == discriminant:
-                    eval_set_error("enum " + name + " variant " + variant_name + " has a duplicate discriminant")
-                    return -1
-            val discriminant_value = val_make_int(discriminant)
-            env_define_global(variant_name, discriminant_value)
-            env_define_global(name + "." + variant_name, discriminant_value)
-            resolved_discriminants.push(discriminant)
-            next_discriminant = discriminant + 1
+            env_define_global(variant_name, val_make_int(vi))
             vi = vi + 1
         # Register enum in registry for exhaustiveness checking
         enum_table_register(name, variants)
@@ -130,10 +116,19 @@ fn eval_decl(did: i64) -> i64:
             register_deferred_module(module_path, current_file, imported_names)
             return val_make_nil()
 
-        # If imports list is empty, load full module
+        # `use pkg.mod as local` is encoded as one `pkg.mod:local` import
+        # item. It imports the module namespace, not a symbol named `pkg.mod`.
+        var source_module_alias = ""
+        for imported_name in imported_names:
+            val alias_parts = imported_name.split(":")
+            if alias_parts.len() == 2 and alias_parts[0] == module_path:
+                source_module_alias = alias_parts[1]
+
+        # If imports list is empty (or is a module-alias marker), load full
+        # module. Otherwise, load selective imports.
         # Otherwise, load selective imports
         var load_result: i64 = 0
-        if imported_names.len() == 0:
+        if imported_names.len() == 0 or source_module_alias != "":
             load_result = load_module(module_path, current_file)
         else:
             load_result = load_module_selective(module_path, imported_names, current_file)
@@ -141,6 +136,16 @@ fn eval_decl(did: i64) -> i64:
         if load_result == 0:
             eval_set_error("failed to load module: " + module_path)
             return -1
+
+        # (module path, name)-keyed resolution, seed-policy mirror 2026-08-25:
+        # record which module THIS importer bound each selective import to, so
+        # a same-named free function in another co-compiled module cannot
+        # hijack the call by load order (func_resolve_for_caller).
+        if imported_names.len() > 0:
+            val use_src_file = module_get_file_path(module_path)
+            if use_src_file != "":
+                for use_imp_name in imported_names:
+                    func_import_binding_register(current_file, use_imp_name, use_src_file)
 
         return val_make_nil()
 
@@ -175,7 +180,7 @@ fn eval_decl(did: i64) -> i64:
                 if eval_had_error:
                     ce_last = -1
                 else:
-                    val ce_bind_is_nil = val_get_kind(ce_bind_rhs) == 0
+                    val ce_bind_is_nil = val_kind(ce_bind_rhs) == 0
                     if ce_bind_is_nil:
                         ce_last = ce_bind_rhs
                         ce_short_circuit = true
@@ -204,7 +209,7 @@ fn eval_decl(did: i64) -> i64:
         env_define_global(cli_struct_name, parsed_val)
         return parsed_val
 
-    # DECL_EXTERN_FN and DECL_CLASS — skip for now
+    # DECL_EXTERN_FN, DECL_IMPL, DECL_CLASS — skip for now
     val_make_nil()
 
 # ===== Module Evaluation =====
@@ -224,12 +229,11 @@ fn eval_module() -> i64:
             # itself, since this Phase-1 registration loop runs immediately
             # after parsing that exact source.
             decl_owner_file_set(did, module_get_path())
+            decl_owner_module_set(did, module_get_path())
         if tag == DECL_EXTERN_FN:
             func_register_return_type(d_node.name, d_node.ret_type)
         if tag == DECL_STRUCT:
             struct_table_register(d_node.name, did)
-        if tag == DECL_IMPL:
-            eval_decl(did)
 
     # Phase 1.5: Process use/import declarations (load dependent modules)
     for did in decls:
@@ -260,13 +264,13 @@ fn eval_module() -> i64:
         val init_decl = func_table_lookup(init_fn_name)
         if init_decl >= 0:
             var init_args: [i64] = []
-            eval_function_call(init_decl, init_args, [])
+            eval_function_call(init_decl, init_args)
 
     # Phase 4: Call main() if it exists
     val main_decl = func_table_lookup("main")
     if main_decl >= 0:
         var empty_args: [i64] = []
-        last_val = eval_function_call(main_decl, empty_args, [])
+        last_val = eval_function_call(main_decl, empty_args)
 
     # Phase 5: Call @teardown functions in reverse order (after main)
     val teardown_len = teardown_functions.len()
@@ -276,7 +280,7 @@ fn eval_module() -> i64:
         val td_decl = func_table_lookup(td_fn_name)
         if td_decl >= 0:
             var td_args: [i64] = []
-            eval_function_call(td_decl, td_args, [])
+            eval_function_call(td_decl, td_args)
         tdi = tdi - 1
 
     last_val
@@ -424,3 +428,4 @@ fn eval_atom_expr(eid: i64) -> i64:
     val atom_name = e_node.s_val
     # Atoms are represented as text with a special prefix for identity comparison
     val_make_text("`" + atom_name)
+

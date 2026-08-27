@@ -1,6 +1,29 @@
 # Widget Coverage Specification
 
-> Tests covering Widget Coverage.
+> 1. expect h len
+
+<!-- sdn-diagram:id=widget_coverage_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=widget_coverage_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+widget_coverage_spec -> nogc_sync_mut
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=widget_coverage_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,22 +40,16 @@
 
 #### parses the kitchen sink demo without error
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- parses the kitchen sink demo without error
+1. expect h len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses the kitchen sink demo without error")
 match result:
     case Ok(h):
         expect h.len() > 0 to_equal true
@@ -44,18 +61,13 @@ match result:
 
 #### contains panel widget
 
-- contains panel widget
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("contains panel widget")
 expect html to_contain "widget panel"
 ```
 
@@ -63,18 +75,13 @@ expect html to_contain "widget panel"
 
 #### contains text widget with content
 
-- contains text widget with content
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("contains text widget with content")
 expect html to_contain "Kitchen Sink Demo"
 ```
 
@@ -82,18 +89,13 @@ expect html to_contain "Kitchen Sink Demo"
 
 #### contains button widget
 
-- contains button widget
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("contains button widget")
 expect html to_contain "id=\"action_btn\""
 ```
 
@@ -101,18 +103,13 @@ expect html to_contain "id=\"action_btn\""
 
 #### contains checkbox widget
 
-- contains checkbox widget
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("contains checkbox widget")
 expect html to_contain "id=\"option_a\""
 ```
 
@@ -120,18 +117,13 @@ expect html to_contain "id=\"option_a\""
 
 #### contains input widget
 
-- contains input widget
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("contains input widget")
 expect html to_contain "id=\"search_input\""
 ```
 
@@ -139,18 +131,13 @@ expect html to_contain "id=\"search_input\""
 
 #### contains textfield widget
 
-- contains textfield widget
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("contains textfield widget")
 expect html to_contain "id=\"edit_field\""
 ```
 
@@ -158,18 +145,13 @@ expect html to_contain "id=\"edit_field\""
 
 #### contains textarea widget
 
-- contains textarea widget
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("contains textarea widget")
 expect html to_contain "id=\"notes_area\""
 ```
 
@@ -177,18 +159,13 @@ expect html to_contain "id=\"notes_area\""
 
 #### contains dropdown widget
 
-- contains dropdown widget
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("contains dropdown widget")
 expect html to_contain "id=\"mode_dropdown\""
 ```
 
@@ -196,18 +173,13 @@ expect html to_contain "id=\"mode_dropdown\""
 
 #### contains list widget
 
-- contains list widget
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("contains list widget")
 expect html to_contain "class=\"list\""
 ```
 
@@ -215,18 +187,13 @@ expect html to_contain "class=\"list\""
 
 #### contains table widget
 
-- contains table widget
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("contains table widget")
 expect html to_contain "id=\"data_table\""
 ```
 
@@ -234,18 +201,13 @@ expect html to_contain "id=\"data_table\""
 
 #### contains tree widget
 
-- contains tree widget
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("contains tree widget")
 expect html to_contain "id=\"file_tree\""
 ```
 
@@ -253,18 +215,13 @@ expect html to_contain "id=\"file_tree\""
 
 #### contains treenode widget
 
-- contains treenode widget
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("contains treenode widget")
 expect html to_contain "id=\"d_src\""
 ```
 
@@ -272,18 +229,13 @@ expect html to_contain "id=\"d_src\""
 
 #### contains tabs widget
 
-- contains tabs widget
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("contains tabs widget")
 expect html to_contain "id=\"nav_tabs\""
 ```
 
@@ -291,18 +243,13 @@ expect html to_contain "id=\"nav_tabs\""
 
 #### contains menubar widget
 
-- contains menubar widget
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("contains menubar widget")
 expect html to_contain "menubar"
 ```
 
@@ -310,18 +257,13 @@ expect html to_contain "menubar"
 
 #### contains statusbar widget
 
-- contains statusbar widget
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("contains statusbar widget")
 expect html to_contain "statusbar"
 ```
 
@@ -329,18 +271,13 @@ expect html to_contain "statusbar"
 
 #### contains progress widget
 
-- contains progress widget
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("contains progress widget")
 expect html to_contain "class=\"progress\""
 ```
 
@@ -348,18 +285,13 @@ expect html to_contain "class=\"progress\""
 
 #### contains image widget
 
-- contains image widget
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("contains image widget")
 expect html to_contain "id=\"app_icon\""
 ```
 
@@ -367,18 +299,13 @@ expect html to_contain "id=\"app_icon\""
 
 #### contains divider widget
 
-- contains divider widget
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("contains divider widget")
 expect html to_contain "id=\"sidebar_divider\""
 ```
 
@@ -386,18 +313,13 @@ expect html to_contain "id=\"sidebar_divider\""
 
 #### contains tooltip widget
 
-- contains tooltip widget
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("contains tooltip widget")
 expect html to_contain "id=\"search_tip\""
 ```
 
@@ -405,18 +327,13 @@ expect html to_contain "id=\"search_tip\""
 
 #### contains dialog widget
 
-- contains dialog widget
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("contains dialog widget")
 expect html to_contain "id=\"modal_dialog\""
 ```
 
@@ -424,18 +341,13 @@ expect html to_contain "id=\"modal_dialog\""
 
 #### contains scroll widget
 
-- contains scroll widget
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("contains scroll widget")
 expect html to_contain "id=\"scroll_area\""
 ```
 
@@ -443,18 +355,13 @@ expect html to_contain "id=\"scroll_area\""
 
 #### has all 21 widget types present
 
-- has all 21 widget types present
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 56 lines folded for reproduction.
+Runnable source: 54 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("has all 21 widget types present")
 # Verify key structural markers from each category are present
 # Panels
 val has_panel = html.contains("widget panel")
@@ -520,12 +427,12 @@ expect count to_equal 21
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/gui/ui/widget_coverage_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Widget Coverage.
+Tests covering:
 - Widget Coverage
 
 ## Scenario Summary
@@ -540,51 +447,3 @@ Tests covering Widget Coverage.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `6caa0ef6f82ebbd7e8993c8e540babb27fb8b1eb920f11f2bbb07e786c3a454f`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `6caa0ef6f82ebbd7e8993c8e540babb27fb8b1eb920f11f2bbb07e786c3a454f`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `6caa0ef6f82ebbd7e8993c8e540babb27fb8b1eb920f11f2bbb07e786c3a454f`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/gui/ui/widget_coverage_spec.spl
-mirror: doc/06_spec/03_system/gui/ui/widget_coverage_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/gui/ui/widget_coverage_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/gui/ui/widget_coverage_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/gui/ui/widget_coverage_spec.spl:44:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses the kitchen sink demo without error' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/gui/ui/widget_coverage_spec.spl:56:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'contains panel widget' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/gui/ui/widget_coverage_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'contains text widget with content' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

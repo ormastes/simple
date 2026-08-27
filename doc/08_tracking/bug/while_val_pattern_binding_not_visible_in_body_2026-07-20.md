@@ -1,9 +1,8 @@
 # Bug: `while val Pattern(x) = expr:` loop body cannot see `x` (`variable not found`)
 
 - **Date:** 2026-07-20
-- **Status:** FIX IMPLEMENTED — UNVERIFIED (2026-08-25; manual execution was
-  explicitly skipped). The source fix and focused regression coverage await the
-  next admitted Rust-seed verification/redeploy boundary.
+- **Status:** OPEN — re-reproduced 2026-08-17 by execution (see "Re-verification
+  2026-08-17" at the bottom; scope now narrowed to the SSpec `it`-block path only)
 - **Status (original):** open (found triaging `test/feature/usage/pattern_matching_advanced_spec.spl`)
 - **Area:** `while val`/`while let` pattern-binding scope (interpreter or HIR
   lowering, not isolated further in this pass), deployed seed at
@@ -159,28 +158,3 @@ EXIT=1
 and the error string is unchanged (`variable \`value\` not found`), so the seed
 rebuild did not touch the SSpec `it`-block statement-executor path that this
 defect is localized to.
-
-## 2026-08-25 implementation (unverified)
-
-The remaining executor was found in
-`src/compiler_rust/compiler/src/interpreter_call/block_execution.rs`. Both
-block-closure statement walkers had a private `Node::While` arm that evaluated
-only the condition's truthiness. Neither arm inspected `while_stmt.let_pattern`,
-so `Some(value)` was truthy and the body ran without ever installing `value`.
-Ordinary function bodies use `interpreter_control::exec_while`, which already
-matches and binds the pattern; that explains the engine/path discriminator and
-proves the Rust-seed ownership boundary.
-
-Both duplicate arms now call one shared block-while executor. It evaluates the
-condition once per iteration, applies the existing optional/structural pattern
-semantics, installs successful bindings as block locals for that iteration's
-body, and restores shadowed or absent names before the next condition or any
-break, continue, return, timeout, or error propagation. Ordinary boolean while
-loops retain an allocation-free condition path. Break, continue, timeout, and
-block-return propagation are unchanged.
-
-The existing real SSpec reproducer now also covers `None`/mismatch termination,
-shadow restoration, a continue followed by a same-name outer-variable condition,
-and nested pattern loops (which exercise both block executors) with break and
-continue. No tests, builds, benchmarks, SPipe,
-optimizer, or other manual verification were run for this implementation.

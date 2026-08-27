@@ -1,0 +1,90 @@
+# @req REQ-001 REQ-003 REQ-004 REQ-010 NFR-001 NFR-002 NFR-007
+"""Vulkan device evidence and Adreno/Turnip staged admission contract."""
+
+use std.spec.*
+use std.common.processing.processing_ir.*
+use os.drivers.gpu.vulkan_device_port.*
+use os.drivers.gpu.adreno_turnip_adapter.*
+
+describe "SimpleOS Vulkan device port":
+    it "should reject host offload as guest-native Vulkan evidence":
+        # @covers VD_CLASS:true
+        val receipt = VulkanDeviceReceipt(evidence_class: VULKAN_EVIDENCE_HOST_OFFLOAD,
+            backend: "vulkan", generation: 4, submission_id: 5, fence_id: 5,
+            backend_handle: 9, device_identity: 11, device_origin: true,
+            values: [7u32], checksum: 7, mismatch_count: 0, reason: "ok")
+        expect(vulkan_device_receipt_native_valid(receipt, 4, [7u32])).to_equal(false)
+
+    it "should admit only fully correlated guest-native readback":
+        # @covers VD_CLASS:false VD_CORRELATION:true VD_CORRELATION:false
+        # @covers VD_PROVENANCE:true VD_PROVENANCE:false VD_INTEGRITY:true VD_INTEGRITY:false
+        val receipt = VulkanDeviceReceipt(evidence_class: VULKAN_EVIDENCE_GUEST_NATIVE,
+            backend: "vulkan", generation: 4, submission_id: 5, fence_id: 5,
+            backend_handle: 9, device_identity: 11, device_origin: true,
+            values: [7u32], checksum: 7, mismatch_count: 0, reason: "ok")
+        expect(vulkan_device_receipt_native_valid(receipt, 4, [7u32])).to_equal(true)
+        expect(vulkan_device_receipt_native_valid(receipt, 3, [7u32])).to_equal(false)
+        expect(vulkan_device_receipt_native_valid(receipt, 4, [8u32])).to_equal(false)
+        val zero_handle = VulkanDeviceReceipt(evidence_class: VULKAN_EVIDENCE_GUEST_NATIVE,
+            backend: "vulkan", generation: 4, submission_id: 5, fence_id: 5,
+            backend_handle: 0, device_identity: 11, device_origin: true,
+            values: [7u32], checksum: 7, mismatch_count: 0, reason: "ok")
+        expect(vulkan_device_receipt_native_valid(zero_handle, 4, [7u32])).to_equal(false)
+        val mismatch = VulkanDeviceReceipt(evidence_class: VULKAN_EVIDENCE_GUEST_NATIVE,
+            backend: "vulkan", generation: 4, submission_id: 5, fence_id: 5,
+            backend_handle: 9, device_identity: 11, device_origin: true,
+            values: [7u32], checksum: 7, mismatch_count: 1, reason: "checksum-mismatch")
+        expect(vulkan_device_receipt_native_valid(mismatch, 4, [7u32])).to_equal(false)
+
+    it "should require every native capability owner":
+        val ready = VulkanDeviceCapability(generation: 1, available: true,
+            evidence_class: VULKAN_EVIDENCE_GUEST_NATIVE, backend: "vulkan",
+            board_identity: "qualcomm-uno-q", device_identity: 73,
+            supports_firmware: true, supports_mmu: true, supports_queue: true,
+            supports_fence: true, supports_readback: true, reason: "ok")
+        expect(vulkan_device_capability_native_ready(ready)).to_equal(true)
+        val blocked = vulkan_device_capability_blocked(1, "vulkan", "qualcomm-uno-q", "firmware-missing")
+        expect(vulkan_device_capability_native_ready(blocked)).to_equal(false)
+
+    it "should keep UNO Q source readiness below native promotion":
+        # @covers AD_PROVENANCE:true AD_LINUX_ID:false AD_PROBE_CACHE:true
+        val adapter = AdrenoTurnipAdapter.linux_board_oracle(
+            "qualcomm-uno-q", "mesa-turnip-pinned", "MIT", 73)
+        val capability = adapter.probe_environment(8)
+        expect(capability.evidence_class).to_equal(VULKAN_EVIDENCE_BOARD_LINUX)
+        expect(capability.available).to_equal(false)
+        expect(vulkan_device_capability_native_ready(capability)).to_equal(false)
+        expect(capability.reason).to_equal("blocked:simpleos-native-firmware-mmu-queue-fence-readback-missing")
+        expect(ADRENO_TURNIP_RESUME_COMMAND).to_equal("SIMPLEOS_UNO_Q_ADRENO_LIVE=1 bin/simple test test/03_system/os/board/uno_q_adreno_turnip_live_spec.spl --mode=interpreter --no-session-daemon")
+
+    it "should cache one probe per generation and invalidate on change":
+        # @covers AD_PROBE_CACHE:false AD_LINUX_ID:true
+        val adapter = AdrenoTurnipAdapter.blocked("qualcomm-uno-q", "mesa-turnip-pinned", "MIT")
+        val _first = adapter.probe_environment(10)
+        val _repeat = adapter.probe_environment(10)
+        expect(adapter.probe_count).to_equal(1)
+        val _next = adapter.probe_environment(11)
+        expect(adapter.probe_count).to_equal(2)
+        adapter.shutdown()
+        val _after_reset = adapter.probe_environment(11)
+        expect(adapter.probe_count).to_equal(3)
+
+    it "should reject lowering and submission until native owners exist":
+        # @covers AD_LOWER_VALID:false AD_SUBMIT_VALID:false AD_PROVENANCE:false
+        val adapter = AdrenoTurnipAdapter.blocked("qualcomm-uno-q", "mesa-turnip-pinned", "MIT")
+        val ir = processing_ir_fill_u32(4, 7u32)
+        expect(adapter.lower_processing_ir(ir).reason).to_equal("adreno-turnip-simpleos-native-lowering-not-admitted")
+        val receipt = adapter.submit_processing_ir(ir, 2, 3)
+        expect(receipt.evidence_class).to_equal(VULKAN_EVIDENCE_BLOCKED)
+        expect(receipt.device_origin).to_equal(false)
+        expect(receipt.reason).to_equal("blocked:uno-q-linux-device-evidence-missing")
+        val no_provenance = AdrenoTurnipAdapter.blocked("", "", "")
+        expect(adreno_turnip_provenance_valid(no_provenance)).to_equal(false)
+        expect(adreno_turnip_resume_gate(no_provenance)).to_equal("blocked:turnip-provenance-missing")
+
+    it "should reject malformed IR before staged backend admission":
+        # @covers AD_LOWER_VALID:true AD_SUBMIT_VALID:true
+        val adapter = AdrenoTurnipAdapter.blocked("qualcomm-uno-q", "mesa-turnip-pinned", "MIT")
+        val invalid = processing_ir_fill_u32(0, 7u32)
+        expect(adapter.lower_processing_ir(invalid).reason).to_equal("invalid-element-count")
+        expect(adapter.submit_processing_ir(invalid, 2, 3).reason).to_equal("invalid-element-count")

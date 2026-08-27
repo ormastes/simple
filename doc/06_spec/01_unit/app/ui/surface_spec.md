@@ -1,10 +1,34 @@
 # Surface Specification
 
-> Tests covering SurfaceManager creation, SurfaceManager open, SurfaceManager get, SurfaceManager close, SurfaceManager handle validation, SurfaceManager active surface, SurfaceManager surface_ids.
+> 1. expect sm surface count
+
+<!-- sdn-diagram:id=surface_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=surface_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+surface_spec -> std
+surface_spec -> common
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=surface_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -17,25 +41,20 @@
 
 #### creates empty manager
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- creates empty manager
+1. expect sm surface count
+2. expect sm active
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates empty manager")
 val sm = new_surface_manager()
 expect sm.surface_count() to_equal 0
-expect sm.active() to_equal ""
+expect sm.active() to_equal "main"
 ```
 
 </details>
@@ -44,18 +63,17 @@ expect sm.active() to_equal ""
 
 #### opens a surface and increments count
 
-- opens a surface and increments count
+1. var sm = new surface manager
+2. expect sm surface count
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("opens a surface and increments count")
 var sm = new_surface_manager()
 val root = text_widget("sm_open_root", "Hello")
 val tree = UITree.new(root)
@@ -69,18 +87,21 @@ expect handle.generation to_equal 1
 
 #### opens multiple surfaces
 
-- opens multiple surfaces
+1. var sm = new surface manager
+2. sm open
+3. sm open
+4. expect sm surface count
+5. expect sm has
+6. expect sm has
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("opens multiple surfaces")
 var sm = new_surface_manager()
 val root1 = text_widget("sm_multi_r1", "One")
 val root2 = text_widget("sm_multi_r2", "Two")
@@ -99,18 +120,17 @@ expect sm.has("win_b") to_equal true
 
 #### gets tree for an existing surface
 
-- gets tree for an existing surface
+1. var sm = new surface manager
+2. sm open
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("gets tree for an existing surface")
 var sm = new_surface_manager()
 val root = text_widget("sm_get_root", "Content")
 val tree = UITree.new(root)
@@ -123,18 +143,13 @@ expect found != nil to_equal true
 
 #### returns nil for nonexistent surface
 
-- returns nil for nonexistent surface
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns nil for nonexistent surface")
 val sm = new_surface_manager()
 val found = sm.get("sm_get_missing")
 expect found to_be_nil
@@ -146,18 +161,19 @@ expect found to_be_nil
 
 #### closes a surface and decrements count
 
-- closes a surface and decrements count
+1. var sm = new surface manager
+2. expect sm surface count
+3. expect sm surface count
+4. expect sm has
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("closes a surface and decrements count")
 var sm = new_surface_manager()
 val root = text_widget("sm_close_root", "Bye")
 val tree = UITree.new(root)
@@ -171,20 +187,22 @@ expect sm.has("temp_win") to_equal false
 
 </details>
 
-#### clears active when closing the only surface
+#### resets active to main when closing active surface
 
-- clears active when closing the only surface
+1. var sm = new surface manager
+2. sm set active
+3. expect sm active
+4. sm close
+5. expect sm active
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("clears active when closing the only surface")
 var sm = new_surface_manager()
 val root = text_widget("sm_close_active_r", "Active")
 val tree = UITree.new(root)
@@ -192,7 +210,7 @@ val handle = sm.open("popup", tree)
 sm.set_active("popup")
 expect sm.active() to_equal "popup"
 sm.close(handle)
-expect sm.active() to_equal ""
+expect sm.active() to_equal "main"
 ```
 
 </details>
@@ -201,18 +219,17 @@ expect sm.active() to_equal ""
 
 #### validates a fresh handle
 
-- validates a fresh handle
+1. var sm = new surface manager
+2. expect sm validate handle
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("validates a fresh handle")
 var sm = new_surface_manager()
 val root = text_widget("sm_valid_root", "Test")
 val tree = UITree.new(root)
@@ -224,18 +241,18 @@ expect sm.validate_handle(handle) to_equal true
 
 #### invalidates handle after close
 
-- invalidates handle after close
+1. var sm = new surface manager
+2. sm close
+3. expect sm validate handle
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("invalidates handle after close")
 var sm = new_surface_manager()
 val root = text_widget("sm_stale_root", "Stale")
 val tree = UITree.new(root)
@@ -248,18 +265,18 @@ expect sm.validate_handle(handle) to_equal false
 
 #### invalidates old handle when surface is re-opened
 
-- invalidates old handle when surface is re-opened
+1. var sm = new surface manager
+2. expect sm validate handle
+3. expect sm validate handle
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("invalidates old handle when surface is re-opened")
 var sm = new_surface_manager()
 val root1 = text_widget("sm_reopen_r1", "V1")
 val root2 = text_widget("sm_reopen_r2", "V2")
@@ -273,45 +290,19 @@ expect sm.validate_handle(new_handle) to_equal true
 
 </details>
 
-#### invalidates old handle when a closed surface id is re-opened
-
-- invalidates old handle when a closed surface id is re-opened
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 9 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("invalidates old handle when a closed surface id is re-opened")
-var sm = new_surface_manager()
-val tree = UITree.new(text_widget("sm_aba_root", "ABA"))
-val old_handle = sm.open("aba_win", tree)
-sm.close(old_handle)
-val new_handle = sm.open("aba_win", tree)
-expect sm.validate_handle(old_handle) to_equal false
-expect new_handle.generation != old_handle.generation to_equal true
-```
-
-</details>
-
 #### rejects close with stale handle
 
-- rejects close with stale handle
+1. var sm = new surface manager
+2. sm close
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("rejects close with stale handle")
 var sm = new_surface_manager()
 val root = text_widget("sm_reject_root", "Reject")
 val tree = UITree.new(root)
@@ -326,40 +317,39 @@ expect result to_equal false
 
 ### SurfaceManager active surface
 
-#### starts without an active surface
+#### defaults to main
 
-- starts without an active surface
+1. expect sm active
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("starts without an active surface")
 val sm = new_surface_manager()
-expect sm.active() to_equal ""
+expect sm.active() to_equal "main"
 ```
 
 </details>
 
 #### switches active to existing surface
 
-- switches active to existing surface
+1. var sm = new surface manager
+2. sm open
+3. sm set active
+4. expect sm active
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("switches active to existing surface")
 var sm = new_surface_manager()
 val root = text_widget("sm_active_root", "Active")
 val tree = UITree.new(root)
@@ -372,21 +362,21 @@ expect sm.active() to_equal "dialog"
 
 #### does not switch to nonexistent surface
 
-- does not switch to nonexistent surface
+1. var sm = new surface manager
+2. sm set active
+3. expect sm active
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("does not switch to nonexistent surface")
 var sm = new_surface_manager()
 sm.set_active("sm_active_ghost")
-expect sm.active() to_equal ""
+expect sm.active() to_equal "main"
 ```
 
 </details>
@@ -395,18 +385,20 @@ expect sm.active() to_equal ""
 
 #### returns all surface ids
 
-- returns all surface ids
+1. var sm = new surface manager
+2. sm open
+3. sm open
+4. sm open
+5. expect ids len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns all surface ids")
 var sm = new_surface_manager()
 val r1 = text_widget("sm_ids_r1", "A")
 val r2 = text_widget("sm_ids_r2", "B")
@@ -427,12 +419,12 @@ expect ids.len() to_equal 3
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/surface_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering SurfaceManager creation, SurfaceManager open, SurfaceManager get, SurfaceManager close, SurfaceManager handle validation, SurfaceManager active surface, SurfaceManager surface_ids.
+Tests covering:
 - SurfaceManager creation
 - SurfaceManager open
 - SurfaceManager get
@@ -445,59 +437,11 @@ Tests covering SurfaceManager creation, SurfaceManager open, SurfaceManager get,
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `85cd1a868d3ec365dbf3eda28cbabef6440a2b525c4c32845148f7f532460edb`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `85cd1a868d3ec365dbf3eda28cbabef6440a2b525c4c32845148f7f532460edb`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `85cd1a868d3ec365dbf3eda28cbabef6440a2b525c4c32845148f7f532460edb`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/ui/surface_spec.spl
-mirror: doc/06_spec/01_unit/app/ui/surface_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/ui/surface_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/ui/surface_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/ui/surface_spec.spl:27:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates empty manager' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui/surface_spec.spl:40:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'opens a surface and increments count' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui/surface_spec.spl:51:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'opens multiple surfaces' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

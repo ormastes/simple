@@ -12,16 +12,13 @@ use compiler.hir.hir_lowering.context_helpers.*
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.core.lexer_chars.{is_digit}
 use std.string_core.{char_code}
+use compiler.common.dependency.visibility.{Visibility}
 
-extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_get(key: text) -> text
 extern fn rt_enum_discriminant(value: Any) -> i64
 extern fn rt_dict_contains(dict: i64, key: Any) -> bool
 
-# `rt_env_get` yields nil for an UNSET variable, so both the extern and this
-# wrapper are OPTIONAL — every call site below already uses the optional-safe
-# `?? ""` / `== "1"` form, which distinguishes unset from explicitly-empty.
-# Same fix as flat_bridge_env_get (7825f01def2) and compiler/00.common/config.
-fn hir_expr_env_get(key: text) -> text?:
+fn hir_expr_env_get(key: text) -> text:
     rt_env_get(key)
 
 fn hir_expr_kind_disc(k: ExprKind) -> i64:
@@ -55,7 +52,7 @@ fn parse_tuple_field_index(name: text) -> i64:
 fn is_interp_builtin_fn(name: text) -> bool:
     """Free-function builtins dispatched by NAME in the HIR interpreter
     (70.backend/backend/interpreter_calls.spl lookup_builtin_tag)."""
-    (name == "print" or name == "println" or name == "eprint" or name == "to_string" or
+    (name == "print" or name == "println" or name == "to_string" or
      name == "type_of" or name == "clone" or name == "file_exists" or
      name == "file_read" or name == "file_write" or name == "file_delete" or
      name == "env_get" or name == "env_set" or name == "int" or
@@ -98,6 +95,7 @@ fn is_bootstrap_builtin_fn(name: text) -> bool:
     name == "get_args" or
     name == "sys_get_args" or
     name == "rt_get_args" or
+    name == "eprint" or
     name == "bootstrap_version" or
     name == "native_build_help" or
     name == "compile_result_exit" or
@@ -171,23 +169,15 @@ impl HirLowering:
         # local variable/parameter never has `defining_module` set (nil), so
         # this loop only ever matches symbols that came from a real cross-
         # module import registration in the first place.
-        # MODCALLIDX (2026-08-21): this used to materialize
-        # `self.symbols.symbols.keys()` -- an array over the WHOLE symbol
-        # table -- and scan it in reverse, on EVERY module-qualified field or
-        # method expression in every body. Fixtures hid it (tiny tables); the
-        # real 662-module closure carries tens of thousands of symbols, making
-        # HIR lowering O(exprs x symbols) and costing 60-136 s per module.
-        # SymbolTable.module_callables answers the same (defining_module,
-        # name-or-last-segment) question in O(1). The hit is re-verified
-        # against the live symbol below so a later rename cannot make a stale
-        # index row answer a spelling the old sweep would have rejected.
-        val indexed_raw = self.symbols.module_callable_raw(module_name, field_name)
-        if indexed_raw >= 0:
-            if val candidate = self.symbols.get_symbol_raw(indexed_raw):
-                if val candidate_module = candidate.defining_module:
-                    if candidate_module == module_name:
-                        if candidate.name == field_name or candidate.name.ends_with("." + field_name):
-                            return candidate.id
+        val candidate_keys = self.symbols.symbols.keys()
+        var index = candidate_keys.len()
+        while index > 0:
+            index = index - 1
+            val candidate = self.symbols.symbols[candidate_keys[index]]
+            if val candidate_module = candidate.defining_module:
+                if candidate_module == module_name:
+                    if candidate.name == field_name or candidate.name.ends_with("." + field_name):
+                        return candidate.id
         nil
 
     me field_tuple_element_type(base_kind: HirExprKind, index: i64) -> HirType?:
@@ -359,7 +349,7 @@ impl HirLowering:
             val recv_sym = self.symbols.lookup_or_invalid(recv_alias)
             if recv_sym.is_valid():
                 return HirExprKind.NamedVar(recv_sym, recv_alias)
-        val is_bootstrap_builtin = self.ambient_bootstrap_enabled() and is_bootstrap_builtin_fn(name)
+        val is_bootstrap_builtin = (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and is_bootstrap_builtin_fn(name)
         # Bare Result variants: `Ok(v)` / `Err(e)` are not in the symbol table
         # (Result is a built-in, not a module enum). Emit NamedVar so MIR
         # lowering's lower_call can intercept by name and construct via
@@ -398,7 +388,7 @@ impl HirLowering:
                 bootstrap_builtin_signature(name, span)
             else:
                 nil
-            val bsym = self.symbols.define(name, SymbolKind.Function, symbol_type, span, false, false, nil)
+            val bsym = self.symbols.define(name, SymbolKind.Function, symbol_type, span, Visibility.Public, false, nil)
             HirExprKind.NamedVar(bsym, name)
         else:
             if self.try_register_bootstrap_global_symbol(name, span):

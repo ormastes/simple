@@ -1,13 +1,15 @@
 # GUI Web 2D Vulkan Setup Simple Binary Selection
 
-> Validates the Simple binary discovery contract for `scripts/setup/setup-gui-web-2d-vulkan-env.shs`. Clean jj worktrees may not have a repo-local `bin/simple` or git metadata for same-repo detection, so PATH fallback must exist but remain explicit.
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 4 | 4 | 0 | 0 |
 
-<details>
-<summary>Full Scenario Manual</summary>
+Clean jj worktrees may not have a repo-local `bin/simple` or git metadata for
+same-repo PATH detection. The setup helper therefore supports PATH discovery
+only when explicitly enabled with `ALLOW_PATH_SIMPLE_BIN=1`, and records the
+selection reason in evidence.
+
+## Operator Flow
 
 # GUI Web 2D Vulkan Setup Simple Binary Selection
 
@@ -29,57 +31,139 @@ Validates the Simple binary discovery contract for `scripts/setup/setup-gui-web-
 
 ## Overview
 
-Validates the Simple binary discovery contract for
-`scripts/setup/setup-gui-web-2d-vulkan-env.shs`. Clean jj worktrees may not have
-a repo-local `bin/simple` or git metadata for same-repo detection, so PATH
-fallback must exist but remain explicit.
+This system spec validates the Simple binary discovery contract for
+`scripts/setup/setup-gui-web-2d-vulkan-env.shs`.
 
-This spec also covers the producer-side browser-backing source-file contract.
-The setup wrapper writes `gui_web_2d_vulkan_*_browser_backing_*` rows during
-`--browser-backing` runs. Those rows are later consumed by the aggregate GUI
-RenderDoc audit, Linux Vulkan render-log comparison, and platform matrix
-criteria. A child browser pass must therefore prove both GPU state and the
-source proof artifact shape. A copied, linked, empty, or directory-shaped proof
-file is diagnostics only, not completion evidence.
+Clean jj worktrees may not have a repo-local `bin/simple` or git metadata for
+same-repo PATH detection. The setup helper therefore supports PATH discovery
+only when explicitly enabled with `ALLOW_PATH_SIMPLE_BIN=1`, and records the
+selection reason in evidence.
 
-The advertised `--renderdoc-simple` entrypoint must preserve one exact
-producer-to-gate chain: capture writes `<setup-build>/renderdoc/simple/evidence.env`,
-the strict Simple RenderDoc gate consumes that same file, and its canonical
-`build/renderdoc/simple-gate/evidence.env` status/reason is relayed fail-closed.
+## Operator Flow
 
-**Plan:** doc/03_plan/agent_tasks/gui_rendering_parallel_agent_plan_2026-06-27.md
-**Requirements:** N/A
-**Research:** doc/09_report/gui_renderdoc_web_wm_path_fallback_evidence_2026-06-27.md
-**Design:** doc/07_guide/app/ui/gui_web_2d_vulkan_setup.md
-
-## Syntax
+Run:
 
 ```sh
 SIMPLE_LIB=src bin/simple test test/03_system/check/gui_web_2d_vulkan_setup_simple_bin_spec.spl --mode=interpreter --clean --fail-fast
-sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
-sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --browser-backing
-sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple
-node scripts/check/gui-web-2d-vulkan-browser-backing-status.js \
-  build/gui-web-2d-vulkan-env/electron_argb_proof.json \
-  build/gui-web-2d-vulkan-env/electron_argb.json \
-  build/gui-web-2d-vulkan-env/chrome_argb_proof.json
 ```
+
+For a direct Vulkan artifact probe on such a worktree, use either an explicit
+driver:
+
+```sh
+SIMPLE_BIN=/path/to/simple BUILD_DIR=build/gui-web-2d-vulkan-env-run-current \
+sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
+```
+
+or the opt-in PATH fallback:
+
+```sh
+ALLOW_PATH_SIMPLE_BIN=1 BUILD_DIR=build/gui-web-2d-vulkan-env-run-current \
+sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
+```
+
+For a direct Vulkan artifact probe on such a worktree, use either an explicit
+driver:
+
+```sh
+SIMPLE_BIN=/path/to/simple BUILD_DIR=build/gui-web-2d-vulkan-env-run-current \
+sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
+```
+
+or the opt-in PATH fallback:
+
+```sh
+ALLOW_PATH_SIMPLE_BIN=1 BUILD_DIR=build/gui-web-2d-vulkan-env-run-current \
+sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
+```
+
+For a direct Vulkan artifact probe on such a worktree, use either an explicit
+driver:
+
+```sh
+SIMPLE_BIN=/path/to/simple BUILD_DIR=build/gui-web-2d-vulkan-env-run-current \
+sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
+```
+
+or the opt-in PATH fallback:
+
+```sh
+ALLOW_PATH_SIMPLE_BIN=1 BUILD_DIR=build/gui-web-2d-vulkan-env-run-current \
+sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
+```
+
+For a direct Vulkan artifact probe on such a worktree, use either an explicit
+driver:
+
+```sh
+SIMPLE_BIN=/path/to/simple BUILD_DIR=build/gui-web-2d-vulkan-env-run-current \
+sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
+```
+
+or the opt-in PATH fallback:
+
+```sh
+ALLOW_PATH_SIMPLE_BIN=1 BUILD_DIR=build/gui-web-2d-vulkan-env-run-current \
+sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
+```
+
+For a direct Vulkan artifact probe on such a worktree, use either an explicit
+driver:
+
+```sh
+SIMPLE_BIN=/path/to/simple BUILD_DIR=build/gui-web-2d-vulkan-env-run-current \
+sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
+```
+
+or the opt-in PATH fallback:
+
+```sh
+ALLOW_PATH_SIMPLE_BIN=1 BUILD_DIR=build/gui-web-2d-vulkan-env-run-current \
+sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
+```
+
+For a direct Vulkan artifact probe on such a worktree, use either an explicit
+driver:
+
+```sh
+SIMPLE_BIN=/path/to/simple BUILD_DIR=build/gui-web-2d-vulkan-env-run-current \
+sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
+```
+
+or the opt-in PATH fallback:
+
+```sh
+ALLOW_PATH_SIMPLE_BIN=1 BUILD_DIR=build/gui-web-2d-vulkan-env-run-current \
+sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
+```
+
+On a prepared RenderDoc host, the focused capture and strict replay gate are a
+single fail-closed command:
+
+```sh
+GUI_WEB_2D_VULKAN_BUILD_DIR=build/gui-web-2d-vulkan-env-renderdoc-simple \
+  sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple
+```
+
+The capture produces
+`build/gui-web-2d-vulkan-env-renderdoc-simple/renderdoc/simple/evidence.env`.
+The wrapper passes that exact path as `RDOC_SIMPLE_EVIDENCE_ENV` to
+`scripts/check/check-renderdoc-simple-gate.shs`, whose default canonical output
+is `build/renderdoc/simple-gate/evidence.env`.
 
 ## Acceptance
 
-- PATH `simple` fallback is gated by `ALLOW_PATH_SIMPLE_BIN=1`.
-- The opt-in path records `default-missing-path-opt-in`.
-- Existing same-repo PATH fallback remains available when git metadata can
-  prove the binary belongs to the checkout.
-- Default discovery prefers the canonical pure-Simple `bin/simple`, rejects
-  copied Rust bootstrap seeds by version identity, and never selects a
-  foreign-OS release.
-- Browser-backing source proof files are typed as `symlink`, `hardlink`,
-  `not-regular`, `empty`, `missing`, or `pass`; child browser-backing passes
-  require regular single-link proof files.
-- `--renderdoc-simple` passes its exact generated Simple evidence env to the
-  strict gate, writes the canonical gate env, and exits nonzero unless both
-  capture and gate pass.
+- Same-repo PATH fallback remains available when git metadata can prove the
+  binary belongs to the checkout.
+- Generic PATH fallback requires `ALLOW_PATH_SIMPLE_BIN=1`.
+- The opt-in fallback records
+  `gui_web_2d_vulkan_simple_bin_selection_reason=default-missing-path-opt-in`.
+- Evidence always emits `gui_web_2d_vulkan_simple_bin_selection_reason`.
+- `--renderdoc-simple` cannot silently leave capture-only evidence: it invokes
+  the strict gate with the exact produced source env and exits nonzero when
+  capture or gate does not pass.
+- The setup evidence relays the source/gate paths plus typed gate and aggregate
+  status/reason fields.
 
 ## Evidence Fields
 
@@ -326,64 +410,3 @@ expect(evidence).to_contain("gui_web_2d_vulkan_chrome_browser_backing_reason=chr
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
-
-
-## Related Documentation
-
-- **Plan:** `doc/03_plan/agent_tasks/gui_rendering_parallel_agent_plan_2026-06-27.md`
-- **Design:** `doc/07_guide/app/ui/gui_web_2d_vulkan_setup.md`
-- **Research:** `doc/09_report/gui_renderdoc_web_wm_path_fallback_evidence_2026-06-27.md`
-
-
-</details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `00bd573a8807882c175260863de0a11dbb57d41496d77438eb2894338080b899`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `00bd573a8807882c175260863de0a11dbb57d41496d77438eb2894338080b899`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `00bd573a8807882c175260863de0a11dbb57d41496d77438eb2894338080b899`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
-
-SSpec documentization score: 88/100
-source: test/03_system/check/gui_web_2d_vulkan_setup_simple_bin_spec.spl
-mirror: doc/06_spec/03_system/check/gui_web_2d_vulkan_setup_simple_bin_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=80
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/check/gui_web_2d_vulkan_setup_simple_bin_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/check/gui_web_2d_vulkan_setup_simple_bin_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/check/gui_web_2d_vulkan_setup_simple_bin_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/check/gui_web_2d_vulkan_setup_simple_bin_spec.spl:176:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps PATH Simple fallback explicit and typed' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/check/gui_web_2d_vulkan_setup_simple_bin_spec.spl:194:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'chains the exact Simple RenderDoc capture env into the strict gate' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/check/gui_web_2d_vulkan_setup_simple_bin_spec.spl:210:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'prefers canonical pure Simple for default Vulkan evidence setup' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

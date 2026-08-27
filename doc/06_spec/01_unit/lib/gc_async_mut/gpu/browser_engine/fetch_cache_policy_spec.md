@@ -17,11 +17,6 @@
 
 #### only shares credential-free GET and HEAD responses
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- only shares credential-free GET and HEAD responses
 - Evaluate cache eligibility across methods and credentials
    - Expected: request_cache_eligible(cache_request("GET", "", "omit")) is true
    - Expected: request_cache_eligible(cache_request("HEAD", "", "omit")) is true
@@ -34,12 +29,10 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("only shares credential-free GET and HEAD responses")
 step("Evaluate cache eligibility across methods and credentials")
 expect(request_cache_eligible(cache_request("GET", "", "omit"))).to_equal(true)
 expect(request_cache_eligible(cache_request("HEAD", "", "omit"))).to_equal(true)
@@ -53,7 +46,6 @@ expect(request_cache_eligible(cache_request("GET", "Cookie: sid=secret", "omit")
 
 #### does not attach same-origin credentials to cross-origin requests
 
-- does not attach same-origin credentials to cross-origin requests
 - Evaluate credential attachment for same-origin and cross-origin requests
    - Expected: credentials_allow_request_cookies("omit", true) is false
    - Expected: credentials_allow_request_cookies("same-origin", true) is true
@@ -64,12 +56,10 @@ expect(request_cache_eligible(cache_request("GET", "Cookie: sid=secret", "omit")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("does not attach same-origin credentials to cross-origin requests")
 step("Evaluate credential attachment for same-origin and cross-origin requests")
 expect(credentials_allow_request_cookies("omit", true)).to_equal(false)
 expect(credentials_allow_request_cookies("same-origin", true)).to_equal(true)
@@ -81,19 +71,19 @@ expect(credentials_allow_request_cookies("include", false)).to_equal(true)
 
 #### admits script cookies only from an exact network URL
 
-- admits script cookies only from an exact network URL
 - Store script cookies from valid and invalid network URLs
+- Logger new
+- origin, "/app/next", Some
+- origin, "/", Some
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("admits script cookies only from an exact network URL")
 step("Store script cookies from valid and invalid network URLs")
 var fetch = FetchEngine.new_for_origin(
     Logger.new("cookie-test", BrowserLogLevel.Error),
@@ -127,20 +117,20 @@ expect(fetch.cookie_store.get_header_for_origin(
 
 #### bounds script cookies by serialized pair and keeps attributes outside the limit
 
-- bounds script cookies by serialized pair and keeps attributes outside the limit
 - Store script cookies at and beyond the serialized size limit
+- Logger new
+- "edge=" + "x" repeat
+- "edge=" + "y" repeat
    - Expected: retained.len() equals `4096`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("bounds script cookies by serialized pair and keeps attributes outside the limit")
 step("Store script cookies at and beyond the serialized size limit")
 var fetch = FetchEngine.new_for_origin(
     Logger.new("script-cookie-size-test", BrowserLogLevel.Error),
@@ -190,20 +180,22 @@ expect(fetch.cookie_store.script_cookie_header(
 
 #### bounds raw Set-Cookie by serialized pair without charging attributes
 
-- bounds raw Set-Cookie by serialized pair without charging attributes
 - Process response cookies at and beyond the serialized size limit
+- Logger new
+- url: Url parse or opaque
+- "edge=" + "x" repeat
+- "edge=" + "y" repeat
+- origin, "/account/next", Some
    - Expected: retained.len() equals `4096`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 77 lines folded for reproduction.
+Runnable source: 75 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("bounds raw Set-Cookie by serialized pair without charging attributes")
 step("Process response cookies at and beyond the serialized size limit")
 var fetch = FetchEngine.new_for_origin(
     Logger.new("response-cookie-size-test", BrowserLogLevel.Error),
@@ -285,19 +277,19 @@ expect(fetch.cookie_store.script_cookie_header(
 
 #### rejects a whole script batch that would shadow a Secure cookie
 
-- rejects a whole script batch that would shadow a Secure cookie
 - Attempt an insecure script batch that shadows a Secure cookie
+- Logger new
+- parse set cookie
+- insecure origin, "/", Some
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("rejects a whole script batch that would shadow a Secure cookie")
 step("Attempt an insecure script batch that shadows a Secure cookie")
 var fetch = FetchEngine.new_for_origin(
     Logger.new("cookie-atomic-test", BrowserLogLevel.Error),
@@ -327,19 +319,22 @@ expect(fetch.cookie_store.get_header_for_origin(
 
 #### preserves Lax cookies for cross-site top-level navigation only
 
-- preserves Lax cookies for cross-site top-level navigation only
 - Prepare cross-site subresource and top-level navigation requests
+- Logger new
+- url: Url parse or opaque
+- Err
+- Ok
+- Err
+- Ok
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("preserves Lax cookies for cross-site top-level navigation only")
 step("Prepare cross-site subresource and top-level navigation requests")
 var fetch = FetchEngine.new_for_origin(
     Logger.new("same-site-test", BrowserLogLevel.Error),
@@ -377,19 +372,17 @@ match fetch.prepare_single_hop(
 
 #### treats max-age zero as immediately stale
 
-- treats max-age zero as immediately stale
 - Store and look up a response with max-age zero
+- Logger new
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("treats max-age zero as immediately stale")
 step("Store and look up a response with max-age zero")
 var cache = HttpCache.new(
     Logger.new("cache-test", BrowserLogLevel.Error), 1
@@ -412,7 +405,7 @@ expect(cache.lookup(
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_cache_policy_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-07-29 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -432,54 +425,3 @@ Tests covering Browser fetch cache isolation.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-LIB`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `f0985aa09136e79b6a0b91bfe80b9096dd1e4f4ce06b13f5321a198917ec2a5d`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `f0985aa09136e79b6a0b91bfe80b9096dd1e4f4ce06b13f5321a198917ec2a5d`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `f0985aa09136e79b6a0b91bfe80b9096dd1e4f4ce06b13f5321a198917ec2a5d`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
-
-SSpec documentization score: 88/100
-source: test/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_cache_policy_spec.spl
-mirror: doc/06_spec/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_cache_policy_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=80
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_cache_policy_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_cache_policy_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_cache_policy_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_cache_policy_spec.spl:37:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'only shares credential-free GET and HEAD responses' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_cache_policy_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'does not attach same-origin credentials to cross-origin requests' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_cache_policy_spec.spl:57:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'admits script cookies only from an exact network URL' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

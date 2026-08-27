@@ -1,0 +1,245 @@
+# Direct destination-type row to MIR type lowering. Only scalar registry reads
+# cross the HIR/MIR boundary; recursively created values are MIR-owned.
+use compiler.hir.hir_lowering.hir_destination_registry_reader.*
+use compiler.hir.hir_lowering.hir_destination_graph.*
+use compiler.hir.hir_lowering.hir_destination_symbols.{HD_SYMBOL_KIND_CLASS,
+    HD_SYMBOL_KIND_STRUCT, HD_SYMBOL_KIND_ENUM, HD_SYMBOL_KIND_TRAIT}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirSignature}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.hir_destination_receipt.*
+
+fn mir_destination_int_type(bits: i64, signed: bool) -> MirType:
+    if signed:
+        if bits <= 8: return MirType(kind: MirTypeKind.I8)
+        if bits <= 16: return MirType(kind: MirTypeKind.I16)
+        if bits <= 32: return MirType(kind: MirTypeKind.I32)
+        return MirType(kind: MirTypeKind.I64)
+    if bits <= 8: return MirType(kind: MirTypeKind.U8)
+    if bits <= 16: return MirType(kind: MirTypeKind.U16)
+    if bits <= 32: return MirType(kind: MirTypeKind.U32)
+    MirType(kind: MirTypeKind.U64)
+
+fn mir_destination_type_range_scalar(slot: i64, generation: i64,
+        handle: i64, depth: i64) -> [MirType]:
+    var result: [MirType] = []
+    if handle < 0 or hdr_range_kind(slot, generation, handle) != HD_RANGE_TYPE:
+        return result
+    val subtype = hdr_range_subtype(slot, generation, handle)
+    val count = hdr_range_length(slot, generation, handle)
+    var offset = 0
+    while offset < count:
+        val row = hdr_range_value(slot, generation, handle, subtype, offset)
+        result.push(mir_destination_lower_type_scalar(slot, generation, row, depth + 1))
+        offset = offset + 1
+    result
+
+fn mir_destination_lower_type_scalar(slot: i64, generation: i64,
+        row: i64, depth: i64 = 0) -> MirType:
+    # Frozen type rows are acyclic, but fail closed on corrupted input without
+    # risking unbounded native recursion.
+    if depth > 256 or row < 0: return MirType(kind: MirTypeKind.Opaque("invalid-hir-type"))
+    val shape = hdr_type_shape(slot, generation, row)
+    if shape == HD_TYPE_INT:
+        return mir_destination_int_type(hdr_type_i64(slot, generation, row, 0),
+            hdr_type_bool(slot, generation, row, 0))
+    if shape == HD_TYPE_FLOAT:
+        if hdr_type_i64(slot, generation, row, 0) <= 32:
+            return MirType(kind: MirTypeKind.F32)
+        return MirType(kind: MirTypeKind.F64)
+    if shape == HD_TYPE_BOOL: return MirType(kind: MirTypeKind.Bool)
+    if shape == HD_TYPE_CHAR: return MirType(kind: MirTypeKind.Char)
+    if shape == HD_TYPE_STR: return MirType(kind: MirTypeKind.Opaque("str"))
+    if shape == HD_TYPE_UNIT: return MirType(kind: MirTypeKind.Unit)
+    if shape == HD_TYPE_NEVER: return MirType(kind: MirTypeKind.Never)
+    if shape == HD_TYPE_ERROR: return MirType(kind: MirTypeKind.Opaque("error"))
+    if shape == HD_TYPE_ANY or shape == HD_TYPE_INFER:
+        return MirType(kind: MirTypeKind.Opaque("any"))
+    if shape == HD_TYPE_NAMED:
+        return MirType(kind: MirTypeKind.Struct(SymbolId(id:
+            hdr_type_i64(slot, generation, row, 0))))
+    if shape == HD_TYPE_PARAM:
+        # Type parameters have no declaration symbol in the frozen row (i0 is
+        # intentionally inert -1). Preserve their canonical textual identity
+        # instead of manufacturing Struct(SymbolId(-1)).
+        return MirType(kind: MirTypeKind.Opaque("type-param:" +
+            hdr_type_text(slot, generation, row)))
+    if shape == HD_TYPE_DYN_TRAIT:
+        return MirType(kind: MirTypeKind.Opaque("dyn:" + hdr_type_text(slot, generation, row)))
+    if shape == HD_TYPE_QUALIFIED_DYN_TRAIT:
+        return MirType(kind: MirTypeKind.Opaque("dyn-qualified:" +
+            hdr_type_qualified_dyn_trait_module(slot, generation, row).to_text() + ":" +
+            hdr_type_dyn_trait_symbol(slot, generation, row).to_text()))
+    if shape == HD_TYPE_TUPLE:
+        return MirType(kind: MirTypeKind.Tuple(mir_destination_type_range_scalar(slot, generation,
+            hdr_type_range(slot, generation, row, false), depth)))
+    if shape == HD_TYPE_UNION:
+        return MirType(kind: MirTypeKind.Union(mir_destination_type_range_scalar(slot, generation,
+            hdr_type_range(slot, generation, row, false), depth)))
+    if shape == HD_TYPE_ARRAY:
+        val element = mir_destination_lower_type_scalar(slot, generation,
+            hdr_type_i64(slot, generation, row, 0), depth + 1)
+        val size = if hdr_type_bool(slot, generation, row, 0):
+            hdr_type_i64(slot, generation, row, 1)
+        else: 0
+        return MirType(kind: MirTypeKind.Array(element, size))
+    if shape == HD_TYPE_DICT or shape == HD_TYPE_RESULT:
+        val left = mir_destination_lower_type_scalar(slot, generation,
+            hdr_type_i64(slot, generation, row, 0), depth + 1)
+        val right = mir_destination_lower_type_scalar(slot, generation,
+            hdr_type_i64(slot, generation, row, 1), depth + 1)
+        if shape == HD_TYPE_DICT: return MirType(kind: MirTypeKind.Dict(left, right))
+        return MirType(kind: MirTypeKind.Result(left, right))
+    if shape == HD_TYPE_FUNCTION:
+        val params = mir_destination_type_range_scalar(slot, generation,
+            hdr_type_range(slot, generation, row, false), depth)
+        val return_type = mir_destination_lower_type_scalar(slot, generation,
+            hdr_type_i64(slot, generation, row, 0), depth + 1)
+        return MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: params,
+            return_type: return_type, is_variadic: false)))
+    # Unary wrappers share i0=child and b0=mutable where meaningful.
+    val inner = mir_destination_lower_type_scalar(slot, generation,
+        hdr_type_i64(slot, generation, row, 0), depth + 1)
+    if shape == HD_TYPE_SLICE: return MirType(kind: MirTypeKind.Slice(inner))
+    if shape == HD_TYPE_REF: return MirType(kind: MirTypeKind.Ref(inner,
+        hdr_type_bool(slot, generation, row, 0)))
+    if shape == HD_TYPE_PTR: return MirType(kind: MirTypeKind.Ptr(inner,
+        hdr_type_bool(slot, generation, row, 0)))
+    if shape == HD_TYPE_OPTIONAL: return MirType(kind: MirTypeKind.Opaque("optional"))
+    if shape == HD_TYPE_ISOLATED or shape == HD_TYPE_WEAK or shape == HD_TYPE_ATOMIC:
+        return inner
+    if shape == HD_TYPE_TENSOR: return MirType(kind: MirTypeKind.Opaque("tensor"))
+    if shape == HD_TYPE_LAYER: return MirType(kind: MirTypeKind.Opaque("layer"))
+    if shape == HD_TYPE_PROJECTION:
+        return MirType(kind: MirTypeKind.Opaque("projection:" +
+            hdr_type_text(slot, generation, row)))
+    MirType(kind: MirTypeKind.Opaque("invalid-hir-type-shape:" + shape.to_text()))
+
+# Declaration and ABI lowering must never manufacture Opaque fallbacks or
+# erase semantic wrappers.  This checked path returns nil for every shape MIR
+# cannot represent exactly; callers reject the declaration transaction.
+fn mir_destination_type_range_scalar_checked(slot: i64, generation: i64,
+        handle: i64, depth: i64) -> [MirType]?:
+    if handle < 0 or hdr_range_kind(slot, generation, handle) != HD_RANGE_TYPE:
+        return nil
+    val subtype = hdr_range_subtype(slot, generation, handle)
+    val count = hdr_range_length(slot, generation, handle)
+    if count < 0: return nil
+    var result: [MirType] = []
+    var offset = 0
+    while offset < count:
+        val row = hdr_range_value(slot, generation, handle, subtype, offset)
+        val lowered = mir_destination_lower_type_scalar_checked(slot,
+            generation, row, depth + 1)
+        if not lowered.?: return nil
+        result.push(lowered ?? MirType.unit())
+        offset = offset + 1
+    Some(result)
+
+fn mir_destination_lower_type_scalar_checked(slot: i64, generation: i64,
+        row: i64, depth: i64 = 0) -> MirType?:
+    if depth > 256 or row < 0: return nil
+    val shape = hdr_type_shape(slot, generation, row)
+    if shape == HD_TYPE_INT:
+        val bits = hdr_type_i64(slot, generation, row, 0)
+        if bits <= 0 or bits > 64: return nil
+        return Some(mir_destination_int_type(bits,
+            hdr_type_bool(slot, generation, row, 0)))
+    if shape == HD_TYPE_FLOAT:
+        val bits = hdr_type_i64(slot, generation, row, 0)
+        if bits == 32: return Some(MirType(kind: MirTypeKind.F32))
+        if bits == 64: return Some(MirType(kind: MirTypeKind.F64))
+        return nil
+    if shape == HD_TYPE_BOOL: return Some(MirType(kind: MirTypeKind.Bool))
+    if shape == HD_TYPE_CHAR: return Some(MirType(kind: MirTypeKind.Char))
+    if shape == HD_TYPE_STR: return Some(MirType(kind: MirTypeKind.Opaque("str")))
+    if shape == HD_TYPE_UNIT: return Some(MirType(kind: MirTypeKind.Unit))
+    if shape == HD_TYPE_NEVER: return Some(MirType(kind: MirTypeKind.Never))
+    if shape == HD_TYPE_NAMED:
+        val symbol = hdr_type_i64(slot, generation, row, 0)
+        val module_row = hdr_type_i64(slot, generation, row, 1)
+        if symbol < 0 or module_row < 0: return nil
+        val type_args = hdr_type_range(slot, generation, row, false)
+        if type_args < 0 or hdr_range_length(slot, generation, type_args) != 0:
+            # MIR has no instantiated nominal-type argument carrier. Accepting
+            # a populated range would silently erase generic ABI identity.
+            return nil
+        val symbol_row = hdr_destination_symbol_lookup_in_module(slot,
+            generation, module_row, symbol)
+        val kind = hdr_destination_symbol_kind(slot, generation, symbol_row)
+        if kind == HD_SYMBOL_KIND_ENUM:
+            return Some(MirType(kind: MirTypeKind.Enum(SymbolId(id: symbol))))
+        if kind == HD_SYMBOL_KIND_CLASS or kind == HD_SYMBOL_KIND_STRUCT:
+            return Some(MirType(kind: MirTypeKind.Struct(SymbolId(id: symbol))))
+        return nil
+    if shape == HD_TYPE_TUPLE or shape == HD_TYPE_UNION:
+        val elements = mir_destination_type_range_scalar_checked(slot,
+            generation, hdr_type_range(slot, generation, row, false), depth)
+        if not elements.?: return nil
+        val values = elements ?? []
+        if shape == HD_TYPE_TUPLE:
+            return Some(MirType(kind: MirTypeKind.Tuple(values)))
+        return Some(MirType(kind: MirTypeKind.Union(values)))
+    if shape == HD_TYPE_ARRAY:
+        if not hdr_type_bool(slot, generation, row, 0): return nil
+        val size = hdr_type_i64(slot, generation, row, 1)
+        val element = mir_destination_lower_type_scalar_checked(slot,
+            generation, hdr_type_i64(slot, generation, row, 0), depth + 1)
+        if size < 0 or not element.?: return nil
+        return Some(MirType(kind: MirTypeKind.Array(element ?? MirType.unit(), size)))
+    if shape == HD_TYPE_DICT or shape == HD_TYPE_RESULT:
+        val left = mir_destination_lower_type_scalar_checked(slot, generation,
+            hdr_type_i64(slot, generation, row, 0), depth + 1)
+        val right = mir_destination_lower_type_scalar_checked(slot, generation,
+            hdr_type_i64(slot, generation, row, 1), depth + 1)
+        if not left.? or not right.?: return nil
+        if shape == HD_TYPE_DICT:
+            return Some(MirType(kind: MirTypeKind.Dict(left ?? MirType.unit(),
+                right ?? MirType.unit())))
+        return Some(MirType(kind: MirTypeKind.Result(left ?? MirType.unit(),
+            right ?? MirType.unit())))
+    if shape == HD_TYPE_FUNCTION:
+        val effects = hdr_type_range(slot, generation, row, true)
+        if effects < 0 or hdr_range_length(slot, generation, effects) != 0:
+            # MirSignature currently has no effect-set field.
+            return nil
+        val params = mir_destination_type_range_scalar_checked(slot, generation,
+            hdr_type_range(slot, generation, row, false), depth)
+        val return_type = mir_destination_lower_type_scalar_checked(slot,
+            generation, hdr_type_i64(slot, generation, row, 0), depth + 1)
+        if not params.? or not return_type.?: return nil
+        return Some(MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+            params: params ?? [], return_type: return_type ?? MirType.unit(),
+            is_variadic: false))))
+    val inner_row = hdr_type_i64(slot, generation, row, 0)
+    if shape == HD_TYPE_SLICE or shape == HD_TYPE_REF or shape == HD_TYPE_PTR:
+        val inner = mir_destination_lower_type_scalar_checked(slot, generation,
+            inner_row, depth + 1)
+        if not inner.?: return nil
+        val value = inner ?? MirType.unit()
+        if shape == HD_TYPE_SLICE: return Some(MirType(kind: MirTypeKind.Slice(value)))
+        if shape == HD_TYPE_REF: return Some(MirType(kind: MirTypeKind.Ref(value,
+            hdr_type_bool(slot, generation, row, 0))))
+        return Some(MirType(kind: MirTypeKind.Ptr(value,
+            hdr_type_bool(slot, generation, row, 0))))
+    nil
+
+fn mir_destination_lower_type(r: MirDestinationFunctionReceipt,
+        row: i64, depth: i64 = 0) -> MirType:
+    mir_destination_lower_type_scalar(r.slot, r.generation, row, depth)
+
+impl MirLowering:
+    me destination_checked_type(r: MirDestinationFunctionReceipt, row: i64,
+            context: text) -> MirType:
+        val checked = mir_destination_lower_type_scalar_checked(r.slot,
+            r.generation, row)
+        if val exact = checked: return exact
+        # Unit is only a non-published recovery value: every caller's module
+        # transaction is rejected by this fatal diagnostic before commit.
+        self.error_fatal("E-MIR-DESTINATION-TYPE: no lossless MIR type for " +
+            context + " row " + row.to_text(), nil)
+        MirType.unit()
+
+export mir_destination_lower_type, mir_destination_lower_type_scalar
+export mir_destination_lower_type_scalar_checked
+export destination_checked_type

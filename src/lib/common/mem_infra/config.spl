@@ -197,18 +197,10 @@ fn mem_infra_matrix() -> [MemInfraRow]:
     ]
 
 # Row names the `auto` shorthand expands to, given the target backend.
-#
-# `auto` only ever expands to rows that are actually supported on `backend`,
-# so it can never advertise a protection the backend does not have. `guard` is
-# therefore interpreter-only here: including it on cranelift/llvm is what made
-# plain `--mem-infra=auto` silently claim use-after-free coverage on native
-# builds that had none.
 fn mem_infra_auto_rows(backend: text) -> [text]:
     if backend == "llvm":
-        return ["attr", "genarena", "asan"]
-    if backend == "interpreter":
-        return ["attr", "guard", "genarena"]
-    ["attr", "genarena"]
+        return ["attr", "guard", "genarena", "asan"]
+    ["attr", "guard", "genarena"]
 
 # True when `name` is one of the eight known capability-matrix rows.
 fn mem_infra_row_known(name: text) -> bool:
@@ -229,45 +221,16 @@ fn mem_infra_row_supported(name: text, backend: text) -> bool:
     false
 
 # Closest runtime-level equivalent for a row unsupported on `backend`, per the
-# feature doc's degradation notes. Empty text means "no equivalent", and the
-# caller turns that into a loud error rather than a silent downgrade.
-#
-# `guard` deliberately has NO fallback on cranelift/llvm. `harden` looks like
-# the obvious analog, but a guard page traps the faulting access at the
-# instruction that commits the use-after-free, whereas harden only notices
-# afterwards, when something calls the harden check. Substituting one for the
-# other silently would answer "yes, you have UAF detection" to someone who
-# asked for the trapping kind — the exact false-safety failure this row was
-# corrected to remove. Erroring sends them to a backend that really has it.
-#
-# A degrade target is itself a capability claim, so it must never name a row
-# that is false on the requesting backend. `strict` used to degrade to
-# `harden` on every non-interpreter backend; now that `harden` is known false
-# on llvm, that path would have quietly enabled an inert row and reported
-# success. `strict` therefore degrades to `harden` only on cranelift, where
-# harden was actually measured to work. `resolve_mem_infra` re-checks this
-# invariant for every target so no future row can reintroduce it.
+# feature doc's degradation notes. Empty text means "no equivalent" (should
+# not happen for the three rows that can ever be unsupported: strict, asan,
+# memprof).
 fn mem_infra_degrade_target(name: text, backend: text) -> text:
     if name == "asan": return "harden"
     if name == "memprof": return "attr"
     if name == "strict":
-        if backend == "cranelift": return "harden"
+        if backend != "interpreter": return "harden"
         return ""
     ""
-
-# `mem_infra_degrade_target` filtered so it can only ever name a row that is
-# genuinely supported on `backend`. Returns "" when the declared fallback is
-# itself unsupported there, which callers already treat as "no fallback" and
-# turn into a loud error. This is the invariant that stops a corrected
-# capability row (harden on llvm, 2026-08-02) from leaving a degrade path that
-# still answers "yes, you have detection".
-fn _mem_infra_usable_degrade_target(name: text, backend: text) -> text:
-    val target = mem_infra_degrade_target(name, backend)
-    if target == "":
-        return ""
-    if not mem_infra_row_supported(target, backend):
-        return ""
-    target
 
 fn _mem_infra_contains(items: [text], value: text) -> bool:
     for item in items:
@@ -311,12 +274,7 @@ fn resolve_mem_infra(requested: [text], backend: text, strict: bool) -> MemInfra
                         "'" + name + "' is not supported on backend '" + backend + "' (strict mode)"
                     )
                 else:
-                    # A degrade target is itself a capability claim. If it is
-                    # unsupported on `backend` it is worse than no fallback:
-                    # resolution would report success while enabling a row that
-                    # does nothing. `_mem_infra_usable_degrade_target` collapses
-                    # that case to "" so it takes the no-fallback error path.
-                    val target = _mem_infra_usable_degrade_target(name, backend)
+                    val target = mem_infra_degrade_target(name, backend)
                     if target == "":
                         errors = errors.push(
                             "'" + name + "' is not supported on backend '" + backend + "' and has no fallback"

@@ -145,3 +145,30 @@ describe "SHA-256 counterpart run: Simple vs OpenSSL vs NIST vectors":
         assert_false(matrix_run_accepted(run))
         assert_equal(results[1].diagnostics[0].contains("not found"), true)
         assert_true(matrix_run_has_rejection_containing(run, "openssl"))
+
+    it "treats an empty openssl path as unavailable without probing any binary":
+        step("Invoke the openssl source with an empty path")
+        val result = openssl_sha256_source("openssl", "", "abc", "abc", 15000)
+        step("Confirm the source is unavailable and says the binary was not found")
+        assert_true(result.diagnostics[0].contains("not found"))
+        assert_equal(result.artifact.canonical_hash, "")
+
+    it "reports a crashed source when the executable exits nonzero, never a silent pass":
+        step("Point the process bridge at /bin/false — executable, but always exits 1")
+        val result = openssl_sha256_source("openssl", "/bin/false", "abc", "abc", 15000)
+        step("Confirm the source is crashed with the exit code in diagnostics")
+        assert_true(result.diagnostics[0].contains("openssl exited"))
+        assert_equal(result.artifact.canonical_hash, "")
+
+    it "yields an empty digest when the executable prints no 'SHA2-256(stdin)=' line":
+        step("Point the process bridge at /bin/true — exits 0 but prints nothing")
+        val result = openssl_sha256_source("openssl", "/bin/true", "abc", "abc", 15000)
+        step("Confirm the hex extraction falls back to an empty digest, not a crash")
+        assert_equal(result.artifact.canonical_hash, "")
+
+    it "quotes single quotes in the message so the digest still matches Simple's":
+        step("Digest a message containing a single quote through both sources")
+        val simple_result = simple_sha256_source("simple", "a'b", "quoted")
+        val openssl_result = openssl_sha256_source("openssl", OPENSSL_DEFAULT_PATH, "a'b", "quoted", 15000)
+        step("Confirm both digests are byte-identical")
+        assert_equal(simple_result.artifact.canonical_hash, openssl_result.artifact.canonical_hash)

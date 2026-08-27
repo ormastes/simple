@@ -1,6 +1,29 @@
 # Engine2d Text Specification
 
-> Tests covering Engine2D Text Rendering.
+> 1. var engine = Engine2D create with backend
+
+<!-- sdn-diagram:id=engine2d_text_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=engine2d_text_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+engine2d_text_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=engine2d_text_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,19 +42,21 @@
 
 #### draw_text renders non-zero pixels in the glyph area
 
-- draw_text renders non-zero pixels in the glyph area
+1. var engine = Engine2D create with backend
+2. engine clear
+3. engine draw text
+4. engine present
    - Expected: found is true
+5. engine shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("draw_text renders non-zero pixels in the glyph area")
 # draw_text uses FontRenderer (8x16 bitmap + bearing offsets), so
 # we scan the first 20x20 region for any non-black pixel rather
 # than asserting a specific coordinate.
@@ -49,21 +74,23 @@ engine.shutdown()
 
 #### draw_text leaves pixels outside the glyph area unchanged
 
-- draw_text leaves pixels outside the glyph area unchanged
+1. var engine = Engine2D create with backend
+2. engine clear
+3. engine draw text
+4. engine present
    - Expected: color_r(p) equals `0`
    - Expected: color_g(p) equals `0`
    - Expected: color_b(p) equals `0`
+5. engine shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("draw_text leaves pixels outside the glyph area unchanged")
 # Draw "A" at (0,0) with font_size=14.  The glyph fits in roughly
 # 8x14 px.  A pixel at (45, 18) is well outside that — must remain
 # the black background.
@@ -83,18 +110,20 @@ engine.shutdown()
 
 #### draw_text_bg fills background color where the glyph bit is OFF
 
-- draw_text_bg fills background color where the glyph bit is OFF
+1. var engine = Engine2D create with backend
+2. engine clear
+3. engine draw text bg
+4. engine present
+5. engine shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("draw_text_bg fills background color where the glyph bit is OFF")
 # "A" row 0: 0b01110 — x=0 (col 0) is OFF, so that pixel should
 # take the background color (green = rgb(0,255,0)), not the fg.
 # At scale=1, font_size=7, the cell is 6px wide x 7px tall.
@@ -123,12 +152,12 @@ engine.shutdown()
 | Category | Other |
 | Status | Active |
 | Source | `test/02_integration/rendering/engine2d_text_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Engine2D Text Rendering.
+Tests covering:
 - Engine2D Text Rendering
 
 ## Scenario Summary
@@ -143,54 +172,3 @@ Tests covering Engine2D Text Rendering.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-INTEGRATION`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `064ed1f40e0b9858bfc5060c631a310e46c4febbd196f4dbbe9a20da9ac2e0a5`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `064ed1f40e0b9858bfc5060c631a310e46c4febbd196f4dbbe9a20da9ac2e0a5`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `064ed1f40e0b9858bfc5060c631a310e46c4febbd196f4dbbe9a20da9ac2e0a5`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/02_integration/rendering/engine2d_text_spec.spl
-mirror: doc/06_spec/02_integration/rendering/engine2d_text_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/rendering/engine2d_text_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/rendering/engine2d_text_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/02_integration/rendering/engine2d_text_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/02_integration/rendering/engine2d_text_spec.spl:72:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'draw_text renders non-zero pixels in the glyph area' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/rendering/engine2d_text_spec.spl:87:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'draw_text leaves pixels outside the glyph area unchanged' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/rendering/engine2d_text_spec.spl:104:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'draw_text_bg fills background color where the glyph bit is OFF' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

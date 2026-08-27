@@ -1,0 +1,123 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.debug.contracts_v1.{debug_policy_observe_only_v1}
+use std.common.debug.evidence_bundle_writer_v1.{
+    DebugBundleArtifactInputV1, DebugEvidenceBundleWriteRequestV1,
+    DebugReplayInputV1, write_debug_evidence_bundle_v1,
+}
+use std.nogc_sync_mut.io_runtime.{
+    dir_create_all, file_delete, file_exists, file_read, file_write,
+}
+
+fn write_ok<T>(result: Result<T, text>) -> bool:
+    match result:
+        case Ok(_): true
+        case Err(_): false
+
+fn request_for(root: text, source: text, bundle_path: text,
+               digest: text, native: bool, privacy: text) -> DebugEvidenceBundleWriteRequestV1:
+    DebugEvidenceBundleWriteRequestV1(
+        bundle_root: root,
+        session_id: "debug-session-7",
+        build_id: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        captured_at_ns: 77,
+        receipts_sdn: "schema: debug-receipts-v1\nreceipts: []\n",
+        replay_inputs: [],
+        artifacts: [DebugBundleArtifactInputV1(
+            source_path: source,
+            bundle_path: bundle_path,
+            digest: digest,
+            media_type: "application/octet-stream",
+            native: native,
+            privacy_label: privacy,
+        )],
+    )
+
+describe "Debug evidence bundle writer V1":
+    it "writes the canonical layout and retains native evidence byte-for-byte":
+        val fixture_dir = "build/test-debug-evidence-writer"
+        val root = "{fixture_dir}/valid-bundle"
+        val source = "{fixture_dir}/native.core"
+        expect(dir_create_all(fixture_dir)).to_equal(true)
+        expect(file_write(source, "native-core-bytes-v1")).to_equal(true)
+        val digest = sha256_text("native-core-bytes-v1")
+
+        val result = write_debug_evidence_bundle_v1(
+            request_for(root, source, "raw/native.core", digest, true, "redacted"),
+            debug_policy_observe_only_v1(),
+        )
+        expect(write_ok(result)).to_equal(true)
+        expect(file_exists("{root}/manifest.sdn")).to_equal(true)
+        expect(file_exists("{root}/receipts.sdn")).to_equal(true)
+        expect(file_read("{root}/raw/native.core")).to_equal("native-core-bytes-v1")
+        expect(file_read("{root}/manifest.sdn")).to_contain("build_id:")
+        expect(file_read("{root}/manifest.sdn")).to_contain("sha256:{digest}")
+
+    it "fails closed before writing traversal paths or unredacted evidence":
+        val fixture_dir = "build/test-debug-evidence-writer"
+        val source = "{fixture_dir}/sensitive.dump"
+        val escaped = "{fixture_dir}/escaped.dump"
+        expect(dir_create_all(fixture_dir)).to_equal(true)
+        expect(file_write(source, "secret-memory")).to_equal(true)
+        val _ = file_delete(escaped)
+        val digest = sha256_text("secret-memory")
+
+        val traversal = write_debug_evidence_bundle_v1(
+            request_for("{fixture_dir}/invalid-path", source, "raw/../escaped.dump", digest, true, "redacted"),
+            debug_policy_observe_only_v1(),
+        )
+        val privacy = write_debug_evidence_bundle_v1(
+            request_for("{fixture_dir}/invalid-privacy", source, "raw/sensitive.dump", digest, true, "secret"),
+            debug_policy_observe_only_v1(),
+        )
+        expect(write_ok(traversal)).to_equal(false)
+        expect(write_ok(privacy)).to_equal(false)
+        expect(file_exists(escaped)).to_equal(false)
+
+    it "rejects missing build identity and digest mismatches":
+        val fixture_dir = "build/test-debug-evidence-writer"
+        val source = "{fixture_dir}/digest.core"
+        expect(dir_create_all(fixture_dir)).to_equal(true)
+        expect(file_write(source, "actual")).to_equal(true)
+        var missing_build = request_for(
+            "{fixture_dir}/missing-build", source, "raw/digest.core",
+            sha256_text("actual"), true, "public",
+        )
+        missing_build.build_id = " "
+        val bad_digest = request_for(
+            "{fixture_dir}/bad-digest", source, "raw/digest.core",
+            sha256_text("different"), true, "public",
+        )
+        expect(write_ok(write_debug_evidence_bundle_v1(
+            missing_build, debug_policy_observe_only_v1()))).to_equal(false)
+        expect(write_ok(write_debug_evidence_bundle_v1(
+            bad_digest, debug_policy_observe_only_v1()))).to_equal(false)
+
+    it "normalizes identical inputs to stable order identity and replay labels":
+        val fixture_dir = "build/test-debug-evidence-writer/deterministic"
+        val source_a = "{fixture_dir}/a.txt"
+        val source_b = "{fixture_dir}/b.txt"
+        expect(dir_create_all(fixture_dir)).to_equal(true)
+        expect(file_write(source_a, "alpha")).to_equal(true)
+        expect(file_write(source_b, "beta")).to_equal(true)
+        val artifact_a = DebugBundleArtifactInputV1(source_a, "normalized/a.txt", sha256_text("alpha"), "text/plain", false, "redacted")
+        val artifact_b = DebugBundleArtifactInputV1(source_b, "normalized/b.txt", sha256_text("beta"), "text/plain", false, "redacted")
+        var first = request_for("{fixture_dir}/bundle-one", source_a, "normalized/a.txt", sha256_text("alpha"), false, "redacted")
+        first.artifacts = [artifact_b, artifact_a]
+        first.replay_inputs = [
+            DebugReplayInputV1("clock", "wall", false, true),
+            DebugReplayInputV1("device", "missing-gpu", true, false),
+        ]
+        var second = first
+        second.bundle_root = "{fixture_dir}/bundle-two"
+        second.artifacts = [artifact_a, artifact_b]
+        second.replay_inputs = [first.replay_inputs[1], first.replay_inputs[0]]
+        val result_one = write_debug_evidence_bundle_v1(first, debug_policy_observe_only_v1())?
+        val result_two = write_debug_evidence_bundle_v1(second, debug_policy_observe_only_v1())?
+        expect(result_one.bundle_id).to_equal(result_two.bundle_id)
+        expect(result_one.manifest_digest).to_equal(result_two.manifest_digest)
+        val manifest_one = file_read(result_one.manifest_path)
+        expect(manifest_one).to_equal(file_read(result_two.manifest_path))
+        expect(manifest_one.index_of("normalized/a.txt") < manifest_one.index_of("normalized/b.txt")).to_equal(true)
+        expect(manifest_one).to_contain("status: nondeterministic")
+        expect(manifest_one).to_contain("status: unavailable")

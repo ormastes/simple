@@ -27,7 +27,7 @@ fn query_cli_get_args() -> [text]:
     get_args()
 
 # Module-level diagnostic accumulator for JSON collection mode
-var _DIAG_COLLECT_MODE: bool = false
+var _DIAG_COLLECT_MODE = false
 var _DIAG_COLLECTED: [text] = []
 
 # Per-lint severity override, keyed by lint code. Populated by query_lint from the
@@ -35,13 +35,32 @@ var _DIAG_COLLECTED: [text] = []
 # the diagnostic (Allow); a positive value rewrites the LSP severity (Deny -> 1).
 # Codes absent from the map keep their emitted severity (Warn / unconfigurable).
 var _DIAG_SEVERITY_OVERRIDE: Dict<text, i64> = {}
-var _DIAG_SEVERITY_OVERRIDE_COUNT: i64 = 0
 
-export _DIAG_COLLECT_MODE, _DIAG_COLLECTED, _DIAG_SEVERITY_OVERRIDE, _DIAG_SEVERITY_OVERRIDE_COUNT
+export _DIAG_COLLECT_MODE, _DIAG_COLLECTED, _DIAG_SEVERITY_OVERRIDE
 export _diag_emit_or_collect, query_file_read_rich
 export _find_in_line, _find_in_line_from, _parse_error_location, _extract_decl_name
-export query_split_structured_error
 export query_mcp_diagnostics_wrapper_json, query_emit_mcp_diagnostics_wrapper
+
+fn query_mcp_diagnostics_wrapper_json(diagnostics: [text]) -> text:
+    val count_text = str(diagnostics.len())
+    var parts: [text] = [
+        "{\"content\":[{\"type\":\"text\",\"text\":\"",
+        count_text,
+        " diagnostics found\"}],\"structuredContent\":{\"diagnostics\":["
+    ]
+    var index = 0
+    while index < diagnostics.len():
+        if index > 0:
+            parts.push(",")
+        parts.push(diagnostics[index])
+        index = index + 1
+    parts.push("],\"count\":")
+    parts.push(count_text)
+    parts.push("},\"isError\":false}")
+    parts.join("")
+
+fn query_emit_mcp_diagnostics_wrapper(diagnostics: [text]):
+    print query_mcp_diagnostics_wrapper_json(diagnostics)
 
 fn query_mcp_diagnostics_wrapper_json(diagnostics: [text]) -> text:
     val count_text = str(diagnostics.len())
@@ -87,22 +106,9 @@ fn _diag_rewrite_severity(json_str: text, sev: i64) -> text:
         return json_str
     val vstart = start + marker.len()
     var vend = vstart
-    while vend < json_str.len() and _diag_is_digit_byte(json_str.byte_at(vend)):
+    while vend < json_str.len() and _diag_is_digit(json_str.substring(vend, vend + 1)):
         vend = vend + 1
-    if vend == vstart:
-        return json_str
-    val severity_text = sev.to_string()
-    var same = severity_text.len() == vend - vstart
-    var si = 0
-    while same and si < severity_text.len():
-        if json_str.byte_at(vstart + si) != severity_text.byte_at(si):
-            same = false
-        si = si + 1
-    if same:
-        return json_str
-    var parts: [text] = [
-        json_str.substring(0, vstart), severity_text, json_str.substring(vend)]
-    parts.join("")
+    json_str.substring(0, vstart) + sev.to_string() + json_str.substring(vend)
 
 fn _diag_emit_or_collect(json_str: text):
     """Either print or collect a JSON diagnostic string depending on mode.
@@ -111,17 +117,16 @@ fn _diag_emit_or_collect(json_str: text):
     LSP/build diagnostic path honors the strictness tier, matching `simple lint`.
     """
     var out = json_str
-    if _DIAG_SEVERITY_OVERRIDE_COUNT > 0:
-        val code = _diag_code_of(json_str)
-        if code != "" and _DIAG_SEVERITY_OVERRIDE.has(code):
-            val ov = _DIAG_SEVERITY_OVERRIDE[code]
-            if ov < 0:
-                return  # suppressed (Allow)
-            out = _diag_rewrite_severity(json_str, ov)
+    val code = _diag_code_of(json_str)
+    if code != "" and _DIAG_SEVERITY_OVERRIDE.has(code):
+        val ov = _DIAG_SEVERITY_OVERRIDE[code]
+        if ov < 0:
+            return  # suppressed (Allow)
+        out = _diag_rewrite_severity(json_str, ov)
     if _DIAG_COLLECT_MODE:
-        _DIAG_COLLECTED.push(out)
+        _DIAG_COLLECTED.push(json_str)
     else:
-        print out
+        print json_str
 
 fn query_file_read_rich(path: text) -> text:
     # Query/check entrypoints parse immediately after this read.  Mapping keeps
@@ -175,21 +180,10 @@ fn _find_in_line(line: text, pattern: text) -> i64:
 
 fn _find_in_line_from(line: text, needle: text, start: i64) -> i64:
     """Find needle in line starting from a given position. Returns -1 if not found."""
-    var i = if start < 0: 0 else: start
+    var i = start
     val nlen = needle.len()
-    if nlen == 0:
-        if i <= line.len():
-            return i
-        return -1
     while i <= line.len() - nlen:
-        var matched = true
-        var ni = 0
-        while ni < nlen:
-            if line.byte_at(i + ni) != needle.byte_at(ni):
-                matched = false
-                break
-            ni = ni + 1
-        if matched:
+        if line.substring(i, i + nlen) == needle:
             return i
         i = i + 1
     -1
@@ -209,7 +203,7 @@ fn _parse_error_location(err: text) -> (i64, i64, text):
     var colon2 = -1
     var ci = 0
     while ci < err.len():
-        if err.byte_at(ci) == 58:
+        if err.substring(ci, ci + 1) == ":":
             if colon1 == -1:
                 colon1 = ci
             elif colon2 == -1:
@@ -225,30 +219,6 @@ fn _parse_error_location(err: text) -> (i64, i64, text):
         if line > 0:
             return (line, if col > 0: col else: 1, msg)
     (1, 1, err)
-
-fn query_split_structured_error(err: text) -> (text, [text], text):
-    """Parse `|||RELATED:` and `|||HELP:` metadata without a split array."""
-    val separator = "|||"
-    val first_separator = _find_in_line_from(err, separator, 0)
-    if first_separator < 0:
-        return (err, [], "")
-
-    val core = err.substring(0, first_separator)
-    var related: [text] = []
-    var help = ""
-    var segment_start = first_separator + separator.len()
-    while segment_start <= err.len():
-        val next_separator = _find_in_line_from(err, separator, segment_start)
-        val segment_end = if next_separator < 0: err.len() else: next_separator
-        val segment = err.substring(segment_start, segment_end).trim()
-        if segment.starts_with("RELATED:"):
-            related.push(segment.substring(8))
-        elif segment.starts_with("HELP:"):
-            help = segment.substring(5)
-        if next_separator < 0:
-            break
-        segment_start = next_separator + separator.len()
-    (core, related, help)
 
 fn _extract_decl_name(after_kw: text) -> text:
     """Extract the variable name from text after val/var keyword."""

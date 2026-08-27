@@ -1,0 +1,72 @@
+"""Pure grouping policy for authorized modern VirtIO-PCI BAR windows."""
+
+struct VirtioGpuPciCapabilityWindow:
+    cfg_type: u8
+    bar: u8
+    offset: u64
+    len: u64
+    config_ptr: u8
+
+struct VirtioGpuBarMappingWindow:
+    bar: u8
+    offset: u64
+    len: u64
+
+struct VirtioGpuBarMappingPlan:
+    ok: bool
+    reason: text
+    windows: [VirtioGpuBarMappingWindow]
+
+fn virtio_gpu_plan_bar_windows(
+        capabilities: [VirtioGpuPciCapabilityWindow]) -> VirtioGpuBarMappingPlan:
+    if capabilities.len() == 0:
+        return VirtioGpuBarMappingPlan(ok: false,
+            reason: "blocked:no-modern-capabilities", windows: [])
+    for capability in capabilities:
+        if capability.bar >= 6u8:
+            return VirtioGpuBarMappingPlan(ok: false,
+                reason: "blocked:capability-bar-invalid", windows: [])
+        if capability.offset > 0xFFFFFFFFu64 or
+                capability.len > 0xFFFFFFFFu64 or capability.len == 0u64 or
+                capability.offset + capability.len < capability.offset:
+            return VirtioGpuBarMappingPlan(ok: false,
+                reason: "blocked:capability-window-invalid", windows: [])
+    var windows: [VirtioGpuBarMappingWindow] = []
+    var bar: u8 = 0u8
+    while bar < 6u8:
+        var found = false
+        var minimum: u64 = 0u64
+        var maximum: u64 = 0u64
+        for capability in capabilities:
+            if capability.bar == bar:
+                val finish = capability.offset + capability.len
+                if not found or capability.offset < minimum:
+                    minimum = capability.offset
+                if not found or finish > maximum:
+                    maximum = finish
+                found = true
+        if found:
+            windows.push(VirtioGpuBarMappingWindow(bar: bar,
+                offset: minimum, len: maximum - minimum))
+        bar = bar + 1u8
+    VirtioGpuBarMappingPlan(ok: true, reason: "ok:modern-bar-plan",
+        windows: windows)
+
+fn virtio_gpu_capability_user_addr(capability: VirtioGpuPciCapabilityWindow,
+        windows: [VirtioGpuBarMappingWindow], users: [u64]) -> u64:
+    if windows.len() != users.len():
+        return 0u64
+    var index: i64 = 0
+    while index < windows.len():
+        val window = windows[index]
+        if window.bar == capability.bar and
+                capability.offset >= window.offset:
+            val relative = capability.offset - window.offset
+            if relative <= window.len and capability.len <= window.len - relative:
+                return users[index] + relative
+        index = index + 1
+    0u64
+
+export VirtioGpuPciCapabilityWindow, VirtioGpuBarMappingWindow,
+    VirtioGpuBarMappingPlan, virtio_gpu_plan_bar_windows,
+    virtio_gpu_capability_user_addr

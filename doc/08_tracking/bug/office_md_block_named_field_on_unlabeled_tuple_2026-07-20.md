@@ -1,10 +1,6 @@
 # `parse_markdown_document` accesses named fields on an unlabeled tuple return
 
-**Status:** RESOLVED 2026-08-17 — commit `33d242cf0e1c`. Evidence: grepped
-`parse_inline_spans` in `src/app/office/file_formats.spl` (declared
-`-> InlineSpanParseResult`); its body now ends on the expression
-`InlineSpanParseResult(spans: spans, comments: comments)` instead of an `if`
-statement, so it no longer returns nil to `parse_markdown_document`.
+**Status:** open
 **Found:** 2026-07-20 (whole-suite triage campaign, test/01_unit shard)
 **Area:** `src/app/office/file_formats.spl`
 
@@ -82,13 +78,3 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 90 \
 
 - `test/01_unit/app/office/odf_ooxml_spec.spl` (2 of 10 examples; both trace
   to the same `_md_block` call site)
-
-## Re-verification 2026-08-17 (app-rest lane) — ALREADY FIXED (content)
-
-`src/app/office/file_formats.spl:53` now declares `struct MdBlockResult:`, and
-`:193` `fn _md_block(...) -> MdBlockResult:`. All seven return sites construct
-`MdBlockResult(block:, comments:)`, and the caller at `:249-251` reads
-`r.block` / `r.comments`. No unlabeled-tuple return remains, so the
-`undefined field block on Tuple` shape cannot occur on this path.
-Verdict: ALREADY-FIXED. Not proven: an end-to-end pass of
-`test/01_unit/app/office/odf_ooxml_spec.spl` (not run in this lane).

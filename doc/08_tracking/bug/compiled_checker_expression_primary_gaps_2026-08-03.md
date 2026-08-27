@@ -1,7 +1,6 @@
 # Compiled checker expression/primary parser gaps
 
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- Status: **fixed in owned scope**
 - Claimed by: `stage4_expr_batch`
 - Date: 2026-08-03
 - Frozen compiler/checker evidence:

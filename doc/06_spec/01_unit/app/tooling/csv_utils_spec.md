@@ -1,6 +1,29 @@
 # Csv Utils Specification
 
-> Tests covering CSV Utilities, CSV Parsing, CSV Formatting, CSV Validation, CSV Transformation, CSV Statistics, Table Formatting.
+> 1. expect fields len
+
+<!-- sdn-diagram:id=csv_utils_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=csv_utils_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+csv_utils_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=csv_utils_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,18 +42,16 @@
 
 #### parses simple CSV line
 
-- parses simple CSV line
+1. expect fields len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses simple CSV line")
 val fields = parse_csv_line_quoted("apple,banana,cherry")
 expect fields.len() == 3
 expect fields[0] == "apple"
@@ -42,18 +63,16 @@ expect fields[2] == "cherry"
 
 #### parses quoted fields
 
-- parses quoted fields
+1. expect fields len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses quoted fields")
 val fields = parse_csv_line_quoted("\"John Doe\",30,\"New York\"")
 expect fields.len() == 3
 expect fields[0] == "John Doe"
@@ -65,18 +84,16 @@ expect fields[2] == "New York"
 
 #### parses comma in quoted field
 
-- parses comma in quoted field
+1. expect fields len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses comma in quoted field")
 val fields = parse_csv_line_quoted("\"Smith, John\",Engineer")
 expect fields.len() == 2
 expect fields[0] == "Smith, John"
@@ -86,18 +103,16 @@ expect fields[0] == "Smith, John"
 
 #### parses multiple rows
 
-- parses multiple rows
+1. expect rows len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses multiple rows")
 val text_content = "Name,Age\nAlice,30\nBob,25"
 val rows = parse_csv(text_content)
 expect rows.len() == 3
@@ -110,18 +125,17 @@ expect rows[2][0] == "Bob"
 
 #### parses with headers
 
-- parses with headers
+1. expect data headers len
+2. expect data rows len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses with headers")
 val text_content = "Name,Age,City\nAlice,30,NYC\nBob,25,LA"
 match parse_csv_with_headers(text_content):
     case Some(data):
@@ -139,18 +153,13 @@ match parse_csv_with_headers(text_content):
 
 #### formats simple line
 
-- formats simple line
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats simple line")
 val line = format_csv_line(["apple", "banana", "cherry"])
 expect line == "apple,banana,cherry"
 ```
@@ -159,18 +168,16 @@ expect line == "apple,banana,cherry"
 
 #### quotes field with comma
 
-- quotes field with comma
+1. expect line contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("quotes field with comma")
 val line = format_csv_line(["Smith, John", "30"])
 expect line.contains("\"Smith, John\"")
 ```
@@ -179,7 +186,25 @@ expect line.contains("\"Smith, John\"")
 
 #### quotes field only when needed
 
-- quotes field only when needed
+1. expect quote csv field
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect quote_csv_field("simple") == "simple"
+```
+
+</details>
+
+#### quotes field with comma
+
+1. expect quoted starts with
+2. expect quoted ends with
 
 
 <details>
@@ -189,27 +214,6 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("quotes field only when needed")
-expect quote_csv_field("simple") == "simple"
-```
-
-</details>
-
-#### quotes field with comma
-
-- quotes field with comma
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("quotes field with comma")
 val quoted = quote_csv_field("Smith, John")
 expect quoted.starts_with("\"")
 expect quoted.ends_with("\"")
@@ -219,18 +223,18 @@ expect quoted.ends_with("\"")
 
 #### formats full CSV
 
-- formats full CSV
+1. expect csv contains
+2. expect csv contains
+3. expect csv contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats full CSV")
 val rows = [
     ["Name", "Age"],
     ["Alice", "30"],
@@ -248,18 +252,16 @@ expect csv.contains("Bob,25")
 
 #### detects rectangular CSV
 
-- detects rectangular CSV
+1. expect is rectangular csv
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("detects rectangular CSV")
 val rows = [
     ["A", "B", "C"],
     ["1", "2", "3"],
@@ -272,18 +274,16 @@ expect is_rectangular_csv(rows)
 
 #### detects non-rectangular CSV
 
-- detects non-rectangular CSV
+1. expect not is rectangular csv
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("detects non-rectangular CSV")
 val rows = [
     ["A", "B", "C"],
     ["1", "2"],
@@ -296,18 +296,16 @@ expect not is_rectangular_csv(rows)
 
 #### counts columns
 
-- counts columns
+1. expect get column count
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("counts columns")
 val rows = [["A", "B", "C"]]
 expect get_column_count(rows) == 3
 ```
@@ -316,18 +314,16 @@ expect get_column_count(rows) == 3
 
 #### counts rows
 
-- counts rows
+1. expect get row count
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("counts rows")
 val rows = [["A"], ["B"], ["C"]]
 expect get_row_count(rows) == 3
 ```
@@ -338,18 +334,16 @@ expect get_row_count(rows) == 3
 
 #### gets column by index
 
-- gets column by index
+1. expect names len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("gets column by index")
 val rows = [
     ["Name", "Age"],
     ["Alice", "30"],
@@ -366,18 +360,16 @@ expect names[2] == "Bob"
 
 #### gets column by name
 
-- gets column by name
+1. expect ages len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("gets column by name")
 val data = CsvData(
     headers: ["Name", "Age", "City"],
     rows: [
@@ -398,18 +390,13 @@ match get_column_by_name(data, "Age"):
 
 #### returns nil for unknown column name
 
-- returns nil for unknown column name
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns nil for unknown column name")
 val data = CsvData(headers: ["Name", "Age"], rows: [])
 match get_column_by_name(data, "Country"):
     case Some(_): expect false
@@ -420,18 +407,16 @@ match get_column_by_name(data, "Country"):
 
 #### transposes CSV
 
-- transposes CSV
+1. expect transposed len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("transposes CSV")
 val rows = [
     ["A", "B"],
     ["1", "2"],
@@ -448,18 +433,16 @@ expect transposed[0][2] == "3"
 
 #### filters rows
 
-- filters rows
+1. expect filtered rows len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("filters rows")
 val data = CsvData(
     headers: ["Name", "Age"],
     rows: [
@@ -479,18 +462,13 @@ expect filtered.rows[0][0] == "Alice"
 
 #### counts non-empty cells
 
-- counts non-empty cells
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("counts non-empty cells")
 val rows = [
     ["A", "B", ""],
     ["1", "", "3"]
@@ -503,18 +481,13 @@ expect count == 4
 
 #### finds max field length
 
-- finds max field length
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("finds max field length")
 val rows = [
     ["Short", "Medium text", "X"],
     ["A", "Very long text here", "Y"]
@@ -529,18 +502,18 @@ expect max_len >= 19
 
 #### formats as table
 
-- formats as table
+1. expect table contains
+2. expect table contains
+3. expect table contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats as table")
 val rows = [
     ["Name", "Age"],
     ["Alice", "30"],
@@ -556,18 +529,17 @@ expect table.contains("|")
 
 #### formats table with headers
 
-- formats table with headers
+1. expect table contains
+2. expect table contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats table with headers")
 val data = CsvData(
     headers: ["ID", "Name"],
     rows: [["1", "Alice"], ["2", "Bob"]]
@@ -586,12 +558,12 @@ expect table.contains("---")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/tooling/csv_utils_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering CSV Utilities, CSV Parsing, CSV Formatting, CSV Validation, CSV Transformation, CSV Statistics, Table Formatting.
+Tests covering:
 - CSV Utilities
 - CSV Parsing
 - CSV Formatting
@@ -612,51 +584,3 @@ Tests covering CSV Utilities, CSV Parsing, CSV Formatting, CSV Validation, CSV T
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `b8702c9eb4520f19912d9ca24df4e0134ee1d97078d4f24273a0ab6119b0b5e3`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `b8702c9eb4520f19912d9ca24df4e0134ee1d97078d4f24273a0ab6119b0b5e3`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `b8702c9eb4520f19912d9ca24df4e0134ee1d97078d4f24273a0ab6119b0b5e3`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/tooling/csv_utils_spec.spl
-mirror: doc/06_spec/01_unit/app/tooling/csv_utils_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/tooling/csv_utils_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/tooling/csv_utils_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/tooling/csv_utils_spec.spl:210:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses simple CSV line' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/tooling/csv_utils_spec.spl:219:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses quoted fields' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/tooling/csv_utils_spec.spl:228:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses comma in quoted field' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

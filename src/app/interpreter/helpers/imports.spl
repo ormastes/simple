@@ -5,32 +5,30 @@
 from ..core import {Interpreter, Value, InterpreterError}
 use app.ioimport std.path
 
-export resolve_import, ImportResolver, ModuleCache, InterpModule
+export resolve_import, ImportResolver, ModuleCache, Module
 
 # A loaded module
-struct InterpModule:
+struct Module:
     path: String
     name: String
     exports: Dict<String, Value>
     is_loaded: bool
 
-impl InterpModule:
-    fn new(path: &str, name: &str) -> InterpModule:
-        return InterpModule {
+impl Module:
+    fn new(path: &str, name: &str) -> Module:
+        return Module {
             path: path.to_string(),
             name: name.to_string(),
             exports: Dict__new(),
             is_loaded: false
         }
     fn get_export(name: &str) -> Option<&Value>:
-        if self.exports.contains_key(name):
-            return Some(self.exports[name])
-        return nil
+        return self.exports.get(name)
     fn has_export(name: &str) -> bool:
         return self.exports.contains_key(name)
 # Module cache
 struct ModuleCache:
-    modules: Dict<String, InterpModule>
+    modules: Dict<String, Module>
     search_paths: Array<String>
 
 fn ModuleCache__new() -> ModuleCache:
@@ -47,14 +45,12 @@ fn ModuleCache__new() -> ModuleCache:
 impl ModuleCache:
     fn add_search_path(path: String):
         self.search_paths.push(path)
-    fn get_module(name: &str) -> Option<&InterpModule>:
-        if self.modules.contains_key(name):
-            return Some(self.modules[name])
-        return nil
+    fn get_module(name: &str) -> Option<&Module>:
+        return self.modules.get(name)
     fn has_module(name: &str) -> bool:
         return self.modules.contains_key(name)
-    fn add_module(module: InterpModule):
-        self.modules[module.name.clone()] = module
+    fn add_module(module: Module):
+        self.modules.set(module.name.clone(), module)
 # Import resolver
 struct ImportResolver:
     cache: ModuleCache
@@ -91,7 +87,7 @@ fn resolve_simple_import(resolver: &mut ImportResolver, path: &ModulePath, alias
         case nil: path.last().to_string()
 
     val result: Dict<String, Value> = Dict__new()
-    result[name] = Value__module(module.clone())
+    result.set(name, Value__module(module.clone()))
     return Ok(result)
 
 # Resolve a from import: from foo.bar import {x, y}
@@ -108,7 +104,7 @@ fn resolve_from_import(resolver: &mut ImportResolver, path: &ModulePath, items: 
 
         match module.get_export(export_name):
             case Some(value):
-                result[local_name] = value.clone()
+                result.set(local_name, value.clone())
             case nil:
                 return Err(InterpreterError.ImportError(
                     "cannot import '{export_name}' from '{path}'".to_string()
@@ -124,12 +120,12 @@ fn resolve_wildcard_import(resolver: &mut ImportResolver, path: &ModulePath) -> 
     for (name, value) in module.exports:
         # Skip private names (starting with _)
         if not name.starts_with("_"):
-            result[name.clone()] = value.clone()
+            result.set(name.clone(), value.clone())
 
     return Ok(result)
 
 # Load a module by path
-fn load_module(resolver: &mut ImportResolver, path: &ModulePath) -> Result<&InterpModule, InterpreterError>:
+fn load_module(resolver: &mut ImportResolver, path: &ModulePath) -> Result<&Module, InterpreterError>:
     val module_name = path.to_string()
 
     # Check cache
@@ -165,7 +161,7 @@ fn find_module_file(resolver: &ImportResolver, path: &ModulePath) -> Result<Stri
     return Err(InterpreterError.ImportError("module not found: {path}".to_string()))
 
 # Execute a module file and extract exports
-fn execute_module(resolver: &mut ImportResolver, file_path: &str, module_name: &str) -> Result<InterpModule, InterpreterError>:
+fn execute_module(resolver: &mut ImportResolver, file_path: &str, module_name: &str) -> Result<Module, InterpreterError>:
     # Read file
     val source = match fs.read_string(file_path):
         case Ok(s): s

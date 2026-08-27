@@ -1,7 +1,8 @@
 # Supervised builder: not yet wired to a front end, and peak RSS is always 0
 
 - **Filed:** 2026-08-17
-- **Status:** OPEN (Gap 2 runtime foundation PARTIAL 2026-08-24; Gaps 1, 3, and 4 remain)
+- **Status:** OPEN (all four gaps re-confirmed 2026-08-17 by an independent lane —
+  see *Re-confirmation* at the bottom; no code change made)
 - **Domain:** compiler / driver
 - **Severity:** P2
 
@@ -140,13 +141,3 @@ child's `ru_maxrss` needs a new `rt_process_*` primitive in the C/Rust runtime,
 which cannot be picked up without a bootstrap. Deliberately not attempted.
 Gaps 1, 3 and 4 are unchanged, and the "do not wire `spawn_fn` to a full
 rebuild" warning above still applies.
-
-## Gap 2 progress — 2026-08-24
-
-The C owned-process capsule now captures direct-child `wait4` CPU/max-RSS and
-exposes `rt_process_owned_observation_v1`; focused Unix and non-Unix C
-selfchecks pass. This removes the lowest-level “no per-child rusage exists”
-part of Gap 2. The builder still reports zero because the sibling observation
-receipt is not yet wired through the Rust/interpreter provider and pure-Simple
-process/build outcome facade. Tree charge remains a separate cgroup/Job Object
-metric and must not be substituted with the direct-child value.

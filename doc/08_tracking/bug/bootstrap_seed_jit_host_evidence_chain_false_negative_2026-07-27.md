@@ -1,7 +1,6 @@
 # Bootstrap-seed JIT host-evidence chain false negative
 
-- Status: OPEN (P3)
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- Status: open, diagnostic runner only
 - Owner: compiler/bootstrap diagnostics
 - Production impact: none claimed; the Rust seed is forbidden for normal
   qualification

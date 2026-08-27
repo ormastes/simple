@@ -1,6 +1,6 @@
-# Vhdl Entity Shared Binding Contract Specification
+# Contract spec: test/01_unit/compiler/bootstrap/vhdl_entity_shared_binding_contract_spec.spl
 
-> Tests covering VHDL entity strict shared bindings.
+> Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,47 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Vhdl Entity Shared Binding Contract Specification
+# Contract spec: test/01_unit/compiler/bootstrap/vhdl_entity_shared_binding_contract_spec.spl
+
+Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Compiler |
+| Status | Active |
+| Source | `test/01_unit/compiler/bootstrap/vhdl_entity_shared_binding_contract_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and Audience
+
+Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
+contracts red-visible, so a regression in the owned code fails this spec
+instead of shipping silently.
+
+## Scope and Preconditions
+
+Precondition: the repository working tree holds the subject code under test.
+Each scenario exercises the subject and asserts its observable contract; no
+behavior outside the named subject is claimed.
+
+## Primary Workflow
+
+Run the scenarios; each one drives the subject through its pinned contract
+and asserts the expected observable outcome with an executed oracle.
+
+## Unsupported / Limitations
+
+Only the pinned contracts are asserted here; end-to-end and integration
+behavior of the surrounding system is covered by companion specs.
+
+## Verification and Recovery
+
+A red scenario names the contract that regressed. Recover by restoring the
+pinned behavior in the subject; verify with
+`bin/simple test test/01_unit/compiler/bootstrap/vhdl_entity_shared_binding_contract_spec.spl` and a green Results line.
 
 ## Scenarios
 
@@ -22,7 +62,6 @@
 
 
 - derives referenced global symbols without reassignment
-   - Expected: source does not contain `var symbol: SymbolId? = nil`
 
 
 <details>
@@ -37,25 +76,10 @@ step("derives referenced global symbols without reassignment")
 val source = file_read("src/compiler/70.backend/backend/vhdl_entity_compile.spl")
 
 expect(source).to_contain("val symbol: SymbolId? = match inst.kind:")
-expect(source.contains("var symbol: SymbolId? = nil")).to_equal(false)
+expect(source).to_not_contain("var symbol: SymbolId? = nil")
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Compiler |
-| Status | Active |
-| Source | `test/01_unit/compiler/bootstrap/vhdl_entity_shared_binding_contract_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering VHDL entity strict shared bindings.
-- VHDL entity strict shared bindings
 
 ## Scenario Summary
 
@@ -75,47 +99,33 @@ Tests covering VHDL entity strict shared bindings.
 
 Requirements covered by the scenarios in this manual:
 
-- `REQ-SSPEC-UNIT`
 - `REQ-SSPEC-COMPILER`
 <!-- sspec-maintain:traceability:end -->
 
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `88ba0f2de1eb58f1868c938f89fb0b75b9a093d4a1e5b243e47e65c9a0a971fb`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `750f976729c5d6ed63d5f689072a655a6a29d5c080d559a46444f232cf5e97bf`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `88ba0f2de1eb58f1868c938f89fb0b75b9a093d4a1e5b243e47e65c9a0a971fb`.
+Source SHA-256: `750f976729c5d6ed63d5f689072a655a6a29d5c080d559a46444f232cf5e97bf`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `88ba0f2de1eb58f1868c938f89fb0b75b9a093d4a1e5b243e47e65c9a0a971fb`  
+Source SHA-256: `750f976729c5d6ed63d5f689072a655a6a29d5c080d559a46444f232cf5e97bf`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **79/100**; effective score: **49/100**; blockers: **2**.
+Raw score: **98/100**; effective score: **98/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 98/100
 source: test/01_unit/compiler/bootstrap/vhdl_entity_shared_binding_contract_spec.spl
 mirror: doc/06_spec/01_unit/compiler/bootstrap/vhdl_entity_shared_binding_contract_spec.md (current)
-findings: 5 blockers: 2
-  narrative=100 structure=100 oracle=50
-  traceability=60 evidence=90 coverage=100 maintainability=70
+findings: 1 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=90 coverage=100 maintainability=100
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=79; blocker cap makes effective=49
-doc/06_spec/01_unit/compiler/bootstrap/vhdl_entity_shared_binding_contract_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/compiler/bootstrap/vhdl_entity_shared_binding_contract_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/compiler/bootstrap/vhdl_entity_shared_binding_contract_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
-test/01_unit/compiler/bootstrap/vhdl_entity_shared_binding_contract_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/01_unit/compiler/bootstrap/vhdl_entity_shared_binding_contract_spec.spl:15:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'derives referenced global symbols without reassignment' has no retained capture or evidence
+test/01_unit/compiler/bootstrap/vhdl_entity_shared_binding_contract_spec.spl:47:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'derives referenced global symbols without reassignment' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

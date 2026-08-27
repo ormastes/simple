@@ -1,6 +1,29 @@
 # Vulkan Window Specification
 
-> Tests covering Vulkan Window Management, Window Event Enum, FullscreenMode Enum, Visual Window Tests.
+> <details>
+
+<!-- sdn-diagram:id=vulkan_window_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=vulkan_window_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+vulkan_window_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=vulkan_window_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,18 +42,13 @@
 
 #### creates window with valid parameters
 
-- creates window with valid parameters
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates window with valid parameters")
 # Window creation requires display - gracefully passes
 expect true
 ```
@@ -39,18 +57,13 @@ expect true
 
 #### handles invalid window sizes gracefully
 
-- handles invalid window sizes gracefully
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles invalid window sizes gracefully")
 expect true
 ```
 
@@ -58,18 +71,13 @@ expect true
 
 #### returns error for zero dimensions
 
-- returns error for zero dimensions
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns error for zero dimensions")
 expect true
 ```
 
@@ -79,18 +87,13 @@ expect true
 
 #### queries window size correctly
 
-- queries window size correctly
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("queries window size correctly")
 expect true
 ```
 
@@ -98,18 +101,13 @@ expect true
 
 #### updates internal size on resize event
 
-- updates internal size on resize event
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("updates internal size on resize event")
 expect true
 ```
 
@@ -119,18 +117,13 @@ expect true
 
 #### switches to borderless fullscreen
 
-- switches to borderless fullscreen
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("switches to borderless fullscreen")
 expect true
 ```
 
@@ -138,18 +131,13 @@ expect true
 
 #### switches to windowed mode
 
-- switches to windowed mode
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("switches to windowed mode")
 expect true
 ```
 
@@ -157,18 +145,13 @@ expect true
 
 #### handles exclusive fullscreen
 
-- handles exclusive fullscreen
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles exclusive fullscreen")
 expect true
 ```
 
@@ -178,18 +161,13 @@ expect true
 
 #### polls events non-blocking
 
-- polls events non-blocking
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("polls events non-blocking")
 expect true
 ```
 
@@ -197,18 +175,13 @@ expect true
 
 #### parses resize events correctly
 
-- parses resize events correctly
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses resize events correctly")
 expect true
 ```
 
@@ -216,18 +189,13 @@ expect true
 
 #### parses close request events
 
-- parses close request events
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses close request events")
 expect true
 ```
 
@@ -235,18 +203,13 @@ expect true
 
 #### parses focus events
 
-- parses focus events
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses focus events")
 expect true
 ```
 
@@ -254,18 +217,13 @@ expect true
 
 #### parses mouse move events
 
-- parses mouse move events
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses mouse move events")
 expect true
 ```
 
@@ -273,18 +231,13 @@ expect true
 
 #### parses mouse button events
 
-- parses mouse button events
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses mouse button events")
 expect true
 ```
 
@@ -292,18 +245,13 @@ expect true
 
 #### parses key events
 
-- parses key events
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses key events")
 expect true
 ```
 
@@ -311,18 +259,13 @@ expect true
 
 #### handles wait_event timeout
 
-- handles wait_event timeout
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles wait_event timeout")
 expect true
 ```
 
@@ -332,18 +275,13 @@ expect true
 
 #### cleans up window on drop
 
-- cleans up window on drop
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("cleans up window on drop")
 expect true
 ```
 
@@ -351,18 +289,13 @@ expect true
 
 #### prevents use after drop
 
-- prevents use after drop
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("prevents use after drop")
 expect true
 ```
 
@@ -372,18 +305,13 @@ expect true
 
 #### reads u8 values correctly
 
-- reads u8 values correctly
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("reads u8 values correctly")
 expect true
 ```
 
@@ -391,18 +319,13 @@ expect true
 
 #### reads u32 values in little-endian
 
-- reads u32 values in little-endian
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("reads u32 values in little-endian")
 expect true
 ```
 
@@ -410,18 +333,13 @@ expect true
 
 #### reads i32 values correctly
 
-- reads i32 values correctly
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("reads i32 values correctly")
 expect true
 ```
 
@@ -429,18 +347,13 @@ expect true
 
 #### reads f64 values correctly
 
-- reads f64 values correctly
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("reads f64 values correctly")
 expect true
 ```
 
@@ -450,18 +363,13 @@ expect true
 
 #### has correct variant count
 
-- has correct variant count
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("has correct variant count")
 # WindowEvent has 7 variants: None, Resize, Close, KeyPress, KeyRelease, MouseMove, MouseButton
 expect true
 ```
@@ -470,18 +378,13 @@ expect true
 
 #### matches FFI event type codes
 
-- matches FFI event type codes
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("matches FFI event type codes")
 # Event type codes: 0=None, 1=Resize, 2=Close, 3=KeyPress, etc.
 expect true
 ```
@@ -492,18 +395,13 @@ expect true
 
 #### maps to correct FFI codes
 
-- maps to correct FFI codes
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("maps to correct FFI codes")
 # 0=Windowed, 1=Borderless, 2=Exclusive
 expect true
 ```
@@ -514,18 +412,13 @@ expect true
 
 #### creates visible window
 
-- creates visible window
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates visible window")
 # Requires display
 expect true
 ```
@@ -534,18 +427,13 @@ expect true
 
 #### responds to resize
 
-- responds to resize
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("responds to resize")
 expect true
 ```
 
@@ -553,18 +441,13 @@ expect true
 
 #### enters fullscreen
 
-- enters fullscreen
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("enters fullscreen")
 expect true
 ```
 
@@ -572,18 +455,13 @@ expect true
 
 #### receives keyboard input
 
-- receives keyboard input
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("receives keyboard input")
 expect true
 ```
 
@@ -591,18 +469,13 @@ expect true
 
 #### receives mouse input
 
-- receives mouse input
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("receives mouse input")
 expect true
 ```
 
@@ -610,18 +483,13 @@ expect true
 
 #### closes cleanly
 
-- closes cleanly
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("closes cleanly")
 expect true
 ```
 
@@ -634,12 +502,12 @@ expect true
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/vulkan_window_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Vulkan Window Management, Window Event Enum, FullscreenMode Enum, Visual Window Tests.
+Tests covering:
 - Vulkan Window Management
 - Window Event Enum
 - FullscreenMode Enum
@@ -657,51 +525,3 @@ Tests covering Vulkan Window Management, Window Event Enum, FullscreenMode Enum,
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `12414bd57ed163cdd25bbab5470bde8d76a19bb3f7ed50cf384f1b9034d30e2d`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `12414bd57ed163cdd25bbab5470bde8d76a19bb3f7ed50cf384f1b9034d30e2d`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `12414bd57ed163cdd25bbab5470bde8d76a19bb3f7ed50cf384f1b9034d30e2d`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/ui/vulkan_window_spec.spl
-mirror: doc/06_spec/01_unit/app/ui/vulkan_window_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/ui/vulkan_window_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/ui/vulkan_window_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/ui/vulkan_window_spec.spl:23:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates window with valid parameters' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui/vulkan_window_spec.spl:28:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles invalid window sizes gracefully' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui/vulkan_window_spec.spl:32:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns error for zero dimensions' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

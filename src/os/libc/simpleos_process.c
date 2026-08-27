@@ -12,6 +12,7 @@
 #include "include/errno.h"
 #include "include/string.h"
 #include "include/sys/types.h"
+#include <stdint.h>
 
 extern int64_t simpleos_syscall(int64_t, int64_t, int64_t, int64_t,
                                  int64_t, int64_t);
@@ -25,7 +26,29 @@ static char *_env_storage[256];
 static int _env_count = 0;
 char **environ = _env_storage;
 
+static int _env_name_valid(const char *name) {
+    if (!name || name[0] == '\0') return 0;
+    size_t i = 0;
+    while (name[i] != '\0') {
+        if (name[i] == '=') return 0;
+        i++;
+    }
+    return 1;
+}
+
+static int _env_entry_size(size_t name_len, size_t value_len, size_t *out_size) {
+    /* name + '=' + value + trailing NUL, with no wrapping allocation. */
+    if (name_len > (size_t)-1 - 2) return 0;
+    if (value_len > (size_t)-1 - name_len - 2) return 0;
+    *out_size = name_len + value_len + 2;
+    return 1;
+}
+
 char *getenv(const char *name) {
+    if (!name) {
+        errno = EINVAL;
+        return NULL;
+    }
     size_t len = strlen(name);
     for (int i = 0; i < _env_count; i++) {
         if (_env_storage[i] &&
@@ -37,47 +60,50 @@ char *getenv(const char *name) {
 }
 
 int setenv(const char *name, const char *value, int overwrite) {
+    if (!_env_name_valid(name) || !value) { errno = EINVAL; return -1; }
     size_t nlen = strlen(name);
     size_t vlen = strlen(value);
+    size_t entry_size = 0;
+    if (!_env_entry_size(nlen, vlen, &entry_size)) { errno = ENOMEM; return -1; }
+
+    char *entry = (char *)malloc(entry_size);
+    if (!entry) { errno = ENOMEM; return -1; }
+    memcpy(entry, name, nlen);
+    entry[nlen] = '=';
+    memcpy(entry + nlen + 1, value, vlen + 1);
 
     /* Check if already exists */
     for (int i = 0; i < _env_count; i++) {
         if (_env_storage[i] &&
             strncmp(_env_storage[i], name, nlen) == 0 &&
             _env_storage[i][nlen] == '=') {
-            if (!overwrite) return 0;
-            char *entry = (char *)malloc(nlen + vlen + 2);
-            if (!entry) { errno = ENOMEM; return -1; }
-            memcpy(entry, name, nlen);
-            entry[nlen] = '=';
-            memcpy(entry + nlen + 1, value, vlen + 1);
+            if (!overwrite) { free(entry); return 0; }
+            char *previous = _env_storage[i];
             _env_storage[i] = entry;
+            free(previous);
             return 0;
         }
     }
 
-    if (_env_count >= 255) { errno = ENOMEM; return -1; }
-
-    char *entry = (char *)malloc(nlen + vlen + 2);
-    if (!entry) { errno = ENOMEM; return -1; }
-    memcpy(entry, name, nlen);
-    entry[nlen] = '=';
-    memcpy(entry + nlen + 1, value, vlen + 1);
+    if (_env_count >= 255) { free(entry); errno = ENOMEM; return -1; }
     _env_storage[_env_count++] = entry;
     _env_storage[_env_count] = NULL;
     return 0;
 }
 
 int unsetenv(const char *name) {
+    if (!_env_name_valid(name)) { errno = EINVAL; return -1; }
     size_t len = strlen(name);
     for (int i = 0; i < _env_count; i++) {
         if (_env_storage[i] &&
             strncmp(_env_storage[i], name, len) == 0 &&
             _env_storage[i][len] == '=') {
+            char *previous = _env_storage[i];
             for (int j = i; j < _env_count - 1; j++)
                 _env_storage[j] = _env_storage[j + 1];
             _env_count--;
             _env_storage[_env_count] = NULL;
+            free(previous);
             return 0;
         }
     }
@@ -140,17 +166,19 @@ int gethostname(char *name, size_t len) {
     return 0;
 }
 
-int getpagesize(void) {
-    return 4096;
+gid_t getgid(void) {
+    errno = ENOSYS;
+    return (gid_t)-1;
 }
 
-unsigned int alarm(unsigned int seconds) {
-    (void)seconds;
-    return 0;
+uid_t geteuid(void) {
+    errno = ENOSYS;
+    return (uid_t)-1;
 }
 
-void _exit(int status) {
-    exit(status);
+gid_t getegid(void) {
+    errno = ENOSYS;
+    return (gid_t)-1;
 }
 
 /* ====================================================================
@@ -158,12 +186,27 @@ void _exit(int status) {
  * ==================================================================== */
 
 unsigned int sleep(unsigned int seconds) {
-    simpleos_syscall(51, (int64_t)seconds * 1000000000LL, 0, 0, 0, 0);
+    const int64_t nanos_per_second = 1000000000LL;
+    if ((uint64_t)seconds > (uint64_t)(INT64_MAX / nanos_per_second)) {
+        errno = ERANGE;
+        return seconds;
+    }
+    int64_t result = simpleos_syscall(51, (int64_t)seconds * nanos_per_second, 0, 0, 0, 0);
+    if (result < 0) {
+        errno = (int)(-result);
+        /* No kernel partial-duration receipt exists; returning the full
+         * request is the conservative POSIX remaining-time result. */
+        return seconds;
+    }
     return 0;
 }
 
 int usleep(useconds_t usec) {
-    simpleos_syscall(51, (int64_t)usec * 1000LL, 0, 0, 0, 0);
+    int64_t result = simpleos_syscall(51, (int64_t)usec * 1000LL, 0, 0, 0, 0);
+    if (result < 0) {
+        errno = (int)(-result);
+        return -1;
+    }
     return 0;
 }
 
@@ -173,11 +216,9 @@ int usleep(useconds_t usec) {
 
 long sysconf(int name) {
     switch (name) {
-    case _SC_ARG_MAX:          return _POSIX_ARG_MAX;
-    case _SC_GETPW_R_SIZE_MAX: return 1024;
     case _SC_PAGESIZE:         return 4096;
     case _SC_NPROCESSORS_CONF: return 1;
-    case _SC_NPROCESSORS_ONLN: return 1;
+    case 84:                   return 1;   /* _SC_NPROCESSORS_ONLN */
     default:
         errno = EINVAL;
         return -1;

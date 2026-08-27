@@ -2,6 +2,29 @@
 
 > match x:
 
+<!-- sdn-diagram:id=pattern_matching_advanced_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=pattern_matching_advanced_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+pattern_matching_advanced_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=pattern_matching_advanced_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 20 | 20 | 0 | 0 |
@@ -21,7 +44,7 @@ match x:
 | Category | Language \| Pattern Matching |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/pattern_matching_advanced_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Syntax
@@ -59,22 +82,17 @@ _ => "large"
 
 #### matches with basic guard
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- matches with basic guard
+1. fn classify
+2. expect classify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches with basic guard")
 fn classify(x: i64) -> i64:
     match x:
         n if n < 0 =>
@@ -92,18 +110,17 @@ expect classify(5) == 1
 
 #### matches negative with guard
 
-- matches negative with guard
+1. fn classify
+2. expect classify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches negative with guard")
 fn classify(x: i64) -> i64:
     match x:
         n if n < 0 =>
@@ -121,18 +138,19 @@ expect classify(-10) == -1
 
 #### uses binding in guard
 
-- uses binding in guard
+1. fn verify
+2.
+3.
+4. expect verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses binding in guard")
 fn verify(pair: (i64, i64)) -> i64:
     match pair:
         (a, b) if a + b > 10 =>
@@ -149,18 +167,17 @@ expect verify((7, 5)) == 1  # 7 + 5 = 12 > 10
 
 #### falls through when guard fails
 
-- falls through when guard fails
+1. fn test
+2. expect test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("falls through when guard fails")
 fn test(x: i64) -> i64:
     match x:
         n if n > 100 =>
@@ -179,18 +196,13 @@ expect test(50) == 10  # 50 > 100? No. 50 > 10? Yes
 
 #### matches Some with if val
 
-- matches Some with if val
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches Some with if val")
 val opt = Some(42)
 var res = 0
 if val Some(x) = opt:
@@ -202,18 +214,13 @@ expect res == 42
 
 #### uses else branch for non-matching
 
-- uses else branch for non-matching
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses else branch for non-matching")
 val opt: Option<i64> = nil
 var res = 0
 if val Some(x) = opt:
@@ -227,18 +234,13 @@ expect res == -1
 
 #### matches Ok with if val
 
-- matches Ok with if val
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches Ok with if val")
 val res = Ok(100)
 var output = 0
 if val Ok(value) = res:
@@ -250,18 +252,13 @@ expect output == 100
 
 #### matches Some with if var
 
-- matches Some with if var
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches Some with if var")
 val opt = Some(42)
 var res = 0
 if var Some(x) = opt:
@@ -278,18 +275,17 @@ expect res == 42
 
 #### loops while pattern matches
 
-- loops while pattern matches
+1. fn next item
+2. Some
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("loops while pattern matches")
 fn next_item(n: i64) -> Option<i64>:
     if n > 0:
         Some(n)
@@ -313,18 +309,17 @@ expect sum == 6  # 3 + 2 + 1
 
 #### matches multiple literals
 
-- matches multiple literals
+1. fn classify
+2. expect classify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches multiple literals")
 fn classify(x: i64) -> i64:
     match x:
         1 | 2 | 3 =>
@@ -341,18 +336,17 @@ expect classify(2) == 1
 
 #### matches medium group
 
-- matches medium group
+1. fn classify
+2. expect classify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches medium group")
 fn classify(x: i64) -> i64:
     match x:
         1 | 2 | 3 =>
@@ -369,18 +363,17 @@ expect classify(5) == 2
 
 #### falls through to wildcard
 
-- falls through to wildcard
+1. fn verify
+2. expect verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("falls through to wildcard")
 fn verify(x: i64) -> i64:
     match x:
         0 | 1 =>
@@ -397,18 +390,17 @@ expect verify(99) == 99
 
 #### matches exclusive range
 
-- matches exclusive range
+1. fn classify
+2. expect classify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches exclusive range")
 fn classify(x: i64) -> i64:
     match x:
         0..10 =>
@@ -425,18 +417,17 @@ expect classify(5) == 1
 
 #### exclusive range excludes end
 
-- exclusive range excludes end
+1. fn classify
+2. expect classify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("exclusive range excludes end")
 fn classify(x: i64) -> i64:
     match x:
         0..10 =>
@@ -453,18 +444,17 @@ expect classify(10) == 2  # 10 not in 0..10
 
 #### matches inclusive range
 
-- matches inclusive range
+1. fn classify
+2. expect classify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches inclusive range")
 fn classify(x: i64) -> i64:
     match x:
         0..=5 =>
@@ -483,18 +473,13 @@ expect classify(5) == 1  # 5 is in 0..=5
 
 #### parses hex literal
 
-- parses hex literal
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses hex literal")
 val x = 0xFF
 expect x == 255
 ```
@@ -503,18 +488,13 @@ expect x == 255
 
 #### hex arithmetic
 
-- hex arithmetic
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("hex arithmetic")
 val x = 0x10 + 0x20
 expect x == 48  # 16 + 32
 ```
@@ -523,18 +503,13 @@ expect x == 48  # 16 + 32
 
 #### parses binary literal
 
-- parses binary literal
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses binary literal")
 val x = 0b1010
 expect x == 10
 ```
@@ -543,18 +518,13 @@ expect x == 10
 
 #### binary with underscores
 
-- binary with underscores
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("binary with underscores")
 val x = 0b1111_0000
 expect x == 240
 ```
@@ -563,18 +533,13 @@ expect x == 240
 
 #### parses octal literal
 
-- parses octal literal
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses octal literal")
 val x = 0o755
 expect x == 493  # 7*64 + 5*8 + 5
 ```
@@ -593,51 +558,3 @@ expect x == 493  # 7*64 + 5*8 + 5
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `ecda821eb20be3b7b88e21c5ddf818bd090d8d1f651dfffa520363e3b5491deb`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `ecda821eb20be3b7b88e21c5ddf818bd090d8d1f651dfffa520363e3b5491deb`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `ecda821eb20be3b7b88e21c5ddf818bd090d8d1f651dfffa520363e3b5491deb`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/pattern_matching_advanced_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/pattern_matching_advanced_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/pattern_matching_advanced_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/pattern_matching_advanced_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/pattern_matching_advanced_spec.spl:63:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches with basic guard' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/pattern_matching_advanced_spec.spl:78:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches negative with guard' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/pattern_matching_advanced_spec.spl:93:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'uses binding in guard' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

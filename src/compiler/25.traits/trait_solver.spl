@@ -5,7 +5,7 @@
 
 use compiler.hir.hir.*
 use compiler.frontend.core.lexer.*
-use compiler.traits.trait_def.{SolverTraitDef, SolverTraitBound, AssocTypeDef, MethodSignature}
+use compiler.traits.trait_def.{TraitDef, TraitBound, AssocTypeDef, MethodSignature}
 use compiler.traits.trait_impl.{ImplBlock}
 use compiler.traits.trait_coherence.{impls_overlap}
 use compiler.traits.trait_validation.{TraitError}
@@ -69,7 +69,7 @@ impl Obligation:
             # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
             for name in self.assoc_type_constraints.keys():
                 constraints = constraints.push("{name}=<type>")
-            desc = "{desc}<{constraints.join(', ')}>"
+            desc = "{desc}<{constraints.join(", ")}>"
         desc
 
 enum ObligationCause:
@@ -87,7 +87,7 @@ impl ObligationCause:
                 "function call to {name}"
             case MethodCall(receiver, method):
                 "method call {receiver}.{method}"
-            case SolverTraitBound(param):
+            case TraitBound(param):
                 "trait bound on {param}"
             case FieldAccess(ty, field):
                 "field access {ty}.{field}"
@@ -131,7 +131,7 @@ class TraitSolver:
     # Associated type resolver
     assoc_resolver: AssocTypeResolver
 
-    # Map from method name to all declaring traits (required + default)
+    # Map from trait name to all method names (required + default)
     # Used by resolve_strategies for method dispatch
     trait_methods: Dict<text, [HirSymbol]>
 
@@ -149,18 +149,21 @@ impl TraitSolver:
             trait_methods: {}
         )
 
-    me add_trait(trait_def: SolverTraitDef):
+    me add_trait(trait_def: TraitDef):
         """Register a trait definition.
 
         Collects all method names (both required and default) into
         trait_methods for efficient lookup during method resolution.
         """
-        self.traits[trait_def.name] = trait_def
+        var traits = self.traits
+        traits[trait_def.name] = trait_def
+        self.traits = traits
 
         var assoc_resolver = self.assoc_resolver
         assoc_resolver.add_trait(trait_def)
         self.assoc_resolver = assoc_resolver
 
+        var trait_methods = self.trait_methods
         for method in trait_def.methods:
             var owners: [HirSymbol] = if self.trait_methods.has(method.name): self.trait_methods[method.name] else: []
             owners.push(trait_def.name)
@@ -179,7 +182,7 @@ impl TraitSolver:
         val trait_name = impl_block.trait_name
 
         # Index by trait name
-        var impl_list_by_trait: [ImplBlock] = if self.impls[trait_name].?:
+        var impl_list_by_trait = if self.impls[trait_name].?:
             self.impls[trait_name]
         else:
             []
@@ -189,7 +192,7 @@ impl TraitSolver:
         # Index by target type (extract symbol from Named type)
         match impl_block.for_type.kind:
             case Named(type_symbol, _):
-                var impl_list_by_type: [ImplBlock] = if self.impls_by_type[type_symbol].?:
+                var impl_list_by_type = if self.impls_by_type[type_symbol].?:
                     self.impls_by_type[type_symbol]
                 else:
                     []
@@ -291,14 +294,14 @@ impl TraitSolver:
 
         nil
 
-    me solve_trait_bound(bound: SolverTraitBound, span: Span) -> Result<(), TraitError>:
+    me solve_trait_bound(bound: TraitBound, span: Span) -> Result<(), TraitError>:
         """Solve a trait bound from a where clause."""
         val ty = HirType(
             kind: HirTypeKind.TypeParam(bound.type_param, []),
             span: bound.span
         )
 
-        val cause = ObligationCause.SolverTraitBound(bound.type_param)
+        val cause = ObligationCause.TraitBound(bound.type_param)
         self.add_obligation(ty, bound.trait_name, cause, span)
 
         Ok(())
@@ -311,7 +314,7 @@ impl TraitSolver:
         val trait_def = self.traits[trait_]
 
         for supertrait_symbol in trait_def.supertraits:
-            val cause = ObligationCause.SolverTraitBound(trait_)
+            val cause = ObligationCause.TraitBound(trait_)
             val supertrait_obligation = Obligation.create(ty, supertrait_symbol, cause, span)
 
             match self.solve_obligation(supertrait_obligation):
@@ -444,3 +447,4 @@ impl TraitSolver:
                             impl2.span
                         )
                         self.errors = self.errors.push(error)
+

@@ -15,20 +15,15 @@
 # - MoldBackend for native binary generation
 
 use compiler.types.type_infer.*
+use compiler.backend.linker.msvc.{is_msvc_available, is_lld_link_available}
+use compiler.backend.linker.smf_header.{u32_to_bytes}
 use compiler.mono.monomorphize.note_sdn.*
 use compiler.mono.monomorphize.note_sdn.{TypeInferenceEntry}
 use compiler.backend.linker.obj_taker.*
 use compiler.backend.linker.lazy_instantiator.*
 use compiler.backend.linker.smf_reader.*
 use compiler.backend.linker.mold.*
-use app.io.file_ops.{file_write_bytes}
-
-fn _linker_remove_text(items: [text], value: text) -> [text]:
-    var kept: [text] = []
-    for item in items:
-        if item != value:
-            kept = kept.push(item)
-    kept
+use app.io.{file_write_bytes}
 
 # ============================================================================
 # Link Configuration
@@ -137,7 +132,7 @@ struct Linker:
     # Collected symbols (name -> (reader_index, symbol))
     symbols: Dict<text, (i32, SmfSymbol)>
     # Unresolved symbols
-    unresolved: [text]
+    unresolved: Set<text>
     # Errors accumulated during linking
     errors: [LinkError]
     # Configuration
@@ -243,7 +238,7 @@ impl Linker:
 
         val stats = LinkStats(
             input_count: self.readers.len() as i32,
-            symbol_count: self.symbols.keys().len() as i32,
+            symbol_count: self.symbols.len() as i32,
             instantiated_count: self.lazy_inst.instantiated.len() as i32,
             deferred_count: self.unresolved.len() as i32,
             output_size: output_result.unwrap()
@@ -287,8 +282,7 @@ impl Linker:
     me collect_symbols():
         """Collect all exported symbols from inputs."""
         for (idx, reader) in self.readers.enumerate():
-            val smf_reader: SmfReaderImpl = reader
-            for symbol in smf_reader.exported_symbols():
+            for symbol in reader.exported_symbols():
                 if self.symbols.has(symbol.name):
                     # Duplicate symbol - check binding
                     val (existing_idx, existing) = self.symbols[symbol.name]
@@ -311,8 +305,8 @@ impl Linker:
             for symbol in symbols:
                 if symbol.section_index < 0:
                     # Check if this symbol is defined in our merged table
-                    if not self.symbols.has(symbol.name) and not self.unresolved.contains(symbol.name):
-                        self.unresolved = self.unresolved.push(symbol.name)
+                    if not self.symbols.has(symbol.name):
+                        self.unresolved.push(symbol.name)
 
     fn collect_deferred_hints() -> [DeferredHints]:
         """Collect all deferred type hints from all modules."""
@@ -351,9 +345,7 @@ impl Linker:
         for hint in hints:
             if not by_symbol.has(hint.symbol):
                 by_symbol[hint.symbol] = []
-            var symbol_hint_list: [DeferredHints] = by_symbol[hint.symbol]
-            symbol_hint_list = symbol_hint_list.push(hint)
-            by_symbol[hint.symbol] = symbol_hint_list
+            by_symbol[hint.symbol] = by_symbol[hint.symbol].push(hint)
 
         # For each symbol with multiple hints, unify across modules
         for (symbol, symbol_hints) in by_symbol:
@@ -391,7 +383,8 @@ impl Linker:
 
     me generate_instantiations() -> Result<(), text>:
         """Generate instantiations for unresolved generic symbols."""
-        val results = self.lazy_inst.instantiate_all_missing(self.unresolved)
+        val unresolved_list = self.unresolved.to_list()
+        val results = self.lazy_inst.instantiate_all_missing(unresolved_list)
 
         for result in results:
             match result:
@@ -408,7 +401,26 @@ impl Linker:
                         template_param_count: 0,
                         template_offset: 0
                     ))
-                    self.unresolved = _linker_remove_text(self.unresolved, symbol)
+                    # Remove the now-resolved symbol IN PLACE through the owning
+                    # field. The previous
+                    # `self.unresolved = _linker_remove_text(self.unresolved, symbol)`
+                    # rebuilt the entire array on every resolved symbol while the
+                    # field still aliased it, so this loop was O(n^2) in the
+                    # unresolved-symbol count. `self.unresolved` is kept
+                    # duplicate-free at its only push site (:318 guards with
+                    # `not self.unresolved.contains(..)`), so removing the first
+                    # match is equivalent to the helper's remove-all, and the
+                    # shift-down preserves the original order. PERF-COW-002.
+                    var ui = 0
+                    while ui < self.unresolved.len():
+                        if self.unresolved[ui] == symbol:
+                            var uj = ui
+                            while uj + 1 < self.unresolved.len():
+                                self.unresolved[uj] = self.unresolved[uj + 1]
+                                uj = uj + 1
+                            self.unresolved.pop()
+                            break
+                        ui = ui + 1
 
                 case Error(msg):
                     self.errors = self.errors.push(LinkError(
@@ -458,13 +470,12 @@ impl Linker:
         buf.push(0x01)
         buf.push(0x00)
         # Symbol count
-        val sym_count = self.symbols.keys().len()
+        val sym_count = self.symbols.len()
         for b in u32_to_bytes(sym_count):
             buf.push(b)
         # Write symbol table entries
         for sym_key in self.symbols.keys():
-            val sym_name: text = sym_key
-            val name_bytes: [u8] = sym_name.to_bytes()
+            val name_bytes = sym_key.to_bytes()
             for b in u32_to_bytes(name_bytes.len()):
                 buf.push(b)
             for b in name_bytes:
@@ -574,8 +585,6 @@ impl BackendSystemLinker:
 
 fn auto_detect_backend_linker() -> BackendSystemLinker:
     """Auto-detect best available linker for current platform."""
-    use std.platform.{is_windows, is_unix}
-    use std.common.target.TargetOS
 
     val os = TargetOS.host()
 
@@ -591,7 +600,6 @@ fn auto_detect_backend_linker() -> BackendSystemLinker:
 
         case TargetOS.Windows:
             # Prefer lld-link > MSVC link.exe
-            use compiler.backend.linker.msvc.{is_lld_link_available, is_msvc_available}
             if is_lld_link_available():
                 BackendSystemLinker.LldLink
             elif is_msvc_available():
@@ -616,11 +624,9 @@ fn auto_detect_backend_linker() -> BackendSystemLinker:
 
 fn command_exists(cmd: text) -> bool:
     """Check if command exists in PATH."""
-    use app.io.process_ops.shell
+    use app.io.shell
 
     # Platform-specific command check
-    use std.platform.is_windows
-
     if is_windows():
         val result = shell("where {cmd} 2>nul")
         result.exit_code == 0

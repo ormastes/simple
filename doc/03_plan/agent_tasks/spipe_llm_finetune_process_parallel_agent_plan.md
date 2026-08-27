@@ -268,55 +268,20 @@ Evidence:
   `acceptance_allowed` directly. The retry6 system spec covers both public
   surfaces so target-eval blockers are not hidden behind only
   `data_check_status`.
-- 2026-06-26 next-action status hardening: `fine-tune-next` now prints
-  `STATUS: WARN llm-finetune-next` for non-ready attempts and
-  `STATUS: PASS llm-finetune-next` only when readiness is complete. The retry7
-  system spec covers the current `retry-implementation` next action, retry
-  target, WARN status, and public absence-marker policy.
-- 2026-06-28 app handoff readiness hardening: `fine-tune-ready` and
-  `fine-tune-next` now treat an app handoff doc path as pending while the
-  handoff record still says `do not deploy`, license constraints are pending,
-  safety eval is `not-run`, or deployment evidence is `not-deployable`. Retry7
-  now reports `app_handoff_doc_ready=pending`, matching the acceptance gate's
-  full license/safety/deployment/app-handoff requirement instead of accepting a
-  placeholder architecture doc path as release-ready evidence.
-- 2026-06-28 next-action blocker hardening: `fine-tune-next` now prints
-  `readiness_blocker=<gate>` for retry-decision and readiness-blocked attempts.
-  Retry7 currently reports `readiness_blocker=model-artifact`, so operators can
-  see the first unmet release gate without separately invoking
-  `fine-tune-ready`.
-- 2026-06-28 local artifact readiness hardening: `fine-tune-ready` now requires
-  local filesystem model artifact paths to exist before `model_artifact_created`
-  can become ready. Explicit artifact URIs such as `model://...` remain valid
-  provider-managed artifacts. The SPipe build smoke includes a missing-local
-  artifact fixture that must fail readiness and report
-  `readiness_blocker=model-artifact`.
-- 2026-06-28 data-checker path hardening: executable fine-tune data-check
-  scripts are resolved under `.spipe/llm-finetune-process/scripts/`, and path
-  traversal outside that directory reports
-  `STATUS: FAIL llm-finetune-data-gate` instead of executing. The SPipe build
-  smoke includes an `unsafe_checker` traversal fixture.
-- 2026-06-28 local handoff-doc readiness hardening: `fine-tune-ready` now
-  requires local filesystem app handoff doc paths to exist before
-  `app_handoff_doc_ready` can become ready. Explicit doc URIs remain valid
-  externally managed evidence. The SPipe build smoke includes a
-  missing-local-handoff-doc fixture that must fail readiness and report
-  `readiness_blocker=app-handoff-doc`.
-- 2026-06-28 doctor local-reference diagnostics: `fine-tune-doctor` now prints
-  `WARN missing_local_model_artifact` and `WARN missing_local_handoff_doc` when
-  non-placeholder local paths do not exist, matching the stricter
-  `fine-tune-ready` gates instead of leaving operators to infer the blocker
-  from `fine-tune-next`.
-- 2026-06-28 doctor target-eval diagnostics: `fine-tune-doctor` now prints
-  `WARN target_eval_not_reached` with a machine-readable reason plus the target
-  and metrics text when eval evidence is malformed, missing the metric, below
-  threshold, or not marked pass. The SPipe build smoke covers a below-target
-  eval fixture.
-- 2026-06-28 status readiness visibility: `fine-tune-status` now prints
-  `readiness_blocker=<gate>` so a present set of eval/model/handoff rows cannot
-  hide the first release-gate blocker. Attempts whose release gate is ready
-  print `readiness_blocker=none`; status may still fail separately for missing
-  required registry evidence.
+- 2026-06-26 report-surface hardening: `fine-tune-report` now runs the same
+  safe repo-local checker and prints a `Data Check Execution` section with
+  `data_check_execution`, `data_check_status`, `result`, `target_accuracy`,
+  `required_accuracy`, `target_eval_reached`, and `acceptance_allowed`. The
+  retry6 system spec covers the consolidated report so normal review handoff
+  does not need to rerun the shell checker to see why retry6 is blocked.
+- 2026-06-26 readiness gate hardening: `fine-tune-ready` now runs safe
+  repo-local checkers, prints `data_check_gate_ready`, and fails until the data
+  checker reports PASS. Retry6 and retry7 system specs cover the release gate
+  so registry rows alone cannot bypass WARN cache/training/acceptance checks.
+- 2026-06-26 next-action gate hardening: `fine-tune-next` now prints the same
+  safe checker status and gate fields when routing an unfinished retry via a
+  recorded decision. The retry6 system spec covers this so the next-action
+  command does not hide the concrete cache/training blocker.
 
 Next normal-LLM work: finish retry5 licensed cache/checksum evidence and retry6
 real training/eval before retry7 can become an acceptance gate with a PASS

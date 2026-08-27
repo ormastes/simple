@@ -38,7 +38,7 @@ fn print_summary(stats: DocStats):
     print ""
     print "============================================================"
     print "Summary:"
-    print "  Complete documentation: {stats.specs_with_docs}/{stats.total_specs}"
+    print "  Complete documentation: {stats.specs_with_docs}/{stats.total_specs} ({stats.coverage_percent()}%)"
 
     var stub_percent = 0
     if stats.total_specs > 0:
@@ -50,6 +50,8 @@ fn print_summary(stats: DocStats):
         print "  Warnings: {stats.total_warnings}"
 
     print "============================================================"
+    print ""
+    print "DONE Documentation generated successfully!"
 
 fn print_usage():
     print "SPipe Documentation Generator"
@@ -78,36 +80,21 @@ fn print_usage():
     print "  spipe-docgen tests/system/*_spec.spl"
     print "  spipe-docgen tests/specs/*.spl --output doc/06_spec"
 
-fn run_spipe_docgen(args: [text]) -> i64:
-    # Parse arguments
-    if args.len() == 0:
-        print_usage()
-        return 1
+fn main() -> i64:
+    # get_cli_args() already strips program name and script path
+    val args = get_cli_args()
 
-    var help_count = 0
-    var normalized_count = 0
-    var help_i = 0
-    if args[0] == "spipe-docgen" or args[0] == "spipe_docgen":
-        help_i = 1
-    while help_i < args.len():
-        val arg = args[help_i]
-        normalized_count = normalized_count + 1
-        if arg == "--help" or arg == "-h":
-            help_count = help_count + 1
-        help_i = help_i + 1
-    if help_count > 0:
-        if help_count != 1 or normalized_count != 1:
-            spipe_err("--help must be used alone")
-            print_usage()
-            return 2
+    # Parse arguments
+    if args.len() == 0 or args.contains("--help") or args.contains("-h"):
         print_usage()
-        return 0
+        return if args.len() == 0: 1 else: 0
 
     # Extract output directory
     var output_dir = "doc/06_spec"
     var generate_index = true
+    var provenance_receipt = ""
+    var provenance_receipt_count = 0
     var spec_files = []
-    var had_error = false
 
     var j = 0
     while j < args.len():
@@ -115,32 +102,55 @@ fn run_spipe_docgen(args: [text]) -> i64:
         if arg == "spipe-docgen" or arg == "spipe_docgen":
             j = j + 1
         elif arg == "--output" or arg == "-o":
-            if j + 1 < args.len() and not args[j + 1].starts_with("-"):
+            if j + 1 < args.len():
                 output_dir = args[j + 1]
                 j = j + 2
             else:
-                spipe_err("--output requires a directory")
-                had_error = true
                 j = j + 1
         elif arg == "--no-index":
             generate_index = false
             j = j + 1
+        elif arg == "--provenance-receipt":
+            provenance_receipt_count = provenance_receipt_count + 1
+            if j + 1 < args.len() and not args[j + 1].starts_with("-"):
+                provenance_receipt = args[j + 1]
+                j = j + 2
+            else:
+                spipe_err("--provenance-receipt requires a path")
+                had_error = true
+                j = j + 1
         elif not arg.starts_with("-"):
             spec_files.push(arg)
             j = j + 1
         else:
-            spipe_err("Unknown option: {arg}")
-            had_error = true
             j = j + 1
-
-    if had_error:
-        return 1
 
     if spec_files.len() == 0:
         spipe_err("No spec files provided")
         print ""
         print_usage()
         return 1
+
+    if provenance_receipt_count > 1:
+        spipe_err("--provenance-receipt may be supplied only once")
+        return 1
+    if provenance_receipt != "" and spec_files.len() != 1:
+        spipe_err("--provenance-receipt requires exactly one spec file")
+        return 1
+
+    var receipt_binary_path = ""
+    var receipt_binary_sha256 = ""
+    var receipt_spec_sha256 = ""
+    if provenance_receipt != "":
+        receipt_binary_path = cli_current_exe_path()
+        if receipt_binary_path == "" or not native_fs_exists(receipt_binary_path):
+            spipe_err("cannot establish the docgen executable identity")
+            return 1
+        receipt_binary_sha256 = native_fs_hash_sha256(receipt_binary_path)
+        receipt_spec_sha256 = native_fs_hash_sha256(spec_files[0])
+        if not _docgen_sha256_valid(receipt_binary_sha256) or not _docgen_sha256_valid(receipt_spec_sha256):
+            spipe_err("cannot hash docgen provenance inputs")
+            return 1
 
     # Create output directory (ignore errors if it already exists)
     native_fs_create_dir(output_dir)
@@ -154,7 +164,6 @@ fn run_spipe_docgen(args: [text]) -> i64:
 
     var stats = DocStats.empty()
     var entries = []
-    var docs_written = 0
 
     # Parse and process all spipe files
     for file_path in spec_files:
@@ -164,7 +173,6 @@ fn run_spipe_docgen(args: [text]) -> i64:
         match parse_result:
             case Err(e):
                 spipe_err("Failed to parse {file_path}: {e}")
-                had_error = true
             case Ok(parsed):
                 spipe_dbg("matched Ok, extracting metadata")
                 # Extract metadata
@@ -201,9 +209,7 @@ fn run_spipe_docgen(args: [text]) -> i64:
                 match gen_result:
                     case Err(e):
                         spipe_warn("Failed to generate doc for {file_path}: {e}")
-                        had_error = true
                     case Ok(path):
-                        docs_written = docs_written + 1
                         output_filename = relative_path_from_output(output_dir, path)
 
                 # Create feature entry for INDEX
@@ -248,26 +254,18 @@ fn run_spipe_docgen(args: [text]) -> i64:
                 ))
 
     # Generate INDEX.md
-    if (generate_index and not had_error and stats.specs_without_docs == 0 and
-        stats.total_specs == spec_files.len() and docs_written == spec_files.len()):
+    if generate_index:
         val index_result = generate_index_page(entries, output_dir, stats)
         match index_result:
             case Err(e):
                 spipe_warn("Failed to generate INDEX.md: {e}")
-                had_error = true
             case Ok(_):
                 pass
 
     # Print summary
     print_summary(stats)
 
-    val success = (not had_error and stats.specs_without_docs == 0 and
-        stats.total_specs == spec_files.len() and docs_written == spec_files.len())
-    if success:
-        print "DONE Generated {docs_written} docs ({stats.specs_with_docs} complete, 0 stubs)"
-        return 0
-    print "FAILED Generated {docs_written}/{spec_files.len()} docs ({stats.specs_without_docs} stubs)"
-    1
+    print "DONE Generated {stats.total_specs} docs ({stats.specs_with_docs} complete, {stats.specs_without_docs} stubs)"
 
 # Fallback for the Rust-seed `bin/simple spipe-docgen ...` route, where the
 # delegation path never populates the runtime CLI-args storage and

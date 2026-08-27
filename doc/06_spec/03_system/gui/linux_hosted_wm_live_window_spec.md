@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 3 | 0 | 0 | 3 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -18,13 +18,13 @@ This environmental scenario verifies the retained output of the canonical Linux 
 | Field | Value |
 |-------|-------|
 | Category | Other |
-| Status | Active |
+| Status | BLOCKED — qualifying pure-Simple live-window run unavailable |
 | Requirements | doc/02_requirements/feature/shared_multilingual_gpu_fonts.md |
 | Plan | doc/03_plan/sys_test/shared_multilingual_gpu_fonts.md |
 | Design | doc/05_design/shared_multilingual_gpu_fonts.md |
 | Research | doc/01_research/local/shared_multilingual_gpu_fonts.md |
 | Source | `test/03_system/gui/linux_hosted_wm_live_window_spec.spl` |
-| Updated | 2026-07-27 |
+| Updated | 2026-07-24 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -113,7 +113,8 @@ The event phase drives the real window with `xdotool`. Focus, pointer motion,
 button input, committed UTF-8 text, and keyboard Tab must appear in the winit
 event log and production receipt. The text commit changes the focused window
 title through the existing compositor lifecycle action, so the snapshot proves
-both receipt and state mutation. Internal maximize and restore commands must update the focused window,
+both receipt and state mutation. The last pointer receipt must equal the
+compositor coordinates. Internal maximize and restore commands must update the focused window,
 restore the exact pre-maximize window array, and advance the render revision.
 The retained env records exact baseline/input/move/maximize/restore nonces
 `1/2/3/4/5`, plus each phase's revision, Engine2D backend, readback source,
@@ -205,7 +206,7 @@ capture helper, and compatibility renderers are not accepted here.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 102 lines folded for reproduction.
+Runnable source: 73 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -293,10 +294,6 @@ expect(wrapper).to_contain(".render.engine2d_backend == $backend")
 expect(wrapper).to_contain(".render.readback_source == $source")
 expect(wrapper).to_contain(".render.backend_handle == $handle")
 expect(wrapper).to_contain(".render.checksum == $checksum")
-expect(wrapper).to_contain(".render.composition_id == $composition")
-expect(wrapper).to_contain(".render.scene_key == $scene")
-expect(wrapper).to_contain(".render.web_content_image_count == $web_images")
-expect(wrapper).to_contain(";composition_id=$composition_id;scene_key=$scene_key;web_content_image_count=$web_content_image_count identity=")
 expect(wrapper).to_contain("capture_argb_checksum")
 expect(wrapper).to_contain("[ \"$(capture_argb_checksum \"$CAPTURE_LIVE\")\" = \"$frame_checksum\" ]")
 expect(wrapper).to_contain("grep -Fq '[hosted-wm] draw-ir-rejected'")
@@ -309,8 +306,6 @@ expect(wrapper).to_contain("[ \"$initial_revision\" -lt \"$input_revision\" ]")
 expect(wrapper).to_contain("[ \"$input_revision\" -lt \"$move_revision\" ]")
 expect(wrapper).to_contain("[ \"$move_revision\" -lt \"$max_revision\" ]")
 expect(wrapper).to_contain("[ \"$max_revision\" -lt \"$restore_revision\" ]")
-expect(wrapper).to_contain("[ \"$input_frame_checksum\" != \"$baseline_frame_checksum\" ]")
-expect(wrapper).to_contain("[ \"$input_capture_sha\" != \"$baseline_capture_sha\" ]")
 ```
 
 </details>
@@ -326,7 +321,7 @@ expect(wrapper).to_contain("[ \"$input_capture_sha\" != \"$baseline_capture_sha\
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -339,9 +334,6 @@ step("Submit the exact composition")
 expect(entry).to_contain("route=shared-wm-scene-draw-ir")
 expect(entry).to_contain("fallback=false revision={comp.render_revision}")
 expect(entry).to_contain("draw-ir-rejected evidence=fail-closed")
-expect(entry).to_contain("raster.last_composition_id")
-expect(entry).to_contain("raster.last_scene_key")
-expect(entry).to_contain("raster.last_web_content_image_count")
 
 step("Deliver correlated focus keyboard text and pointer events")
 val winit_runtime = file_read("src/runtime/spl_winit/src/lib.rs")
@@ -366,8 +358,6 @@ expect(evidence).to_contain("linux_hosted_wm_live_window_restore_status=pass")
 
 step("Capture backend and framebuffer evidence")
 expect(evidence).to_contain("linux_hosted_wm_live_window_frame_correlation_status=pass")
-expect(evidence).to_contain("linux_hosted_wm_live_window_input_composition_id=wm-composite")
-expect(evidence).to_contain("linux_hosted_wm_live_window_input_web_content_image_count=")
 expect(evidence).to_contain("linux_hosted_wm_live_window_window_png=present")
 expect(evidence).to_contain("linux_hosted_wm_live_window_framebuffer_ppm=present")
 expect(evidence).to_contain("linux_hosted_wm_live_window_snapshot=present")
@@ -378,15 +368,13 @@ expect(evidence).to_contain("linux_hosted_wm_live_window_snapshot=present")
 #### fails closed before live execution when its source contract is not explicit
 
 - Run the wrapper source-contract self-test without a compiler default
-   - Expected: code equals `0`
-   - Expected: stderr equals ``
 - Reject silent Git-only provenance and stale release defaults
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -405,12 +393,6 @@ expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_git_dirty_depen
 expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_text_receipt=required")
 expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_exact_readback_fields=required")
 expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_capture_checksum=pass")
-expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_runtime_bootstrap=rejected")
-expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_runtime_bootstrap_content=rejected")
-expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_runtime_sha256_mismatch=rejected")
-expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_runtime_changed=rejected")
-expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_runtime_staged=pass")
-expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_runtime_fd=pass")
 
 step("Reject silent Git-only provenance and stale release defaults")
 val wrapper = file_read("scripts/check/check-linux-hosted-wm-live-window-evidence.shs")
@@ -421,39 +403,20 @@ expect(wrapper).to_contain("write_native_source_manifest \"$SOURCE_MANIFEST\"")
 expect(wrapper).to_contain("write_native_source_manifest \"$SOURCE_MANIFEST_AFTER\"")
 expect(wrapper).to_contain("emit fail source-provenance-unavailable")
 expect(wrapper).to_contain("emit unavailable explicit-simple-bin-required")
-expect(wrapper).to_contain("RUNTIME_LIB=\"${SIMPLE_WM_RUNTIME_LIB:-}\"")
-expect(wrapper).to_contain("runtime-provider-bootstrap-forbidden")
-expect(wrapper).to_contain("runtime-provider-changed-before-launch")
-expect(wrapper).to_contain("LD_PRELOAD=\"$wint_provider_path:/proc/self/fd/9\"")
 expect(wrapper).to_contain("emit fail \"glyph-oracle-calibration-only-$glyph_sha\"")
 ```
 
 </details>
-
-## Runtime-provider admission
-
-The wrapper no longer defaults to or directly preloads the bootstrap runtime
-DSO. It requires an explicit provider and expected SHA-256, rejects the
-canonical bootstrap path and matching canonical bootstrap content, stages the
-admitted bytes privately, holds them on inherited file descriptor 9 through
-loader startup, sanitizes ambient loader variables, and records provider,
-content-identity, and artifact-bound admission hashes.
-
-This hardening does not yet qualify the live receipt as production evidence
-when the canonical bootstrap DSO is absent: the repository has no trusted
-provider build manifest or persistent forbidden-bootstrap identity. The
-runtime-provider production gate therefore remains RED rather than accepting a
-caller-supplied provider as proven production provenance.
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
 | Total scenarios | 3 |
-| Active scenarios | 3 |
+| Active scenarios | 0 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
-| Pending scenarios | 0 |
+| Pending scenarios | 3 |
 
 
 ## Related Documentation

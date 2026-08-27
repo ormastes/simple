@@ -1,0 +1,253 @@
+# Plan-bound combinational projection from the frozen decoded-uop boundary to
+# an LSU access request. This graph owns no handshake, bus, response, or state.
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwCompareOp,
+    HwConstant, HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort,
+    HwSelectOp, HwSignal}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.mir.hwir.riscv_scalar_decoded_uop_interface.{HwScalarDecodedUopInterface}
+use lib.hardware.riscv_common.isa.scalar_database.{RiscvScalarDecoderPlan,
+    riscv_scalar_semantic_opcode}
+
+fn runtime_lsu_row_width(row_count: i32) -> i32:
+    var width = 1; var capacity = 2
+    while capacity <= row_count:
+        width = width + 1; capacity = capacity * 2
+    width
+
+fn runtime_lsu_bytes(effect: text, instruction: u32, xlen: i32) -> i32:
+    val f3 = ((instruction >> 12) & 7) as i32
+    if f3 == 0: return 1
+    if f3 == 1: return 2
+    if f3 == 2: return 4
+    if f3 == 3 and xlen == 64: return 8
+    if effect == "load" and f3 == 4: return 1
+    if effect == "load" and f3 == 5: return 2
+    if effect == "load" and f3 == 6 and xlen == 64: return 4
+    0
+
+fn runtime_lsu_signed(effect: text, instruction: u32) -> i64:
+    if effect == "load" and (((instruction >> 12) & 7) as i32) <= 3: return 1
+    0
+
+fn runtime_lsu_log2(value: i32) -> i32:
+    if value == 4: return 2
+    if value == 8: return 3
+    4
+
+pub fn strict_riscv_scalar_runtime_lsu_projection(module_name: text,
+    config: CoreConfig, bus: LsuConfig, decoded: HwScalarDecodedUopInterface,
+    decoder: HwModuleDef, plan: RiscvScalarDecoderPlan) -> Result<HwModuleDef, text>:
+    if module_name == "": return Err("HWIR-E-RUNTIME-LSU-ID: runtime LSU projection requires a module name")
+    val interface_error = decoded.diagnostic_for_decoder(decoder, plan)
+    if interface_error != "": return Err(interface_error)
+    val bus_error = bus.diagnostic(); if bus_error != "": return Err(bus_error)
+    if (decoded.config.profile != config.profile or
+        decoded.config.isa_profile != config.isa_profile or
+        decoded.config.compressed_decode_profile != config.compressed_decode_profile or
+        decoded.config.xlen != config.xlen or
+        decoded.config.physical_address_bits != config.physical_address_bits or
+        decoded.config.register_count != config.register_count):
+        return Err("HWIR-E-RUNTIME-LSU-CONFIG: projection requires the decoded-uop CoreConfig")
+    val xlen = config.xlen; val pa = config.physical_address_bits
+    val row_width = runtime_lsu_row_width(plan.entries.len())
+    val offset_bits = runtime_lsu_log2(bus.byte_mask_bits)
+    val ports = [HwPort.input("uop_valid", "Bits", 1),
+        HwPort.input("decode_legal", "Bits", 1),
+        HwPort.input("decoded_row_index", "Bits", row_width),
+        HwPort.input("decoded_execution_class", "Bits", 3),
+        HwPort.input("decoded_memory_effect", "Bits", 3),
+        HwPort.input("decoded_semantic_opcode", "Bits", 6),
+        HwPort.input("decoded_declared_operand_width_is_32", "Bits", 1),
+        HwPort.input("canonical_instruction", "Bits", 32),
+        HwPort.input("instruction_rd_field", "Bits", 5),
+        HwPort.input("instruction_rs1_field", "Bits", 5),
+        HwPort.input("instruction_rs2_field", "Bits", 5),
+        HwPort.input("rs1_value", "Bits", xlen), HwPort.input("rs2_value", "Bits", xlen),
+        HwPort.output("projection_valid", "Bits", 1),
+        HwPort.output("effective_address", "Bits", pa),
+        HwPort.output("access_size_bytes", "Bits", 4),
+        HwPort.output("access_signed_load", "Bits", 1),
+        HwPort.output("access_rd_index", "Bits", 5),
+        HwPort.output("request_write", "Bits", 1),
+        HwPort.output("request_byte_mask", "Bits", bus.byte_mask_bits),
+        HwPort.output("request_write_data", "Bits", bus.bus_data_bits),
+        HwPort.output("protocol_fault", "Bits", 1),
+        HwPort.output("local_fault", "Bits", 1),
+        HwPort.output("local_cause", "Bits", xlen), HwPort.output("local_tval", "Bits", xlen)]
+    var constants = [HwConstant.bits("zero1", 1, 0), HwConstant.bits("one1", 1, 1),
+        HwConstant.bits("zero3", 3, 0), HwConstant.bits("zero4", 4, 0),
+        HwConstant.bits("zero5", 5, 0), HwConstant.bits("zero6", 6, 0),
+        HwConstant.bits("zero32", 32, 0), HwConstant.bits("zero_xlen", xlen, 0),
+        HwConstant.bits("zero_pa", pa, 0), HwConstant.bits("zero_mask", bus.byte_mask_bits, 0),
+        HwConstant.bits("zero_bus", bus.bus_data_bits, 0), HwConstant.bits("class_lsu", 3, 3),
+        HwConstant.bits("shift7_32", 32, 7), HwConstant.bits("shift15_32", 32, 15),
+        HwConstant.bits("shift20_32", 32, 20), HwConstant.bits("shift25_32", 32, 25),
+        HwConstant.bits("low5_32", 32, 31), HwConstant.bits("low7_32", 32, 127),
+        HwConstant.bits("low12_32", 32, 4095), HwConstant.bits("store_low_mask", 32, 31),
+        HwConstant.bits("store_high_mask", 32, 127), HwConstant.bits("shift5_32", 32, 5),
+        HwConstant.bits("offset_mask_pa", pa, bus.byte_mask_bits - 1),
+        HwConstant.bits("three_shift", offset_bits + 3, 3),
+        HwConstant.bits("misaligned_load", xlen, 4), HwConstant.bits("access_load", xlen, 5),
+        HwConstant.bits("misaligned_store", xlen, 6), HwConstant.bits("access_store", xlen, 7)]
+    var signals: [HwSignal] = []; var ops: [HwCombOp] = []
+    var compares: [HwCompareOp] = []; var selects: [HwSelectOp] = []
+    var selected = "zero1"; var selected_write = "zero1"; var selected_size = "zero4"
+    var selected_signed = "zero1"; var selected_align = "zero_pa"; var selected_mask = "zero_mask"
+    var row_index = 0
+    for entry in plan.entries:
+        val bytes = runtime_lsu_bytes(entry.memory_effect, entry.encoding_value, xlen)
+        if entry.execution_class == "load-store" and bytes > 0:
+            if bytes * 8 > bus.bus_data_bits:
+                return Err("HWIR-E-RUNTIME-LSU-BUS: selected plan contains an access wider than the bus")
+            val suffix = row_index.to_text(); val row_match = "row_match_" + suffix
+            val masked = "row_masked_" + suffix; val form_ok = "row_form_ok_" + suffix
+            val row_ok = "row_index_ok_" + suffix; val semantic_ok = "row_semantic_ok_" + suffix
+            val effect_ok = "row_effect_ok_" + suffix; val width_ok = "row_width_ok_" + suffix
+            val metadata_a = "row_metadata_a_" + suffix; val metadata_b = "row_metadata_b_" + suffix
+            val metadata_c = "row_metadata_c_" + suffix
+            val row_const = "row_" + suffix; val mask_const = "mask_" + suffix
+            val value_const = "value_" + suffix; val semantic_const = "semantic_" + suffix
+            val effect_const = "effect_" + suffix; val width_const = "width_" + suffix
+            val write_const = "write_" + suffix; val size_const = "size_" + suffix
+            val signed_const = "signed_" + suffix; val align_const = "align_" + suffix
+            val byte_mask_const = "byte_mask_" + suffix
+            constants.push(HwConstant.bits(row_const, row_width, row_index + 1))
+            constants.push(HwConstant.bits(mask_const, 32, entry.encoding_mask as i64))
+            constants.push(HwConstant.bits(value_const, 32, entry.encoding_value as i64))
+            constants.push(HwConstant.bits(semantic_const, 6, riscv_scalar_semantic_opcode(entry.semantic_operation)))
+            constants.push(HwConstant.bits(effect_const, 3, if entry.memory_effect == "load": 1 else: 2))
+            constants.push(HwConstant.bits(width_const, 1, if entry.operand_width_bits == 32: 1 else: 0))
+            constants.push(HwConstant.bits(write_const, 1, if entry.memory_effect == "store": 1 else: 0))
+            constants.push(HwConstant.bits(size_const, 4, bytes))
+            constants.push(HwConstant.bits(signed_const, 1, runtime_lsu_signed(entry.memory_effect, entry.encoding_value)))
+            constants.push(HwConstant.bits(align_const, pa, bytes - 1))
+            constants.push(HwConstant.bits(byte_mask_const, bus.byte_mask_bits, (1i64 << bytes) - 1))
+            for signal in [(masked, 32), (form_ok, 1), (row_ok, 1), (semantic_ok, 1),
+                    (effect_ok, 1), (width_ok, 1), (metadata_a, 1), (metadata_b, 1),
+                    (metadata_c, 1), (row_match, 1)]:
+                signals.push(HwSignal.comb(signal[0], "Bits", signal[1]))
+            ops.push(HwCombOp.binary("and", masked, "canonical_instruction", mask_const, 32))
+            compares.push(HwCompareOp.equal(form_ok, masked, value_const, 32))
+            compares.push(HwCompareOp.equal(row_ok, "decoded_row_index", row_const, row_width))
+            compares.push(HwCompareOp.equal(semantic_ok, "decoded_semantic_opcode", semantic_const, 6))
+            compares.push(HwCompareOp.equal(effect_ok, "decoded_memory_effect", effect_const, 3))
+            compares.push(HwCompareOp.equal(width_ok, "decoded_declared_operand_width_is_32", width_const, 1))
+            ops.push(HwCombOp.binary("and", metadata_a, row_ok, semantic_ok, 1))
+            ops.push(HwCombOp.binary("and", metadata_b, effect_ok, width_ok, 1))
+            ops.push(HwCombOp.binary("and", metadata_c, metadata_a, metadata_b, 1))
+            ops.push(HwCombOp.binary("and", row_match, metadata_c, form_ok, 1))
+            val next_selected = "selected_" + suffix; val next_write = "selected_write_" + suffix
+            val next_size = "selected_size_" + suffix; val next_signed = "selected_signed_" + suffix
+            val next_align = "selected_align_" + suffix; val next_mask = "selected_mask_" + suffix
+            for signal in [(next_selected, 1), (next_write, 1), (next_size, 4),
+                    (next_signed, 1), (next_align, pa), (next_mask, bus.byte_mask_bits)]:
+                signals.push(HwSignal.comb(signal[0], "Bits", signal[1]))
+            ops.push(HwCombOp.binary("or", next_selected, selected, row_match, 1))
+            selects.push(HwSelectOp.mux(next_write, row_match, write_const, selected_write, 1))
+            selects.push(HwSelectOp.mux(next_size, row_match, size_const, selected_size, 4))
+            selects.push(HwSelectOp.mux(next_signed, row_match, signed_const, selected_signed, 1))
+            selects.push(HwSelectOp.mux(next_align, row_match, align_const, selected_align, pa))
+            selects.push(HwSelectOp.mux(next_mask, row_match, byte_mask_const, selected_mask, bus.byte_mask_bits))
+            selected = next_selected; selected_write = next_write; selected_size = next_size
+            selected_signed = next_signed; selected_align = next_align; selected_mask = next_mask
+        row_index = row_index + 1
+    # Raw-field equality prevents a caller from substituting decoded register fields.
+    for field in [("rd", "shift7_32"), ("rs1", "shift15_32"), ("rs2", "shift20_32")]:
+        val shifted = "raw_" + field[0] + "_shifted"; val raw = "raw_" + field[0]
+        val ok = "raw_" + field[0] + "_ok"
+        signals.push(HwSignal.comb(shifted, "Bits", 32)); signals.push(HwSignal.comb(raw, "Bits", 5))
+        signals.push(HwSignal.comb(ok, "Bits", 1))
+        ops.push(HwCombOp.binary("shr", shifted, "canonical_instruction", field[1], 32))
+        ops.push(HwCombOp.unary("trunc", raw, shifted, 5))
+        compares.push(HwCompareOp.equal(ok, raw, "instruction_" + field[0] + "_field", 5))
+    for signal in [("identity_b", 1), ("identity_c", 1),
+            ("class_lsu_ok", 1), ("in_domain_valid", 1), ("in_domain", 1),
+            ("identity_metadata_ok", 1), ("identity_ok", 1), ("identity_bad", 1),
+            ("protocol_fault_value", 1), ("projection_ok", 1),
+            ("rs1_is_x0", 1), ("rs2_is_x0", 1),
+            ("effective_rs1", xlen), ("effective_rs2", xlen),
+            ("i_shifted", 32), ("i_raw", 12), ("s_high_shifted", 32),
+            ("s_high", 32), ("s_high_positioned", 32), ("s_low_shifted", 32),
+            ("s_low", 32), ("s_raw32", 32),
+            ("s_raw", 12), ("immediate12", 12), ("immediate_xlen", xlen),
+            ("sum_xlen", xlen), ("address_pa", pa), ("address_roundtrip", xlen),
+            ("address_fits", 1), ("pa_overflow", 1), ("alignment_bits", pa),
+            ("aligned", 1), ("misaligned", 1), ("address_fault", 1),
+            ("local_fault_value", 1), ("projection_not_ok", 1),
+            ("suppress_outputs", 1),
+            ("byte_offset_pa", pa), ("byte_offset", offset_bits),
+            ("offset_extended", offset_bits + 3), ("shift_amount", offset_bits + 3),
+            ("shifted_mask", bus.byte_mask_bits), ("store_bus", bus.bus_data_bits),
+            ("shifted_store", bus.bus_data_bits), ("misaligned_cause", xlen),
+            ("access_cause", xlen), ("fault_cause", xlen)]:
+        signals.push(HwSignal.comb(signal[0], "Bits", signal[1]))
+    compares.push(HwCompareOp.equal("class_lsu_ok", "decoded_execution_class", "class_lsu", 3))
+    ops.push(HwCombOp.binary("and", "in_domain_valid", "uop_valid", "decode_legal", 1))
+    ops.push(HwCombOp.binary("and", "in_domain", "in_domain_valid", "class_lsu_ok", 1))
+    ops.push(HwCombOp.binary("and", "identity_b", "raw_rd_ok", "raw_rs1_ok", 1))
+    ops.push(HwCombOp.binary("and", "identity_c", "identity_b", "raw_rs2_ok", 1))
+    ops.push(HwCombOp.binary("and", "identity_metadata_ok", selected, "identity_c", 1))
+    ops.push(HwCombOp.binary("and", "identity_ok", "identity_metadata_ok", "class_lsu_ok", 1))
+    ops.push(HwCombOp.binary("xor", "identity_bad", "identity_ok", "one1", 1))
+    ops.push(HwCombOp.binary("and", "protocol_fault_value", "in_domain", "identity_bad", 1))
+    ops.push(HwCombOp.binary("and", "projection_ok", "in_domain", "identity_ok", 1))
+    compares.push(HwCompareOp.equal("rs1_is_x0", "raw_rs1", "zero5", 5))
+    compares.push(HwCompareOp.equal("rs2_is_x0", "raw_rs2", "zero5", 5))
+    selects.push(HwSelectOp.mux("effective_rs1", "rs1_is_x0", "zero_xlen", "rs1_value", xlen))
+    selects.push(HwSelectOp.mux("effective_rs2", "rs2_is_x0", "zero_xlen", "rs2_value", xlen))
+    ops.push(HwCombOp.binary("shr", "i_shifted", "canonical_instruction", "shift20_32", 32))
+    ops.push(HwCombOp.unary("trunc", "i_raw", "i_shifted", 12))
+    ops.push(HwCombOp.binary("shr", "s_high_shifted", "canonical_instruction", "shift25_32", 32))
+    ops.push(HwCombOp.binary("and", "s_high", "s_high_shifted", "store_high_mask", 32))
+    ops.push(HwCombOp.binary("shr", "s_low_shifted", "canonical_instruction", "shift7_32", 32))
+    ops.push(HwCombOp.binary("and", "s_low", "s_low_shifted", "store_low_mask", 32))
+    ops.push(HwCombOp.binary("shl", "s_high_positioned", "s_high", "shift5_32", 32))
+    ops.push(HwCombOp.binary("or", "s_raw32", "s_high_positioned", "s_low", 32))
+    ops.push(HwCombOp.unary("trunc", "s_raw", "s_raw32", 12))
+    selects.push(HwSelectOp.mux("immediate12", selected_write, "s_raw", "i_raw", 12))
+    ops.push(HwCombOp.unary("sext", "immediate_xlen", "immediate12", xlen))
+    ops.push(HwCombOp.binary("add", "sum_xlen", "effective_rs1", "immediate_xlen", xlen))
+    ops.push(HwCombOp.unary("trunc", "address_pa", "sum_xlen", pa))
+    ops.push(HwCombOp.unary("zext", "address_roundtrip", "address_pa", xlen))
+    compares.push(HwCompareOp.equal("address_fits", "sum_xlen", "address_roundtrip", xlen))
+    ops.push(HwCombOp.binary("xor", "pa_overflow", "address_fits", "one1", 1))
+    ops.push(HwCombOp.binary("and", "alignment_bits", "address_pa", selected_align, pa))
+    compares.push(HwCompareOp.equal("aligned", "alignment_bits", "zero_pa", pa))
+    ops.push(HwCombOp.binary("xor", "misaligned", "aligned", "one1", 1))
+    ops.push(HwCombOp.binary("or", "address_fault", "pa_overflow", "misaligned", 1))
+    ops.push(HwCombOp.binary("and", "local_fault_value", "projection_ok", "address_fault", 1))
+    ops.push(HwCombOp.binary("xor", "projection_not_ok", "projection_ok", "one1", 1))
+    ops.push(HwCombOp.binary("or", "suppress_outputs", "projection_not_ok", "local_fault_value", 1))
+    ops.push(HwCombOp.binary("and", "byte_offset_pa", "address_pa", "offset_mask_pa", pa))
+    ops.push(HwCombOp.unary("trunc", "byte_offset", "byte_offset_pa", offset_bits))
+    ops.push(HwCombOp.unary("zext", "offset_extended", "byte_offset", offset_bits + 3))
+    ops.push(HwCombOp.binary("shl", "shift_amount", "offset_extended", "three_shift", offset_bits + 3))
+    ops.push(HwCombOp.binary("shl", "shifted_mask", selected_mask, "byte_offset", bus.byte_mask_bits))
+    ops.push(HwCombOp.unary(if bus.bus_data_bits >= xlen: "zext" else: "trunc", "store_bus", "effective_rs2", bus.bus_data_bits))
+    ops.push(HwCombOp.binary("shl", "shifted_store", "store_bus", "shift_amount", bus.bus_data_bits))
+    selects.push(HwSelectOp.mux("misaligned_cause", selected_write, "misaligned_store", "misaligned_load", xlen))
+    selects.push(HwSelectOp.mux("access_cause", selected_write, "access_store", "access_load", xlen))
+    selects.push(HwSelectOp.mux("fault_cause", "misaligned", "misaligned_cause", "access_cause", xlen))
+    selects.push(HwSelectOp.mux("projection_valid", "suppress_outputs", "zero1", "projection_ok", 1))
+    selects.push(HwSelectOp.mux("effective_address", "suppress_outputs", "zero_pa", "address_pa", pa))
+    selects.push(HwSelectOp.mux("access_size_bytes", "suppress_outputs", "zero4", selected_size, 4))
+    selects.push(HwSelectOp.mux("access_signed_load", "suppress_outputs", "zero1", selected_signed, 1))
+    selects.push(HwSelectOp.mux("access_rd_index", "suppress_outputs", "zero5", "instruction_rd_field", 5))
+    selects.push(HwSelectOp.mux("request_write", "suppress_outputs", "zero1", selected_write, 1))
+    selects.push(HwSelectOp.mux("request_byte_mask", "suppress_outputs", "zero_mask", "shifted_mask", bus.byte_mask_bits))
+    selects.push(HwSelectOp.mux("request_write_data", "suppress_outputs", "zero_bus", "shifted_store", bus.bus_data_bits))
+    ops.push(HwCombOp.unary("passthrough", "protocol_fault", "protocol_fault_value", 1))
+    ops.push(HwCombOp.unary("passthrough", "local_fault", "local_fault_value", 1))
+    selects.push(HwSelectOp.mux("local_cause", "local_fault_value", "fault_cause", "zero_xlen", xlen))
+    selects.push(HwSelectOp.mux("local_tval", "local_fault_value", "sum_xlen", "zero_xlen", xlen))
+    val summary = HwModule(name: module_name, profile: config.profile, port_count: ports.len(),
+        signal_count: signals.len(), register_count: 0, memory_count: 0,
+        comb_op_count: ops.len() + compares.len() + selects.len(), clock_domain_count: 1,
+        fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config, node_id: HwNodeId.module_root(module_name),
+        origins: [HwOrigin(node_id: HwNodeId.child(module_name, "runtime-access"),
+            source_name: "riscv.scalar.lsu.runtime-plan-bound")], ports: ports, signals: signals,
+        constants: constants, comb_ops: ops, compare_ops: compares, select_ops: selects,
+        clock_domains: [HwClockDomain.default_domain()])
+    val error = module.shape_diagnostic(); if error != "": return Err(error)
+    Ok(module)

@@ -1,8 +1,10 @@
 #!/bin/sh
-# Enforce an exact module+symbol source contract before a reviewed rt_* edit.
+# Enforce an exact module+symbol contract before a reviewed rt_* autofix.
 #
-# This checker never edits source. It rejects wildcard/prefix mapping and is a
-# source-shape precondition only, never provider verification or admission.
+# This script never edits production code.  A policy row is an auditable
+# precondition for a narrow mechanical change and is intentionally unable to
+# match a module or symbol by prefix/wildcard.  The result is source-only: it
+# is not foreign-provider verification or cryptographic admission evidence.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -14,7 +16,7 @@ test -f "$policy" && test ! -L "$policy" || {
     echo 'rt unsafe autofix contract: policy must be a regular non-symlink file' >&2
     exit 2
 }
-expected_header='module	symbol	unsafe_tag	contract	state'
+expected_header='module	symbol	unsafe_tag	contract	state	min_direct_raw_calls'
 actual_header=$(head -n 1 "$policy")
 test "$actual_header" = "$(printf '%b' "$expected_header")" || {
     echo 'rt unsafe autofix contract: unsupported policy schema' >&2
@@ -23,10 +25,11 @@ test "$actual_header" = "$(printf '%b' "$expected_header")" || {
 
 awk -F '\t' '
     NR == 1 { next }
-    NF != 5 || $1 !~ /^(src|test)\/[A-Za-z0-9_./-]+$/ || $1 ~ /\.\.|\*/ ||
+    NF != 6 || $1 !~ /^(src|test)\/[A-Za-z0-9_./-]+$/ || $1 ~ /\.\.|\*/ ||
     $2 !~ /^rt_[A-Za-z0-9_]+$/ || $3 !~ /^(tagged|missing)$/ ||
     $4 !~ /^(missing|documented|typed_result|sffi_metadata)$/ ||
-    $5 !~ /^(unsafe_contract_missing|unsafe_contract_declared|unsafe_tag_missing|unsafe_tag_and_contract_missing)$/ {
+    $5 !~ /^(unsafe_contract_missing|unsafe_contract_declared|unsafe_tag_missing|unsafe_tag_and_contract_missing)$/ ||
+    $6 !~ /^[0-9]+$/ {
         print "rt unsafe autofix contract: malformed exact policy row " NR > "/dev/stderr"; exit 1
     }
     {
@@ -41,33 +44,35 @@ awk -F '\t' '
 
 SFFI_SOURCE_ONLY=1 sh "$root/scripts/audit/sffi-contract-inventory.shs" \
     "$work/contracts.tsv" "$work/symbols.tsv" >/dev/null 2>&1
-
-awk -F '\t' 'BEGIN { OFS="\t" }
-    FNR == 1 { next }
-    $1 ~ /^rt_/ {
-        module=$6; sub(/\.spl$/, "", module)
-        print module, $1, $8, $9, $12
-    }
-' "$work/contracts.tsv" >"$work/actual.tsv"
+sh "$root/scripts/audit/rt-unsafe-priority.shs" "$work/priority.tsv" >/dev/null
 
 awk -F '\t' 'BEGIN { OFS="\t" }
     NR == FNR {
-        key=$1 SUBSEP $2
-        count[key]++
-        actual[key]=$3 SUBSEP $4 SUBSEP $5
+        if (FNR > 1) priority[$1 SUBSEP $2]=$5
         next
     }
+    FNR == 1 { next }
+    $1 ~ /^rt_/ {
+        module=$6
+        sub(/\.spl$/, "", module)
+        key=module SUBSEP $1
+        if (!(key in seen)) {
+            seen[key]=1
+            print module, $1, $8, $9, $12, (priority[key] + 0)
+        }
+    }
+' "$work/priority.tsv" "$work/contracts.tsv" >"$work/actual.tsv"
+
+awk -F '\t' 'BEGIN { OFS="\t" }
+    NR == FNR { actual[$1 SUBSEP $2]=$3 SUBSEP $4 SUBSEP $5 SUBSEP $6; next }
     FNR == 1 { next }
     {
         key=$1 SUBSEP $2
         if (!(key in actual)) {
             print "rt unsafe autofix contract: module+symbol not found: " $1 " / " $2 > "/dev/stderr"; failed=1; next
         }
-        if (count[key] != 1) {
-            print "rt unsafe autofix contract: ambiguous module+symbol declaration: " $1 " / " $2 > "/dev/stderr"; failed=1; next
-        }
         split(actual[key], got, SUBSEP)
-        if (got[1] != $3 || got[2] != $4 || got[3] != $5) {
+        if (got[1] != $3 || got[2] != $4 || got[3] != $5 || got[4] < $6) {
             print "rt unsafe autofix contract: exact contract mismatch for " $1 " / " $2 > "/dev/stderr"; failed=1
         }
     }

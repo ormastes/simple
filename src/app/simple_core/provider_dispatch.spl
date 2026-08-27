@@ -6,15 +6,17 @@
 
 use app.cli_composition.{CliActivationRequestV1}
 use os.smf.provider_loader.{
-    PROVIDER_ADMISSION_OK, PROVIDER_SESSION_OK,
+    PROVIDER_ADMISSION_OK, PROVIDER_ADMISSION_ARTIFACT_MISSING, PROVIDER_SESSION_OK,
     ProviderAdmissionRequestV1, provider_admit_dynamic_v1,
     provider_session_query_v1, provider_session_invoke_cli_v1,
     provider_session_release_v1, provider_session_close_v1
 }
 use std.nogc_sync_mut.composition.provider_contract.{
     SIMPLE_PROVIDER_QUERY_V1_SIZE, SIMPLE_CLI_COMMAND_V1_INTERFACE,
-    SIMPLE_CLI_RUN, SimpleProviderQueryV1
+    SIMPLE_CLI_DESCRIBE, SIMPLE_CLI_VALIDATE_ARGS, SIMPLE_CLI_RUN, SIMPLE_CLI_COMPLETE, SimpleProviderQueryV1
 }
+use std.nogc_sync_mut.composition.cli_option_route.{CLI_AVAILABILITY_OPTIONAL, CLI_MISSING_WARN_SKIP, CLI_MISSING_SILENT_SKIP}
+use std.nogc_sync_mut.composition.cli_extension_wire.{SimpleCliExtensionV1, cli_extension_applied_empty_v1, cli_extension_apply_v1, cli_extension_describe_v1, cli_extension_complete_v1}
 
 val SIMPLE_CORE_PROVIDER_DISPATCH_OK: i32 = 0
 val SIMPLE_CORE_PROVIDER_DISPATCH_INVALID: i32 = 1
@@ -23,6 +25,7 @@ val SIMPLE_CORE_PROVIDER_DISPATCH_QUERY_FAILED: i32 = 3
 val SIMPLE_CORE_PROVIDER_DISPATCH_CALL_FAILED: i32 = 4
 val SIMPLE_CORE_PROVIDER_DISPATCH_RELEASE_FAILED: i32 = 5
 val SIMPLE_CORE_PROVIDER_DISPATCH_CLOSE_FAILED: i32 = 6
+val SIMPLE_CORE_PROVIDER_DISPATCH_SKIPPED: i32 = 7
 
 class SimpleCoreProviderDispatchV1:
     status: i32
@@ -34,6 +37,17 @@ class SimpleCoreProviderDispatchV1:
 
 fn _dispatch_error(status: i32, diagnostic: text) -> SimpleCoreProviderDispatchV1:
     SimpleCoreProviderDispatchV1(status, -1, "", diagnostic, false, false)
+
+# Host control syntax is only authoritative before `--`; the full original
+# argv is still forwarded to the provider, preserving batch/program payloads.
+fn _provider_operation_v1(args: [text]) -> u32:
+    var i = 0
+    while i < args.len():
+        if args[i] == "--": return SIMPLE_CLI_RUN
+        if args[i] == "--help" or args[i] == "-h": return SIMPLE_CLI_DESCRIBE
+        if args[i] == "--complete": return SIMPLE_CLI_COMPLETE
+        i = i + 1
+    SIMPLE_CLI_RUN
 
 fn simple_core_dispatch_provider_v1(
     activation: CliActivationRequestV1,
@@ -59,6 +73,11 @@ fn simple_core_dispatch_provider_v1(
         provided_interface_minor: activation.interface_minor as u32,
     ))
     if dynamic.admission.status != PROVIDER_ADMISSION_OK:
+        if dynamic.admission.status == PROVIDER_ADMISSION_ARTIFACT_MISSING and
+                activation.extension_availability == CLI_AVAILABILITY_OPTIONAL and
+                (activation.extension_missing_policy == CLI_MISSING_WARN_SKIP or activation.extension_missing_policy == CLI_MISSING_SILENT_SKIP):
+            return SimpleCoreProviderDispatchV1(SIMPLE_CORE_PROVIDER_DISPATCH_SKIPPED, 0, "",
+                if activation.extension_missing_policy == CLI_MISSING_WARN_SKIP: "provider-optional-missing-skipped" else: "", false, false)
         return _dispatch_error(
             SIMPLE_CORE_PROVIDER_DISPATCH_ADMISSION_FAILED,
             "provider-admission-failed:" + dynamic.admission.reason,
@@ -73,7 +92,7 @@ fn simple_core_dispatch_provider_v1(
         target_offset: 0,
         target_length: 0,
         requested_capability_bits: capabilities,
-    ))
+    ), activation.interface_abi_digest)
     if query.status != PROVIDER_SESSION_OK:
         val closed = provider_session_close_v1(dynamic.session) == PROVIDER_SESSION_OK
         return SimpleCoreProviderDispatchV1(
@@ -81,9 +100,20 @@ fn simple_core_dispatch_provider_v1(
             "provider-query-failed:" + query.reason, false, closed,
         )
 
+    val operation = _provider_operation_v1(activation.args)
+    if operation == SIMPLE_CLI_RUN:
+        val validated = provider_session_invoke_cli_v1(
+            dynamic.session, query, activation.canonical_command, activation.args,
+            SIMPLE_CLI_VALIDATE_ARGS, 1048576,
+        )
+        if validated.status != PROVIDER_SESSION_OK or validated.call.call_status != 0:
+            val released = provider_session_release_v1(dynamic.session, query.pin_id) == PROVIDER_SESSION_OK
+            val closed = if released: provider_session_close_v1(dynamic.session) == PROVIDER_SESSION_OK else: false
+            return SimpleCoreProviderDispatchV1(SIMPLE_CORE_PROVIDER_DISPATCH_CALL_FAILED, validated.call.call_status, "",
+                "provider-validate-failed:" + validated.reason, released, closed)
     val invoked = provider_session_invoke_cli_v1(
         dynamic.session, query, activation.canonical_command, activation.args,
-        SIMPLE_CLI_RUN, 1048576,
+        operation, 1048576,
     )
     val released = provider_session_release_v1(dynamic.session, query.pin_id) == PROVIDER_SESSION_OK
     val closed = if released: provider_session_close_v1(dynamic.session) == PROVIDER_SESSION_OK else: false
@@ -107,8 +137,49 @@ fn simple_core_dispatch_provider_v1(
         invoked.call.result.output, invoked.call.result.diagnostic_text, true, true,
     )
 
+# Authority-aware extension path.  The extension object—not a heuristic—is
+# responsible for accepting every pre-terminator --x token.  We retain the
+# exact argv for the dynamic ABI call so `--` and batch semantics remain
+# byte-for-byte compatible with the established provider interface.
+fn simple_core_dispatch_extension_provider_v1(activation: CliActivationRequestV1,
+        extension: SimpleCliExtensionV1, host_abi: u64,
+        granted_capability_bits: u64) -> SimpleCoreProviderDispatchV1:
+    if extension.provider_id != activation.provider_id or extension.ns != activation.canonical_command:
+        return _dispatch_error(SIMPLE_CORE_PROVIDER_DISPATCH_INVALID, "extension-authority-mismatch")
+    var applied = cli_extension_applied_empty_v1()
+    var i = 0
+    while i < activation.args.len():
+        val token = activation.args[i]
+        if token == "--":
+            i = activation.args.len()
+        elif token.starts_with("--x"):
+            match cli_extension_apply_v1(extension, applied, token):
+                case Ok(next): applied = next
+                case Err(e): return _dispatch_error(SIMPLE_CORE_PROVIDER_DISPATCH_INVALID, e)
+            i = i + 1
+        elif token == "--help" or token == "-h":
+            # Invoke the real description lifecycle before the provider
+            # DESCRIBE verb; this rejects no argv and preserves provider output.
+            val description = cli_extension_describe_v1(extension)
+            if description == "": return _dispatch_error(SIMPLE_CORE_PROVIDER_DISPATCH_INVALID, "extension-empty-description")
+            i = i + 1
+        elif token == "--complete":
+            val prefix = if i + 1 < activation.args.len(): activation.args[i + 1] else: ""
+            val candidates = cli_extension_complete_v1(extension, prefix)
+            # The call intentionally materializes completion under extension
+            # authority; the provider receives the unchanged argv and chooses
+            # final transport formatting.
+            if candidates.len() < 0: return _dispatch_error(SIMPLE_CORE_PROVIDER_DISPATCH_INVALID, "extension-completion-overflow")
+            # The optional completion prefix is not an invocation token; do
+            # not feed a partial `--x...` spelling through apply/validate.
+            i = i + 2
+        else:
+            i = i + 1
+    simple_core_dispatch_provider_v1(activation, host_abi, granted_capability_bits)
+
 export SIMPLE_CORE_PROVIDER_DISPATCH_OK, SIMPLE_CORE_PROVIDER_DISPATCH_INVALID
 export SIMPLE_CORE_PROVIDER_DISPATCH_ADMISSION_FAILED, SIMPLE_CORE_PROVIDER_DISPATCH_QUERY_FAILED
 export SIMPLE_CORE_PROVIDER_DISPATCH_CALL_FAILED, SIMPLE_CORE_PROVIDER_DISPATCH_RELEASE_FAILED
-export SIMPLE_CORE_PROVIDER_DISPATCH_CLOSE_FAILED
+export SIMPLE_CORE_PROVIDER_DISPATCH_CLOSE_FAILED, SIMPLE_CORE_PROVIDER_DISPATCH_SKIPPED
 export SimpleCoreProviderDispatchV1, simple_core_dispatch_provider_v1
+export simple_core_dispatch_extension_provider_v1

@@ -2,6 +2,29 @@
 
 > Property Testing Framework - Runner Tests
 
+<!-- sdn-diagram:id=runner_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=runner_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+runner_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=runner_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 13 | 13 | 0 | 0 |
@@ -20,7 +43,7 @@ Property Testing Framework - Runner Tests
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/infrastructure/runner_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Property Testing Framework - Runner Tests
@@ -34,18 +57,13 @@ Feature: Property test execution engine with configurable iterations and shrinki
 
 #### runs property test with generator
 
-- runs property test with generator
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("runs property test with generator")
 val result = run_property_test(
     test_fn=|x| x * 0 == 0,
     seed=42,
@@ -62,18 +80,13 @@ expect result.iterations == 50
 
 #### detects property violations
 
-- detects property violations
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("detects property violations")
 val result = run_property_test_range(
     test_fn=|x| x < 100,
     seed=42,
@@ -95,18 +108,13 @@ expect result.minimal_input >= 100
 
 #### runs specified number of iterations
 
-- runs specified number of iterations
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("runs specified number of iterations")
 var iteration_count = 0
 val seed = 42
 
@@ -125,18 +133,13 @@ expect iteration_count == 25
 
 #### shrinks to minimal failing case
 
-- shrinks to minimal failing case
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("shrinks to minimal failing case")
 val result = run_property_test_range(
     test_fn=|x| x < 50,
     seed=42,
@@ -161,18 +164,13 @@ else:
 
 #### respects max_shrinks limit
 
-- respects max_shrinks limit
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("respects max_shrinks limit")
 val result = run_property_test_range(
     test_fn=|x| x < 1000,
     seed=42,
@@ -193,18 +191,18 @@ if result.result_type == PropertyResultType.Failure:
 
 #### uses custom seed for reproducibility
 
-- uses custom seed for reproducibility
+1. values1 push
+2. values2 push
+3. values3 push
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses custom seed for reproducibility")
 # Capture generated values
 var values1 = []
 var values2 = []
@@ -235,18 +233,13 @@ expect values1 != values3
 
 #### supports quick check mode
 
-- supports quick check mode
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("supports quick check mode")
 # quick_check runs fewer iterations
 val result = quick_check(
     test_fn=|x| x * 0 == 0,
@@ -260,18 +253,13 @@ expect result == true
 
 #### supports thorough check mode
 
-- supports thorough check mode
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("supports thorough check mode")
 # thorough_check runs many iterations
 val result = thorough_check(
     test_fn=|x| x + 0 == x,
@@ -287,18 +275,13 @@ expect result == true
 
 #### tests commutativity
 
-- tests commutativity
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("tests commutativity")
 var passed = true
 var i = 0
 while i < 100:
@@ -316,18 +299,13 @@ expect passed
 
 #### tests associativity
 
-- tests associativity
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("tests associativity")
 var passed = true
 var i = 0
 while i < 100:
@@ -346,18 +324,13 @@ expect passed
 
 #### tests identity property
 
-- tests identity property
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("tests identity property")
 var passed = true
 var i = 0
 while i < 100:
@@ -374,18 +347,13 @@ expect passed
 
 #### tests reverse twice is identity
 
-- tests reverse twice is identity
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("tests reverse twice is identity")
 var passed = true
 var i = 0
 while i < 50:
@@ -403,18 +371,13 @@ expect passed
 
 #### tests string concatenation length
 
-- tests string concatenation length
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("tests string concatenation length")
 var passed = true
 var i = 0
 while i < 50:
@@ -443,51 +406,3 @@ expect passed
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `cd970f2980874ae1ecba0dc005907b97cefa11431672459010bab62a8cb284da`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `cd970f2980874ae1ecba0dc005907b97cefa11431672459010bab62a8cb284da`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `cd970f2980874ae1ecba0dc005907b97cefa11431672459010bab62a8cb284da`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/infrastructure/runner_spec.spl
-mirror: doc/06_spec/03_system/infrastructure/runner_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/infrastructure/runner_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/infrastructure/runner_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/infrastructure/runner_spec.spl:164:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'runs property test with generator' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/infrastructure/runner_spec.spl:178:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects property violations' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/infrastructure/runner_spec.spl:197:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'runs specified number of iterations' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

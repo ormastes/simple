@@ -16,32 +16,247 @@
 #   - HPACK encode of response HttpResponseData → HEADERS+DATA frames
 #
 # Out of scope (follow-up milestones):
+#   - CONTINUATION frame header-block merging
 #   - Server push (PUSH_PROMISE)
 #   - Priority / weighted scheduling
+#   - Dynamic table updates (static-table-only HPACK)
 #
 # Worker drains decoded requests via take_decoded_requests() and feeds
-# responses back via queue_h2_response(stream_id, resp).
+# responses back via queue_h2_response(stream_id, request_method, resp).
 
 use std.http.h2.h2_frame.{
-    H2Frame, H2DataFrame, H2HeadersFrame, H2ContinuationFrame, H2SettingsFrame,
+    H2Frame, H2DataFrame, H2HeadersFrame, H2SettingsFrame,
     H2PingFrame, H2GoawayFrame, H2WindowUpdateFrame,
     H2RstStreamFrame, H2Setting,
+    H2_FRAME_HEADER_LEN,
     H2_FLAG_END_STREAM, H2_FLAG_END_HEADERS, H2_FLAG_ACK,
     H2_SETTINGS_MAX_CONCURRENT_STREAMS, H2_SETTINGS_INITIAL_WINDOW_SIZE,
     H2_SETTINGS_MAX_FRAME_SIZE,
     H2_ERR_NO_ERROR, H2_ERR_PROTOCOL_ERROR, H2_ERR_INTERNAL_ERROR,
     H2_ERR_COMPRESSION_ERROR
 }
-use std.http.h2.h2_parser.{h2_parse_frame_bounded, H2BoundedParseResult}
+use std.http.h2.h2_parser.{h2_parse_frame, h2_parse_frame_header, H2FrameHeader}
 use std.http.h2.h2_writer.{h2_write_frame}
 use std.http.h2.h2_preface.{h2_validate_preface, H2_CONNECTION_PREFACE_LEN}
-use std.common.hpack.encoder.{HpackHeader, HpackDecoderState, hpack_decoder_new}
-use std.common.hpack.decoder.{hpack_decode}
-use std.http_server.h2_request_headers.{h2_validate_request_headers}
+use std.http.h2.h2_hpack.{
+    hpack_static_table, hpack_encode, hpack_decode,
+    HpackEntry, HpackTable, HpackEncodeResult, HpackDecodeResult
+}
 use std.http_server.h2_stream.{H2Stream, H2StreamState}
 use std.http_server.types.{HttpRequestData, HttpResponseData}
 
-use std.common.string_core.{text_to_bytes}
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+# ============================================================================
+# Minimal inline HPACK decoder (avoids match-on-Result bugs in interpreter)
+# ============================================================================
+
+fn _hpack_static_name(idx: i64) -> text:
+    if idx == 1: return ":authority"
+    if idx == 2: return ":method"
+    if idx == 3: return ":method"
+    if idx == 4: return ":path"
+    if idx == 5: return ":path"
+    if idx == 6: return ":scheme"
+    if idx == 7: return ":scheme"
+    if idx == 8: return ":status"
+    if idx == 15: return "accept-charset"
+    if idx == 16: return "accept-encoding"
+    if idx == 17: return "accept-language"
+    if idx == 19: return "accept"
+    if idx == 28: return "content-length"
+    if idx == 31: return "content-type"
+    if idx == 32: return "cookie"
+    if idx == 33: return "date"
+    if idx == 38: return "host"
+    if idx == 58: return "user-agent"
+    return "header-{idx}"
+
+fn _hpack_static_value(idx: i64) -> text:
+    if idx == 2: return "GET"
+    if idx == 3: return "POST"
+    if idx == 4: return "/"
+    if idx == 5: return "/index.html"
+    if idx == 6: return "http"
+    if idx == 7: return "https"
+    if idx == 8: return "200"
+    if idx == 9: return "204"
+    if idx == 10: return "206"
+    if idx == 11: return "304"
+    if idx == 12: return "400"
+    if idx == 13: return "404"
+    if idx == 14: return "500"
+    return ""
+
+fn _bytes_range_to_str(data: [u8], start: i64, count: i64) -> text:
+    val chars = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    var result = ""
+    var i = 0
+    while i < count:
+        val b = data[start + i]
+        if b >= 32 and b <= 126:
+            val idx = b - 32
+            val c = chars[idx]
+            result = "{result}{c}"
+        i = i + 1
+    return result
+
+fn _mini_hpack_decode(data: [u8]) -> [(text, text)]:
+    var headers: [(text, text)] = []
+    var pos = 0
+    while pos < data.len():
+        val b = data[pos]
+        if (b & 128) != 0:
+            val idx = b & 127
+            if idx > 0 and idx <= 61:
+                val n = _hpack_static_name(idx)
+                val v = _hpack_static_value(idx)
+                headers.push((n, v))
+            pos = pos + 1
+        elif (b & 64) != 0:
+            val name_idx = b & 63
+            pos = pos + 1
+            var name = ""
+            if name_idx > 0:
+                name = _hpack_static_name(name_idx)
+            else:
+                if pos < data.len():
+                    val nlen = data[pos]
+                    pos = pos + 1
+                    name = _bytes_range_to_str(data, pos, nlen)
+                    pos = pos + nlen
+            if pos < data.len():
+                val vlen = data[pos]
+                pos = pos + 1
+                val vs = _bytes_range_to_str(data, pos, vlen)
+                headers.push((name, vs))
+                pos = pos + vlen
+        else:
+            val name_idx = b & 15
+            pos = pos + 1
+            var name = ""
+            if name_idx > 0:
+                name = _hpack_static_name(name_idx)
+            else:
+                if pos < data.len():
+                    val nlen = data[pos]
+                    pos = pos + 1
+                    name = _bytes_range_to_str(data, pos, nlen)
+                    pos = pos + nlen
+            if pos < data.len():
+                val vlen = data[pos]
+                pos = pos + 1
+                val vs = _bytes_range_to_str(data, pos, vlen)
+                headers.push((name, vs))
+                pos = pos + vlen
+    return headers
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+# ============================================================================
+# Minimal inline HPACK decoder (avoids match-on-Result bugs in interpreter)
+# ============================================================================
+
+fn _hpack_static_name(idx: i64) -> text:
+    if idx == 1: return ":authority"
+    if idx == 2: return ":method"
+    if idx == 3: return ":method"
+    if idx == 4: return ":path"
+    if idx == 5: return ":path"
+    if idx == 6: return ":scheme"
+    if idx == 7: return ":scheme"
+    if idx == 8: return ":status"
+    if idx == 15: return "accept-charset"
+    if idx == 16: return "accept-encoding"
+    if idx == 17: return "accept-language"
+    if idx == 19: return "accept"
+    if idx == 28: return "content-length"
+    if idx == 31: return "content-type"
+    if idx == 32: return "cookie"
+    if idx == 33: return "date"
+    if idx == 38: return "host"
+    if idx == 58: return "user-agent"
+    return "header-{idx}"
+
+fn _hpack_static_value(idx: i64) -> text:
+    if idx == 2: return "GET"
+    if idx == 3: return "POST"
+    if idx == 4: return "/"
+    if idx == 5: return "/index.html"
+    if idx == 6: return "http"
+    if idx == 7: return "https"
+    if idx == 8: return "200"
+    if idx == 9: return "204"
+    if idx == 10: return "206"
+    if idx == 11: return "304"
+    if idx == 12: return "400"
+    if idx == 13: return "404"
+    if idx == 14: return "500"
+    return ""
+
+fn _bytes_range_to_str(data: [u8], start: i64, count: i64) -> text:
+    val chars = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    var result = ""
+    var i = 0
+    while i < count:
+        val b = data[start + i]
+        if b >= 32 and b <= 126:
+            val idx = b - 32
+            val c = chars[idx]
+            result = "{result}{c}"
+        i = i + 1
+    return result
+
+fn _mini_hpack_decode(data: [u8]) -> [(text, text)]:
+    var headers: [(text, text)] = []
+    var pos = 0
+    while pos < data.len():
+        val b = data[pos]
+        if (b & 128) != 0:
+            val idx = b & 127
+            if idx > 0 and idx <= 61:
+                val n = _hpack_static_name(idx)
+                val v = _hpack_static_value(idx)
+                headers.push((n, v))
+            pos = pos + 1
+        elif (b & 64) != 0:
+            val name_idx = b & 63
+            pos = pos + 1
+            var name = ""
+            if name_idx > 0:
+                name = _hpack_static_name(name_idx)
+            else:
+                if pos < data.len():
+                    val nlen = data[pos]
+                    pos = pos + 1
+                    name = _bytes_range_to_str(data, pos, nlen)
+                    pos = pos + nlen
+            if pos < data.len():
+                val vlen = data[pos]
+                pos = pos + 1
+                val vs = _bytes_range_to_str(data, pos, vlen)
+                headers.push((name, vs))
+                pos = pos + vlen
+        else:
+            val name_idx = b & 15
+            pos = pos + 1
+            var name = ""
+            if name_idx > 0:
+                name = _hpack_static_name(name_idx)
+            else:
+                if pos < data.len():
+                    val nlen = data[pos]
+                    pos = pos + 1
+                    name = _bytes_range_to_str(data, pos, nlen)
+                    pos = pos + nlen
+            if pos < data.len():
+                val vlen = data[pos]
+                pos = pos + 1
+                val vs = _bytes_range_to_str(data, pos, vlen)
+                headers.push((name, vs))
+                pos = pos + vlen
+    return headers
+
 # ============================================================================
 # Connection-level defaults (RFC 9113 §6.5.2)
 # ============================================================================
@@ -51,8 +266,6 @@ val DEFAULT_INITIAL_WINDOW_SIZE: i64 = 65535
 val DEFAULT_MAX_FRAME_SIZE: i64 = 16384
 val DEFAULT_CONNECTION_WINDOW: i64 = 65535
 val H2_MAX_RECV_BUFFER: i64 = 1048576
-val H2_MAX_HEADER_BLOCK_BYTES: i64 = 65536
-val H2_HPACK_TABLE_BYTES: i64 = 4096
 
 # ============================================================================
 # H2Connection
@@ -82,9 +295,6 @@ class H2Connection:
     goaway_sent: bool
     last_stream_id: i64
     next_server_stream_id: i64
-    # RFC 9113 section 6.10: while nonzero, the next frame MUST be a
-    # CONTINUATION on this exact stream until END_HEADERS closes the envelope.
-    pending_continuation_stream_id: i64
 
     # Negotiated settings (peer values)
     peer_max_concurrent_streams: i64
@@ -106,14 +316,13 @@ class H2Connection:
     # Outbound frame buffer — worker drains this after each on_data_received
     pending_writes: [u8]
 
-    # Stateful HPACK decoder. Dynamic entries are connection-scoped and never
-    # shared across peers or recreated between streams.
-    hpack_decoder: HpackDecoderState
+    # HPACK static table (shared across all streams on this connection)
+    hpack_table: HpackTable
 
     # Decoded requests waiting for worker to drain via take_decoded_requests()
     pending_requests: [(i64, HttpRequestData)]
 
-    pub(package) static fn new(fd: i64, peer_addr: text, now: i64) -> H2Connection:
+    static fn new(fd: i64, peer_addr: text, now: i64) -> H2Connection:
         """Create a new H2 connection after ALPN negotiation selects h2.
 
         Immediately queues the server connection preface (SETTINGS frame).
@@ -134,7 +343,6 @@ class H2Connection:
             goaway_sent: false,
             last_stream_id: 0,
             next_server_stream_id: 2,
-            pending_continuation_stream_id: 0,
             peer_max_concurrent_streams: DEFAULT_MAX_CONCURRENT_STREAMS,
             peer_initial_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
             peer_max_frame_size: DEFAULT_MAX_FRAME_SIZE,
@@ -145,7 +353,7 @@ class H2Connection:
             recv_window: DEFAULT_CONNECTION_WINDOW,
             streams: {},
             pending_writes: [],
-            hpack_decoder: hpack_decoder_new(H2_HPACK_TABLE_BYTES),
+            hpack_table: hpack_static_table(),
             pending_requests: []
         )
         # Server MUST send its SETTINGS as connection preface (RFC 9113 §3.4).
@@ -156,21 +364,8 @@ class H2Connection:
     # Public interface — called by Worker
     # ========================================================================
 
-    pub(package) me h2_on_data_received(data: [u8], now: i64) -> bool:
+    me h2_on_data_received(data: [u8], now: i64) -> bool:
         self.last_activity = now
-        if self.goaway_sent:
-            return false
-        # Bound connection-owned incremental input before copying it. A peer
-        # cannot grow retained partial input without limit while withholding a
-        # frame tail.
-        if self.recv_buf.len() > H2_MAX_RECV_BUFFER:
-            self.recv_buf = []
-            self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
-            return false
-        if data.len() > H2_MAX_RECV_BUFFER - self.recv_buf.len():
-            self.recv_buf = []
-            self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
-            return false
         var i = 0
         while i < data.len():
             self.recv_buf.push(data[i])
@@ -179,14 +374,13 @@ class H2Connection:
             if self.recv_buf.len() < H2_CONNECTION_PREFACE_LEN:
                 return true
             if not h2_validate_preface(self.recv_buf):
-                self.recv_buf = []
                 self.queue_goaway(0, H2_ERR_PROTOCOL_ERROR)
                 return false
             self.preface_validated = true
             self.recv_buf = _slice_from(self.recv_buf, H2_CONNECTION_PREFACE_LEN)
         return true
 
-    pub(package) me take_pending_writes() -> [u8]:
+    me take_pending_writes() -> [u8]:
         """Drain and return all queued outbound bytes.
 
         Worker calls this after on_data_received and submits via
@@ -196,19 +390,19 @@ class H2Connection:
         self.pending_writes = []
         return out
 
-    pub(package) me is_goaway_sent() -> bool:
+    me is_goaway_sent() -> bool:
         """True if GOAWAY has been sent (connection is shutting down)."""
         self.goaway_sent
 
-    pub(package) me is_idle_timeout(now: i64, timeout_ms: i64) -> bool:
+    me is_idle_timeout(now: i64, timeout_ms: i64) -> bool:
         """Check if connection has exceeded idle timeout."""
         (now - self.last_activity) > timeout_ms
 
-    pub(package) me take_decoded_requests() -> [(i64, HttpRequestData)]:
+    me take_decoded_requests() -> [(i64, HttpRequestData)]:
         """Drain and return all decoded H2 requests ready for processing.
 
         Each entry is (stream_id, request). Worker should call
-        queue_h2_response(stream_id, response) for each entry after
+        queue_h2_response(stream_id, request.method, response) for each entry after
         routing through the middleware/handler pipeline.
         """
         val out = self.pending_requests
@@ -221,7 +415,8 @@ class H2Connection:
             self.pending_writes.push(src[i])
             i = i + 1
 
-    pub(package) me queue_h2_response(stream_id: i64, resp: HttpResponseData):
+    pub(package) me queue_h2_response(stream_id: i64, request_method: text,
+                                     resp: HttpResponseData):
         # Build HPACK-encoded header block inline
         var hpack: [u8] = []
         val st = resp.status
@@ -232,35 +427,62 @@ class H2Connection:
         if st == 500: hpack.push(142)
         if st != 200 and st != 204 and st != 304 and st != 404 and st != 500:
             hpack.push(72)
-            val ss_bytes = text_to_bytes("{st}")
+            val ss_bytes = rt_text_to_bytes("{st}")
             hpack.push(ss_bytes.len())
             var si = 0
             while si < ss_bytes.len():
                 hpack.push(ss_bytes[si])
                 si = si + 1
+        var selected_body_len = if resp.body_bytes.len() > 0:
+            resp.body_bytes.len()
+        elif resp.body.len() > 0:
+            resp.body.len()
+        else:
+            resp.body_length
+        if selected_body_len <= 0 and (request_method == "HEAD" or resp.status == 304):
+            val declared_length = response_declared_content_length(resp.headers)
+            if declared_length >= 0:
+                selected_body_len = declared_length
+        val framing = response_body_framing_decision(
+            request_method, resp.status, false)
+        if framing.emit_content_length:
+            val cl_name = text_to_bytes("content-length")
+            val framed_body_len = if framing.content_length_must_be_zero: 0 else: selected_body_len
+            val cl_value = text_to_bytes("{framed_body_len}")
+            hpack.push(0)
+            hpack.push(cl_name.len())
+            for byte in cl_name:
+                hpack.push(byte)
+            hpack.push(cl_value.len())
+            for byte in cl_value:
+                hpack.push(byte)
         var hi = 0
         while hi < resp.headers.len():
             val pair = resp.headers[hi]
-            val hn_bytes = text_to_bytes(pair.0)
-            val hv_bytes = text_to_bytes(pair.1)
-            hpack.push(0)
-            hpack.push(hn_bytes.len())
-            var ni = 0
-            while ni < hn_bytes.len():
-                hpack.push(hn_bytes[ni])
-                ni = ni + 1
-            hpack.push(hv_bytes.len())
-            var vi = 0
-            while vi < hv_bytes.len():
-                hpack.push(hv_bytes[vi])
-                vi = vi + 1
+            val lower_name = pair.0.lower()
+            if lower_name != "content-length" and lower_name != "transfer-encoding" and
+                    lower_name != "trailer" and lower_name != "connection" and
+                    lower_name != "keep-alive" and lower_name != "upgrade":
+                val hn_bytes = text_to_bytes(lower_name)
+                val hv_bytes = text_to_bytes(pair.1)
+                hpack.push(0)
+                hpack.push(hn_bytes.len())
+                var ni = 0
+                while ni < hn_bytes.len():
+                    hpack.push(hn_bytes[ni])
+                    ni = ni + 1
+                hpack.push(hv_bytes.len())
+                var vi = 0
+                while vi < hv_bytes.len():
+                    hpack.push(hv_bytes[vi])
+                    vi = vi + 1
             hi = hi + 1
 
         # Build body bytes
         var body_bytes: [u8] = []
-        if resp.body_bytes.len() > 0:
+        if framing.transfer_body and resp.body_bytes.len() > 0:
             body_bytes = resp.body_bytes
-        elif resp.body.len() > 0:
+        elif framing.transfer_body and resp.body.len() > 0:
             body_bytes = text_to_bytes(resp.body)
 
         # Write HEADERS frame: type=1, flags=END_HEADERS(4) [+END_STREAM(1) if no body]
@@ -299,6 +521,11 @@ class H2Connection:
                 self.pending_writes.push(body_bytes[di])
                 di = di + 1
 
+        # The queued bytes own the response from here.  Release the terminal
+        # stream so a completed/cancelled request cannot retain peer input or
+        # be rearmed by a racing RST_STREAM.
+        self.streams.remove(stream_id)
+
     # ========================================================================
     # Frame consumption loop
     # ========================================================================
@@ -306,57 +533,94 @@ class H2Connection:
     pub(package) me consume_frames() -> bool:
         if self.goaway_sent:
             return false
-        # `handle_h2_recv` invokes this after every socket completion.  A TCP
-        # completion may contain fewer than the 24 client-preface bytes; those
-        # bytes are retained by `h2_on_data_received` and are not frame input.
-        # Parsing them early misclassifies ordinary fragmentation as a malformed
-        # frame and sends GOAWAY.  Wait until preface validation has consumed
-        # the complete prefix before entering the frame parser.
-        if not self.preface_validated:
-            return true
         var offset = 0
         var keep_going = true
-        var parsing = true
-        while parsing and offset < self.recv_buf.len():
-            match h2_parse_frame_bounded(self.recv_buf, offset, self.local_max_frame_size):
-                case Complete(ok):
-                    offset = offset + ok.consumed
-                    keep_going = self.dispatch_frame(ok.frame)
-                    if not keep_going or self.goaway_sent:
-                        keep_going = false
-                        parsing = false
-                case Ignored(consumed):
-                    # RFC 9113 extension frames are consumed even though this
-                    # endpoint has no handler for their semantics.
-                    if consumed <= 0:
-                        self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
-                        keep_going = false
-                        parsing = false
-                        offset = self.recv_buf.len()
+        var has_frames = true
+        while has_frames:
+            if self.recv_buf.len() < offset + H2_FRAME_HEADER_LEN:
+                has_frames = false
+            else:
+                val maybe_header = h2_parse_frame_header(self.recv_buf, offset)
+                if maybe_header == nil:
+                    has_frames = false
+                else:
+                    val header = maybe_header ?? H2FrameHeader(length: 0, frame_type: 0, flags: 0, stream_id: 0)
+                    val frame_len = H2_FRAME_HEADER_LEN + header.length
+                    if self.recv_buf.len() < offset + frame_len:
+                        has_frames = false
                     else:
-                        offset = offset + consumed
-                case Incomplete(required_bytes):
-                    # Retain only the unconsumed suffix. Admission already
-                    # bounded both the declared frame size and aggregate input.
-                    if required_bytes <= 0:
-                        self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
-                        keep_going = false
-                        offset = self.recv_buf.len()
-                    parsing = false
-                case Rejected(_):
-                    # Malformed frames are terminal connection errors. Discard
-                    # attacker-controlled residue before worker cancellation.
-                    self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
-                    keep_going = false
-                    parsing = false
-                    offset = self.recv_buf.len()
+                        val maybe_frame = h2_parse_frame(self.recv_buf, offset)
+                        offset = offset + frame_len
+                        if maybe_frame == nil:
+                            has_frames = false
+                        else:
+                            val frame = maybe_frame ?? H2Frame.Data(H2DataFrame(stream_id: 0, flags: 0, data: []))
+                            val ft = header.frame_type
+                            if ft == 4:
+                                val is_ack = (header.flags & 1) != 0
+                                if not is_ack:
+                                    self.pending_writes.push(0)
+                                    self.pending_writes.push(0)
+                                    self.pending_writes.push(0)
+                                    self.pending_writes.push(4)
+                                    self.pending_writes.push(1)
+                                    self.pending_writes.push(0)
+                                    self.pending_writes.push(0)
+                                    self.pending_writes.push(0)
+                                    self.pending_writes.push(0)
+                            elif ft == 8:
+                                pass_dn
+                            elif ft == 1:
+                                val sid = header.stream_id
+                                val hblock = _slice_bytes(self.recv_buf, offset - header.length, header.length)
+                                val decoded_hdrs = _mini_hpack_decode(hblock)
+                                var method = "GET"
+                                var path = "/"
+                                var authority = ""
+                                var di = 0
+                                while di < decoded_hdrs.len():
+                                    val hpair = decoded_hdrs[di]
+                                    if hpair.0 == ":method":
+                                        method = hpair.1
+                                    elif hpair.0 == ":path":
+                                        path = hpair.1
+                                    elif hpair.0 == ":authority":
+                                        authority = hpair.1
+                                    di = di + 1
+                                var req = HttpRequestData(
+                                    method: method,
+                                    path: path,
+                                    query: "",
+                                    version: "HTTP/2",
+                                    headers: [],
+                                    body: "",
+                                    params: {},
+                                    peer_addr: self.peer_addr
+                                )
+                                self.pending_requests.push((sid, req))
+                            elif ft == 6:
+                                # PING — need opaque_data from payload
+                                val ping_payload = _slice_bytes(self.recv_buf, offset - header.length, header.length)
+                                self.pending_writes.push(0)
+                                self.pending_writes.push(0)
+                                self.pending_writes.push(8)
+                                self.pending_writes.push(6)
+                                self.pending_writes.push(1)
+                                self.pending_writes.push(0)
+                                self.pending_writes.push(0)
+                                self.pending_writes.push(0)
+                                self.pending_writes.push(0)
+                                var pi = 0
+                                while pi < ping_payload.len():
+                                    self.pending_writes.push(ping_payload[pi])
+                                    pi = pi + 1
+                            elif ft == 0:
+                                pass_dn
+                            elif ft == 7:
+                                keep_going = false
+                                has_frames = false
         if offset > 0:
             self.recv_buf = _slice_from(self.recv_buf, offset)
-        if self.recv_buf.len() > H2_MAX_RECV_BUFFER:
-            self.recv_buf = []
-            if not self.goaway_sent:
-                self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
-            return false
         return keep_going
 
     # ========================================================================
@@ -368,19 +632,6 @@ class H2Connection:
 
         Returns true to continue, false to close.
         """
-        # Header-block fragments are a connection-wide serialization envelope,
-        # not merely per-stream state. No frame of any other type may be
-        # interleaved before END_HEADERS (RFC 9113 sections 4.3 and 6.10).
-        if self.pending_continuation_stream_id != 0:
-            match frame:
-                H2Frame.Continuation(cf):
-                    if cf.stream_id != self.pending_continuation_stream_id:
-                        self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
-                        return false
-                _:
-                    self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
-                    return false
-
         match frame:
             H2Frame.Settings(sf):
                 self.handle_settings(sf)
@@ -399,8 +650,7 @@ class H2Connection:
                 return false
 
             H2Frame.Headers(hf):
-                self.handle_headers(hf)
-                return true
+                return self.handle_headers(hf)
 
             H2Frame.Data(df):
                 self.handle_data(df)
@@ -420,33 +670,17 @@ class H2Connection:
                 return false
 
             H2Frame.Continuation(cf):
-                if self.pending_continuation_stream_id == 0:
-                    # Unknown stream, continuation after END_HEADERS, and a
-                    # second unowned fragment are all connection errors.
-                    self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
-                    return false
                 # Merge continuation header block into the stream accumulator
                 # NOTE: index read + contains_key, not .get() — Dict<K, class>
                 # .get() returns a corrupt payload under native codegen.
                 if self.streams.contains_key(cf.stream_id):
                     var cs = self.streams[cf.stream_id]
                     self.streams.remove(cf.stream_id)
-                    if cf.header_block.len() > H2_MAX_HEADER_BLOCK_BYTES - cs.recv_header_bytes:
-                        self.queue_goaway(self.last_stream_id, H2_ERR_COMPRESSION_ERROR)
-                        cs.close()
-                        cs.request_dispatched = true
-                        self.streams[cf.stream_id] = cs
-                        return false
                     cs.on_headers(cf.header_block, cf.flags)
-                    if (cf.flags & H2_FLAG_END_HEADERS) != 0:
-                        self.pending_continuation_stream_id = 0
                     if cs.is_request_complete() and not cs.request_dispatched:
-                        self._decode_and_buffer_request(cf.stream_id, cs)
-                        cs.request_dispatched = true
+                        if self._decode_and_buffer_request(cf.stream_id, cs):
+                            cs.request_dispatched = true
                     self.streams[cf.stream_id] = cs
-                else:
-                    self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
-                    return false
                 return true
 
     # ========================================================================
@@ -535,7 +769,6 @@ class H2Connection:
         else:
             if self.streams.contains_key(wf.stream_id):
                 var s = self.streams[wf.stream_id]
-                self.streams.remove(wf.stream_id)
                 s.adjust_send_window(wf.increment)
                 self.streams[wf.stream_id] = s
 
@@ -543,7 +776,7 @@ class H2Connection:
     # HEADERS handling
     # ========================================================================
 
-    me handle_headers(hf: H2HeadersFrame):
+    me handle_headers(hf: H2HeadersFrame) -> bool:
         """Process a HEADERS frame — create or update a stream.
 
         Accumulates header blocks, then when END_HEADERS + END_STREAM are
@@ -551,36 +784,38 @@ class H2Connection:
         pending_requests for worker to drain and route.
         """
         val sid = hf.stream_id
-        if sid > self.last_stream_id:
+        # Servers only receive newly-created, client-initiated odd stream
+        # identifiers, in strict ascending order.  Keeping a terminal stream
+        # out of the registry must not let a peer reuse its id after RESET or
+        # after the server has completed its response.
+        if sid <= 0 or sid % 2 == 0:
+            self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
+            return false
+        val is_new_stream = not self.streams.contains_key(sid)
+        if is_new_stream and sid <= self.last_stream_id:
+            self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
+            return false
+        if is_new_stream and self.streams.len() >= self.local_max_concurrent_streams:
+            self.queue_rst_stream(sid, H2_ERR_PROTOCOL_ERROR)
+            return true
+        if is_new_stream:
             self.last_stream_id = sid
 
         # Create stream if new
-        var stream = H2Stream.new(sid, self.local_initial_window_size)
         if not self.streams.contains_key(sid):
-            if hf.header_block.len() > H2_MAX_HEADER_BLOCK_BYTES:
-                self.queue_rst_stream(sid, H2_ERR_PROTOCOL_ERROR)
-                return
             stream.on_headers(hf.header_block, hf.flags)
         else:
             stream = self.streams[sid]
             self.streams.remove(sid)
-            if hf.header_block.len() > H2_MAX_HEADER_BLOCK_BYTES - stream.recv_header_bytes:
-                self.queue_rst_stream(sid, H2_ERR_PROTOCOL_ERROR)
-                stream.close()
-                stream.request_dispatched = true
-                self.streams[sid] = stream
-                return
             stream.on_headers(hf.header_block, hf.flags)
 
         # Check if request is complete (END_HEADERS + END_STREAM received)
         if stream.is_request_complete() and not stream.request_dispatched:
-            self._decode_and_buffer_request(sid, stream)
-            stream.request_dispatched = true
+            if self._decode_and_buffer_request(sid, stream):
+                stream.request_dispatched = true
         self.streams[sid] = stream
-        if (hf.flags & H2_FLAG_END_HEADERS) == 0:
-            self.pending_continuation_stream_id = sid
 
-    me _decode_and_buffer_request(sid: i64, stream: H2Stream) -> bool:
+    me _decode_and_buffer_request(sid: i64, stream: H2Stream):
         """Decode HPACK header blocks and build an HttpRequestData.
 
         Concatenates all received header block fragments, decodes via HPACK
@@ -596,31 +831,17 @@ class H2Connection:
         if combined.len() > H2_MAX_HEADER_BLOCK_BYTES:
             self.queue_goaway(self.last_stream_id, H2_ERR_COMPRESSION_ERROR)
             return false
-        val decoded = hpack_decode(combined, self.hpack_decoder)
-        var decoded_headers: [HpackHeader] = []
-        match decoded:
-            Err(_):
-                self.queue_goaway(self.last_stream_id, H2_ERR_COMPRESSION_ERROR)
-                return false
-            Ok(pair):
-                decoded_headers = pair.0
-                self.hpack_decoder = pair.1
-
-        val validation = h2_validate_request_headers(decoded_headers)
-        if not validation.valid:
-            self.queue_rst_stream(sid, H2_ERR_PROTOCOL_ERROR)
-            return false
 
         # Extract pseudo-headers and regular headers
-        var method = ""
-        var path = ""
+        var method = "GET"
+        var path = "/"
         var query = ""
         var authority = ""
         var req_headers: [(text, text)] = []
 
         var di = 0
-        while di < decoded_headers.len():
-            val entry = decoded_headers[di]
+        while di < decode_result.headers.len():
+            val entry = decode_result.headers[di]
             if entry.name == ":method":
                 method = entry.value
             elif entry.name == ":path":
@@ -647,7 +868,7 @@ class H2Connection:
 
         # Assemble body from accumulated DATA frames
         val body_bytes = stream.combined_data()
-        val body = bytes_to_text(body_bytes)
+        val body = rt_bytes_to_text(body_bytes)
 
         # Build HttpRequestData
         val request = HttpRequestData(
@@ -662,7 +883,12 @@ class H2Connection:
         )
 
         self.pending_requests.push((sid, request))
-        return true
+
+        # Mark stream so stray frames do not re-trigger decode
+        if self.streams.contains_key(sid):
+            var ds = self.streams[sid]
+            ds.request_dispatched = true
+            self.streams[sid] = ds
 
     # ========================================================================
     # DATA handling
@@ -675,14 +901,15 @@ class H2Connection:
         the request is complete — decode and buffer it for worker to drain.
         """
         val sid = df.stream_id
-        if not self.streams.contains_key(sid):
+        val stream = self.streams.get(sid)
+        if not stream.?:
             # DATA on unknown stream — connection error
             self.queue_rst_stream(sid, H2_ERR_PROTOCOL_ERROR)
             return
 
         var s = self.streams[sid]
-        self.streams.remove(sid)
         s.on_data(df.data, df.flags)
+        self.streams[sid] = s
 
         # Credit connection-level receive window
         val data_len = df.data.len()
@@ -696,8 +923,8 @@ class H2Connection:
         # If DATA completed the request (END_STREAM after prior END_HEADERS),
         # decode headers + body and buffer in pending_requests.
         if s.is_request_complete() and not s.request_dispatched:
-            self._decode_and_buffer_request(sid, s)
-            s.request_dispatched = true
+            if self._decode_and_buffer_request(sid, s):
+                s.request_dispatched = true
         self.streams[sid] = s
 
     # ========================================================================
@@ -707,7 +934,6 @@ class H2Connection:
     me handle_rst_stream(rf: H2RstStreamFrame):
         """Process a RST_STREAM — close the stream."""
         if self.streams.contains_key(rf.stream_id):
-            var s = self.streams[rf.stream_id]
             self.streams.remove(rf.stream_id)
             s.close()
             self.streams[rf.stream_id] = s
@@ -782,12 +1008,12 @@ fn _slice_text(s: text, start: i64, end: i64) -> text:
     while i < end and i < s.len():
         buf.push(s.byte_at(i))
         i = i + 1
-    return bytes_to_text(buf)
+    return rt_bytes_to_text(buf)
 
 fn _byte_to_text(b: i64) -> text:
     """Convert a single byte value to a one-character text string."""
     var scratch: [u8] = []
     scratch.push(b)
-    return bytes_to_text(scratch)
+    return rt_bytes_to_text(scratch)
 
-use std.common.string_core.{bytes_to_text}
+extern fn rt_bytes_to_text(bytes: [u8]) -> text

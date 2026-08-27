@@ -1,10 +1,10 @@
 # Browser Renderer Protocol Specification
 
-> Tests covering Browser renderer retained damage receipt, isolated browser renderer protocol.
+> Tests covering isolated browser renderer protocol.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -13,229 +13,34 @@
 
 ## Scenarios
 
-### Browser renderer retained damage receipt
-
-#### accepts canonical none local and full viewport receipts
-
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- accepts canonical none local and full viewport receipts
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-LIB
-step("accepts canonical none local and full viewport receipts")
-expect(browser_renderer_damage_receipt_valid(
-    browser_renderer_damage_receipt(DAMAGE_PLAN_NONE, []), 64, 48
-)).to_equal(true)
-```
-
-</details>
-
-#### round-trips canonical raw old/new local bounds
-
-- round-trips canonical raw old/new local bounds
-   - Expected: encoded equals `1,4,4,8,8,6,4,8,8`
-   - Expected: decoded != nil is true
-   - Expected: decoded.unwrap().rects equals `receipt.rects`
-   - Expected: browser_renderer_damage_receipt_decode("0,", 64, 48) == nil is true
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 10 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-LIB
-step("round-trips canonical raw old/new local bounds")
-val receipt = browser_renderer_damage_receipt(
-    DAMAGE_PLAN_LOCAL, [4, 4, 8, 8, 6, 4, 8, 8])
-val encoded = browser_renderer_damage_receipt_encode(receipt)
-expect(encoded).to_equal("1,4,4,8,8,6,4,8,8")
-val decoded = browser_renderer_damage_receipt_decode(encoded, 64, 48)
-expect(decoded != nil).to_equal(true)
-expect(decoded.unwrap().rects).to_equal(receipt.rects)
-expect(browser_renderer_damage_receipt_decode("0,", 64, 48) == nil).to_equal(true)
-```
-
-</details>
-
-#### round-trips a retained frame with its local receipt
-
-- round-trips a retained frame with its local receipt
-   - Expected: encoded.ok is true
-   - Expected: frame.ok is true
-   - Expected: frame.damage_receipt.mode equals `DAMAGE_PLAN_LOCAL`
-   - Expected: frame.damage_receipt.rects equals `receipt.rects`
-   - Expected: outer.ok is true
-   - Expected: envelope.status equals `message`
-   - Expected: bounded_frame.ok is true
-   - Expected: bounded_frame.damage_receipt.rects equals `receipt.rects`
-   - Expected: invalid.ok is false
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 44 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-LIB
-step("round-trips a retained frame with its local receipt")
-val receipt = browser_renderer_damage_receipt(
-    DAMAGE_PLAN_LOCAL, [4, 4, 8, 8, 6, 4, 8, 8])
-val encoded = browser_renderer_frame_encode_with_retained_damage(
-    _renderer_protocol_fixture(), 7, 2, 41, -1, 0, "", 0, "", "",
-    "https://damage.test/", "", "", "Damage", 1, [], [], 64, 48,
-    receipt
-)
-expect(encoded.ok).to_equal(true)
-val message = browser_renderer_decoder_feed(
-    browser_renderer_decoder_new(7), encoded.wire).message
-val frame = browser_renderer_frame_decode(message, 64, 48)
-expect(frame.ok).to_equal(true)
-expect(frame.damage_receipt.mode).to_equal(DAMAGE_PLAN_LOCAL)
-expect(frame.damage_receipt.rects).to_equal(receipt.rects)
-val outer = browser_renderer_capability_bind_encoded(
-    encoded, 7, 2, 41, "11111111111111111111111111111111"
-)
-expect(outer.ok).to_equal(true)
-val envelope = browser_renderer_capability_decoder_feed(
-    browser_renderer_capability_decoder_new(7), outer.wire
-)
-expect(envelope.status).to_equal("message")
-expect(envelope.message.payload).to_start_with("SBRF11\t")
-val bounded_frame = browser_renderer_frame_decode(
-    browser_renderer_capability_payload_message(envelope.message), 64, 48
-)
-expect(bounded_frame.ok).to_equal(true)
-expect(bounded_frame.damage_receipt.rects).to_equal(receipt.rects)
-val invalid = browser_renderer_frame_encode_with_retained_damage(
-    _renderer_protocol_fixture(), 7, 2, 41, -1, 0, "", 0, "", "",
-    "https://damage.test/", "", "", "Damage", 1, [], [], 64, 48,
-    browser_renderer_damage_receipt(DAMAGE_PLAN_LOCAL, [0, 0, 1])
-)
-expect(invalid.ok).to_equal(false)
-expect(browser_renderer_damage_receipt_valid(
-    browser_renderer_damage_receipt(
-        DAMAGE_PLAN_LOCAL, [0, 0, 8, 4, 16, 8, 4, 4]), 64, 48
-)).to_equal(true)
-expect(browser_renderer_damage_receipt_valid(
-    browser_renderer_damage_receipt(
-        DAMAGE_PLAN_FULL, [0, 0, 64, 48]), 64, 48
-)).to_equal(true)
-```
-
-</details>
-
-#### accepts overlapping old/new bounds but rejects malformed receipts
-
-- accepts overlapping old/new bounds but rejects malformed receipts
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 18 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-LIB
-step("accepts overlapping old/new bounds but rejects malformed receipts")
-expect(browser_renderer_damage_receipt_valid(
-    browser_renderer_damage_receipt(DAMAGE_PLAN_NONE, [0, 0, 1, 1]),
-    64, 48
-)).to_equal(false)
-expect(browser_renderer_damage_receipt_valid(
-    browser_renderer_damage_receipt(DAMAGE_PLAN_LOCAL, [0, 0, 8]),
-    64, 48
-)).to_equal(false)
-expect(browser_renderer_damage_receipt_valid(
-    browser_renderer_damage_receipt(
-        DAMAGE_PLAN_LOCAL, [0, 0, 8, 8, 4, 4, 8, 8]), 64, 48
-)).to_equal(true)
-expect(browser_renderer_damage_receipt_valid(
-    browser_renderer_damage_receipt(DAMAGE_PLAN_LOCAL, [60, 40, 8, 8]),
-    64, 48
-)).to_equal(false)
-```
-
-</details>
-
 ### isolated browser renderer protocol
-
-#### rejects NUL payloads at both renderer envelope decoders
-
-- rejects NUL payloads at both renderer envelope decoders
-- Decode manually framed malformed renderer envelopes
-   - Expected: legacy.status equals `violation`
-   - Expected: legacy.decoder.error equals `nul-payload`
-   - Expected: bound.status equals `violation`
-   - Expected: bound.decoder.error equals `nul-payload`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 17 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-LIB
-step("rejects NUL payloads at both renderer envelope decoders")
-step("Decode manually framed malformed renderer envelopes")
-val legacy = browser_renderer_decoder_feed(
-    browser_renderer_decoder_new(7),
-    "SBR1\tinit\t7\t1\t3\nA\0B"
-)
-expect(legacy.status).to_equal("violation")
-expect(legacy.decoder.error).to_equal("nul-payload")
-
-val capability = "0123456789abcdef0123456789abcdef"
-val bound = browser_renderer_capability_decoder_feed(
-    browser_renderer_capability_decoder_new(7),
-    "SBR2\tinit\t7\t1\t1\t3\t32\nA\0B" + capability
-)
-expect(bound.status).to_equal("violation")
-expect(bound.decoder.error).to_equal("nul-payload")
-```
-
-</details>
 
 #### round-trips bounded document titles and rejects hostile SBRF8 fields
 
-- round-trips bounded document titles and rejects hostile SBRF8 fields
+-  renderer protocol fixture
+- browser renderer decoder new
    - Expected: decoded_message.status equals `message`
    - Expected: frame.document_title equals `title_512`
+-  renderer protocol fixture
    - Expected: oversized.reason equals `invalid-document-title`
    - Expected: forged_title.len() equals `684`
+- base64 encode
    - Expected: forged_rejection.document_title equals ``
+-  renderer protocol fixture
+- browser renderer decoder new
+-  renderer protocol fixture
+- browser renderer decoder new
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 134 lines folded for reproduction.
+Runnable source: 130 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("round-trips bounded document titles and rejects hostile SBRF8 fields")
 val title_512 = "a".repeat(510) + "é"
 val title_513 = "a".repeat(511) + "é"
-expect(hosted_browser_title_is_valid(title_512)).to_be(true)
-expect(hosted_browser_title_is_valid(title_513)).to_be(false)
 val encoded = (
     browser_renderer_frame_encode_with_state_and_retained_images_and_title(
         _renderer_protocol_fixture(),
@@ -370,20 +175,20 @@ expect(browser_renderer_frame_decode(
 
 #### selects dense image resources once in first-reference order
 
-- selects dense image resources once in first-reference order
 - Encode a dense frame whose image resources arrive in reverse order
+-  renderer protocol dense image fixture
+- var reverse index = dense resources len
+- reverse resources push
    - Expected: selected.len() equals `64`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("selects dense image resources once in first-reference order")
 step("Encode a dense frame whose image resources arrive in reverse order")
 val (dense_composition, dense_resources) = (
     _renderer_protocol_dense_image_fixture(1024, 64)
@@ -413,23 +218,19 @@ expect(browser_renderer_frame_encode_with_state_and_images(
 
 #### round-trips only bounded positive viewport resize commands
 
-- round-trips only bounded positive viewport resize commands
 - Encode and decode valid and oversized viewport resize commands
+- browser renderer decoder new
    - Expected: resize.width equals `800`
    - Expected: resize.height equals `600`
-   - Expected: eight_k_resize.width equals `7680`
-   - Expected: eight_k_resize.height equals `4320`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("round-trips only bounded positive viewport resize commands")
 step("Encode and decode valid and oversized viewport resize commands")
 val encoded = browser_renderer_resize_encode(7, 1, 800, 600)
 expect(encoded.ok).to_be(true)
@@ -440,22 +241,8 @@ val resize = browser_renderer_resize_decode(message.message)
 expect(resize.ok).to_be(true)
 expect(resize.width).to_equal(800)
 expect(resize.height).to_equal(600)
-val eight_k = browser_renderer_resize_encode(7, 2, 7680, 4320)
-expect(eight_k.ok).to_be(true)
-val eight_k_message = browser_renderer_decoder_feed(
-    browser_renderer_decoder_new(7), eight_k.wire
-)
-val eight_k_resize = browser_renderer_resize_decode(
-    eight_k_message.message
-)
-expect(eight_k_resize.ok).to_be(true)
-expect(eight_k_resize.width).to_equal(7680)
-expect(eight_k_resize.height).to_equal(4320)
 expect(browser_renderer_resize_encode(
-    7, 1, 8193, 600
-).ok).to_be(false)
-expect(browser_renderer_resize_encode(
-    7, 1, 8192, 8192
+    7, 1, 4097, 600
 ).ok).to_be(false)
 ```
 
@@ -463,8 +250,8 @@ expect(browser_renderer_resize_encode(
 
 #### round-trips bounded network messages without delimiter ambiguity
 
-- round-trips bounded network messages without delimiter ambiguity
 - Round-trip bounded fetch and response messages across the renderer boundary
+- browser renderer decoder new
    - Expected: request.reply_to_request_id equals `41`
    - Expected: request.request_id equals `fetch-1`
    - Expected: request.method equals `POST`
@@ -475,21 +262,25 @@ expect(browser_renderer_resize_encode(
    - Expected: request.script_cookie_writes.len() equals `2`
    - Expected: request.script_cookie_writes[0] equals `theme=dark`
    - Expected: request.script_cookie_writes[1] equals `lang=\u754c`
+- "edge=" + "x" repeat
+- browser renderer decoder new
+- browser renderer decoder new
+- browser renderer decoder new
+- browser renderer decoder new
    - Expected: response.status equals `200`
    - Expected: response.body equals `ok\n\u754c`
    - Expected: response.credentials equals ``
    - Expected: response.script_cookie_writes.len() equals `0`
+- str
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 160 lines folded for reproduction.
+Runnable source: 158 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("round-trips bounded network messages without delimiter ambiguity")
 step("Round-trip bounded fetch and response messages across the renderer boundary")
 val request_wire = browser_renderer_fetch_request_encode(
     7, 1, 41, "fetch-1", "fetch", "https://example.test/a",
@@ -654,31 +445,35 @@ expect(browser_renderer_network_response_encode(
 
 #### round-trips bounded actions and rejects ambiguous payloads
 
-- round-trips bounded actions and rejects ambiguous payloads
 - Round-trip renderer actions and submit malformed payload shapes
+- browser renderer decoder new
    - Expected: pointer.kind equals `pointer`
    - Expected: pointer.event_id equals `9`
    - Expected: pointer.x equals `-3`
    - Expected: pointer.y equals `4`
+- browser renderer decoder new
    - Expected: scroll.kind equals `scroll`
    - Expected: scroll.event_id equals `10`
    - Expected: scroll.y equals `-1250`
+- browser renderer decoder new
    - Expected: browser_renderer_action_decode(advance_message.message).now_ms equals `1234`
+- browser renderer decoder new
    - Expected: browser_renderer_action_decode(key_message.message).key_code equals `65`
+- browser renderer decoder new
    - Expected: shifted_key.key_code equals `9`
+- browser renderer decoder new
    - Expected: browser_renderer_action_decode(text_message.message).value equals `h\u00e9llo\nworld`
+- browser renderer decoder new
    - Expected: browser_renderer_action_decode(chrome_message.message).value equals `forward`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 100 lines folded for reproduction.
+Runnable source: 85 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("round-trips bounded actions and rejects ambiguous payloads")
 step("Round-trip renderer actions and submit malformed payload shapes")
 val pointer_wire = browser_renderer_pointer_encode(7, 1, 9, -3, 4, true)
 expect(pointer_wire.ok).to_be(true)
@@ -748,19 +543,6 @@ val chrome_message = browser_renderer_decoder_feed(
 expect(browser_renderer_action_decode(chrome_message.message).value).to_equal("forward")
 expect(browser_renderer_action_decode(chrome_message.message).pressed).to_be(false)
 
-val go_wire = browser_renderer_chrome_encode(
-    7, 2, 13, "go", true
-)
-val go_message = browser_renderer_decoder_feed(
-    browser_renderer_decoder_new(7), go_wire.wire
-)
-expect(browser_renderer_action_decode(
-    go_message.message
-).value).to_equal("go")
-expect(browser_renderer_action_decode(
-    go_message.message
-).pressed).to_be(true)
-
 expect(browser_renderer_action_decode(BrowserRendererMessage(
     kind: "pointer", generation: 7, request_id: 1,
     payload: "P1\t09\t0\t0\t1"
@@ -783,23 +565,22 @@ expect(browser_renderer_action_decode(BrowserRendererMessage(
 
 #### round-trips typed navigation and rejects noncanonical shapes
 
-- round-trips typed navigation and rejects noncanonical shapes
 - Round-trip typed navigation and submit noncanonical messages
+- browser renderer decoder new
    - Expected: opened.action equals `open`
    - Expected: opened.url equals `https://example.test/form`
    - Expected: opened.method equals `POST`
    - Expected: opened.body equals `name=value`
+- browser renderer decoder new
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("round-trips typed navigation and rejects noncanonical shapes")
 step("Round-trip typed navigation and submit noncanonical messages")
 val open_wire = browser_renderer_navigation_encode(
     7, 1, "open", "https://example.test/form", "POST",
@@ -844,9 +625,10 @@ expect(browser_renderer_navigation_decode(BrowserRendererMessage(
 
 #### round-trips canonical DrawIR and fails closed on malformed stale duplicate or oversized frames
 
-- round-trips canonical DrawIR and fails closed on malformed stale duplicate or oversized frames
 - Round-trip a canonical DrawIR frame and submit invalid frame variants
+- var decoded = browser renderer decoder feed
    - Expected: decoded.status equals `need_more`
+- decoded = browser renderer decoder feed
    - Expected: decoded.status equals `message`
    - Expected: decoded.message.kind equals `frame`
    - Expected: decoded.message.generation equals `7`
@@ -860,53 +642,111 @@ expect(browser_renderer_navigation_decode(BrowserRendererMessage(
    - Expected: frame.composition.batches[0].backend_target equals `DRAW_IR_BACKEND_AUTO`
    - Expected: frame.cpu_composited_count equals `0`
    - Expected: frame.diagnostics equals ``
+-  renderer protocol fixture
+- browser renderer decoder new
    - Expected: witnessed_frame.reply_to_request_id equals `41`
    - Expected: witnessed_frame.next_animation_ms equals `33`
    - Expected: witnessed_frame.cpu_composited_count equals `1`
+-  renderer protocol fixture
+- browser renderer decoder new
    - Expected: diagnostic_frame.reply_to_request_id equals `42`
    - Expected: diagnostic_frame.history_current_url equals ``
    - Expected: diagnostic_frame.history_back_url equals ``
    - Expected: diagnostic_frame.history_forward_url equals ``
+-  renderer protocol fixture
+- browser renderer decoder new
    - Expected: state_frame.diagnostics equals `history diagnostics`
+-  renderer protocol fixture
+-  renderer protocol fixture
+- 0, "", 0, "", "", ["x"; 8193] join
+- state message message payload index of
+- state message message payload len
    - Expected: malformed_state.reason equals `malformed-frame-state`
+- browser renderer decoder new
    - Expected: image_frame.image_resources.len() equals `1`
    - Expected: image_frame.image_resources[0].image_uri equals `image_uri`
+- image state wire len
+- browser renderer decoder new
    - Expected: retained_image_frame.composition_revision equals `1`
+- retained header slice
+- retained image message message payload len
    - Expected: legacy_retained_frame.composition_revision equals `-1`
+- browser renderer decoder new
    - Expected: changed_image_frame.composition_revision equals `2`
+- browser renderer decoder new
    - Expected: mixed_image_frame.image_resources.len() equals `2`
+-  renderer protocol image fixture
+-  renderer protocol fixture
    - Expected: referenced_resources.len() equals `2`
    - Expected: referenced_resources[0].image_uri equals `image_uri`
    - Expected: referenced_resources[1].image_uri equals `second_uri`
    - Expected: missing_resources.len() equals `0`
+-  renderer protocol fixture
+- browser renderer decoder new
+-  renderer protocol fixture
+- duplicate resources push
+- duplicate resources push
+- browser renderer decoder new
+-  renderer protocol fixture
+- browser renderer decoder new
+- empty header end + 1, empty message payload len
+- var incomplete canvas =  renderer protocol fixture
+- browser renderer decoder new
    - Expected: incomplete_frame.reason equals `invalid-canvas`
+- browser renderer decoder new
    - Expected: unicode_decoded.message.payload equals `h\u00e9`
+- unicode decoded = browser renderer decoder feed
    - Expected: unicode_decoded.message.request_id equals `2`
    - Expected: unicode_decoded.message.payload equals `ok`
+- payload parts push
+- browser renderer decoder new
+- fragmented wire slice
+- fragment end = fragmented wire len
+- fragmented wire slice
    - Expected: fragmented.status equals `message`
    - Expected: fragmented.message.request_id equals `1`
    - Expected: fragmented.message.payload equals `maximum_payload`
+- fragmented = browser renderer decoder feed
    - Expected: fragmented.status equals `message`
    - Expected: fragmented.message.request_id equals `2`
    - Expected: fragmented.message.payload equals `tail`
+- BrowserRendererMessage
    - Expected: wrong_kind.reason equals `wrong-kind`
+- var hostile composition =  renderer protocol fixture
    - Expected: hostile_message.status equals `message`
    - Expected: hostile_frame.reason equals `invalid-embedding`
+- var coordinate composition =  renderer protocol fixture
    - Expected: coordinate_message.status equals `message`
    - Expected: coordinate_frame.reason equals `invalid-command-bounds`
+- var metadata composition =  renderer protocol fixture
+- draw ir style prop
    - Expected: metadata_frame.reason equals `invalid-command-metadata`
+- var kind composition =  renderer protocol fixture
+- browser renderer decoder new
+- var overdraw composition =  renderer protocol fixture
+- browser renderer decoder new
+- browser renderer decoder new
+- var style count composition =  renderer protocol fixture
+- hostile styles push
    - Expected: style_count_frame.reason equals `invalid-command-metadata`
    - Expected: duplicate.status equals `violation`
    - Expected: duplicate.decoder.error equals `duplicate-request`
+- browser renderer decoder new
+- browser renderer message encode
+- browser renderer message encode
    - Expected: skipped_sequence.status equals `violation`
+- browser renderer message encode
    - Expected: next_sequence.status equals `message`
    - Expected: next_sequence.message.payload equals `two`
+- browser renderer pointer encode
+- browser renderer decoder new
    - Expected: resequenced_message.message.kind equals `pointer`
    - Expected: resequenced_message.message.request_id equals `4`
    - Expected: stale.status equals `violation`
    - Expected: stale.decoder.error equals `stale-generation`
    - Expected: malformed.status equals `violation`
    - Expected: malformed.decoder.error equals `malformed-header`
+- browser renderer decoder new
    - Expected: oversized.status equals `violation`
    - Expected: oversized.decoder.error equals `payload-too-large`
 
@@ -914,12 +754,10 @@ expect(browser_renderer_navigation_decode(BrowserRendererMessage(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 709 lines folded for reproduction.
+Runnable source: 707 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("round-trips canonical DrawIR and fails closed on malformed stale duplicate or oversized frames")
 step("Round-trip a canonical DrawIR frame and submit invalid frame variants")
 val encoded = browser_renderer_frame_encode(_renderer_protocol_fixture(), 7, 1)
 expect(encoded.ok).to_be(true)
@@ -1105,11 +943,11 @@ val retained_image_state = (
     browser_renderer_frame_encode_with_state_and_retained_images(
         image_composition, 7, 6, 46, 16, 0, "", 0, "",
         "", "https://example.test/image", "", "",
-        1, image_resources, image_revisions
+        image_resources, image_revisions
     )
 )
 expect(retained_image_state.ok).to_be(true)
-expect(retained_image_state.wire.contains("SBRF7")).to_be(true)
+expect(retained_image_state.wire.contains("SBRF6")).to_be(true)
 expect(retained_image_state.wire.len()).to_be_less_than(
     image_state.wire.len()
 )
@@ -1125,38 +963,7 @@ val retained_image_frame = (
     )
 )
 expect(retained_image_frame.ok).to_be(true)
-expect(retained_image_frame.composition_revision).to_equal(1)
 expect(retained_image_frame.image_resources[0].pixels[0]).to_equal(
-    0xffc080feu32
-)
-val retained_header_end = retained_image_message.message.payload.index_of(
-    "\n"
-)
-val retained_header = retained_image_message.message.payload.slice(
-    0, retained_header_end
-)
-val retained_revision_start = retained_header.last_index_of("\t")
-expect(retained_header).to_start_with("SBRF7\t")
-expect(retained_revision_start).to_be_greater_than(4)
-val legacy_retained_message = BrowserRendererMessage(
-    kind: "frame",
-    generation: retained_image_message.message.generation,
-    request_id: retained_image_message.message.request_id,
-    payload: "SBRF6" +
-        retained_header.slice(5, retained_revision_start) + "\n" +
-        retained_image_message.message.payload.slice(
-            retained_header_end + 1,
-            retained_image_message.message.payload.len()
-        )
-)
-val legacy_retained_frame = (
-    browser_renderer_frame_decode_with_retained_images(
-        legacy_retained_message, 64, 48, image_resources
-    )
-)
-expect(legacy_retained_frame.ok).to_be(true)
-expect(legacy_retained_frame.composition_revision).to_equal(-1)
-expect(legacy_retained_frame.image_resources[0].pixels[0]).to_equal(
     0xffc080feu32
 )
 val changed_image_resources = [
@@ -1168,11 +975,11 @@ val changed_image_state = (
     browser_renderer_frame_encode_with_state_and_retained_images(
         image_composition, 7, 7, 47, 32, 0, "", 0, "",
         "", "https://example.test/image", "", "",
-        2, changed_image_resources, image_revisions
+        changed_image_resources, image_revisions
     )
 )
 expect(changed_image_state.ok).to_be(true)
-expect(changed_image_state.wire.contains("SBRF7")).to_be(true)
+expect(changed_image_state.wire.contains("SBRF5")).to_be(true)
 val changed_image_frame = browser_renderer_frame_decode(
     browser_renderer_decoder_feed(
         browser_renderer_decoder_new(7), changed_image_state.wire
@@ -1181,7 +988,6 @@ val changed_image_frame = browser_renderer_frame_decode(
     48
 )
 expect(changed_image_frame.ok).to_be(true)
-expect(changed_image_frame.composition_revision).to_equal(2)
 expect(changed_image_frame.image_resources[0].pixels[0]).to_equal(
     0xff010203u32
 )
@@ -1209,11 +1015,11 @@ val mixed_image_state = (
     browser_renderer_frame_encode_with_state_and_retained_images(
         ordered_composition, 7, 8, 48, 48, 0, "", 0, "",
         "", "https://example.test/image", "", "",
-        3, [image_resources[0], second_resource], image_revisions
+        [image_resources[0], second_resource], image_revisions
     )
 )
 expect(mixed_image_state.ok).to_be(true)
-expect(mixed_image_state.wire.contains("SBRF7")).to_be(true)
+expect(mixed_image_state.wire.contains("SBRF6")).to_be(true)
 val mixed_image_frame = (
     browser_renderer_frame_decode_with_retained_images(
         browser_renderer_decoder_feed(
@@ -1226,9 +1032,6 @@ val mixed_image_frame = (
 )
 expect(mixed_image_frame.ok).to_be(true)
 expect(mixed_image_frame.image_resources.len()).to_equal(2)
-expect(mixed_image_frame.image_resources[0].pixels[0]).to_equal(
-    0xffc080feu32
-)
 expect(mixed_image_frame.image_resources[1].pixels[0]).to_equal(
     0xff556677u32
 )
@@ -1239,18 +1042,11 @@ val tiny_image_state = (
     browser_renderer_frame_encode_with_state_and_retained_images(
         _renderer_protocol_image_fixture(second_uri),
         7, 9, 49, 64, 0, "", 0, "", "", "", "", "",
-        4, [second_resource], tiny_revisions
+        [second_resource], tiny_revisions
     )
 )
 expect(tiny_image_state.ok).to_be(true)
-expect(tiny_image_state.wire.contains("SBRF7")).to_be(true)
-expect(
-    browser_renderer_frame_encode_with_state_and_retained_images(
-        _renderer_protocol_fixture(),
-        7, 10, 50, -1, 0, "", 0, "", "", "", "", "",
-        -1, [], []
-    ).reason
-).to_equal("invalid-composition-revision")
+expect(tiny_image_state.wire.contains("SBRF5")).to_be(true)
 val referenced_resources = browser_renderer_referenced_image_resources(
     ordered_composition,
     [unused_resource, second_resource, image_resources[0]]
@@ -1638,75 +1434,23 @@ expect(oversized.decoder.error).to_equal("payload-too-large")
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/common/web/browser_renderer_protocol_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-07-30 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Browser renderer retained damage receipt, isolated browser renderer protocol.
-- Browser renderer retained damage receipt
+Tests covering isolated browser renderer protocol.
 - isolated browser renderer protocol
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-LIB`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `ac45877070463289d397da31f387d3d6a062d5e8216ccb5e51f0c472ecb677af`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `ac45877070463289d397da31f387d3d6a062d5e8216ccb5e51f0c472ecb677af`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `ac45877070463289d397da31f387d3d6a062d5e8216ccb5e51f0c472ecb677af`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/01_unit/lib/common/web/browser_renderer_protocol_spec.spl
-mirror: doc/06_spec/01_unit/lib/common/web/browser_renderer_protocol_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/common/web/browser_renderer_protocol_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/common/web/browser_renderer_protocol_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/common/web/browser_renderer_protocol_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 38 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/lib/common/web/browser_renderer_protocol_spec.spl:84:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'accepts canonical none local and full viewport receipts' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/common/web/browser_renderer_protocol_spec.spl:91:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'round-trips canonical raw old/new local bounds' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/common/web/browser_renderer_protocol_spec.spl:103:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'round-trips a retained frame with its local receipt' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

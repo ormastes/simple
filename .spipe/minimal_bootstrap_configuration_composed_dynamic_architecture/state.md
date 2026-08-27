@@ -52,9 +52,28 @@ dev-done
 
 implementation-in-progress
 
+## ABI-digest SSpec slice
+
+- Status: `TEST_BLOCKED` for runtime/docgen/`sspec-maintain` execution.
+- Executable: `test/03_system/app/simple/feature/sci_provider_query_abi_digest_spec.spl`.
+- Manual: `doc/06_spec/03_system/app/simple/feature/sci_provider_query_abi_digest_spec.md`.
+- Static contract: visible step flows, built-in matchers, non-placeholder
+  positive/edge/error assertions, and three-or-more scenarios for each of
+  REQ-005, REQ-006, and REQ-014.
+- Blocker: this worktree has no `bin/simple`; no available general test/docgen
+  CLI has an admission receipt establishing exact path/hash/stage/provenance
+  and command support. The admitted Stage 2 compiler is native-build-only and
+  may not substitute for SPipe. The Rust seed is prohibited as evidence.
+- Exclusion: mutable-path/same-handle loader TOCTOU is a separate later
+  criterion and is not claimed by this slice.
+
 ## Log
 
 - dev: Created state file with 12 acceptance criteria (type: feature).
+- system-test ABI-digest slice: added a focused, future-executable SSpec and
+  Markdown-only manual for complete provider digest wire/admission behavior.
+  Runtime/docgen/maintenance evidence remains honestly `TEST_BLOCKED` pending
+  an admitted general pure-Simple CLI; static guards are recorded separately.
 - docs inventory: canonical public guidance is
   `doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md`;
   feature/layer expert and cross-tool workflow surfaces are in scope.

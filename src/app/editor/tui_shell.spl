@@ -26,6 +26,7 @@ use app.editor.editor_controller_types.*
 use app.editor.tui_shell_panels.*
 
 extern fn stdin_read_char() -> text
+extern fn rt_string_len(value: text) -> i64
 
 fn editor_tui_run(session: EditSession):
     terminal_enter_alt_screen()
@@ -62,7 +63,7 @@ fn editor_tui_run(session: EditSession):
 fn _tui_render_frame(ctrl: EditorController, zones: LayoutZones, size: TerminalSize):
     terminal_clear_screen()
     val line_num_width = 4
-    val cursor_buffer = ctrl.active_buffer()
+    val buffer = ctrl.active_buffer()
     val multi_pane = ctrl.session.layout.tree.leaf_count() > 1
 
     _tui_render_tab_bar(ctrl.session, size.cols)
@@ -93,19 +94,19 @@ fn _tui_render_frame(ctrl: EditorController, zones: LayoutZones, size: TerminalS
                 val pane_diags = ctrl.diagnostic_store.diagnostics_for(pane_path)
                 val content_y = rect.y + 1
                 val content_h = rect.h - 1
-                _tui_render_pane_content(pane_buf, rect.x, content_y, rect.w, content_h, line_num_width, pane_path, pane_diags, ctrl.config.theme)
+                _tui_render_pane_content(pane_buf, rect.x, content_y, rect.w, content_h, line_num_width, pane_path, pane_diags, "dark")
             ri = ri + 1
         _tui_render_split_borders(ctrl.session.layout.tree, rects, ctrl.session.layout.active_group_id, zones.editor_x, zones.editor_y, zones.editor_w, zones.editor_h)
     else:
         val active_doc = ctrl.session.active_document()
-        var buffer: EditorBuffer = nil
+        var render_buffer: EditorBuffer = nil
         var active_path = ""
         var active_diags: [EditorDiagnostic] = []
-        if active_doc != nil and cursor_buffer != nil:
-            buffer = cursor_buffer
+        if active_doc != nil and buffer != nil:
+            render_buffer = buffer
             active_path = active_doc.path()
             active_diags = ctrl.diagnostic_store.diagnostics_for(active_path)
-        _tui_render_single_pane(buffer, zones.editor_x, zones.editor_y, zones.editor_w, zones.editor_h, line_num_width, active_path, active_diags, ctrl.config.theme)
+        _tui_render_single_pane(render_buffer, zones.editor_x, zones.editor_y, zones.editor_w, zones.editor_h, line_num_width, active_path, active_diags, "dark")
 
     if ctrl.session.dock_layout.right_visible:
         val rz = ctrl_right_zone(ctrl, zones)
@@ -124,7 +125,7 @@ fn _tui_render_frame(ctrl: EditorController, zones: LayoutZones, size: TerminalS
     _tui_render_lsp_popups(ctrl, zones)
     _tui_render_status_bar(ctrl, zones, size.cols)
     _tui_render_command_line(ctrl, zones)
-    _tui_render_cursor(ctrl, cursor_buffer, zones, line_num_width)
+    _tui_render_cursor(ctrl, buffer, zones, line_num_width)
 
 
 fn _tui_render_single_pane(buffer: EditorBuffer, x: i64, y: i64, w: i64, h: i64, line_num_width: i64, path: text, diagnostics: [EditorDiagnostic], theme: text):
@@ -181,8 +182,6 @@ fn _tui_render_status_bar(ctrl: EditorController, zones: LayoutZones, width: i64
     if doc_sb != nil and doc_sb.language_id == "markdown":
         val stats_text = md_stats_to_status_bar(doc_sb.cached_md_stats)
         right_status = stats_text + " | " + right_status
-    if doc_sb != nil and doc_sb.custom_editor_id != "":
-        right_status = "custom-editor:" + doc_sb.custom_editor_id + " | " + right_status
     var fill = ""
     var f = 0
     val fill_len = width - left_status.len() - right_status.len()

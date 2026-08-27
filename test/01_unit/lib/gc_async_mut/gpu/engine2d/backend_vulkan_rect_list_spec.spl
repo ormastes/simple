@@ -1,0 +1,48 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl 100%
+# @tag: unit, gpu, vulkan, batching, parity
+"""Opaque Vulkan rect-list batching.
+
+Vulkan availability is required evidence for this device claim: a missing
+device fails closed rather than silently promoting an unexecuted example.
+"""
+
+use std.spec.*
+use std.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gpu.engine2d.backend_software.{SoftwareBackend}
+
+fn _mismatches(left: [u32], right: [u32]) -> i32:
+    if left.len() != right.len():
+        return -1
+    var mismatches = 0
+    var i = 0
+    while i < left.len():
+        if left[i] != right[i]:
+            mismatches = mismatches + 1
+        i = i + 1
+    mismatches
+
+describe "Vulkan opaque rect-list batching":
+    it "collapses two ordered opaque rects into one real device dispatch after clear":
+        var vulkan = VulkanBackend.create()
+        if not vulkan.init(16, 12):
+            fail("Vulkan unavailable: " + vulkan.last_error)
+        vulkan.enable_frame_batching()
+        vulkan.clear(0xff101820u32)
+        vulkan.draw_rect_filled(2, 2, 8, 6, 0xffcc2020u32)
+        # Overlap establishes that list order, not unordered z dispatch, owns
+        # the final pixel value.
+        vulkan.draw_rect_filled(6, 4, 7, 5, 0xff20a0e0u32)
+        val readback = vulkan.read_pixels_with_source()
+
+        var software = SoftwareBackend.create()
+        software.init(16, 12)
+        software.clear(0xff101820u32)
+        software.draw_rect_filled(2, 2, 8, 6, 0xffcc2020u32)
+        software.draw_rect_filled(6, 4, 7, 5, 0xff20a0e0u32)
+
+        expect(vulkan.rect_list_device_dispatch_count).to_equal(1)
+        expect(vulkan.cpu_fallback_used).to_equal(false)
+        expect(readback.source).to_equal("device_readback")
+        expect(_mismatches(readback.pixels, software.read_pixels())).to_equal(0)
+        software.shutdown()
+        vulkan.shutdown()

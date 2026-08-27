@@ -1,6 +1,29 @@
 # Mcp Bugdb Specification
 
-> Tests covering MCP Bug Database Integration.
+> 1. var bugdb = create bug database
+
+<!-- sdn-diagram:id=mcp_bugdb_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=mcp_bugdb_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+mcp_bugdb_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=mcp_bugdb_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,11 +40,9 @@
 
 #### gets all bugs as JSON
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- gets all bugs as JSON
+1. var bugdb = create bug database
+2. bugdb add bug
+3. bugdb save
    - Expected: json contains `mcp_test_001`
    - Expected: json contains `Critical bug`
    - Expected: json contains `"total":1`
@@ -30,12 +51,10 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("gets all bugs as JSON")
 # Create test database
 val db_path = "/tmp/test_mcp_all_bugs.sdn"
 var bugdb = create_bug_database(db_path)
@@ -73,7 +92,10 @@ expect(json.contains("\"total\":1")).to_equal(true)
 
 #### gets open bugs only
 
-- gets open bugs only
+1. var bugdb = create bug database
+2. bugdb add bug
+3. bugdb add bug
+4. bugdb save
    - Expected: json contains `open_001`
    - Expected: not json contains `fixed_001`
 
@@ -81,12 +103,10 @@ expect(json.contains("\"total\":1")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("gets open bugs only")
 val db_path = "/tmp/test_mcp_open_bugs.sdn"
 var bugdb = create_bug_database(db_path)
 
@@ -139,7 +159,11 @@ expect(not json.contains("fixed_001")).to_equal(true)
 
 #### gets critical bugs (P0 and P1)
 
-- gets critical bugs (P0 and P1)
+1. var bugdb = create bug database
+2. bugdb add bug
+3. bugdb add bug
+4. bugdb add bug
+5. bugdb save
    - Expected: json contains `p0_001`
    - Expected: json contains `p1_001`
    - Expected: not json contains `p2_001`
@@ -149,12 +173,10 @@ expect(not json.contains("fixed_001")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 67 lines folded for reproduction.
+Runnable source: 65 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("gets critical bugs (P0 and P1)")
 val db_path = "/tmp/test_mcp_critical.sdn"
 var bugdb = create_bug_database(db_path)
 
@@ -226,7 +248,9 @@ expect(json.contains("\"total\":2")).to_equal(true)
 
 #### gets bug statistics
 
-- gets bug statistics
+1. var bugdb = create bug database
+2. bugdb add bug
+3. bugdb save
    - Expected: json contains `"total":5`
    - Expected: json contains `"open":3`
    - Expected: json contains `"fixed":2`
@@ -237,12 +261,10 @@ expect(json.contains("\"total\":2")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("gets bug statistics")
 val db_path = "/tmp/test_mcp_stats.sdn"
 var bugdb = create_bug_database(db_path)
 
@@ -286,20 +308,13 @@ expect(json.contains("\"health\":")).to_equal(true)
 
 #### handles missing database gracefully
 
-- handles missing database gracefully
-   - Expected: json contains `"error":`
-   - Expected: json contains `Database not found`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("handles missing database gracefully")
 val json = get_all_bugs("/nonexistent/path.sdn")
 
 # Should return error JSON
@@ -311,7 +326,9 @@ expect(json.contains("Database not found")).to_equal(true)
 
 #### escapes JSON special characters
 
-- escapes JSON special characters
+1. var bugdb = create bug database
+2. bugdb add bug
+3. bugdb save
    - Expected: json contains `\\"`
    - Expected: json contains `\\\\`
    - Expected: json contains `\\t`
@@ -320,12 +337,10 @@ expect(json.contains("Database not found")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("escapes JSON special characters")
 val db_path = "/tmp/test_mcp_escape.sdn"
 var bugdb = create_bug_database(db_path)
 
@@ -367,12 +382,12 @@ expect(json.contains("\\t")).to_equal(true)   # Escaped tab
 | Category | Application |
 | Status | Active |
 | Source | `test/02_integration/app/mcp_bugdb_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering MCP Bug Database Integration.
+Tests covering:
 - MCP Bug Database Integration
 
 ## Scenario Summary
@@ -387,51 +402,3 @@ Tests covering MCP Bug Database Integration.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-INTEGRATION`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `a2c72ba5fbeb053d73a7a476d5534969bcb293387788b336fd39bc7c6aa25849`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `a2c72ba5fbeb053d73a7a476d5534969bcb293387788b336fd39bc7c6aa25849`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `a2c72ba5fbeb053d73a7a476d5534969bcb293387788b336fd39bc7c6aa25849`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/02_integration/app/mcp_bugdb_spec.spl
-mirror: doc/06_spec/02_integration/app/mcp_bugdb_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/app/mcp_bugdb_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/app/mcp_bugdb_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/02_integration/app/mcp_bugdb_spec.spl:40:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'gets all bugs as JSON' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/app/mcp_bugdb_spec.spl:74:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'gets open bugs only' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/app/mcp_bugdb_spec.spl:123:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'gets critical bugs (P0 and P1)' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

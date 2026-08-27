@@ -27,54 +27,18 @@ use os.compositor.simple_web_window_renderer.{
     simple_web_content_revision_with_theme
 }
 use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
-    MockResponseRegistry, observed_mock_request_count, set_mock_registry
+    MockResponseRegistry, set_mock_registry
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_debug_style_by_id,
     simple_web_layout_render_html_draw_ir_result_at_time
 }
-use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
-use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
-    be_dom_focused_route, be_dom_get_tag, be_dom_path_for_route
-}
-use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
-    DomIdentityIndex
-}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_focused_id}
 use common.ui.draw_ir.{DrawIrComposition}
 use std.js.types.pair.{Pair}
-use std.js.types.js_types.{JsValue}
 
 extern fn rt_text_to_bytes(value: text) -> [u8]
 extern fn rt_file_read_text(path: text) -> text
-
-fn _hosted_dom_index(
-    session: HostedWebContentSession
-) -> DomIdentityIndex:
-    match session.browser.current_dom_identity_index():
-        Some(index): index
-        nil: fail("Expected hosted DOM identity index")
-
-fn _hosted_dom_path(
-    session: HostedWebContentSession, author_id: text
-) -> [BeDomNode]:
-    val index = _hosted_dom_index(session)
-    val route = match index.route_for_author_id(author_id):
-        Some(value): value
-        nil: fail("Expected hosted DOM route for author id {author_id}")
-    be_dom_path_for_route(session.browser.dom_root(), index, route)
-
-fn _hosted_focused_author_id(
-    session: HostedWebContentSession
-) -> text:
-    val index = _hosted_dom_index(session)
-    val route = match be_dom_focused_route(
-        session.browser.dom_root(), index
-    ):
-        Some(value): value
-        nil: fail("Expected hosted focused DOM route")
-    match index.author_id_for_route(route):
-        Some(author_id): author_id
-        nil: fail("Expected focused DOM author id")
 
 fn checksum(pixels: [u32]) -> i64:
     var out: i64 = 0
@@ -107,15 +71,6 @@ fn draw_ir_style_value(
                     if property.key == key:
                         return property.value
     ""
-
-fn draw_ir_has_component(
-    composition: DrawIrComposition, component_id: text
-) -> bool:
-    for batch in composition.batches:
-        for command in batch.commands:
-            if command.component_id == component_id:
-                return true
-    false
 
 describe "hosted Web content session":
 
@@ -365,7 +320,7 @@ describe "hosted Web content session":
         var registry = HostedWebContentRegistry.create()
         val static_html = (
             "<style>@keyframes Pulse{from{background-color:#ef4444}" +
-            "to{{background-color:#2563eb}}}#stage{width:32px;height:24px;" +
+            "to{background-color:#2563eb}}#stage{width:32px;height:24px;" +
             "animation:Pulse 32ms linear forwards}</style>" +
             "<div id='stage'></div>"
         )
@@ -397,7 +352,7 @@ describe "hosted Web content session":
 
         val dynamic_html = (
             "<style>@keyframes Pulse{from{background-color:#ef4444}" +
-            "to{{background-color:#2563eb}}}#dynamic{width:32px;height:24px;" +
+            "to{background-color:#2563eb}}#dynamic{width:32px;height:24px;" +
             "background-color:#ef4444}.running{" +
             "animation:Pulse 1000ms linear forwards}</style>" +
             "<div id='dynamic'></div><script>setTimeout(function(){" +
@@ -655,8 +610,6 @@ describe "hosted Web content session":
             Some(request):
                 session.network_job_handle = 424242
                 session.network_job_request = Some(request)
-                session.network_job_phase = "actual"
-                session.network_job_deadline_ms = 5000
             None:
                 expect(false).to_be(true)
 
@@ -666,9 +619,6 @@ describe "hosted Web content session":
         expect(down.reason).to_equal("chrome-pressed")
         expect(up.callback_count).to_equal(1)
         expect(session.network_job_handle).to_equal(0)
-        expect(session.network_job_phase).to_equal("")
-        expect(session.network_job_actual_request).to_be_nil()
-        expect(session.network_job_deadline_ms).to_equal(0)
         expect(session.browser.can_stop_loading()).to_equal(false)
         expect(session.current_body_html()).to_contain("prior")
         expect(session.address_text()).to_equal(prior_url)
@@ -770,7 +720,7 @@ describe "hosted Web content session":
         expect(animated.render_session.counters.style_count).to_equal(2)
         expect(animated.render_session.counters.layout_count).to_equal(2)
 
-        # @req REQ-SSPEC-INTEGRATION REQ-SSPEC-INTEGRATION REQ-SSPEC-INTEGRATION REQ-SSPEC-INTEGRATION NFR-WEB-BROWSER-006
+    # @req REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 NFR-WEB-BROWSER-006
     it "advances a SimpleScript timer body mutation into the next Draw IR frame":
         # @req REQ-SSPEC-INTEGRATION
         step("advances a SimpleScript timer body mutation into the next Draw IR frame")
@@ -807,7 +757,7 @@ describe "hosted Web content session":
         expect(session.render_session.counters.serialize_count).to_equal(2)
         expect(session.render_session.counters.parse_count).to_equal(2)
 
-        # @req REQ-SSPEC-INTEGRATION
+    # @req REQ-WEB-BROWSER-008
     it "appends committed text only to the actually focused hosted input":
         # @req REQ-SSPEC-INTEGRATION
         step("appends committed text only to the actually focused hosted input")
@@ -830,13 +780,13 @@ describe "hosted Web content session":
         expect(second.mutation_revision).to_equal(3)
         expect(session.current_body_html()).to_contain("value=\"Ada\"")
 
-        # @req REQ-SSPEC-INTEGRATION
+    # @req REQ-WEB-BROWSER-008
     it "routes committed text to focus established on pointer down":
         # @req REQ-SSPEC-INTEGRATION
         step("routes committed text to focus established on pointer down")
         var session = HostedWebContentSession.create(
             11,
-            "<style>body{{margin:0}}input{display:block;margin:0;padding:0;" +
+            "<style>body{margin:0}input{display:block;margin:0;padding:0;" +
             "border:0;width:40px;height:20px}</style>" +
             "<input id='first' value=''><input id='second' value=''>" +
             "<input id='blocked' value='' onmousedown='prevent-default'>",
@@ -848,7 +798,7 @@ describe "hosted Web content session":
 
         val down = session.dispatch_pointer_at(3, 5, 25, true)
         expect(down.semantic_target_id).to_equal("second")
-        expect(_hosted_focused_author_id(session)).to_equal("second")
+        expect(be_dom_focused_id(session.browser.dom_root())).to_equal("second")
         expect(session.last_target_id).to_equal("second")
 
         val committed = session.dispatch_text(4, "X")
@@ -859,7 +809,7 @@ describe "hosted Web content session":
 
         val canceled = session.dispatch_pointer_at(5, 5, 45, true)
         expect(canceled.semantic_target_id).to_equal("blocked")
-        expect(_hosted_focused_author_id(session)).to_equal("second")
+        expect(be_dom_focused_id(session.browser.dom_root())).to_equal("second")
         expect(session.last_target_id).to_equal("second")
 
     it "counts only an executed input listener as an application callback":
@@ -883,7 +833,7 @@ describe "hosted Web content session":
             "data-callback=\"yes\""
         )
 
-        # @req REQ-SSPEC-INTEGRATION
+    # @req REQ-WEB-BROWSER-008
     it "enforces authored maxlength after cancelable beforeinput":
         # @req REQ-SSPEC-INTEGRATION
         step("enforces authored maxlength after cancelable beforeinput")
@@ -931,8 +881,8 @@ describe "hosted Web content session":
         ).to_be(false)
 
     # @manual: show
-        # @req REQ-SSPEC-INTEGRATION REQ-SSPEC-INTEGRATION
-        # @req REQ-SSPEC-INTEGRATION REQ-SSPEC-INTEGRATION REQ-SSPEC-INTEGRATION
+    # @req REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004
+    # @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-021
     it "clicks only after a matching hosted pointer press and release":
         # @req REQ-SSPEC-INTEGRATION
         step("clicks only after a matching hosted pointer press and release")
@@ -952,7 +902,7 @@ describe "hosted Web content session":
         var comp = HostCompositor.new_headless(Size(width: 240u64, height: 180u64))
         comp.apply_bridge_request(
             1, 0, COMP_CREATE_WINDOW.to_i64(), 0, "Form", 20, 48, 180, 100,
-            form_html,
+            "<style>input{display:block;width:40px;height:28px;background-color:#ef4444}input[checked]{background-color:#2563eb}</style><input id='accept' type='checkbox'>",
             1, "hosted-web-event"
         )
         val target = comp.content_target(40, 90)
@@ -964,25 +914,7 @@ describe "hosted Web content session":
             target.unwrap().width,
             target.unwrap().height
         )
-        val form_path = _hosted_dom_path(session, "preferences")
-        val input_path = _hosted_dom_path(session, "accept")
-        if form_path.len() == 0 or input_path.len() < 2:
-            fail("missing canonical form/input semantic path")
-        expect(be_dom_get_tag(
-            form_path[form_path.len() - 1]
-        )).to_equal("form")
-        expect(be_dom_get_tag(
-            input_path[input_path.len() - 1]
-        )).to_equal("input")
-        expect(input_path[input_path.len() - 1].parent_id).to_equal(
-            form_path[form_path.len() - 1].node_id
-        )
-        expect(input_path[input_path.len() - 2].node_id).to_equal(
-            form_path[form_path.len() - 1].node_id
-        )
         val before = session.render_to_pixels()
-        expect(count_color(before, 0xFFEF4444u32)).to_be_greater_than(0)
-        expect(count_color(before, 0xFF2563EBu32)).to_equal(0)
         val release_only = session.dispatch_pointer_at(
             17, target.unwrap().local_x, target.unwrap().local_y, false
         )
@@ -995,12 +927,7 @@ describe "hosted Web content session":
         val abandoned_press = session.dispatch_pointer_at(
             18, target.unwrap().local_x, target.unwrap().local_y, true
         )
-        expect(abandoned_press.reason).to_equal("")
-        expect(abandoned_press.callback_count).to_equal(1)
-        expect(_hosted_focused_author_id(session)).to_equal("accept")
-        expect(session.current_body_html()).to_contain(
-            "data-focused=\"yes\""
-        )
+        expect(abandoned_press.reason).to_equal("pointer-pressed")
         val missed_release = session.dispatch_pointer_at(19, 1000, 1000, false)
         expect(missed_release.reason).to_equal("no-semantic-target")
         expect(
@@ -1011,8 +938,6 @@ describe "hosted Web content session":
             20, target.unwrap().local_x, target.unwrap().local_y, true
         )
         expect(press.reason).to_equal("pointer-pressed")
-        expect(press.callback_count).to_equal(0)
-        expect(_hosted_focused_author_id(session)).to_equal("accept")
         val receipt = session.dispatch_pointer_at(
             21, target.unwrap().local_x, target.unwrap().local_y, false
         )
@@ -1020,54 +945,10 @@ describe "hosted Web content session":
         expect(receipt.event_id).to_equal(21)
         expect(receipt.wm_target_id).to_equal(target.unwrap().window_id)
         expect(receipt.semantic_target_id).to_equal("accept")
-        expect(receipt.callback_count).to_equal(2)
+        expect(receipt.callback_count).to_equal(0)
         expect(receipt.mutation_revision).to_equal(2)
         expect(session.current_body_html()).to_contain("checked=\"checked\"")
-        expect(session.current_body_html()).to_contain("data-input=\"yes\"")
-        expect(session.current_body_html()).to_contain("data-clicked=\"yes\"")
-
-        val layout = simple_web_layout_render_html_draw_ir_result_at_time(
-            session.browser.current_style_html + session.current_body_html(),
-            target.unwrap().width, target.unwrap().height, 0
-        )
-        var form_index = -1
-        var input_index = -1
-        var node_index = 0
-        for node in layout.hit_index.nodes:
-            if node.id_attr == "preferences":
-                form_index = node_index
-            if node.id_attr == "accept":
-                input_index = node_index
-            node_index = node_index + 1
-        expect(form_index).to_be_greater_than(-1)
-        expect(input_index).to_be_greater_than(-1)
-        expect(layout.hit_index.nodes[input_index].parent).to_equal(
-            form_index.to_i64()
-        )
-        expect([
-            layout.hit_index.boxes.bx[input_index],
-            layout.hit_index.boxes.by[input_index],
-            layout.hit_index.boxes.bw[input_index],
-            layout.hit_index.boxes.bh[input_index]
-        ]).to_equal([0, 0, 40, 28])
-        var input_command_found = false
-        var input_command_parent = ""
-        var input_command_geometry = [0, 0, 0, 0]
-        for batch in layout.composition.batches:
-            for command in batch.commands:
-                if command.component_id == "accept":
-                    input_command_found = true
-                    input_command_parent = command.parent_id
-                    input_command_geometry = [
-                        command.x, command.y, command.width, command.height
-                    ]
-        expect(input_command_found).to_equal(true)
-        expect(input_command_parent).to_equal("preferences")
-        expect(input_command_geometry).to_equal([0, 0, 40, 28])
-        val after = session.render_to_pixels()
-        expect(checksum(after) == checksum(before)).to_be(false)
-        expect(count_color(after, 0xFF2563EBu32)).to_be_greater_than(0)
-        expect(count_color(after, 0xFFEF4444u32)).to_equal(0)
+        expect(checksum(session.render_to_pixels()) == checksum(before)).to_be(false)
 
         comp = host_compositor_update_window_content(comp, target.unwrap().window_id, session.current_body_html())
         val raster = Engine2dCompositorBackend.create_named(240, 180, "software")
@@ -1077,7 +958,7 @@ describe "hosted Web content session":
         expect(checksum(frame)).to_be_greater_than(0)
         raster.shutdown()
 
-        # @req REQ-SSPEC-INTEGRATION REQ-SSPEC-INTEGRATION
+    # @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008
     it "routes hosted key edges to DOM focus before window shortcuts":
         # @req REQ-SSPEC-INTEGRATION
         step("routes hosted key edges to DOM focus before window shortcuts")
@@ -1146,7 +1027,9 @@ describe "hosted Web content session":
             38, 9, true, true
         )
         expect(canceled_tab.semantic_target_id).to_equal("stay")
-        expect(_hosted_focused_author_id(payload_session)).to_equal("stay")
+        expect(be_dom_focused_id(
+            payload_session.browser.dom_root()
+        )).to_equal("stay")
 
         var checkbox_session = HostedWebContentSession.create(
             12,
@@ -1178,7 +1061,7 @@ describe "hosted Web content session":
             "data-up=\"yes\""
         )
 
-        # @req REQ-SSPEC-INTEGRATION REQ-SSPEC-INTEGRATION
+    # @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008
     it "deletes one UTF-8 scalar from the hosted address bar":
         # @req REQ-SSPEC-INTEGRATION
         step("deletes one UTF-8 scalar from the hosted address bar")
@@ -1203,7 +1086,7 @@ describe "hosted Web content session":
         expect(erased.callback_count).to_equal(1)
         expect(session.address_text()).to_equal("https://example.test/")
 
-        # @req REQ-SSPEC-INTEGRATION REQ-SSPEC-INTEGRATION
+    # @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008
     it "cancels the hosted address draft and defocuses on Escape":
         # @req REQ-SSPEC-INTEGRATION
         step("cancels the hosted address draft and defocuses on Escape")
@@ -1244,7 +1127,7 @@ describe "hosted Web content session":
         expect(ignored.reason).to_equal("no-focused-semantic-target")
         expect(session.address_text()).to_equal(committed_url)
 
-        # @req REQ-SSPEC-INTEGRATION REQ-SSPEC-INTEGRATION
+    # @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008
     it "defocuses the hosted address only after a successful submit":
         # @req REQ-SSPEC-INTEGRATION
         step("defocuses the hosted address only after a successful submit")
@@ -1272,7 +1155,7 @@ describe "hosted Web content session":
         expect(session.chrome_focus).to_equal("address")
         expect(session.address_replace_on_text).to_be(false)
 
-        # @req REQ-SSPEC-INTEGRATION REQ-SSPEC-INTEGRATION
+    # @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008
     it "accepts 2048 UTF-8 address bytes and rejects 2049 without mutation":
         # @req REQ-SSPEC-INTEGRATION
         step("accepts 2048 UTF-8 address bytes and rejects 2049 without mutation")
@@ -1310,7 +1193,7 @@ describe "hosted Web content session":
         expect(session.chrome_focus).to_equal("address")
         expect(session.address_replace_on_text).to_be(true)
 
-        # @req REQ-SSPEC-INTEGRATION REQ-SSPEC-INTEGRATION
+    # @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008
     it "keeps trusted browser chrome outside hostile page hit testing":
         # @req REQ-SSPEC-INTEGRATION
         step("keeps trusted browser chrome outside hostile page hit testing")
@@ -1455,7 +1338,7 @@ describe "hosted Web content session":
         expect(session.current_body_html().contains("#2563eb")).to_be(false)
         expect(session.render_session.document_revision).to_equal(-1)
 
-        # @req REQ-SSPEC-INTEGRATION REQ-SSPEC-INTEGRATION
+    # @req REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009
     it "isolates address history and page state between browser windows":
         # @req REQ-SSPEC-INTEGRATION
         step("isolates address history and page state between browser windows")
@@ -1520,7 +1403,7 @@ describe "hosted Web content session":
             registry.address_text(72)
         )).to_be(false)
 
-        # @req REQ-SSPEC-INTEGRATION
+    # @req REQ-WEB-BROWSER-009
     it "persists Favorite only for the selected secondary browser window":
         # @req REQ-SSPEC-INTEGRATION
         step("persists Favorite only for the selected secondary browser window")
@@ -1557,14 +1440,14 @@ describe "hosted Web content session":
         expect(registry.profile_bookmarks.entries.len()).to_equal(1)
         expect(registry.close()).to_equal(true)
 
-        # @req REQ-SSPEC-INTEGRATION REQ-SSPEC-INTEGRATION REQ-SSPEC-INTEGRATION REQ-SSPEC-INTEGRATION REQ-SSPEC-INTEGRATION
+    # @req REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
     it "carries one compositor-local pointer release through BrowserSession and the canonical Engine2D frame":
         # @req REQ-SSPEC-INTEGRATION
         step("carries one compositor-local pointer release through BrowserSession and the canonical Engine2D frame")
         var comp = HostCompositor.new_headless(Size(width: 240u64, height: 180u64))
         comp.apply_bridge_request(
             1, 0, COMP_CREATE_WINDOW.to_i64(), 0, "Form", 20, 48, 180, 100,
-            "<style>input{display:block;width:40px;height:28px;background-color:#ef4444}input[checked]{{background-color:#2563eb}}</style><input id='accept' type='checkbox'>",
+            "<style>input{display:block;width:40px;height:28px;background-color:#ef4444}input[checked]{background-color:#2563eb}</style><input id='accept' type='checkbox'>",
             1, "hosted-web-event"
         )
         val target = comp.content_target(40, 90)

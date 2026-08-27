@@ -25,7 +25,7 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -213,6 +213,7 @@ expect(entry.is_some).to_equal(false)
 
 - AC-1: lookup returns Some after register and None after reap
    - Expected: before.is_some is true
+2. process table reap
    - Expected: after.is_some is false
 
 
@@ -268,6 +269,7 @@ expect(entry.is_some).to_equal(false)
 - AC-1: no resident fallback markers remain after reap
    - Expected: entry.is_some is true
    - Expected: entry.value.state equals `running`
+2. process table reap
    - Expected: reaped.is_some is false
 
 

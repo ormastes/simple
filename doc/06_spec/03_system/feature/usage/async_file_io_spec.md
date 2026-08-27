@@ -1,6 +1,29 @@
 # Async File I/O Specification
 
-> use std.spec.step
+> val handle = async_file_create(path, flags, prefault)
+
+<!-- sdn-diagram:id=async_file_io_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=async_file_io_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+async_file_io_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=async_file_io_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +34,7 @@
 
 # Async File I/O Specification
 
-use std.spec.step
+val handle = async_file_create(path, flags, prefault)
 
 ## At a Glance
 
@@ -21,7 +44,7 @@ use std.spec.step
 | Category | Runtime \| File I/O |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/async_file_io_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Async File States
@@ -35,8 +58,6 @@ use std.spec.step
 
 ```simple
 # Create async file handle
-use std.spec.step
-
 val handle = async_file_create(path, flags, prefault)
 
 # Start loading
@@ -56,22 +77,17 @@ val state = async_file_get_state(handle)
 
 #### creates handle for existing file
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- creates handle for existing file
+1. fn test create handle
+2. expect test create handle
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates handle for existing file")
 # Create a test file first
 @fs
 fn test_create_handle() -> i64:
@@ -87,18 +103,17 @@ expect test_create_handle() > 0
 
 #### initial state is Pending
 
-- initial state is Pending
+1. fn get initial state
+2. expect get initial state
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("initial state is Pending")
 # After creating handle, state should be Pending (0)
 @fs
 fn get_initial_state() -> i64:
@@ -113,18 +128,17 @@ expect get_initial_state() == 0
 
 #### is not ready before loading
 
-- is not ready before loading
+1. fn check not ready initially
+2. expect not check not ready initially
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("is not ready before loading")
 @fs
 fn check_not_ready_initially() -> bool:
     # Before starting load, is_ready should return false
@@ -139,18 +153,17 @@ expect not check_not_ready_initially()
 
 #### transitions through states correctly
 
-- transitions through states correctly
+1. fn test lifecycle
+2. expect test lifecycle
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("transitions through states correctly")
 # Pending -> start_loading -> Ready
 @fs
 fn test_lifecycle() -> i64:
@@ -167,18 +180,17 @@ expect test_lifecycle() == 1
 
 #### wait returns valid data pointer
 
-- wait returns valid data pointer
+1. fn test wait returns data
+2. expect test wait returns data
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("wait returns valid data pointer")
 @fs
 fn test_wait_returns_data() -> bool:
     # After successful load, wait should return valid pointer
@@ -191,18 +203,17 @@ expect test_wait_returns_data()
 
 #### is ready after successful load
 
-- is ready after successful load
+1. fn test is ready after load
+2. expect test is ready after load
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("is ready after successful load")
 @fs
 fn test_is_ready_after_load() -> bool:
     # After wait completes successfully, is_ready should be true
@@ -217,18 +228,17 @@ expect test_is_ready_after_load()
 
 #### handles invalid path gracefully
 
-- handles invalid path gracefully
+1. fn test invalid path
+2. expect test invalid path
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles invalid path gracefully")
 @fs
 fn test_invalid_path() -> i64:
     # Loading non-existent file should fail
@@ -242,18 +252,17 @@ expect test_invalid_path() == 2
 
 #### wait returns zero for failed load
 
-- wait returns zero for failed load
+1. fn test failed wait
+2. expect test failed wait
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("wait returns zero for failed load")
 @fs
 fn test_failed_wait() -> i64:
     # Wait on failed file should return 0
@@ -266,18 +275,17 @@ expect test_failed_wait() == 0
 
 #### invalid handle returns failed state
 
-- invalid handle returns failed state
+1. fn test invalid handle
+2. expect test invalid handle
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("invalid handle returns failed state")
 @fs
 fn test_invalid_handle() -> i64:
     # Using invalid handle ID should return Failed state
@@ -290,18 +298,17 @@ expect test_invalid_handle() == 2
 
 #### invalid handle wait returns zero
 
-- invalid handle wait returns zero
+1. fn test invalid handle wait
+2. expect test invalid handle wait
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("invalid handle wait returns zero")
 @fs
 fn test_invalid_handle_wait() -> i64:
     # Wait on invalid handle should return 0
@@ -316,18 +323,17 @@ expect test_invalid_handle_wait() == 0
 
 #### creates unique handle IDs
 
-- creates unique handle IDs
+1. fn test unique handles
+2. expect test unique handles
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates unique handle IDs")
 @fs
 fn test_unique_handles() -> bool:
     # Multiple creates should return different handle IDs
@@ -342,18 +348,17 @@ expect test_unique_handles()
 
 #### loads multiple files concurrently
 
-- loads multiple files concurrently
+1. fn test concurrent load
+2. expect test concurrent load
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("loads multiple files concurrently")
 @fs
 fn test_concurrent_load() -> bool:
     # Can start loading multiple files
@@ -369,18 +374,17 @@ expect test_concurrent_load()
 
 #### supports prefault option
 
-- supports prefault option
+1. fn test prefault
+2. expect test prefault
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("supports prefault option")
 @fs
 fn test_prefault() -> bool:
     # Loading with prefault enabled should still work
@@ -394,18 +398,17 @@ expect test_prefault()
 
 #### rejects non-string path input
 
-- rejects non-string path input
+1. fn test invalid input
+2. expect test invalid input
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects non-string path input")
 @fs
 fn test_invalid_input() -> i64:
     # Passing non-string as path should return 0 (invalid handle)
@@ -428,51 +431,3 @@ expect test_invalid_input() == 0
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `37d0354cb2327edaf8e2a8c83c4702ef5b2564177e554d92125eccbc32fb8b4f`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `37d0354cb2327edaf8e2a8c83c4702ef5b2564177e554d92125eccbc32fb8b4f`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `37d0354cb2327edaf8e2a8c83c4702ef5b2564177e554d92125eccbc32fb8b4f`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/async_file_io_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/async_file_io_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/async_file_io_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/async_file_io_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/async_file_io_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates handle for existing file' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/async_file_io_spec.spl:73:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'initial state is Pending' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/async_file_io_spec.spl:85:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'is not ready before loading' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

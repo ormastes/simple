@@ -1,0 +1,186 @@
+; Vulkan Engine2D opaque rect-list compute shader.
+; Assemble reproducibly with:
+;   spirv-as --target-env vulkan1.1 backend_vulkan_rect_list.spvasm -o rect_list.spv
+;   spirv-val --target-env vulkan1.1 rect_list.spv
+;
+; binding 0: framebuffer u32[]
+; binding 1: packed rect list, ten u32 words per rect:
+;   x, y, width, height, argb, clip_x, clip_y, clip_width, clip_height, clip_enabled
+; push constants: rect_count, framebuffer_width, framebuffer_height
+;
+; Every invocation owns one destination pixel and visits records in list order.
+; That serial per-pixel order is what preserves ordinary opaque draw ordering
+; when rectangles overlap.
+
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %global_id
+               OpExecutionMode %main LocalSize 16 16 1
+               OpDecorate %global_id BuiltIn GlobalInvocationId
+               OpDecorate %runtime_u32 ArrayStride 4
+               OpMemberDecorate %framebuffer 0 Offset 0
+               OpDecorate %framebuffer Block
+               OpDecorate %framebuffer_var DescriptorSet 0
+               OpDecorate %framebuffer_var Binding 0
+               OpMemberDecorate %rect_list 0 Offset 0
+               OpDecorate %rect_list Block
+               OpDecorate %rect_list_var DescriptorSet 0
+               OpDecorate %rect_list_var Binding 1
+               OpMemberDecorate %push_constants 0 Offset 0
+               OpMemberDecorate %push_constants 1 Offset 4
+               OpMemberDecorate %push_constants 2 Offset 8
+               OpDecorate %push_constants Block
+
+%void = OpTypeVoid
+%void_fn = OpTypeFunction %void
+%bool = OpTypeBool
+%u32 = OpTypeInt 32 0
+%i32 = OpTypeInt 32 1
+%v3u32 = OpTypeVector %u32 3
+%ptr_input_v3u32 = OpTypePointer Input %v3u32
+%ptr_input_u32 = OpTypePointer Input %u32
+%runtime_u32 = OpTypeRuntimeArray %u32
+%framebuffer = OpTypeStruct %runtime_u32
+%rect_list = OpTypeStruct %runtime_u32
+%push_constants = OpTypeStruct %u32 %u32 %u32
+%ptr_storage_framebuffer = OpTypePointer StorageBuffer %framebuffer
+%ptr_storage_rect_list = OpTypePointer StorageBuffer %rect_list
+%ptr_storage_u32 = OpTypePointer StorageBuffer %u32
+%ptr_push_constants = OpTypePointer PushConstant %push_constants
+%ptr_push_u32 = OpTypePointer PushConstant %u32
+%ptr_function_u32 = OpTypePointer Function %u32
+%global_id = OpVariable %ptr_input_v3u32 Input
+%framebuffer_var = OpVariable %ptr_storage_framebuffer StorageBuffer
+%rect_list_var = OpVariable %ptr_storage_rect_list StorageBuffer
+%push = OpVariable %ptr_push_constants PushConstant
+%u0 = OpConstant %u32 0
+%u1 = OpConstant %u32 1
+%u2 = OpConstant %u32 2
+%u3 = OpConstant %u32 3
+%u4 = OpConstant %u32 4
+%u5 = OpConstant %u32 5
+%u6 = OpConstant %u32 6
+%u7 = OpConstant %u32 7
+%u8 = OpConstant %u32 8
+%u9 = OpConstant %u32 9
+%u10 = OpConstant %u32 10
+
+%main = OpFunction %void None %void_fn
+%entry = OpLabel
+%rect_index = OpVariable %ptr_function_u32 Function
+%gid = OpLoad %v3u32 %global_id
+%pixel_x = OpCompositeExtract %u32 %gid 0
+%pixel_y = OpCompositeExtract %u32 %gid 1
+%count_ptr = OpAccessChain %ptr_push_u32 %push %u0
+%fb_width_ptr = OpAccessChain %ptr_push_u32 %push %u1
+%fb_height_ptr = OpAccessChain %ptr_push_u32 %push %u2
+%rect_count = OpLoad %u32 %count_ptr
+%fb_width = OpLoad %u32 %fb_width_ptr
+%fb_height = OpLoad %u32 %fb_height_ptr
+%x_out = OpUGreaterThanEqual %bool %pixel_x %fb_width
+%y_out = OpUGreaterThanEqual %bool %pixel_y %fb_height
+%out_of_bounds = OpLogicalOr %bool %x_out %y_out
+               OpSelectionMerge %return None
+               OpBranchConditional %out_of_bounds %return %loop_init
+
+%loop_init = OpLabel
+               OpStore %rect_index %u0
+               OpBranch %loop_header
+
+%loop_header = OpLabel
+               OpLoopMerge %loop_end %loop_continue None
+               OpBranch %loop_test
+
+%loop_test = OpLabel
+%current_rect = OpLoad %u32 %rect_index
+%more_rects = OpULessThan %bool %current_rect %rect_count
+               OpBranchConditional %more_rects %loop_body %loop_end
+
+%loop_body = OpLabel
+%word_base = OpIMul %u32 %current_rect %u10
+%word_x = OpIAdd %u32 %word_base %u0
+%word_y = OpIAdd %u32 %word_base %u1
+%word_width = OpIAdd %u32 %word_base %u2
+%word_height = OpIAdd %u32 %word_base %u3
+%word_color = OpIAdd %u32 %word_base %u4
+%word_clip_x = OpIAdd %u32 %word_base %u5
+%word_clip_y = OpIAdd %u32 %word_base %u6
+%word_clip_width = OpIAdd %u32 %word_base %u7
+%word_clip_height = OpIAdd %u32 %word_base %u8
+%word_clip_enabled = OpIAdd %u32 %word_base %u9
+%rect_x_ptr = OpAccessChain %ptr_storage_u32 %rect_list_var %u0 %word_x
+%rect_y_ptr = OpAccessChain %ptr_storage_u32 %rect_list_var %u0 %word_y
+%rect_width_ptr = OpAccessChain %ptr_storage_u32 %rect_list_var %u0 %word_width
+%rect_height_ptr = OpAccessChain %ptr_storage_u32 %rect_list_var %u0 %word_height
+%color_ptr = OpAccessChain %ptr_storage_u32 %rect_list_var %u0 %word_color
+%clip_x_ptr = OpAccessChain %ptr_storage_u32 %rect_list_var %u0 %word_clip_x
+%clip_y_ptr = OpAccessChain %ptr_storage_u32 %rect_list_var %u0 %word_clip_y
+%clip_width_ptr = OpAccessChain %ptr_storage_u32 %rect_list_var %u0 %word_clip_width
+%clip_height_ptr = OpAccessChain %ptr_storage_u32 %rect_list_var %u0 %word_clip_height
+%clip_enabled_ptr = OpAccessChain %ptr_storage_u32 %rect_list_var %u0 %word_clip_enabled
+%rect_x_u = OpLoad %u32 %rect_x_ptr
+%rect_y_u = OpLoad %u32 %rect_y_ptr
+%rect_width_u = OpLoad %u32 %rect_width_ptr
+%rect_height_u = OpLoad %u32 %rect_height_ptr
+%color = OpLoad %u32 %color_ptr
+%clip_x_u = OpLoad %u32 %clip_x_ptr
+%clip_y_u = OpLoad %u32 %clip_y_ptr
+%clip_width_u = OpLoad %u32 %clip_width_ptr
+%clip_height_u = OpLoad %u32 %clip_height_ptr
+%clip_enabled_u = OpLoad %u32 %clip_enabled_ptr
+%rect_x = OpBitcast %i32 %rect_x_u
+%rect_y = OpBitcast %i32 %rect_y_u
+%rect_width = OpBitcast %i32 %rect_width_u
+%rect_height = OpBitcast %i32 %rect_height_u
+%clip_x = OpBitcast %i32 %clip_x_u
+%clip_y = OpBitcast %i32 %clip_y_u
+%clip_width = OpBitcast %i32 %clip_width_u
+%clip_height = OpBitcast %i32 %clip_height_u
+%pixel_x_i = OpBitcast %i32 %pixel_x
+%pixel_y_i = OpBitcast %i32 %pixel_y
+%rect_right = OpIAdd %i32 %rect_x %rect_width
+%rect_bottom = OpIAdd %i32 %rect_y %rect_height
+%in_x_left = OpSGreaterThanEqual %bool %pixel_x_i %rect_x
+%in_x_right = OpSLessThan %bool %pixel_x_i %rect_right
+%in_y_top = OpSGreaterThanEqual %bool %pixel_y_i %rect_y
+%in_y_bottom = OpSLessThan %bool %pixel_y_i %rect_bottom
+%in_x = OpLogicalAnd %bool %in_x_left %in_x_right
+%in_y = OpLogicalAnd %bool %in_y_top %in_y_bottom
+%in_rect = OpLogicalAnd %bool %in_x %in_y
+%clip_right = OpIAdd %i32 %clip_x %clip_width
+%clip_bottom = OpIAdd %i32 %clip_y %clip_height
+%in_clip_x_left = OpSGreaterThanEqual %bool %pixel_x_i %clip_x
+%in_clip_x_right = OpSLessThan %bool %pixel_x_i %clip_right
+%in_clip_y_top = OpSGreaterThanEqual %bool %pixel_y_i %clip_y
+%in_clip_y_bottom = OpSLessThan %bool %pixel_y_i %clip_bottom
+%in_clip_x = OpLogicalAnd %bool %in_clip_x_left %in_clip_x_right
+%in_clip_y = OpLogicalAnd %bool %in_clip_y_top %in_clip_y_bottom
+%in_clip = OpLogicalAnd %bool %in_clip_x %in_clip_y
+%clip_enabled = OpINotEqual %bool %clip_enabled_u %u0
+%clip_disabled = OpLogicalNot %bool %clip_enabled
+%passes_clip = OpLogicalOr %bool %clip_disabled %in_clip
+%write_pixel = OpLogicalAnd %bool %in_rect %passes_clip
+               OpSelectionMerge %skip_write None
+               OpBranchConditional %write_pixel %write %skip_write
+
+%write = OpLabel
+%row_start = OpIMul %u32 %pixel_y %fb_width
+%framebuffer_index = OpIAdd %u32 %row_start %pixel_x
+%framebuffer_ptr = OpAccessChain %ptr_storage_u32 %framebuffer_var %u0 %framebuffer_index
+               OpStore %framebuffer_ptr %color
+               OpBranch %skip_write
+
+%skip_write = OpLabel
+               OpBranch %loop_continue
+
+%loop_continue = OpLabel
+%next_rect = OpIAdd %u32 %current_rect %u1
+               OpStore %rect_index %next_rect
+               OpBranch %loop_header
+
+%loop_end = OpLabel
+               OpBranch %return
+
+%return = OpLabel
+               OpReturn
+               OpFunctionEnd

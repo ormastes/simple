@@ -1,5 +1,6 @@
 # Primary parsing: parse_primary_expr (literals, identifiers, keywords).
 use compiler.frontend.core.parser_primary.*
+use compiler.frontend.core._ParserPrimary.asm_match_suffix.{parser_validate_unit_suffix}
 # Parser — Primary Expression & ASM Parsing
 #
 # Extracted from parser_expr.spl. Contains:
@@ -7,7 +8,6 @@ use compiler.frontend.core.parser_primary.*
 # - ASM parsing: asm match, asm assert, target spec parsing
 
 use compiler.core.tokens.{tok_kind_name, keyword_lookup}
-use compiler.frontend.trace_policy.{frontend_compiler_trace_enabled}
 use compiler.core.tokens.{TOK_INT_LIT, TOK_FLOAT_LIT, TOK_STRING_LIT}
 use compiler.core.tokens.{TOK_BOOL_LIT, TOK_NIL_LIT, TOK_IDENT}
 use compiler.core.tokens.{TOK_KW_IF, TOK_KW_MATCH, TOK_KW_CASE}
@@ -18,7 +18,7 @@ use compiler.core.tokens.{TOK_KW_SELF}
 use compiler.core.tokens.{TOK_KW_ASYNC, TOK_KW_AWAIT, TOK_KW_YIELD, TOK_KW_SPAWN}
 use compiler.core.tokens.{TOK_KW_NEW}
 use compiler.core.tokens.{TOK_KW_ASM}
-use compiler.core.tokens.{TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_AMPERSAND, TOK_NOT, TOK_CARET}
+use compiler.core.tokens.{TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_AMPERSAND, TOK_NOT}
 use compiler.core.tokens.{TOK_EQ, TOK_LT, TOK_GEQ}
 use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET, TOK_RBRACKET}
 use compiler.core.tokens.{TOK_LBRACE, TOK_RBRACE}
@@ -29,16 +29,19 @@ use compiler.core.tokens.{TOK_UNDERSCORE, TOK_SEMICOLON}
 use compiler.core.tokens.{TOK_SUFFIXED_INT, TOK_SUFFIXED_FLOAT}
 use compiler.core.tokens.{TOK_KW_DO, TOK_KW_CE}
 use compiler.core.tokens.{TOK_BACKTICK_IDENT}
-use compiler.core.tokens.{TOK_AT, TOK_KW_KEYOF, TOK_KW_MIXIN}
+use compiler.core.tokens.{TOK_AT, TOK_KW_KEYOF, TOK_KW_MIXIN, TOK_STAR}
 use compiler.core.tokens.{TOK_AMP_COLON, TOK_BACKSLASH}
 use compiler.core.tokens.{TOK_KW_FOR, TOK_KW_IF, TOK_KW_IN}
 use compiler.core.ast.{expr_int_lit, expr_float_lit, expr_string_lit, expr_raw_string_lit}
-use compiler.core.ast.{expr_bool_lit, expr_nil_lit, expr_ident, expr_custom_block}
+use compiler.core.ast.{expr_bool_lit, expr_nil_lit, expr_ident}
 use compiler.core.ast.{expr_unary, expr_call, expr_array_lit, expr_array_repeat, expr_method_call, expr_lambda}
 use compiler.core.ast.{expr_block, expr_tuple}
 use compiler.core.ast.{expr_return_expr, expr_break_expr, expr_continue_expr}
 use compiler.core.ast.{expr_unit, expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_do_nothing, expr_pass_dn}
 use compiler.core.ast.{expr_dict_lit}
+# D1 arrow lambda: a parenthesised element list is a PARAMETER list only when
+# every element is a bare identifier, which needs the arena tag directly.
+use compiler.core.ast_expr.{EXPR_IDENT, expr_tag}
 use compiler.core.ast.{expr_suffixed_int, expr_suffixed_float, expr_suffixed_bool}
 use compiler.core.ast.{expr_await, expr_yield, expr_spawn, expr_do_block, expr_atom, expr_new_alloc}
 use compiler.core.ast.{expr_list_comp, expr_dict_comp}
@@ -46,7 +49,8 @@ use compiler.core.ast.{expr_asm, expr_asm_operands, expr_asm_match, expr_asm_ass
 use compiler.core.ast.{asm_arm_new, asm_arm_is_compile_error, asm_arm_error_msg, asm_arm_asm_text}
 use compiler.core.ast.{module_get_path}
 use compiler.frontend.core.lexer.{lex_cur_suffix_get}
-use compiler.frontend.core.lexer.{lex_source_char_at, lex_source_len, lex_source_slice, lex_token_start_get, lex_token_end_get, lex_cur_no_interp_get}
+use compiler.frontend.core.lexer.{lex_pos_get, lex_pos_set, lex_line_get, lex_line_set, lex_col_get, lex_col_set}
+use compiler.frontend.core.lexer.{lex_source_char_at, lex_source_len, lex_source_slice, lex_token_start_get}
 use compiler.frontend.core.lexer.{lex_enable_forced_indentation, lex_disable_forced_indentation, lex_pop_indent}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_warn, parser_skip_newlines}
@@ -55,26 +59,18 @@ use compiler.core.parser.{parser_has_errors}
 use compiler.core.parser.{parser_parse_type}
 
 # Forward declarations for mutual recursion
-use compiler.frontend.core.parser_stmts.{parse_block, parse_statement, parse_if_expr, parse_unsafe_block_expr_if_present}
+use compiler.frontend.core.parser_stmts.{parse_block, parse_statement, parse_match_stmt, parse_if_expr}
 use compiler.frontend.core.parser_stmts.{parse_match_stmt_tail, parse_match_expr_tail, g33_kw_ident_follow}
 use compiler.frontend.core.parser_expr.{parse_expr, parse_not, parse_unary}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
+extern fn rt_env_get(key: text) -> text
+
 fn parser_primary_trace_enabled() -> bool:
-    frontend_compiler_trace_enabled()
+    (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
 
 fn parser_primary_trace_line_enabled() -> bool:
     parser_primary_trace_enabled() and par_line_get() >= 60
-
-fn parser_is_canonical_custom_block_kind(kind: text) -> bool:
-    # Keep this list in parity with the canonical Rust lexer
-    # try_scan_custom_block(). Adjacency is checked separately, so ordinary
-    # identifiers followed by a spaced struct/dict brace remain untouched.
-    (kind == "m" or kind == "sh" or kind == "sql" or kind == "re" or
-        kind == "md" or kind == "html" or kind == "graph" or kind == "img" or
-        kind == "schema" or kind == "style" or kind == "ui" or kind == "music" or
-        kind == "bim" or kind == "cad" or kind == "city" or kind == "rtl" or
-        kind == "loss" or kind == "lean" or kind == "nograd")
 
 # Parses the tail of a `fn` lambda after the `fn` keyword itself has already
 # been consumed by the caller: `(param: Type, ...) -> RetType: body`.
@@ -93,7 +89,7 @@ fn parse_fn_lambda_after_kw() -> i64:
             if par_kind_get() == 161:
                 parser_advance()
                 parser_parse_type()
-            while true:
+            for fn_pi in 0..100:
                 if par_kind_get() != 160:
                     break
                 parser_advance()
@@ -111,11 +107,6 @@ fn parse_fn_lambda_after_kw() -> i64:
     if par_kind_get() == 167:
         parser_advance()
         parser_parse_type()
-    # Anonymous `fn(...)` block lambdas can appear inside a call's parens.
-    # Match the backslash-lambda path below: enable forced indentation before
-    # consuming `:` so the following newline/body indentation is not suppressed
-    # by paren_depth (parser_anonymous_fn_block_call_arg_2026-08-03).
-    lex_enable_forced_indentation()
     # Expect ':' then body
     parser_expect(161)
     # Block body or expression body (same pattern as backslash lambda)
@@ -123,19 +114,15 @@ fn parse_fn_lambda_after_kw() -> i64:
     if par_kind_get() == 180 or par_kind_get() == 181:
         parser_skip_newlines()
         var fn_blk: [i64] = []
-        var fn_lam_saw_indent = false
         if par_kind_get() == 181:
             parser_advance()
-            fn_lam_saw_indent = true
-        while true:
+        for fn_bi in 0..100000:
             parser_skip_newlines()
             val fn_bk = par_kind_get()
             if fn_bk == 182:
                 parser_advance()
                 break
             if fn_bk == 141 or fn_bk == 160 or fn_bk == 190:
-                if fn_lam_saw_indent:
-                    lex_pop_indent()
                 break
             val fn_s = parse_statement()
             fn_blk.push(fn_s)
@@ -143,11 +130,9 @@ fn parse_fn_lambda_after_kw() -> i64:
                 break
             parser_skip_newlines()
         fn_lam_stmts.push(expr_block(fn_blk, -1, 0))
-        lex_disable_forced_indentation()
     else:
         val fn_body_e = parse_expr()
         fn_lam_stmts.push(fn_body_e)
-        lex_disable_forced_indentation()
     expr_lambda(fn_param_names, fn_lam_stmts, 0)
 
 # Integer literal token text -> value, supporting _ separators and
@@ -216,8 +201,6 @@ fn parse_int_literal_text(int_text: text) -> i64:
     int_val
 
 fn parse_primary_expr() -> i64:
-    if parser_primary_trace_line_enabled():
-        eprint("[parser-primary] start kind={par_kind_get()} text={par_text_get()} line={par_line_get()} col={par_col_get()}")
     # @annotation(...) -- compile-time introspection built-ins
     # @traits(query, T, ...) desugars to __traits("query", "T", ...)
     # @file, @line, @function desugar to __builtin_file etc.
@@ -255,7 +238,7 @@ fn parse_primary_expr() -> i64:
         return expr_ident(at_builtin_name, 0)
 
     # keyof T -- compile-time field name list (sugar for @traits("fields", "T"))
-    if par_kind_get() == TOK_KW_KEYOF:
+    if par_kind_get() == 200:
         parser_advance()
         val keyof_type = par_text_get()
         if par_kind_get() == 6:
@@ -314,7 +297,7 @@ fn parse_primary_expr() -> i64:
                 return expr_asm("", 0)
             parser_advance()
             var asm_lines: [text] = []
-            while true:
+            for ai in 0..100000:
                 parser_skip_newlines()
                 if par_kind_get() == 182:
                     parser_advance()
@@ -326,7 +309,7 @@ fn parse_primary_expr() -> i64:
                     parser_advance()
                     continue
                 parser_error("expected string literal in asm block")
-                while true:
+                for aj in 0..10000:
                     val is_nl = par_kind_get() == 180
                     val is_ded = par_kind_get() == 182
                     val is_eof = par_kind_get() == 190
@@ -339,15 +322,10 @@ fn parse_primary_expr() -> i64:
             val raw_asm = parse_raw_asm_braced_payload()
             return expr_asm(raw_asm, 0)
 
-        if par_kind_get() == 164:
-            # `asm` used as a plain identifier (e.g. `asm.constraints`);
-            # the postfix layer parses the field access.
-            return expr_ident("asm", 0)
-
         parser_error("expected string literal, ':' block, or '{...}' after 'asm'")
         return expr_asm("", 0)
 
-    if par_kind_get() == 1:
+    if par_kind_get() == 1 or par_kind_get() == 2:
         val int_text = par_text_get()
         parser_advance()
         return expr_int_lit(parse_int_literal_text(int_text), 0)
@@ -377,12 +355,10 @@ fn parse_primary_expr() -> i64:
         # this was ordinary double-quote, single/raw-prefixed, or bare triple.
         val str_start = lex_token_start_get()
         val str_first = lex_source_char_at(str_start)
-        var no_interp = lex_cur_no_interp_get() or str_first != "\""
+        var no_interp = str_first != "\""
         if str_first == "\"" and lex_source_char_at(str_start + 1) == "\"" and lex_source_char_at(str_start + 2) == "\"":
             no_interp = true
         parser_advance()
-        if no_interp:
-            return expr_raw_string_lit(str_text, 0)
         return expr_string_lit(str_text, 0)
 
     if par_kind_get() == 4:
@@ -404,34 +380,14 @@ fn parse_primary_expr() -> i64:
                 parser_warn("REQC003: todo requires two strings: todo(\"what remains\", \"hint or issue\")")
             return expr_pass_todo(msg, 0)
 
-    if par_kind_get() == TOK_IDENT and (par_text_get() == "unsafe" or par_text_get() == "danger"):
-        val unsafe_expr = parse_unsafe_block_expr_if_present()
-        if unsafe_expr >= 0:
-            return unsafe_expr
-
     if par_kind_get() == 6:
         val id_name = par_text_get()
         if parser_primary_trace_line_enabled():
             eprint("[parser-primary] ident:start name={id_name}")
-        val custom_block_adjacent = parser_is_canonical_custom_block_kind(id_name) and
-            lex_source_char_at(lex_token_end_get()) == "{"
         parser_advance()
-        if custom_block_adjacent:
-            if par_kind_get() != TOK_LBRACE:
-                parser_error("expected { after custom block kind")
-                return expr_nil_lit(0)
-            val raw_payload = parse_raw_braced_payload(id_name)
-            return expr_custom_block(id_name, raw_payload, 0)
         if parser_primary_trace_line_enabled():
             eprint("[parser-primary] ident:advanced name={id_name}")
         return expr_ident(id_name, 0)
-
-    # The core lexer deliberately maps textual `xor` onto TOK_CARET so infix
-    # `a xor b` and `a ^ b` share one operator. In primary/callee position the
-    # same spelling remains an identifier (`xor(a, b)`), matching the seed.
-    if par_kind_get() == TOK_CARET and par_text_get() == "xor":
-        parser_advance()
-        return expr_ident("xor", 0)
 
     if par_kind_get() == 38:
         parser_advance()
@@ -450,15 +406,6 @@ fn parse_primary_expr() -> i64:
     # new expr | new() expr | new(alloc) expr — explicit allocation
     if par_kind_get() == 211:
         parser_advance()
-        val new_next_kind = par_kind_get()
-        # `g33_kw_ident_follow` also includes unary-prefix tokens such as
-        # `+`, `-`, `*`, and `&`. Those can start the documented generic
-        # `new expr` form, so only use G33's unambiguous remainder here.
-        val new_can_start_alloc = new_next_kind == TOK_PLUS or new_next_kind == TOK_MINUS or new_next_kind == TOK_STAR or new_next_kind == TOK_AMPERSAND
-        if g33_kw_ident_follow(new_next_kind) and not new_can_start_alloc:
-            return expr_ident("new", 0)
-        if new_next_kind == TOK_EOF or new_next_kind == TOK_RBRACE or new_next_kind == TOK_RBRACKET or new_next_kind == TOK_SEMICOLON:
-            return expr_ident("new", 0)
         # alloc_kind: 0 = default, 1 = pool, 2 = explicit allocator
         var alloc_kind = 0
         var alloc_expr_id = -1
@@ -491,8 +438,6 @@ fn parse_primary_expr() -> i64:
     if par_kind_get() == 205:
         # ce NAME: block as expression -- returns last value like do:
         parser_advance()
-        if par_kind_get() != 6:
-            return expr_ident("ce", 0)
         var ce_builder_name = par_text_get()
         parser_expect(6)
         parser_expect(161)
@@ -508,6 +453,17 @@ fn parse_primary_expr() -> i64:
         parser_advance()
         if par_kind_get() == 141:
             parser_advance()
+            # D1: zero-parameter arrow lambda — `() => expr`. The Rust seed has
+            # accepted this form since expressions/primary/collections.rs:32;
+            # without it here the two parsers disagreed about a construct the
+            # seed already compiles, which breaks self-hosting asymmetrically.
+            # doc/08_tracking/bug/
+            # seed_parser_arrow_lambda_block_expr_wrapped_return_type_2026-08-23.md
+            if par_kind_get() == 168:
+                parser_advance()
+                var zero_body: [i64] = []
+                zero_body.push(parse_expr())
+                return expr_lambda([], zero_body, 0)
             return expr_unit(0)
         val inner = parse_expr()
         # G29: tuple literal — (e1, e2, ...)
@@ -520,8 +476,33 @@ fn parse_primary_expr() -> i64:
                     break
                 tup_elems.push(parse_expr())
             parser_expect(141)
+            # D1: multi-parameter arrow lambda — `(x, y) => expr`. Same
+            # production as the zero-parameter form above, only with a
+            # non-empty parameter list. The parenthesised element list has
+            # already been parsed as expressions; it is a parameter list only
+            # when EVERY element is a bare identifier, so a real tuple such as
+            # `(a.b, 1)` can never be mistaken for one.
+            if par_kind_get() == 168:
+                var tup_all_idents = true
+                for te in tup_elems:
+                    if te < 0 or te >= expr_tag.len() or expr_tag[te] != EXPR_IDENT:
+                        tup_all_idents = false
+                if tup_all_idents:
+                    parser_advance()
+                    var multi_body: [i64] = []
+                    multi_body.push(parse_expr())
+                    return expr_lambda(tup_elems, multi_body, 0)
             return expr_tuple(tup_elems, 0)
         parser_expect(141)
+        # D1: single-parameter arrow lambda — `(x) => expr`.
+        if par_kind_get() == 168:
+            if inner >= 0 and inner < expr_tag.len() and expr_tag[inner] == EXPR_IDENT:
+                parser_advance()
+                var one_params: [i64] = []
+                one_params.push(inner)
+                var one_body: [i64] = []
+                one_body.push(parse_expr())
+                return expr_lambda(one_params, one_body, 0)
         return inner
 
     if par_kind_get() == 144:
@@ -548,12 +529,6 @@ fn parse_primary_expr() -> i64:
             return expr_list_comp(comp_iter_var, comp_iterable, comp_body, comp_cond, 0)
         # Parse first element
         val first_elem = parse_expr()
-        # Array-repeat expression: [value; count] (count may be non-literal).
-        if par_kind_get() == 163:
-            parser_advance()
-            val repeat_count = parse_expr()
-            parser_expect(145)
-            return expr_array_repeat(first_elem, repeat_count, 0)
         # For-last comprehension: [expr for x in items if cond]
         if par_kind_get() == 45:
             parser_advance()
@@ -568,24 +543,10 @@ fn parse_primary_expr() -> i64:
             parser_expect(145)
             return expr_list_comp(comp_iter_var, comp_iterable, first_elem, comp_cond, 0)
         # Regular array literal: [first, second, ...]
-        #
-        # This loop must be UNBOUNDED. It used to be `for i in 0..10000`, which
-        # capped the literal at 10000 consumed commas. Past that the loop merely
-        # fell out with the cursor still parked on a comma, so the
-        # `parser_expect(145)` below reported `expected ], got , ','` against a
-        # perfectly well-formed comma and gave no hint that a size limit had
-        # been reached. Generated tables trip this: the public-suffix table in
-        # src/lib/common/web/public_suffix_data.spl failed at exactly line
-        # 10012 column 25, the comma after its 10001st entry. See
-        # doc/08_tracking/bug/parser_array_literal_element_cap_2026-08-01.md
-        #
-        # Termination is structural, not counted. The loop is entered only when
-        # the cursor is on a comma (160) and unconditionally consumes it via
-        # parser_advance(), so every pass retires at least one token from a
-        # finite stream even when the parse_expr() below consumes nothing. At
-        # EOF the kind is 190, never 160, so the loop exits.
         var elements: [i64] = [first_elem]
-        while par_kind_get() == 160:
+        for i in 0..10000:
+            if par_kind_get() != 160:
+                break
             parser_advance()
             if par_kind_get() == 145:
                 break
@@ -730,7 +691,7 @@ fn parse_primary_expr() -> i64:
             val p0 = par_text_get()
             parser_advance()
             lam_params.push(expr_ident(p0, 0))
-            while true:
+            for lpi in 0..100:
                 if par_kind_get() != 160:
                     break
                 parser_advance()
@@ -740,14 +701,6 @@ fn parse_primary_expr() -> i64:
                 val pn = par_text_get()
                 parser_advance()
                 lam_params.push(expr_ident(pn, 0))
-        # Enable forced indentation BEFORE consuming ':' so the lexer keeps
-        # emitting real NEWLINE/INDENT/DEDENT for this lambda's own body even
-        # though we may be inside a call's parens (paren_depth > 0), where
-        # those tokens are normally suppressed entirely (the whole
-        # parenthesized expression is otherwise one logical line). Must be
-        # disabled again on every exit path below. See
-        # CoreLexer.enable_forced_indentation (lexer_struct.spl).
-        lex_enable_forced_indentation()
         # Expect ':'
         parser_expect(161)
         # Block body or expression body. EXPR_LAMBDA's stmts list holds body
@@ -763,22 +716,16 @@ fn parse_primary_expr() -> i64:
         if par_kind_get() == 180 or par_kind_get() == 181:
             parser_skip_newlines()
             var blk_stmts: [i64] = []
-            var lam_saw_indent = false
             if par_kind_get() == 181:
                 parser_advance()
                 lam_saw_indent = true
-            while true:
+            for blk_i in 0..100000:
                 parser_skip_newlines()
                 val bk = par_kind_get()
                 if bk == 182:
                     parser_advance()
                     break
                 if bk == 141 or bk == 160 or bk == 190:
-                    # Block ended at the call's closing bracket/comma/eof with
-                    # no DEDENT seen (last statement shared its line with the
-                    # terminator) — resync the lexer's indent stack manually.
-                    if lam_saw_indent:
-                        lex_pop_indent()
                     break
                 val s = parse_statement()
                 blk_stmts.push(s)
@@ -786,12 +733,15 @@ fn parse_primary_expr() -> i64:
                     break
                 parser_skip_newlines()
             lam_stmts.push(expr_block(blk_stmts, -1, 0))
-            lex_disable_forced_indentation()
         else:
             # Expression body (single expression becomes sole body expr)
+            # No block indentation is needed once the token after ':' is not
+            # a newline. Disable it before parsing so the expression's final
+            # token cannot eagerly lex a structural newline inside the outer
+            # call.
+            lex_disable_forced_indentation()
             val body_e = parse_expr()
             lam_stmts.push(body_e)
-            lex_disable_forced_indentation()
         return expr_lambda(lam_params, lam_stmts, 0)
 
     if par_kind_get() == 169:
@@ -853,18 +803,8 @@ fn parse_primary_expr() -> i64:
         key_exprs.push(key)
         value_exprs.push(value)
 
-        # Parse remaining key-value pairs.
-        #
-        # Unbounded for the same reason as the array-literal loop above: a
-        # `for i in 0..10000` bound here truncated a dict literal at 10000
-        # consumed commas and then returned the dict with the remaining
-        # `, k: v ...}` tokens still in the stream, producing cascading
-        # diagnostics far from the real cause. Termination is structural — every
-        # path through the body either breaks outright or consumes the comma via
-        # parser_advance(), so one token is retired from a finite stream per
-        # pass. At EOF the kind is neither 160 nor 143, so the else branch below
-        # reports and breaks.
-        while true:
+        # Parse remaining key-value pairs
+        for i in 0..10000:
             # Check for comma or closing brace
             if par_kind_get() == 160:
                 parser_advance()
@@ -893,7 +833,7 @@ fn parse_primary_expr() -> i64:
         if par_text_get() == "unexpected character: \\":
             parser_advance()
             # Skip lambda params
-            while true:
+            for i in 0..100:
                 if par_kind_get() == 161:
                     parser_advance()
                     break
@@ -908,23 +848,10 @@ fn parse_primary_expr() -> i64:
     # Handle keywords that may appear in expression position
     if par_kind_get() == 43:
         # G33: `match` as identifier in expression position (if match: ...)
-        val match_line = par_line_get()
-        val match_col = par_col_get()
         parser_advance()
-        val adjacent_index = par_kind_get() == TOK_LBRACKET and par_line_get() == match_line and par_col_get() == match_col + 5
-        if g33_kw_ident_follow(par_kind_get()) or adjacent_index:
+        if g33_kw_ident_follow(par_kind_get()):
             return expr_ident("match", 0)
-        # `match` used as a VALUE (e.g. `val r = match n: case 1: 10 case _:
-        # 99`). Bug fix: this used to call parse_match_stmt_tail() and return
-        # its STATEMENT id here as if it were an expr id -- stmt-arena and
-        # expr-arena indices overlap, so the caller (expecting an expr id)
-        # silently read whatever unrelated EXPR happened to occupy that
-        # numeric slot (wrong-arena type confusion) instead of the match's
-        # real value, with no branches emitted downstream at all. Build a
-        # genuine expr_match_expr node instead so match-as-a-value is a real
-        # expression the rest of the pipeline (HIR MatchCase lowering, the
-        # flat-AST bridge) can consume like any other expr.
-        return parse_match_expr_tail()
+        return parse_match_stmt_tail()
     if par_kind_get() == 40:
         return parse_if_expr()
 
@@ -932,7 +859,62 @@ fn parse_primary_expr() -> i64:
     # G16: fn keyword (kind 20) in expression position
     if par_kind_get() == 20:
         parser_advance()
-        return parse_fn_lambda_after_kw()
+        # Parse parameter list
+        parser_expect(140)
+        var fn_param_names: [i64] = []
+        if par_kind_get() != 141:
+            val fn_p0 = par_text_get()
+            if par_kind_get() == 6 or par_kind_get() == 169:
+                parser_advance()
+                fn_param_names.push(expr_ident(fn_p0, 0))
+                if par_kind_get() == 161:
+                    parser_advance()
+                    parser_parse_type()
+                for fn_pi in 0..100:
+                    if par_kind_get() != 160:
+                        break
+                    parser_advance()
+                    if par_kind_get() == 141:
+                        break
+                    val fn_pn = par_text_get()
+                    if par_kind_get() == 6 or par_kind_get() == 169:
+                        parser_advance()
+                        fn_param_names.push(expr_ident(fn_pn, 0))
+                    if par_kind_get() == 161:
+                        parser_advance()
+                        parser_parse_type()
+        parser_expect(141)
+        # Optional return type: -> Type
+        if par_kind_get() == 167:
+            parser_advance()
+            parser_parse_type()
+        # Expect ':' then body
+        parser_expect(161)
+        # Block body or expression body (same pattern as backslash lambda)
+        var fn_lam_stmts: [i64] = []
+        if par_kind_get() == 180 or par_kind_get() == 181:
+            parser_skip_newlines()
+            var fn_blk: [i64] = []
+            if par_kind_get() == 181:
+                parser_advance()
+            for fn_bi in 0..100000:
+                parser_skip_newlines()
+                val fn_bk = par_kind_get()
+                if fn_bk == 182:
+                    parser_advance()
+                    break
+                if fn_bk == 141 or fn_bk == 160 or fn_bk == 190:
+                    break
+                val fn_s = parse_statement()
+                fn_blk.push(fn_s)
+                if parser_has_errors():
+                    break
+                parser_skip_newlines()
+            fn_lam_stmts.push(expr_block(fn_blk, -1, 0))
+        else:
+            val fn_body_e = parse_expr()
+            fn_lam_stmts.push(fn_body_e)
+        return expr_lambda(fn_param_names, fn_lam_stmts, 0)
 
     # loop: in EXPRESSION position (e.g. `val x = loop: ... break v`) is not
     # implemented: this fallback used to wrap the body in a plain one-shot
@@ -943,15 +925,15 @@ fn parse_primary_expr() -> i64:
     # value (bug #163 remainder). Statement-form `loop:` is unaffected —
     # it is desugared to `while true:` by parse_loop_stmt() in
     # parser_stmts.spl and still works correctly. Fail loudly here instead
-    # of silently returning a wrong value.
+    # of silently returning a wrong value. `loop` is also an established
+    # parameter name in optimizer code, so only the colon form starts the
+    # unsupported expression; member/index/bare uses remain identifiers.
     if par_kind_get() == 51:
-        parser_advance()
-        if par_kind_get() != TOK_COLON:
-            return expr_ident("loop", 0)
         parser_error("loop-as-expression with break-value is not supported (e.g. `val x = loop: ... break v`); use a `var` plus a statement-form `loop:` / `break` instead")
-        parser_expect(TOK_COLON)
+        parser_advance()
+        parser_expect(161)
         val loop_body_stmts = parse_block()
-        return expr_nil_lit(0)
+        return expr_block(loop_body_stmts, -1, 0)
 
     # G26: keyword used as identifier expression (e.g. `after.len()`)
     val pe_kw_name = tok_kind_name(par_kind_get())

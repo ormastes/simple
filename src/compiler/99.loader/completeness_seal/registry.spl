@@ -96,23 +96,29 @@ pub class Registry:
 pub fn empty_registry(seal_hash: text) -> Registry:
     Registry(seal_hash: seal_hash, generation: 0, module_ids: [], entries: [])
 
+fn _find_holder(entries: [RegistryEntry], op_key: text) -> text?:
+    for e in entries:
+        if e.op_key == op_key:
+            return Some(e.module_id)
+    None
+
 # Step 1 — BUILD. Produces the candidate table without touching `current`.
 fn _build(current: Registry, admitted: [AdmittedModule]) -> ([RegistryEntry], [text]):
     var entries: [RegistryEntry] = []
     for e in current.entries:
-        entries.push(e)
+        entries = entries + [e]
     var ids: [text] = []
     for m in current.module_ids:
-        ids.push(m)
+        ids = ids + [m]
     for a in admitted:
-        ids.push(a.module_id)
+        ids = ids + [a.module_id]
         var i: i64 = 0
         while i < a.op_keys.len():
-            entries.push(RegistryEntry(
+            entries = entries + [RegistryEntry(
                 op_key: a.op_keys[i],
                 handler: a.op_handlers[i],
                 module_id: a.module_id
-            ))
+            )]
             i = i + 1
     (entries, ids)
 
@@ -128,26 +134,17 @@ fn _validate(current: Registry, admitted: [AdmittedModule], next_generation: i64
     for a in admitted:
         if a.seal_hash != current.seal_hash:
             errors.push(RegistryError.SealDrift(a.module_id, current.seal_hash, a.seal_hash))
-    # Retain the first holder for each key.  `contains_key` plus indexed lookup
-    # is intentional: Dict.get has backend-specific optional decoding hazards,
-    # while this pair is the established compiler-safe lookup shape.  Scanning
-    # entries in encounter order and never replacing a holder preserves the
-    # exact legacy diagnostic order and first-provider attribution in O(n)
-    # expected time with O(u) auxiliary storage for u unique operation keys.
-    var first_holder_by_key: Dict<text, text> = {}
+    var seen: [RegistryEntry] = []
     for e in entries:
-        if first_holder_by_key.contains_key(e.op_key):
-            # Same-module re-registration is a duplicate too: a module that
-            # lists one operation twice has an ambiguous dispatch row, and
-            # silently keeping the first is how a table stops being a
-            # function.
-            errors.push(RegistryError.DuplicateOperation(
-                e.op_key,
-                first_holder_by_key[e.op_key],
-                e.module_id
-            ))
-        else:
-            first_holder_by_key[e.op_key] = e.module_id
+        match _find_holder(seen, e.op_key):
+            case Some(holder):
+                # Same-module re-registration is a duplicate too: a module that
+                # lists one operation twice has an ambiguous dispatch row, and
+                # silently keeping the first is how a table stops being a
+                # function.
+                errors.push(RegistryError.DuplicateOperation(e.op_key, holder, e.module_id))
+            case None:
+                seen = seen + [e]
 
 # Step 3 — SWAP. The new `Registry` is constructed only after validation
 # passed, and it is the function's only success value: there is no path that

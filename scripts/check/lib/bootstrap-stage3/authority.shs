@@ -9,6 +9,14 @@ bootstrap_stage3_provenance_fail() {
     return 1
 }
 
+bootstrap_stage3_regular_input() {
+    [ "$#" = 1 ] && [ -f "$1" ] || return 1
+    [ ! -L "$1" ] && return 0
+    [ "${BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE:-0}" = 1 ] || return 1
+    case "$1" in /proc/[1-9][0-9]*/fd/[1-9][0-9]*) return 0 ;; esac
+    return 1
+}
+
 bootstrap_stage3_hash_file() {
     [ -f "$1" ] || return 1
     if command -v sha256sum >/dev/null 2>&1; then
@@ -34,103 +42,10 @@ bootstrap_stage3_hash_stream() {
     fi
 }
 
-# Hash an ordered newline-delimited path manifest without starting a hash and
-# parser process for every file. The authority manifests already reject
-# newline-bearing paths; NUL-delimited xargs keeps every other shell character
-# opaque while batching to the host's argument limit. sha256/openssl retain the
-# portable single-file path because their multi-file output formats differ.
-bootstrap_stage3_hash_path_list() {
-    [ "$#" -eq 1 ] || return 1
-    bootstrap_stage3_hash_paths=$1
-    [ -f "$bootstrap_stage3_hash_paths" ] || return 1
-    [ -s "$bootstrap_stage3_hash_paths" ] || return 0
-    if command -v xargs >/dev/null 2>&1 &&
-        printf '' | xargs -0 true >/dev/null 2>&1; then
-        if command -v sha256sum >/dev/null 2>&1; then
-            while IFS= read -r bootstrap_stage3_hash_path; do
-                printf '%s\0' "$bootstrap_stage3_hash_path"
-            done <"$bootstrap_stage3_hash_paths" |
-                xargs -0 sha256sum --
-            return
-        elif command -v shasum >/dev/null 2>&1; then
-            while IFS= read -r bootstrap_stage3_hash_path; do
-                printf '%s\0' "$bootstrap_stage3_hash_path"
-            done <"$bootstrap_stage3_hash_paths" |
-                xargs -0 shasum -a 256 --
-            return
-        fi
-    fi
-    while IFS= read -r bootstrap_stage3_hash_path; do
-        bootstrap_stage3_path_hash=$(
-            bootstrap_stage3_hash_file "$bootstrap_stage3_hash_path"
-        ) || return 1
-        printf '%s  %s\n' "$bootstrap_stage3_path_hash" \
-            "$bootstrap_stage3_hash_path" || return 1
-    done <"$bootstrap_stage3_hash_paths"
-}
-
 bootstrap_stage3_args_sha256() {
     for bootstrap_stage3_arg in "$@"; do
         printf '%s:%s\n' "${#bootstrap_stage3_arg}" "$bootstrap_stage3_arg"
     done | bootstrap_stage3_hash_stream
-}
-
-# Emit the Stage 3 diagnostic pass-through environment, one NAME=1 assignment
-# per line, in a fixed lexical order.
-#
-# WHY THIS EXISTS.  Stage 3 executes under `env -i` with an explicit allowlist
-# (see bootstrap_stage3_run_transcribed).  Every env-gated diagnostic probe
-# inside the compiler therefore reads EMPTY during Stage 3 and stays silent,
-# even when it was compiled into the admitted Stage 2 binary.  Measured
-# 2026-08-17: SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE's literal is present in the
-# admitted Stage 2 binary (`strings`) yet emitted zero lines in Stage 3.  About
-# ten probes on the Stage 3 compile path were unreachable for the same reason.
-# See doc/08_tracking/bug/stage3_env_gated_probes_unreachable_2026-08-17.md.
-#
-# WHY IT CANNOT WEAKEN THE PROVENANCE GATE.
-#  1. NAME allowlist.  Only the fixed names below are considered; there is no
-#     prefix rule, no wildcard, and no "pass everything" escape.  Each was
-#     read and confirmed to be a pure `if env == "1": print ...` gate on the
-#     Stage 3 compile path.  Deliberately EXCLUDED: any path- or level-valued
-#     knob (SIMPLE_DIAG_FILE, SIMPLE_MEM_DUMP_PATH, SIMPLE_KEEP_LLVM_IR,
-#     SIMPLE_DEBUG_INFO_LEVEL, SIMPLE_OBJDUMP) -- those write files, run tools,
-#     or change debug info in the emitted object, i.e. they can alter what
-#     Stage 3 BUILDS rather than only what it PRINTS.
-#  2. VALUE is constrained to the single literal `1`.  Any other value
-#     (including `0`, `2`, a path, or the empty string) is dropped.  A
-#     pass-through var therefore cannot carry a payload into the compiler; it
-#     can only flip a print gate on.  This also makes the emitted list safe for
-#     unquoted word splitting by construction.
-#  3. The emitted assignments are appended to the SAME explicit-env vector that
-#     both bootstrap_stage3_args_sha256 and the recorded command transcript
-#     consume, so the args hash and the transcript keep describing the real
-#     invocation.  Turning a probe on DOES change stage3_build_args_sha256 --
-#     that is correct and intended: a hash that omitted part of the environment
-#     would be the weaker gate.
-#  4. With no allowlisted var set to 1 this emits nothing, so the explicit-env
-#     vector, the transcript bytes, and the args hash are unchanged.
-#
-# Note the seed-delegation gate greps the Stage 3 log for `^Build complete: N
-# compiled` / `^Linked: ... via clang` and FAILS on their presence.  A probe can
-# only ADD lines, so this pass-through can make that gate fail closed but can
-# never make it falsely pass.
-bootstrap_stage3_diagnostic_env() {
-    for bootstrap_stage3_diag_name in \
-        SIMPLE_BOOTSTRAP_DIAG \
-        SIMPLE_COMPILER_TRACE \
-        SIMPLE_HIR_EXPORT_ORIGIN_TRACE \
-        SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE \
-        SIMPLE_HIR_SIBLING_TRACE \
-        SIMPLE_MIRB_TRACE \
-        SIMPLE_MIR_DEFAULT_PAD_TRACE \
-        SIMPLE_MIR_FIELD_TRACE \
-        SIMPLE_MIR_RET_TRACE; do
-        bootstrap_stage3_diag_value=$(
-            eval "printf '%s' \"\${${bootstrap_stage3_diag_name}-}\""
-        ) || return 1
-        [ "$bootstrap_stage3_diag_value" = 1 ] || continue
-        printf '%s=1\n' "$bootstrap_stage3_diag_name"
-    done
 }
 
 # Return one canonical absolute path and reject a symlinked leaf.  pwd -P
@@ -156,6 +71,35 @@ bootstrap_stage3_canonical_file() {
     bootstrap_stage3_canonical_path "$1"
 }
 
+# Resolve the one writable Cargo/seed authority target. Callers may place the
+# whole target on a larger filesystem, but may not split generations, markers,
+# locks, and the compatibility view across trust roots. The parent must already
+# exist and both the requested leaf and its parent chain are resolved without
+# accepting a symlink leaf.
+bootstrap_stage3_prepare_authority_target_root() {
+    [ "$#" -eq 1 ] || return 1
+    bootstrap_stage3_authority_requested=$1
+    case "$bootstrap_stage3_authority_requested" in /*) ;; *) return 1 ;; esac
+    [ ! -L "$bootstrap_stage3_authority_requested" ] || return 1
+    bootstrap_stage3_authority_canonical=$(
+        bootstrap_stage3_canonical_path \
+            "$bootstrap_stage3_authority_requested"
+    ) || return 1
+    if [ -e "$bootstrap_stage3_authority_requested" ]; then
+        [ -d "$bootstrap_stage3_authority_requested" ] || return 1
+    else
+        mkdir "$bootstrap_stage3_authority_canonical" || return 1
+    fi
+    [ -d "$bootstrap_stage3_authority_canonical" ] &&
+        [ ! -L "$bootstrap_stage3_authority_canonical" ] || return 1
+    bootstrap_stage3_authority_physical=$(
+        CDPATH= cd -- "$bootstrap_stage3_authority_canonical" && pwd -P
+    ) || return 1
+    [ "$bootstrap_stage3_authority_physical" = \
+        "$bootstrap_stage3_authority_canonical" ] || return 1
+    printf '%s\n' "$bootstrap_stage3_authority_canonical"
+}
+
 # Bind an existing directory authority to its physical root.  A worktree may
 # intentionally provide the authority root as a symlink to a completed Rust
 # bootstrap tree.  Resolving only the root keeps directory_snapshot's stricter
@@ -175,13 +119,6 @@ bootstrap_stage3_host_platform() {
         arm64:Linux|aarch64:Linux) echo aarch64-unknown-linux-gnu ;;
         x86_64:FreeBSD) echo x86_64-unknown-freebsd ;;
         arm64:FreeBSD|aarch64:FreeBSD) echo aarch64-unknown-freebsd ;;
-        x86_64:MINGW*|x86_64:MSYS*|x86_64:CYGWIN*|x86_64:Windows*)
-            case "${SIMPLE_WINDOWS_ABI:-${MSYSTEM:+gnu}}" in
-                gnu) echo x86_64-pc-windows-gnu ;;
-                ""|msvc) echo x86_64-pc-windows-msvc ;;
-                *) return 1 ;;
-            esac
-            ;;
         *) return 1 ;;
     esac
 }
@@ -594,20 +531,8 @@ bootstrap_stage3_tool_authority_snapshot() (
     ) || return 1
     [ -n "$bootstrap_stage3_real_rustc" ] &&
         [ -n "$bootstrap_stage3_real_cargo" ] || return 1
-    bootstrap_stage3_tool_c_name=cc
-    case "$(bootstrap_stage3_host_platform)" in
-        *-pc-windows-msvc)
-            bootstrap_stage3_tool_c_path=$(
-                bootstrap_stage3_target_c_compiler \
-                    "$(bootstrap_stage3_host_platform)"
-            ) || return 1
-            bootstrap_stage3_tool_c_name=$(basename \
-                "$bootstrap_stage3_tool_c_path")
-            bootstrap_stage3_tool_c_name=${bootstrap_stage3_tool_c_name%.exe}
-            ;;
-    esac
     for bootstrap_stage3_tool_name in \
-        cargo rustc "$bootstrap_stage3_tool_c_name" clang ld ar ranlib sh env perl sed file \
+        cargo rustc cc clang ld ar ranlib sh env perl sed file \
         shasum openssl; do
         bootstrap_stage3_tool_requested=$(
             command -v "$bootstrap_stage3_tool_name" 2>/dev/null
@@ -736,6 +661,78 @@ bootstrap_stage3_tool_authority_snapshot() (
     mv "$bootstrap_stage3_tool_tmp" "$bootstrap_stage3_tool_output"
 )
 
+# Capture retry inputs before the caller removes any prior provenance/cache.
+# Keep the snapshots beside the eventual provenance directory so promotion is
+# a same-filesystem rename and the exact preflight bytes become the receipts.
+bootstrap_stage3_retry_preflight() {
+    bootstrap_stage3_retry_stage=$1
+    bootstrap_stage3_retry_path=$2
+    bootstrap_stage3_retry_root=$3
+    case "$bootstrap_stage3_retry_stage:$bootstrap_stage3_retry_root" in
+        /*:/*) ;;
+        *) return 1 ;;
+    esac
+    [ "$(bootstrap_stage3_canonical_path \
+        "$bootstrap_stage3_retry_root")" = \
+        "$bootstrap_stage3_retry_root" ] || return 1
+    bootstrap_stage3_retry_parent=$(
+        CDPATH= cd -- "$(dirname -- "$bootstrap_stage3_retry_stage")" &&
+            pwd -P
+    ) || return 1
+    [ ! -L "$(dirname -- "$bootstrap_stage3_retry_stage")" ] || return 1
+    [ "$bootstrap_stage3_retry_stage" = \
+        "$bootstrap_stage3_retry_parent/$(basename -- "$bootstrap_stage3_retry_stage")" ] ||
+        return 1
+    case "$bootstrap_stage3_retry_stage" in
+        "$bootstrap_stage3_retry_root"|"$bootstrap_stage3_retry_root/src"|\
+        "$bootstrap_stage3_retry_root/src/"*) return 1 ;;
+    esac
+    [ ! -L "$bootstrap_stage3_retry_stage" ] || return 1
+    bootstrap_stage3_retry_dir="${bootstrap_stage3_retry_stage}.preflight.$$"
+    [ ! -e "$bootstrap_stage3_retry_dir" ] &&
+        [ ! -L "$bootstrap_stage3_retry_dir" ] || return 1
+    (umask 077 && mkdir "$bootstrap_stage3_retry_dir") || return 1
+    bootstrap_stage3_retry_tool="$bootstrap_stage3_retry_dir/tool-authority-before.txt"
+    bootstrap_stage3_retry_git="$bootstrap_stage3_retry_dir/git-state-before.env"
+    bootstrap_stage3_retry_source="$bootstrap_stage3_retry_dir/source-inputs-before.txt"
+    bootstrap_stage3_tool_authority_snapshot \
+        "$bootstrap_stage3_retry_tool" "$bootstrap_stage3_retry_path" \
+        "$bootstrap_stage3_retry_root" &&
+        bootstrap_stage3_git_state "$bootstrap_stage3_retry_root" \
+            "$bootstrap_stage3_retry_git" &&
+        bootstrap_stage3_source_snapshot "$bootstrap_stage3_retry_source" \
+            "$bootstrap_stage3_retry_root" &&
+        chmod 0400 "$bootstrap_stage3_retry_tool" \
+            "$bootstrap_stage3_retry_git" "$bootstrap_stage3_retry_source" || {
+        rm -rf "$bootstrap_stage3_retry_dir"
+        return 1
+    }
+    printf '%s\n' "$bootstrap_stage3_retry_dir"
+}
+
+bootstrap_stage3_promote_retry_preflight() {
+    bootstrap_stage3_retry_dir=$1
+    bootstrap_stage3_retry_stage=$2
+    [ -d "$bootstrap_stage3_retry_dir" ] &&
+        [ ! -L "$bootstrap_stage3_retry_dir" ] &&
+        [ -d "$bootstrap_stage3_retry_stage" ] &&
+        [ ! -L "$bootstrap_stage3_retry_stage" ] || return 1
+    for bootstrap_stage3_retry_name in \
+        tool-authority-before.txt git-state-before.env source-inputs-before.txt; do
+        bootstrap_stage3_retry_file=\
+"$bootstrap_stage3_retry_dir/$bootstrap_stage3_retry_name"
+        [ -f "$bootstrap_stage3_retry_file" ] &&
+            [ ! -L "$bootstrap_stage3_retry_file" ] &&
+            [ "$(bootstrap_stage3_canonical_file \
+                "$bootstrap_stage3_retry_file")" = \
+                "$bootstrap_stage3_retry_file" ] || return 1
+        mv "$bootstrap_stage3_retry_file" \
+            "$bootstrap_stage3_retry_stage/$bootstrap_stage3_retry_name" ||
+            return 1
+    done
+    rmdir "$bootstrap_stage3_retry_dir"
+}
+
 bootstrap_stage3_directory_snapshot() {
     bootstrap_stage3_directory_snapshot_output=$1
     bootstrap_stage3_directory_snapshot_root=$2
@@ -757,12 +754,14 @@ bootstrap_stage3_directory_snapshot() {
                     return if $absolute eq $root;
                     -l $absolute and die "authority symlink rejected\n";
                     return unless -f $absolute;
-                    my $sha = Digest::SHA->new(256);
-                    $sha->addfile($absolute, "b") or die "hash\n";
+                    open my $fh, "<:raw", $absolute or die "open\n";
+                    local $/;
+                    my $bytes = <$fh>;
+                    close $fh or die "close\n";
                     my $relative = substr($absolute, length($root) + 1);
                     push @records, join(
                         ":", "file-hex", unpack("H*", $relative),
-                        (-x $absolute ? 1 : 0), $sha->hexdigest
+                        (-x $absolute ? 1 : 0), sha256_hex($bytes)
                     );
                 },
             },
@@ -1031,7 +1030,12 @@ bootstrap_stage3_write_seed_stamp() {
         [ -f "$bootstrap_stage3_stamp_native_all" ] || return 1
     bootstrap_stage3_stamp_backfill_status=absent
     bootstrap_stage3_stamp_backfill_sha=absent
-    if [ -f "$bootstrap_stage3_stamp_backfill" ]; then
+    if [ "$bootstrap_stage3_stamp_backfill" = descriptor-absent ]; then
+        [ "$(bootstrap_stage3_manifest_value backfill_status \
+            "$bootstrap_stage3_stamp")" = absent ] &&
+            [ "$(bootstrap_stage3_manifest_value backfill_sha256 \
+                "$bootstrap_stage3_stamp")" = absent ] || return 1
+    elif [ -f "$bootstrap_stage3_stamp_backfill" ]; then
         bootstrap_stage3_stamp_backfill_status=present
         bootstrap_stage3_stamp_backfill_sha=$(
             bootstrap_stage3_hash_file "$bootstrap_stage3_stamp_backfill"
@@ -1056,8 +1060,7 @@ bootstrap_stage3_verify_seed_stamp() {
     bootstrap_stage3_stamp_seed=$3
     bootstrap_stage3_stamp_native_all=$4
     bootstrap_stage3_stamp_backfill=$5
-    [ -f "$bootstrap_stage3_stamp" ] &&
-        [ ! -L "$bootstrap_stage3_stamp" ] || return 1
+    bootstrap_stage3_regular_input "$bootstrap_stage3_stamp" || return 1
     [ "$(bootstrap_stage3_manifest_value schema \
         "$bootstrap_stage3_stamp")" = \
         simple-bootstrap-seed-artifact-stamp-v2 ] || return 1
@@ -1419,22 +1422,829 @@ bootstrap_stage3_publish_compatibility_pointer() {
     rm -f "$bootstrap_stage3_compatibility_marker"
 }
 
+# A test-only three-FIFO rendezvous lets mutation tests stop at an exact snapshot
+# boundary without executing an environment-provided command or relying on a
+# scheduler race. Production calls do nothing unless the named point matches.
+bootstrap_stage3_git_test_barrier() {
+    [ "$#" -eq 1 ] || return 1
+    [ "${BOOTSTRAP_STAGE3_TEST_GIT_BARRIER_POINT:-}" = "$1" ] ||
+        return 0
+    bootstrap_stage3_git_barrier_reached=\
+${BOOTSTRAP_STAGE3_TEST_GIT_BARRIER_REACHED:-}
+    bootstrap_stage3_git_barrier_release=\
+${BOOTSTRAP_STAGE3_TEST_GIT_BARRIER_RELEASE:-}
+    bootstrap_stage3_git_barrier_ack=\
+${BOOTSTRAP_STAGE3_TEST_GIT_BARRIER_ACK:-}
+    bootstrap_stage3_git_barrier_token=\
+${BOOTSTRAP_STAGE3_TEST_GIT_BARRIER_TOKEN:-}
+    perl -MErrno=EAGAIN,EWOULDBLOCK,EINTR,ENXIO \
+        -MFcntl=:DEFAULT,:mode -MTime::HiRes -e '
+        use strict;
+        use warnings;
+        my ($point, $reached, $release, $ack_path, $token) = @ARGV;
+        length($token) or die "barrier token missing\n";
+        my $deadline = Time::HiRes::time() + 5.0;
+
+        sub same_fifo {
+            my ($left, $right) = @_;
+            return @$left && @$right &&
+                S_ISFIFO($left->[2]) && S_ISFIFO($right->[2]) &&
+                $left->[0] == $right->[0] &&
+                $left->[1] == $right->[1] &&
+                $left->[2] == $right->[2] &&
+                $left->[6] == $right->[6];
+        }
+
+        sub open_fifo_before {
+            my ($path, $flags, $role) = @_;
+            while (Time::HiRes::time() < $deadline) {
+                my @before = Time::HiRes::lstat($path);
+                @before && S_ISFIFO($before[2])
+                    or die "$role barrier is not a FIFO\n";
+                if (sysopen(my $fh, $path, $flags | O_NONBLOCK)) {
+                    my @opened = Time::HiRes::stat($fh);
+                    same_fifo(\@before, \@opened)
+                        or die "$role barrier identity raced\n";
+                    return ($fh, \@opened);
+                }
+                ($! == EAGAIN || $! == EWOULDBLOCK || $! == EINTR ||
+                    $! == ENXIO) or die "open $role barrier: $!\n";
+                Time::HiRes::sleep(0.01);
+            }
+            die "$role barrier open timed out\n";
+        }
+
+        my ($notify, $notify_stat) =
+            open_fifo_before($reached, O_WRONLY, "notification");
+        my $message = "$point:$token\n";
+        my $written = syswrite($notify, $message);
+        defined($written) && $written == length($message)
+            or die "write notification barrier: $!\n";
+        my @notify_after = Time::HiRes::lstat($reached);
+        same_fifo($notify_stat, \@notify_after)
+            or die "notification barrier changed\n";
+        close($notify) or die "close notification barrier: $!\n";
+
+        my ($resume, $resume_stat) =
+            open_fifo_before($release, O_RDONLY, "release");
+        my $ack = "";
+        while (Time::HiRes::time() < $deadline) {
+            my $chunk = "";
+            my $read = sysread($resume, $chunk, 64 - length($ack));
+            if (defined($read) && $read > 0) {
+                $ack .= $chunk;
+                last if $ack =~ /\n\z/;
+                length($ack) < 64 or die "release barrier oversized\n";
+            } elsif (!defined($read) &&
+                    !($! == EAGAIN || $! == EWOULDBLOCK || $! == EINTR)) {
+                die "read release barrier: $!\n";
+            }
+            Time::HiRes::sleep(0.01);
+        }
+        $ack eq "continue:$token\n"
+            or die "release barrier timed out or invalid\n";
+        my @resume_after = Time::HiRes::lstat($release);
+        same_fifo($resume_stat, \@resume_after)
+            or die "release barrier changed\n";
+        close($resume) or die "close release barrier: $!\n";
+        my ($accepted, $accepted_stat) =
+            open_fifo_before($ack_path, O_WRONLY, "acknowledgement");
+        my $receipt = "accepted:$token\n";
+        my $receipt_written = syswrite($accepted, $receipt);
+        defined($receipt_written) && $receipt_written == length($receipt)
+            or die "write acknowledgement barrier: $!\n";
+        my @accepted_after = Time::HiRes::lstat($ack_path);
+        same_fifo($accepted_stat, \@accepted_after)
+            or die "acknowledgement barrier changed\n";
+        close($accepted) or die "close acknowledgement barrier: $!\n";
+    ' "$1" "$bootstrap_stage3_git_barrier_reached" \
+        "$bootstrap_stage3_git_barrier_release" \
+        "$bootstrap_stage3_git_barrier_ack" \
+        "$bootstrap_stage3_git_barrier_token"
+}
+
+# Append canonical records for one NUL-delimited Git pathname enumeration.
+# Perl receives undecoded bytes, sorts them bytewise, and binds regular files
+# to descriptors before hashing. The length-prefixed legacy record shape is
+# injective for every non-NUL POSIX pathname and remains byte-for-byte
+# compatible for the previously supported ASCII pathname set.
+bootstrap_stage3_git_hash_regular() {
+    [ "$#" -eq 1 ] || return 1
+    perl -MDigest::SHA -MFcntl=:DEFAULT,:mode -MTime::HiRes -e '
+        use strict;
+        use warnings;
+        my ($path) = @ARGV;
+        my @before = Time::HiRes::lstat($path);
+        @before && S_ISREG($before[2]) or die "hash input not regular\n";
+        my $flags = O_RDONLY | O_NONBLOCK;
+        $flags |= O_NOFOLLOW if defined(&O_NOFOLLOW);
+        sysopen(my $fh, $path, $flags) or die "open hash input: $!\n";
+        my @opened = Time::HiRes::stat($fh);
+        @opened && S_ISREG($opened[2]) &&
+            $before[0] == $opened[0] && $before[1] == $opened[1] &&
+            $before[2] == $opened[2] && $before[3] == $opened[3] &&
+            $before[4] == $opened[4] && $before[5] == $opened[5] &&
+            $before[6] == $opened[6] && $before[7] == $opened[7] &&
+            $before[9] == $opened[9] && $before[10] == $opened[10]
+            or die "hash input identity raced\n";
+        my $opened_flags = fcntl($fh, F_GETFL, 0);
+        defined($opened_flags) or die "get hash input flags: $!\n";
+        defined(fcntl($fh, F_SETFL, $opened_flags & ~O_NONBLOCK))
+            or die "clear hash input nonblocking flag: $!\n";
+        binmode($fh) or die "binmode hash input: $!\n";
+        my $sha = Digest::SHA->new(256);
+        $sha->addfile($fh);
+        my @after_fd = Time::HiRes::stat($fh);
+        my @after_path = Time::HiRes::lstat($path);
+        # This reader does not create a hard link.  A concurrent link(2)
+        # changes both nlink and ctime and therefore invalidates this snapshot.
+        # The publication helper below audits its own expected nlink/ctime
+        # transitions separately.
+        for my $index (0, 1, 2, 3, 4, 5, 6, 7, 9, 10) {
+            $opened[$index] == $after_fd[$index] &&
+                $opened[$index] == $after_path[$index]
+                or die "hash input changed while reading\n";
+        }
+        close($fh) or die "close hash input: $!\n";
+        print $sha->hexdigest, "\n";
+    ' "$1"
+}
+
+bootstrap_stage3_git_write_new_regular() {
+    [ "$#" -eq 2 ] || return 1
+    perl -MFcntl=:DEFAULT,:mode -MTime::HiRes -e '
+        use strict;
+        use warnings;
+        use bytes;
+        my ($path, $payload) = @ARGV;
+        $payload .= "\n";
+        my $flags = O_WRONLY | O_CREAT | O_EXCL | O_NONBLOCK;
+        $flags |= O_NOFOLLOW if defined(&O_NOFOLLOW);
+        sysopen(my $fh, $path, $flags, 0600)
+            or die "create record file: $!\n";
+        my @opened = Time::HiRes::stat($fh);
+        @opened && S_ISREG($opened[2])
+            or die "record file is not regular\n";
+        my $opened_flags = fcntl($fh, F_GETFL, 0);
+        defined($opened_flags) or die "get record file flags: $!\n";
+        defined(fcntl($fh, F_SETFL, $opened_flags & ~O_NONBLOCK))
+            or die "clear record file nonblocking flag: $!\n";
+        binmode($fh) or die "binmode record file: $!\n";
+        my $written = syswrite($fh, $payload);
+        defined($written) && $written == length($payload)
+            or die "write record file: $!\n";
+        my @after_fd = Time::HiRes::stat($fh);
+        my @after_path = Time::HiRes::lstat($path);
+        @after_path && S_ISREG($after_path[2]) &&
+            $opened[0] == $after_fd[0] && $opened[0] == $after_path[0] &&
+            $opened[1] == $after_fd[1] && $opened[1] == $after_path[1] &&
+            $opened[2] == $after_fd[2] && $opened[2] == $after_path[2] &&
+            $after_fd[7] == length($payload) &&
+            $after_path[7] == length($payload)
+            or die "record file changed while writing\n";
+        close($fh) or die "close record file: $!\n";
+    ' "$1" "$2"
+}
+
+bootstrap_stage3_git_untracked_records() {
+    [ "$#" -eq 3 ] || return 1
+    perl -MDigest::SHA -MErrno=EAGAIN,EWOULDBLOCK,EINTR,ENXIO \
+        -MFcntl=:DEFAULT,:mode -MTime::HiRes -e '
+        use strict;
+        use warnings;
+        use bytes;
+
+        sub same_identity {
+            my ($left, $right) = @_;
+            return @$left && @$right &&
+                $left->[0] == $right->[0] &&
+                $left->[1] == $right->[1] &&
+                $left->[2] == $right->[2] &&
+                $left->[3] == $right->[3] &&
+                $left->[4] == $right->[4] &&
+                $left->[5] == $right->[5] &&
+                $left->[6] == $right->[6];
+        }
+
+        sub same_stat {
+            my ($left, $right) = @_;
+            return same_identity($left, $right) &&
+                $left->[7] == $right->[7] &&
+                $left->[9] == $right->[9] &&
+                $left->[10] == $right->[10];
+        }
+
+        sub clear_nonblocking {
+            my ($fh, $label) = @_;
+            my $flags = fcntl($fh, F_GETFL, 0);
+            defined($flags) or die "get $label flags: $!\n";
+            defined(fcntl($fh, F_SETFL, $flags & ~O_NONBLOCK))
+                or die "clear $label nonblocking flag: $!\n";
+        }
+
+        sub open_bound_regular {
+            my ($path, $open_flags, $label) = @_;
+            my @before = Time::HiRes::lstat($path);
+            @before && S_ISREG($before[2])
+                or die "$label is not a regular file\n";
+            my $flags = $open_flags | O_NONBLOCK;
+            $flags |= O_NOFOLLOW if defined(&O_NOFOLLOW);
+            sysopen(my $fh, $path, $flags)
+                or die "open $label: $!\n";
+            my @opened = Time::HiRes::stat($fh);
+            @opened && S_ISREG($opened[2]) &&
+                same_stat(\@before, \@opened)
+                or die "$label identity raced\n";
+            clear_nonblocking($fh, $label);
+            return ($fh, \@opened);
+        }
+
+        sub same_fifo {
+            my ($left, $right) = @_;
+            return same_identity($left, $right) &&
+                S_ISFIFO($left->[2]) && S_ISFIFO($right->[2]);
+        }
+
+        sub open_fifo_before {
+            my ($path, $flags, $role, $deadline) = @_;
+            while (Time::HiRes::time() < $deadline) {
+                my @before = Time::HiRes::lstat($path);
+                @before && S_ISFIFO($before[2])
+                    or die "$role barrier is not a FIFO\n";
+                if (sysopen(my $fh, $path, $flags | O_NONBLOCK)) {
+                    my @opened = Time::HiRes::stat($fh);
+                    same_fifo(\@before, \@opened)
+                        or die "$role barrier identity raced\n";
+                    return ($fh, \@opened);
+                }
+                ($! == EAGAIN || $! == EWOULDBLOCK || $! == EINTR ||
+                    $! == ENXIO) or die "open $role barrier: $!\n";
+                Time::HiRes::sleep(0.01);
+            }
+            die "$role barrier open timed out\n";
+        }
+
+        sub test_barrier {
+            my ($point, $path) = @_;
+            return unless
+                ($ENV{BOOTSTRAP_STAGE3_TEST_GIT_BARRIER_POINT} // "") eq
+                    $point;
+            my $match =
+                $ENV{BOOTSTRAP_STAGE3_TEST_GIT_BARRIER_MATCH_PATH};
+            defined($match) && length($match)
+                or die "test barrier match path missing\n";
+            return unless $path eq $match;
+            my $reached =
+                $ENV{BOOTSTRAP_STAGE3_TEST_GIT_BARRIER_REACHED} // "";
+            my $release =
+                $ENV{BOOTSTRAP_STAGE3_TEST_GIT_BARRIER_RELEASE} // "";
+            my $ack_path =
+                $ENV{BOOTSTRAP_STAGE3_TEST_GIT_BARRIER_ACK} // "";
+            my $token =
+                $ENV{BOOTSTRAP_STAGE3_TEST_GIT_BARRIER_TOKEN} // "";
+            length($token) or die "test barrier token missing\n";
+            my $deadline = Time::HiRes::time() + 5.0;
+            my ($notify, $notify_stat) =
+                open_fifo_before($reached, O_WRONLY, "notification",
+                    $deadline);
+            my $message = "$point:$token\n";
+            my $written = syswrite($notify, $message);
+            defined($written) && $written == length($message)
+                or die "write notification barrier: $!\n";
+            my @notify_after = Time::HiRes::lstat($reached);
+            same_fifo($notify_stat, \@notify_after)
+                or die "notification barrier changed\n";
+            close($notify) or die "close notification barrier: $!\n";
+
+            my ($resume, $resume_stat) =
+                open_fifo_before($release, O_RDONLY, "release", $deadline);
+            my $ack = "";
+            while (Time::HiRes::time() < $deadline) {
+                my $chunk = "";
+                my $read = sysread($resume, $chunk, 64 - length($ack));
+                if (defined($read) && $read > 0) {
+                    $ack .= $chunk;
+                    last if $ack =~ /\n\z/;
+                    length($ack) < 64
+                        or die "release barrier oversized\n";
+                } elsif (!defined($read) &&
+                        !($! == EAGAIN || $! == EWOULDBLOCK ||
+                            $! == EINTR)) {
+                    die "read release barrier: $!\n";
+                }
+                Time::HiRes::sleep(0.01);
+            }
+            $ack eq "continue:$token\n"
+                or die "release barrier timed out or invalid\n";
+            my @resume_after = Time::HiRes::lstat($release);
+            same_fifo($resume_stat, \@resume_after)
+                or die "release barrier changed\n";
+            close($resume) or die "close release barrier: $!\n";
+            my ($accepted, $accepted_stat) =
+                open_fifo_before($ack_path, O_WRONLY, "acknowledgement",
+                    $deadline);
+            my $receipt = "accepted:$token\n";
+            my $receipt_written = syswrite($accepted, $receipt);
+            defined($receipt_written) &&
+                $receipt_written == length($receipt)
+                or die "write acknowledgement barrier: $!\n";
+            my @accepted_after = Time::HiRes::lstat($ack_path);
+            same_fifo($accepted_stat, \@accepted_after)
+                or die "acknowledgement barrier changed\n";
+            close($accepted)
+                or die "close acknowledgement barrier: $!\n";
+            if (($ENV{BOOTSTRAP_STAGE3_TEST_GIT_OPEN_DEVICE} // "") eq
+                    "1") {
+                -c "/dev/null" or die "test device unavailable\n";
+                return "/dev/null";
+            }
+            return;
+        }
+
+        my ($records_input, $records_output, $identities_output) = @ARGV;
+        defined($records_input) && defined($records_output) &&
+            defined($identities_output) && @ARGV == 3
+            or die "record input/output arguments missing\n";
+        my ($input, $input_stat) =
+            open_bound_regular($records_input, O_RDONLY, "record input");
+        binmode($input) or die "binmode record input: $!\n";
+        my @paths;
+        local $/ = "\0";
+        while (defined(my $path = <$input>)) {
+            substr($path, -1, 1) eq "\0"
+                or die "unterminated git path list\n";
+            chop($path);
+            length($path) or die "empty git path\n";
+            push @paths, $path;
+        }
+        my @input_after_fd = Time::HiRes::stat($input);
+        my @input_after_path = Time::HiRes::lstat($records_input);
+        same_stat($input_stat, \@input_after_fd) &&
+            same_stat($input_stat, \@input_after_path)
+            or die "record input changed while reading\n";
+        close($input) or die "close record input: $!\n";
+        @paths = sort { $a cmp $b } @paths;
+
+        sub file_digest {
+            my ($path, $before, $open_path) = @_;
+            # Opening a path that raced from a regular file to a FIFO must not
+            # block before descriptor validation can reject it. O_NONBLOCK is
+            # inert for regular files and makes special-file swaps fail closed.
+            my $flags = O_RDONLY | O_NONBLOCK;
+            $flags |= O_NOFOLLOW if defined(&O_NOFOLLOW);
+            sysopen(my $fh, $open_path, $flags)
+                or die "open untracked file: $!\n";
+            my @opened = Time::HiRes::stat($fh);
+            @opened && S_ISREG($opened[2]) &&
+                same_stat($before, \@opened)
+                or die "untracked file identity raced\n";
+            clear_nonblocking($fh, "untracked file");
+            # File tests on an open handle use fstat, so the executable bit is
+            # bound to the exact object being hashed instead of a pathname
+            # that may be replaced between open and record emission. The -x
+            # test preserves effective-user/group access semantics, including
+            # the owner-noexec/other-exec case exercised by the legacy test.
+            my $executable = -x $fh ? 1 : 0;
+            binmode($fh) or die "binmode untracked file: $!\n";
+            my $sha = Digest::SHA->new(256);
+            $sha->addfile($fh);
+            my $digest = $sha->hexdigest;
+            my @after_fd = Time::HiRes::stat($fh);
+            my @after_path = Time::HiRes::lstat($path);
+            my $executable_after = -x $fh ? 1 : 0;
+            @after_path && S_ISREG($after_path[2]) &&
+                same_stat(\@opened, \@after_fd) &&
+                same_stat(\@opened, \@after_path) &&
+                $executable == $executable_after
+                or die "untracked file changed while hashing\n";
+            close($fh) or die "close untracked file: $!\n";
+            return ($digest, $executable, \@opened);
+        }
+
+        sub identity_record {
+            my ($kind, $path, $identity) = @_;
+            # This is a private, comparison-only snapshot.  Device/inode and
+            # the complete stable metadata are deliberately kept out of the
+            # published fingerprint so identical checkouts remain
+            # reproducible, but comparing them across the two live snapshots
+            # rejects a same-byte pathname replacement between passes.
+            return $kind . ":" . length($path) . ":" . $path . ":" .
+                join(":", map { $identity->[$_] }
+                    (0, 1, 2, 3, 4, 5, 6, 7, 9, 10)) . "\n";
+        }
+
+        my $records = "";
+        my $identities = "";
+        my $previous;
+        my $have_previous = 0;
+        for my $path (@paths) {
+            next if $have_previous && $path eq $previous;
+            $previous = $path;
+            $have_previous = 1;
+            my @before = Time::HiRes::lstat($path);
+            @before or die "untracked path missing: $!\n";
+            if (S_ISLNK($before[2])) {
+                my $target = readlink($path);
+                defined($target) or die "read untracked link: $!\n";
+                my @after = Time::HiRes::lstat($path);
+                my $target_after = readlink($path);
+                @after && S_ISLNK($after[2]) &&
+                    defined($target_after) &&
+                    same_stat(\@before, \@after) &&
+                    $target eq $target_after
+                    or die "untracked link changed while reading\n";
+                my $sha = Digest::SHA->new(256);
+                $sha->add($target);
+                $records .= "untracked-link:" . length($path) . ":" . $path .
+                    ":" . length($target) . ":" . $sha->hexdigest . "\n";
+                $identities .= identity_record("untracked-link", $path,
+                    \@after);
+            } elsif (S_ISREG($before[2])) {
+                my $open_path =
+                    test_barrier("before-untracked-open", $path);
+                $open_path = $path unless defined($open_path);
+                my ($digest, $executable, $identity) =
+                    file_digest($path, \@before, $open_path);
+                $records .= "untracked-file:" . length($path) . ":" .
+                    $path . ":" . $executable . ":" . $digest . "\n";
+                $identities .= identity_record("untracked-file", $path,
+                    $identity);
+            } else {
+                die "unsupported untracked path type\n";
+            }
+        }
+
+        my ($output, $output_stat) =
+            open_bound_regular($records_output, O_WRONLY | O_APPEND,
+                "record output");
+        binmode($output) or die "binmode record output: $!\n";
+        my $offset = 0;
+        while ($offset < length($records)) {
+            my $written = syswrite($output, $records,
+                length($records) - $offset, $offset);
+            defined($written) && $written > 0
+                or die "write record output: $!\n";
+            $offset += $written;
+        }
+        my @output_after_fd = Time::HiRes::stat($output);
+        my @output_after_path = Time::HiRes::lstat($records_output);
+        same_identity($output_stat, \@output_after_fd) &&
+            same_stat(\@output_after_fd, \@output_after_path) &&
+            $output_after_fd[7] == $output_stat->[7] + length($records)
+            or die "record output changed while writing\n";
+        close($output) or die "close record output: $!\n";
+
+        my ($identities_fh, $identities_stat) =
+            open_bound_regular($identities_output, O_WRONLY | O_APPEND,
+                "identity output");
+        binmode($identities_fh) or die "binmode identity output: $!\n";
+        $offset = 0;
+        while ($offset < length($identities)) {
+            my $written = syswrite($identities_fh, $identities,
+                length($identities) - $offset, $offset);
+            defined($written) && $written > 0
+                or die "write identity output: $!\n";
+            $offset += $written;
+        }
+        my @identities_after_fd = Time::HiRes::stat($identities_fh);
+        my @identities_after_path = Time::HiRes::lstat($identities_output);
+        same_identity($identities_stat, \@identities_after_fd) &&
+            same_stat(\@identities_after_fd, \@identities_after_path) &&
+            $identities_after_fd[7] ==
+                $identities_stat->[7] + length($identities)
+            or die "identity output changed while writing\n";
+        close($identities_fh) or die "close identity output: $!\n";
+    ' "$1" "$2" "$3"
+}
+
+# Publish the private O_EXCL-created result without replacing any existing
+# pathname.  The hard link is atomic/no-replace; success is returned only after
+# the exact linked inode and its parent directory are durable.  Any failure
+# after link performs an identity-checked unlink plus a second parent fsync.
+bootstrap_stage3_git_publish_regular() {
+    [ "$#" -eq 3 ] || return 1
+    perl -MCwd=getcwd -MErrno=EEXIST \
+        -MFile::Basename=dirname,basename -MFile::Spec \
+        -MFcntl=:DEFAULT,:mode -MIO::Handle -MTime::HiRes -e '
+        use strict;
+        use warnings;
+        use bytes;
+        my ($source, $destination, $temp_dir) = @ARGV;
+        my $initial_cwd = getcwd();
+        defined($initial_cwd) or die "get publication working directory: $!\n";
+        $source = File::Spec->rel2abs($source, $initial_cwd);
+        $destination = File::Spec->rel2abs($destination, $initial_cwd);
+        $temp_dir = File::Spec->rel2abs($temp_dir, $initial_cwd);
+
+        sub same_inode {
+            my ($left, $right) = @_;
+            return @$left && @$right &&
+                $left->[0] == $right->[0] && $left->[1] == $right->[1] &&
+                $left->[2] == $right->[2];
+        }
+        sub same_stable_file {
+            my ($left, $right) = @_;
+            return same_inode($left, $right) &&
+                $left->[4] == $right->[4] && $left->[5] == $right->[5] &&
+                $left->[6] == $right->[6] && $left->[7] == $right->[7] &&
+                $left->[9] == $right->[9];
+        }
+        sub same_complete_file {
+            my ($left, $right) = @_;
+            return same_stable_file($left, $right) &&
+                $left->[3] == $right->[3] &&
+                $left->[10] == $right->[10];
+        }
+        sub parent_path_identity {
+            my ($path) = @_;
+            return $path =~ m{\A/proc/[1-9][0-9]*/fd/[1-9][0-9]*\z}
+                ? Time::HiRes::stat($path)
+                : Time::HiRes::lstat($path);
+        }
+        sub open_parent {
+            my ($path) = @_;
+            my $procfd_parent =
+                $path =~ m{\A/proc/[1-9][0-9]*/fd/[1-9][0-9]*\z};
+            my @before = parent_path_identity($path);
+            @before && S_ISDIR($before[2])
+                or die "git-state output parent not directory\n";
+            my $flags = O_RDONLY | O_NONBLOCK;
+            $flags |= O_DIRECTORY if defined(&O_DIRECTORY);
+            $flags |= O_NOFOLLOW if defined(&O_NOFOLLOW) && !$procfd_parent;
+            sysopen(my $fh, $path, $flags)
+                or die "open git-state output parent: $!\n";
+            my @st = Time::HiRes::stat($fh);
+            @st && S_ISDIR($st[2]) && same_inode(\@before, \@st)
+                or die "git-state output parent identity raced\n";
+            my $opened_flags = fcntl($fh, F_GETFL, 0);
+            defined($opened_flags) or die "get output parent flags: $!\n";
+            defined(fcntl($fh, F_SETFL, $opened_flags & ~O_NONBLOCK))
+                or die "clear output parent nonblocking: $!\n";
+            return ($fh, \@st);
+        }
+        sub sync_parent {
+            my ($fh, $inject) = @_;
+            if ($inject &&
+                    ($ENV{BOOTSTRAP_STAGE3_TEST_GIT_PUBLISH_FSYNC_FAIL} // "")
+                        eq "1") {
+                die "injected git-state output parent fsync failure\n";
+            }
+            $fh->sync or die "fsync git-state output parent: $!\n";
+        }
+        my $parent_path = dirname($destination);
+        my $destination_leaf = basename($destination);
+        length($destination_leaf) && $destination_leaf ne "." &&
+            $destination_leaf ne ".." && index($destination_leaf, "/") < 0
+            or die "invalid git-state output leaf\n";
+        my ($parent_fh, $parent_identity) = open_parent($parent_path);
+        my $parent_fd = fileno($parent_fh);
+        defined($parent_fd) or die "git-state output parent descriptor missing\n";
+        # fchdir binds every relative link/lstat/unlink below to this already
+        # validated directory inode.  Renaming or replacing any pathname
+        # ancestor cannot redirect publication or rollback.
+        chdir($parent_fh) or die "bind git-state output parent: $!\n";
+        my $bound_destination = $destination_leaf;
+
+        my $flags = O_RDONLY | O_NONBLOCK;
+        $flags |= O_NOFOLLOW if defined(&O_NOFOLLOW);
+        sysopen(my $source_fh, $source, $flags)
+            or die "open git-state result: $!\n";
+        my @opened = Time::HiRes::stat($source_fh);
+        my @source_path = Time::HiRes::lstat($source);
+        @opened && @source_path && S_ISREG($opened[2]) &&
+            S_ISREG($source_path[2]) &&
+            $opened[0] == $source_path[0] &&
+            $opened[1] == $source_path[1] &&
+            $opened[2] == $source_path[2] &&
+            $opened[3] == $source_path[3] &&
+            $opened[4] == $source_path[4] &&
+            $opened[5] == $source_path[5] &&
+            $opened[6] == $source_path[6] &&
+            $opened[7] == $source_path[7] &&
+            $opened[9] == $source_path[9] &&
+            $opened[10] == $source_path[10]
+            or die "git-state result identity raced\n";
+        $source_fh->sync or die "fsync git-state result: $!\n";
+
+        my @destination_before = Time::HiRes::lstat($bound_destination);
+        !@destination_before
+            or die "publish git-state result collision\n";
+
+        my ($stage_leaf, $bound_stage);
+        for my $attempt (0 .. 31) {
+            $stage_leaf = sprintf(".stage3-git-state.%x.%x.%x",
+                $$, $opened[1], $attempt);
+            $bound_stage = $stage_leaf;
+            last if link($source, $bound_stage);
+            $! == EEXIST or die "stage git-state result: $!\n";
+            undef($bound_stage);
+        }
+        defined($bound_stage) or die "stage git-state result collision\n";
+
+        my $destination_linked = 0;
+        my $stage_owned = 1;
+        my $ok = eval {
+            my @after_stage_fd = Time::HiRes::stat($source_fh);
+            my @after_stage_path = Time::HiRes::lstat($bound_stage);
+            same_stable_file(\@opened, \@after_stage_fd) &&
+                same_complete_file(\@after_stage_fd, \@after_stage_path) &&
+                $after_stage_fd[3] == $opened[3] + 1
+                or die "staged git-state result identity raced\n";
+            sysopen(my $stage_fh, $bound_stage, $flags)
+                or die "open staged git-state result: $!\n";
+            my @stage_opened = Time::HiRes::stat($stage_fh);
+            same_complete_file(\@after_stage_fd, \@stage_opened)
+                or die "staged git-state descriptor identity raced\n";
+            if (($ENV{BOOTSTRAP_STAGE3_TEST_GIT_PUBLISH_CLEANUP_FAIL} // "")
+                    eq "1") {
+                die "injected git-state temporary cleanup failure\n";
+            }
+            unlink($source) or die "unlink private git-state result: $!\n";
+            my @after_source_unlink_fd = Time::HiRes::stat($source_fh);
+            my @after_source_unlink_stage_fd = Time::HiRes::stat($stage_fh);
+            my @after_source_unlink_stage = Time::HiRes::lstat($bound_stage);
+            same_complete_file(\@after_source_unlink_fd,
+                    \@after_source_unlink_stage_fd) &&
+                same_complete_file(\@after_source_unlink_fd,
+                    \@after_source_unlink_stage) &&
+                $after_source_unlink_fd[3] == $after_stage_fd[3] - 1
+                or die "staged git-state unlink transition raced\n";
+            close($source_fh) or die "close private git-state result: $!\n";
+            rmdir($temp_dir)
+                or die "remove private git-state directory: $!\n";
+
+            if (($ENV{BOOTSTRAP_STAGE3_TEST_GIT_PUBLISH_REPLACE_STAGE} // "")
+                    eq "1") {
+                unlink($bound_stage)
+                    or die "injected staged result unlink: $!\n";
+                my $replace_flags = O_WRONLY | O_CREAT | O_EXCL;
+                $replace_flags |= O_NOFOLLOW if defined(&O_NOFOLLOW);
+                sysopen(my $stage_replacement, $bound_stage,
+                    $replace_flags, 0600)
+                    or die "injected staged result replacement: $!\n";
+                my $payload = "injected-stage-replacement\n";
+                syswrite($stage_replacement, $payload) == length($payload)
+                    or die "write injected staged result replacement: $!\n";
+                $stage_replacement->sync
+                    or die "fsync injected staged result replacement: $!\n";
+                close($stage_replacement)
+                    or die "close injected staged result replacement: $!\n";
+            }
+
+            my @stage_before_link = Time::HiRes::stat($stage_fh);
+            my @stage_before_path = Time::HiRes::lstat($bound_stage);
+            same_complete_file(\@after_source_unlink_stage_fd,
+                    \@stage_before_link) &&
+                same_complete_file(\@stage_before_link, \@stage_before_path)
+                or die "staged git-state result changed before publish\n";
+            $stage_fh->sync or die "fsync staged git-state result: $!\n";
+
+            link($bound_stage, $bound_destination)
+                or die "publish git-state result no-replace: $!\n";
+            $destination_linked = 1;
+            my @after_link_fd = Time::HiRes::stat($stage_fh);
+            my @after_link_stage = Time::HiRes::lstat($bound_stage);
+            my @after_link_destination =
+                Time::HiRes::lstat($bound_destination);
+            same_stable_file(\@stage_before_link, \@after_link_fd) &&
+                same_complete_file(\@after_link_fd, \@after_link_stage) &&
+                same_complete_file(\@after_link_fd,
+                    \@after_link_destination) &&
+                $after_link_fd[3] == $stage_before_link[3] + 1
+                or die "published git-state link transition raced\n";
+
+            unlink($bound_stage)
+                or die "unlink staged git-state result: $!\n";
+            $stage_owned = 0;
+            my @after_stage_unlink_fd = Time::HiRes::stat($stage_fh);
+            my @after_stage_unlink_destination =
+                Time::HiRes::lstat($bound_destination);
+            same_complete_file(\@after_stage_unlink_fd,
+                    \@after_stage_unlink_destination) &&
+                $after_stage_unlink_fd[3] == $after_link_fd[3] - 1
+                or die "published git-state unlink transition raced\n";
+
+            my $moved_parent =
+                $ENV{BOOTSTRAP_STAGE3_TEST_GIT_PUBLISH_PARENT_RENAME};
+            if (defined($moved_parent) && length($moved_parent)) {
+                rename($parent_path, $moved_parent)
+                    or die "injected output parent rename: $!\n";
+                mkdir($parent_path, 0700)
+                    or die "injected output parent replacement: $!\n";
+            }
+            if (($ENV{BOOTSTRAP_STAGE3_TEST_GIT_PUBLISH_REPLACE_DESTINATION} // "")
+                    eq "1") {
+                unlink($bound_destination)
+                    or die "injected destination unlink: $!\n";
+                my $replace_flags = O_WRONLY | O_CREAT | O_EXCL;
+                $replace_flags |= O_NOFOLLOW if defined(&O_NOFOLLOW);
+                sysopen(my $replacement, $bound_destination,
+                    $replace_flags, 0600)
+                    or die "injected destination replacement: $!\n";
+                my $payload = "injected-replacement\n";
+                syswrite($replacement, $payload) == length($payload)
+                    or die "write injected destination replacement: $!\n";
+                $replacement->sync
+                    or die "fsync injected destination replacement: $!\n";
+                close($replacement)
+                    or die "close injected destination replacement: $!\n";
+            }
+
+            sync_parent($parent_fh, 1);
+            my @parent_after_fd = Time::HiRes::stat($parent_fh);
+            my @parent_after_path = parent_path_identity($parent_path);
+            same_inode($parent_identity, \@parent_after_fd) &&
+                same_inode($parent_identity, \@parent_after_path)
+                or die "git-state output parent identity changed\n";
+            my @final_bound = Time::HiRes::lstat($bound_destination);
+            my @final_path = Time::HiRes::lstat($destination);
+            same_complete_file(\@after_stage_unlink_fd, \@final_bound) &&
+                same_complete_file(\@after_stage_unlink_fd, \@final_path)
+                or die "final git-state destination identity raced\n";
+            close($stage_fh) or die "close staged git-state result: $!\n";
+            sync_parent($parent_fh, 0);
+            @parent_after_fd = Time::HiRes::stat($parent_fh);
+            @parent_after_path = parent_path_identity($parent_path);
+            same_inode($parent_identity, \@parent_after_fd) &&
+                same_inode($parent_identity, \@parent_after_path)
+                or die "git-state output parent changed before commit\n";
+            @final_bound = Time::HiRes::lstat($bound_destination);
+            @final_path = Time::HiRes::lstat($destination);
+            same_complete_file(\@after_stage_unlink_fd, \@final_bound) &&
+                same_complete_file(\@after_stage_unlink_fd, \@final_path)
+                or die "final git-state destination changed before commit\n";
+            1;
+        };
+        unless ($ok) {
+            my $reason = $@ || "git-state publication failed";
+            my $rollback_ok = 1;
+            if ($destination_linked) {
+                my @current = Time::HiRes::lstat($bound_destination);
+                if (@current && same_inode(\@opened, \@current)) {
+                    unlink($bound_destination) or $rollback_ok = 0;
+                } elsif (@current) {
+                    # A replacement is not the published inode and must survive.
+                }
+            }
+            if ($stage_owned) {
+                my @stage_now = Time::HiRes::lstat($bound_stage);
+                if (@stage_now && same_inode(\@opened, \@stage_now)) {
+                    unlink($bound_stage) or $rollback_ok = 0;
+                } elsif (@stage_now) {
+                    # A replacement is not the owned staging inode and must
+                    # survive just like an unrelated destination replacement.
+                }
+            }
+            eval { sync_parent($parent_fh, 0); 1 } or $rollback_ok = 0;
+            $rollback_ok
+                or die "$reason; git-state publication rollback failed\n";
+            die $reason;
+        }
+        # The final successful directory fsync and identity comparison above
+        # are the commit point.  No fallible cleanup remains after it; Perl
+        # process teardown closes the already-synced parent descriptor.
+    ' "$1" "$2" "$3"
+}
+
 # Bind the checked-out commit plus the actual tracked dirty bytes/symlink
 # targets and untracked bytes/symlink targets.  A porcelain path list alone is
 # insufficient because an already-dirty file can change without changing it.
 bootstrap_stage3_git_state() {
     bootstrap_stage3_git_root=$1
     bootstrap_stage3_git_output=$2
-    bootstrap_stage3_git_diff="${bootstrap_stage3_git_output}.diff.$$"
-    bootstrap_stage3_git_untracked="${bootstrap_stage3_git_output}.untracked.$$"
-    bootstrap_stage3_git_untracked_sorted="${bootstrap_stage3_git_output}.untracked.sorted.$$"
-    bootstrap_stage3_git_records="${bootstrap_stage3_git_output}.records.$$"
-    bootstrap_stage3_jj_stderr="${bootstrap_stage3_git_output}.jj-stderr.$$"
+    bootstrap_stage3_git_temp_parent=$(dirname -- \
+        "$bootstrap_stage3_git_output") || return 1
+    bootstrap_stage3_git_temp_name=$(basename -- \
+        "$bootstrap_stage3_git_output") || return 1
+    bootstrap_stage3_git_temp=$(
+        umask 077
+        mktemp -d \
+            "$bootstrap_stage3_git_temp_parent/.${bootstrap_stage3_git_temp_name}.git-state.XXXXXXXX"
+    ) || return 1
+    [ -d "$bootstrap_stage3_git_temp" ] &&
+        [ ! -L "$bootstrap_stage3_git_temp" ] || {
+        rmdir "$bootstrap_stage3_git_temp" 2>/dev/null || true
+        return 1
+    }
+    bootstrap_stage3_git_diff="$bootstrap_stage3_git_temp/tracked.diff"
+    bootstrap_stage3_git_diff_verify=\
+"$bootstrap_stage3_git_temp/tracked.verify.diff"
+    bootstrap_stage3_git_untracked="$bootstrap_stage3_git_temp/untracked.list"
+    bootstrap_stage3_git_untracked_verify=\
+"$bootstrap_stage3_git_temp/untracked.verify.list"
+    bootstrap_stage3_git_records="$bootstrap_stage3_git_temp/records"
+    bootstrap_stage3_git_records_verify=\
+"$bootstrap_stage3_git_temp/records.verify"
+    bootstrap_stage3_jj_stderr="$bootstrap_stage3_git_temp/jj.stderr"
+    bootstrap_stage3_git_result="$bootstrap_stage3_git_temp/result"
     if ! (
         cd "$bootstrap_stage3_git_root" &&
             git rev-parse --verify HEAD >/dev/null 2>&1
     ); then
-        command -v jj >/dev/null 2>&1 || return 1
+        command -v jj >/dev/null 2>&1 || {
+            rmdir "$bootstrap_stage3_git_temp" 2>/dev/null || true
+            return 1
+        }
         (
             cd "$bootstrap_stage3_git_root" || exit 1
             bootstrap_stage3_git_head=$(
@@ -1447,91 +2257,139 @@ bootstrap_stage3_git_state() {
                 >"$bootstrap_stage3_git_diff" \
                 2>"$bootstrap_stage3_jj_stderr" || exit 1
             [ ! -s "$bootstrap_stage3_jj_stderr" ] || exit 1
-            printf 'jj-working-copy-diff-sha256=%s\n' \
-                "$(bootstrap_stage3_hash_file "$bootstrap_stage3_git_diff")" \
-                >"$bootstrap_stage3_git_records" || exit 1
+            bootstrap_stage3_git_diff_sha=$(
+                bootstrap_stage3_git_hash_regular \
+                    "$bootstrap_stage3_git_diff"
+            ) || exit 1
+            bootstrap_stage3_git_write_new_regular \
+                "$bootstrap_stage3_git_records" \
+                "jj-working-copy-diff-sha256=$bootstrap_stage3_git_diff_sha" ||
+                exit 1
             bootstrap_stage3_git_dirty=$(
-                bootstrap_stage3_hash_file "$bootstrap_stage3_git_records"
+                bootstrap_stage3_git_hash_regular \
+                    "$bootstrap_stage3_git_records"
             ) || exit 1
             printf 'head=%s\n' "$bootstrap_stage3_git_head"
             printf 'dirty_fingerprint=%s\n' "$bootstrap_stage3_git_dirty"
-        ) >"${bootstrap_stage3_git_output}.tmp.$$" || {
-            rm -f "${bootstrap_stage3_git_output}.tmp.$$" \
-                "$bootstrap_stage3_git_diff" "$bootstrap_stage3_git_records" \
+        ) >"$bootstrap_stage3_git_result" || {
+            rm -f "$bootstrap_stage3_git_result" \
+                "$bootstrap_stage3_git_diff" \
+                "$bootstrap_stage3_git_diff_verify" \
+                "$bootstrap_stage3_git_untracked" \
+                "$bootstrap_stage3_git_untracked_verify" \
+                "$bootstrap_stage3_git_records" \
+                "$bootstrap_stage3_git_records_verify" \
                 "$bootstrap_stage3_jj_stderr"
+            rmdir "$bootstrap_stage3_git_temp" 2>/dev/null || true
             return 1
         }
-        rm -f "$bootstrap_stage3_git_diff" "$bootstrap_stage3_git_records" \
+        rm -f "$bootstrap_stage3_git_diff" \
+            "$bootstrap_stage3_git_diff_verify" \
+            "$bootstrap_stage3_git_untracked" \
+            "$bootstrap_stage3_git_untracked_verify" \
+            "$bootstrap_stage3_git_records" \
+            "$bootstrap_stage3_git_records_verify" \
             "$bootstrap_stage3_jj_stderr"
-        mv "${bootstrap_stage3_git_output}.tmp.$$" \
-            "$bootstrap_stage3_git_output"
+        bootstrap_stage3_git_test_barrier before-output-publish || {
+            rm -f "$bootstrap_stage3_git_result"
+            rmdir "$bootstrap_stage3_git_temp" 2>/dev/null || true
+            return 1
+        }
+        bootstrap_stage3_git_publish_regular \
+            "$bootstrap_stage3_git_result" \
+            "$bootstrap_stage3_git_output" || {
+            rm -f "$bootstrap_stage3_git_result"
+            rmdir "$bootstrap_stage3_git_temp" 2>/dev/null || true
+            return 1
+        }
+        rmdir "$bootstrap_stage3_git_temp" || return 1
         return
     fi
     (
         cd "$bootstrap_stage3_git_root" || exit 1
         bootstrap_stage3_git_head=$(git rev-parse --verify HEAD) || exit 1
-        git diff --binary --full-index --no-ext-diff --no-textconv HEAD -- \
+        bootstrap_stage3_git_test_barrier after-head || exit 1
+        git diff --binary --full-index --no-ext-diff --no-textconv \
+            "$bootstrap_stage3_git_head" -- \
             >"$bootstrap_stage3_git_diff" || exit 1
-        # Keep non-ASCII path bytes literal. Git's default core.quotePath=true
-        # emits a C-quoted display name, which is not an addressable pathname
-        # and makes the authority snapshot fail for otherwise valid Unicode
-        # files. Newline/NUL-bearing paths remain outside this line protocol
-        # and therefore continue to fail closed below.
-        git -c core.quotePath=false ls-files --others --exclude-standard \
+        git ls-files -z --others --exclude-standard \
             >"$bootstrap_stage3_git_untracked" || exit 1
-        LC_ALL=C sort -u "$bootstrap_stage3_git_untracked" \
-            >"$bootstrap_stage3_git_untracked_sorted" || exit 1
-        : >"$bootstrap_stage3_git_records" || exit 1
-        printf 'tracked-diff-sha256=%s\n' \
-            "$(bootstrap_stage3_hash_file "$bootstrap_stage3_git_diff")" \
-            >>"$bootstrap_stage3_git_records" || exit 1
-        while IFS= read -r bootstrap_stage3_git_path; do
-            [ -n "$bootstrap_stage3_git_path" ] || continue
-            if [ -L "$bootstrap_stage3_git_path" ]; then
-                bootstrap_stage3_git_target=$(
-                    readlink "$bootstrap_stage3_git_path"
-                ) || exit 1
-                bootstrap_stage3_git_target_sha=$(
-                    printf '%s' "$bootstrap_stage3_git_target" |
-                        bootstrap_stage3_hash_stream
-                ) || exit 1
-                printf 'untracked-link:%s:%s:%s:%s\n' \
-                    "${#bootstrap_stage3_git_path}" "$bootstrap_stage3_git_path" \
-                    "${#bootstrap_stage3_git_target}" \
-                    "$bootstrap_stage3_git_target_sha" \
-                    >>"$bootstrap_stage3_git_records" || exit 1
-            elif [ -f "$bootstrap_stage3_git_path" ]; then
-                bootstrap_stage3_git_file_sha=$(
-                    bootstrap_stage3_hash_file "$bootstrap_stage3_git_path"
-                ) || exit 1
-                bootstrap_stage3_git_executable=0
-                [ ! -x "$bootstrap_stage3_git_path" ] ||
-                    bootstrap_stage3_git_executable=1
-                printf 'untracked-file:%s:%s:%s:%s\n' \
-                    "${#bootstrap_stage3_git_path}" "$bootstrap_stage3_git_path" \
-                    "$bootstrap_stage3_git_executable" \
-                    "$bootstrap_stage3_git_file_sha" \
-                    >>"$bootstrap_stage3_git_records" || exit 1
-            else
-                exit 1
-            fi
-        done <"$bootstrap_stage3_git_untracked_sorted"
+        bootstrap_stage3_git_test_barrier after-enumeration || exit 1
+        bootstrap_stage3_git_diff_sha=$(
+            bootstrap_stage3_git_hash_regular "$bootstrap_stage3_git_diff"
+        ) || exit 1
+        bootstrap_stage3_git_write_new_regular \
+            "$bootstrap_stage3_git_records" \
+            "tracked-diff-sha256=$bootstrap_stage3_git_diff_sha" || exit 1
+        bootstrap_stage3_git_untracked_records \
+            "$bootstrap_stage3_git_untracked" \
+            "$bootstrap_stage3_git_records" || exit 1
+
+        # Re-derive the whole Git view, not only each leaf. This detects HEAD
+        # replacement, tracked-byte drift, newly added/removed untracked
+        # paths, and mutation of an early path after it was first hashed.
+        bootstrap_stage3_git_test_barrier after-first-snapshot || exit 1
+        bootstrap_stage3_git_head_verify=$(
+            git rev-parse --verify HEAD
+        ) || exit 1
+        [ "$bootstrap_stage3_git_head_verify" = \
+            "$bootstrap_stage3_git_head" ] || exit 1
+        git diff --binary --full-index --no-ext-diff --no-textconv \
+            "$bootstrap_stage3_git_head" -- \
+            >"$bootstrap_stage3_git_diff_verify" || exit 1
+        cmp -s "$bootstrap_stage3_git_diff" \
+            "$bootstrap_stage3_git_diff_verify" || exit 1
+        git ls-files -z --others --exclude-standard \
+            >"$bootstrap_stage3_git_untracked_verify" || exit 1
+        bootstrap_stage3_git_diff_verify_sha=$(
+            bootstrap_stage3_git_hash_regular \
+                "$bootstrap_stage3_git_diff_verify"
+        ) || exit 1
+        bootstrap_stage3_git_write_new_regular \
+            "$bootstrap_stage3_git_records_verify" \
+            "tracked-diff-sha256=$bootstrap_stage3_git_diff_verify_sha" ||
+            exit 1
+        bootstrap_stage3_git_untracked_records \
+            "$bootstrap_stage3_git_untracked_verify" \
+            "$bootstrap_stage3_git_records_verify" || exit 1
+        cmp -s "$bootstrap_stage3_git_records" \
+            "$bootstrap_stage3_git_records_verify" || exit 1
+        [ "$(git rev-parse --verify HEAD)" = \
+            "$bootstrap_stage3_git_head" ] || exit 1
         bootstrap_stage3_git_dirty=$(
-            bootstrap_stage3_hash_file "$bootstrap_stage3_git_records"
+            bootstrap_stage3_git_hash_regular "$bootstrap_stage3_git_records"
         ) || exit 1
         printf 'head=%s\n' "$bootstrap_stage3_git_head"
         printf 'dirty_fingerprint=%s\n' "$bootstrap_stage3_git_dirty"
-    ) >"${bootstrap_stage3_git_output}.tmp.$$" || {
-        rm -f "${bootstrap_stage3_git_output}.tmp.$$" \
-            "$bootstrap_stage3_git_diff" "$bootstrap_stage3_git_untracked" \
-            "$bootstrap_stage3_git_untracked_sorted" \
-            "$bootstrap_stage3_git_records"
+    ) >"$bootstrap_stage3_git_result" || {
+        rm -f "$bootstrap_stage3_git_result" \
+            "$bootstrap_stage3_git_diff" \
+            "$bootstrap_stage3_git_diff_verify" \
+            "$bootstrap_stage3_git_untracked" \
+            "$bootstrap_stage3_git_untracked_verify" \
+            "$bootstrap_stage3_git_records" \
+            "$bootstrap_stage3_git_records_verify"
+        rmdir "$bootstrap_stage3_git_temp" 2>/dev/null || true
         return 1
     }
-    rm -f "$bootstrap_stage3_git_diff" "$bootstrap_stage3_git_untracked" \
-        "$bootstrap_stage3_git_untracked_sorted" \
-        "$bootstrap_stage3_git_records"
-    mv "${bootstrap_stage3_git_output}.tmp.$$" "$bootstrap_stage3_git_output"
+    rm -f "$bootstrap_stage3_git_diff" \
+        "$bootstrap_stage3_git_diff_verify" \
+        "$bootstrap_stage3_git_untracked" \
+        "$bootstrap_stage3_git_untracked_verify" \
+        "$bootstrap_stage3_git_records" \
+        "$bootstrap_stage3_git_records_verify"
+    bootstrap_stage3_git_test_barrier before-output-publish || {
+        rm -f "$bootstrap_stage3_git_result"
+        rmdir "$bootstrap_stage3_git_temp" 2>/dev/null || true
+        return 1
+    }
+    bootstrap_stage3_git_publish_regular "$bootstrap_stage3_git_result" \
+        "$bootstrap_stage3_git_output" || {
+        rm -f "$bootstrap_stage3_git_result"
+        rmdir "$bootstrap_stage3_git_temp" 2>/dev/null || true
+        return 1
+    }
+    rmdir "$bootstrap_stage3_git_temp" || return 1
 }
 
 # Re-derive the Rust seed input fingerprint using the same complete authority
@@ -1540,24 +2398,11 @@ bootstrap_stage3_git_state() {
 # identity is re-derived from that recorded PATH, never from verifier ambient
 # state.
 bootstrap_stage3_seed_inputs_fingerprint() (
-    case "$#" in
-        4|5) ;;
-        *) return 1 ;;
-    esac
+    [ "$#" -eq 4 ] || return 1
     bootstrap_stage3_seed_root=$1
     bootstrap_stage3_seed_backend=$2
     bootstrap_stage3_seed_features=$3
     bootstrap_stage3_seed_tool_path=$4
-    bootstrap_stage3_seed_target=${5:-}
-    if [ -z "$bootstrap_stage3_seed_target" ]; then
-        bootstrap_stage3_seed_target=$(bootstrap_stage3_host_platform) ||
-            return 1
-    fi
-    case "$bootstrap_stage3_seed_target" in
-        *-pc-windows-gnu|*-pc-windows-msvc|*-unknown-linux-gnu|\
-        *-apple-darwin|*-unknown-freebsd) ;;
-        *) return 1 ;;
-    esac
     case "$bootstrap_stage3_seed_tool_path" in
         /*) ;;
         *) return 1 ;;
@@ -1578,27 +2423,48 @@ bootstrap_stage3_seed_inputs_fingerprint() (
     }
     (
         cd "$bootstrap_stage3_seed_root" || exit 1
+        # These two directories are compiler-execution and crash-reporting
+        # outputs, never authority inputs. Keep the exclusions exact: vendored
+        # sources may legitimately contain nested build or .simple directories.
         if find src/compiler_rust src/runtime \
             \( -type d -name target -prune \) -o \
+            \( -type d \
+                \( -path src/compiler_rust/compiler/build -o \
+                    -path src/compiler_rust/compiler/.simple \) \
+                -prune \) -o \
             -type l -print -quit | grep -q .; then
             exit 1
         fi
         find src/compiler_rust \
-            \( -type d -name target \) -prune -o \
+            \( -type d \
+                \( -name target -o \
+                    -path src/compiler_rust/compiler/build -o \
+                    -path src/compiler_rust/compiler/.simple \) \
+                -prune \) -o \
             -type f -print 2>/dev/null \
             >"$bootstrap_stage3_seed_tmp/compiler.unsorted" || exit 1
         LC_ALL=C sort -u "$bootstrap_stage3_seed_tmp/compiler.unsorted" \
             >"$bootstrap_stage3_seed_tmp/compiler.paths" || exit 1
-        bootstrap_stage3_hash_path_list \
-            "$bootstrap_stage3_seed_tmp/compiler.paths" \
-            >>"$bootstrap_stage3_seed_records" || exit 1
+        while IFS= read -r bootstrap_stage3_seed_path; do
+            bootstrap_stage3_seed_hash=$(
+                bootstrap_stage3_hash_file "$bootstrap_stage3_seed_path"
+            ) || exit 1
+            printf '%s  %s\n' "$bootstrap_stage3_seed_hash" \
+                "$bootstrap_stage3_seed_path" \
+                >>"$bootstrap_stage3_seed_records" || exit 1
+        done <"$bootstrap_stage3_seed_tmp/compiler.paths"
         # Cargo path dependencies may live outside src/compiler_rust (the
         # hosted runtime currently does). Discover them from dependency
         # sections instead of maintaining a partial hand-written allowlist.
         # Every resolved dependency must stay inside this checkout, must not
         # traverse a symlink, and must contribute all Cargo.toml/Rust inputs.
-        find src/compiler_rust -name Cargo.toml -type f \
-            -not -path '*/target/*' -print \
+        find src/compiler_rust \
+            \( -type d \
+                \( -name target -o \
+                    -path src/compiler_rust/compiler/build -o \
+                    -path src/compiler_rust/compiler/.simple \) \
+                -prune \) -o \
+            -name Cargo.toml -type f -print \
             >"$bootstrap_stage3_seed_tmp/cargo-manifests" || exit 1
         : >"$bootstrap_stage3_seed_tmp/path-deps.unsorted" || exit 1
         while IFS= read -r bootstrap_stage3_seed_manifest; do
@@ -1672,18 +2538,28 @@ bootstrap_stage3_seed_inputs_fingerprint() (
                 "$bootstrap_stage3_seed_tmp/path-dep-files.unsorted" \
                 >"$bootstrap_stage3_seed_tmp/path-dep-files" || exit 1
             [ -s "$bootstrap_stage3_seed_tmp/path-dep-files" ] || exit 1
-            bootstrap_stage3_hash_path_list \
-                "$bootstrap_stage3_seed_tmp/path-dep-files" \
-                >>"$bootstrap_stage3_seed_records" || exit 1
+            while IFS= read -r bootstrap_stage3_seed_path; do
+                bootstrap_stage3_seed_hash=$(
+                    bootstrap_stage3_hash_file "$bootstrap_stage3_seed_path"
+                ) || exit 1
+                printf '%s  %s\n' "$bootstrap_stage3_seed_hash" \
+                    "$bootstrap_stage3_seed_path" \
+                    >>"$bootstrap_stage3_seed_records" || exit 1
+            done <"$bootstrap_stage3_seed_tmp/path-dep-files"
         done <"$bootstrap_stage3_seed_tmp/path-deps"
         find src/runtime \( -name '*.c' -o -name '*.h' \) \
             -type f -print 2>/dev/null \
             >"$bootstrap_stage3_seed_tmp/runtime.unsorted" || exit 1
         LC_ALL=C sort -u "$bootstrap_stage3_seed_tmp/runtime.unsorted" \
             >"$bootstrap_stage3_seed_tmp/runtime.paths" || exit 1
-        bootstrap_stage3_hash_path_list \
-            "$bootstrap_stage3_seed_tmp/runtime.paths" \
-            >>"$bootstrap_stage3_seed_records" || exit 1
+        while IFS= read -r bootstrap_stage3_seed_path; do
+            bootstrap_stage3_seed_hash=$(
+                bootstrap_stage3_hash_file "$bootstrap_stage3_seed_path"
+            ) || exit 1
+            printf '%s  %s\n' "$bootstrap_stage3_seed_hash" \
+                "$bootstrap_stage3_seed_path" \
+                >>"$bootstrap_stage3_seed_records" || exit 1
+        done <"$bootstrap_stage3_seed_tmp/runtime.paths"
         bootstrap_stage3_seed_lock_hash=$(
             bootstrap_stage3_hash_file src/compiler_rust/Cargo.lock
         ) || exit 1
@@ -1698,22 +2574,8 @@ bootstrap_stage3_seed_inputs_fingerprint() (
         printf 'profile=bootstrap backend=%s features=%s target=%s\n' \
             "$bootstrap_stage3_seed_backend" \
             "$bootstrap_stage3_seed_features" \
-            "$bootstrap_stage3_seed_target" \
+            "$(bootstrap_stage3_host_platform)" \
             >>"$bootstrap_stage3_seed_records" || exit 1
-        if [ "$bootstrap_stage3_seed_target" = \
-            x86_64-pc-windows-gnu ]; then
-            printf 'target-linker=%s\ntarget-cc=%s\ntarget-ar=%s\n' \
-                "${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER:-gcc}" \
-                "${CC_x86_64_pc_windows_gnu:-gcc}" \
-                "${AR_x86_64_pc_windows_gnu:-ar}" \
-                >>"$bootstrap_stage3_seed_records" || exit 1
-        elif [ "$bootstrap_stage3_seed_target" = \
-            x86_64-pc-windows-msvc ]; then
-            printf 'windows-INCLUDE=%s\nwindows-LIB=%s\nwindows-LIBPATH=%s\nwindows-SystemRoot=%s\nwindows-TEMP=%s\n' \
-                "${INCLUDE:-}" "${LIB:-}" "${LIBPATH:-}" \
-                "${SystemRoot:-}" "${TEMP:-}" \
-                >>"$bootstrap_stage3_seed_records" || exit 1
-        fi
         bootstrap_stage3_seed_llvm_authority=$(
             bootstrap_stage3_resolve_llvm_build_authority \
                 "$PATH" "$bootstrap_stage3_seed_features"
@@ -1721,10 +2583,10 @@ bootstrap_stage3_seed_inputs_fingerprint() (
         printf '%s\n' "$bootstrap_stage3_seed_llvm_authority" \
             >>"$bootstrap_stage3_seed_records" || exit 1
         printf '%s\n' \
-            'recipe.1=cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap --target <selected-platform> -p simple-driver <selected-llvm-features>' \
-            'recipe.2=cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap --target <selected-platform> -p simple-native-all <selected-llvm-features>' \
-            'recipe.3=env CARGO_PROFILE_BOOTSTRAP_LTO=off cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap --target <selected-platform> -p simple-runtime --features runtime-symbol-table' \
-            'recipe.4=cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap --target <selected-platform> -p simple-compiler-backfill' \
+            'recipe.1=cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver <selected-llvm-features>' \
+            'recipe.2=cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-native-all <selected-llvm-features>' \
+            'recipe.3=env CARGO_PROFILE_BOOTSTRAP_LTO=off cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-runtime --features runtime-symbol-table' \
+            'recipe.4=cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-compiler-backfill' \
             >>"$bootstrap_stage3_seed_records" || exit 1
         # Rust authority builds execute under env -i with explicit RUSTC/CC
         # paths. Ambient SDK/LLVM/general flag variables are therefore not
@@ -1762,11 +2624,8 @@ bootstrap_stage3_seed_inputs_fingerprint() (
         env -i PATH="$PATH" LC_ALL=C LANG=C \
             "$bootstrap_stage3_seed_cargo" -V \
             >>"$bootstrap_stage3_seed_records" 2>/dev/null || exit 1
-        bootstrap_stage3_seed_cc=$(
-            bootstrap_stage3_target_c_compiler \
-                "$bootstrap_stage3_seed_target"
-        ) || exit 1
-        if [ -n "$bootstrap_stage3_seed_cc" ]; then
+        if command -v cc >/dev/null 2>&1; then
+            bootstrap_stage3_seed_cc=$(command -v cc) || exit 1
             bootstrap_stage3_seed_cc_canonical=$(
                 perl -MCwd=abs_path -e \
                     'my $p = abs_path($ARGV[0]); defined($p) or exit 1; print $p' \
@@ -1779,16 +2638,13 @@ bootstrap_stage3_seed_inputs_fingerprint() (
                 >>"$bootstrap_stage3_seed_records" || exit 1
             bootstrap_stage3_seed_cc_version=\
 "$bootstrap_stage3_seed_tmp/cc-version"
-            bootstrap_stage3_seed_cc_status=0
             env -i PATH="$PATH" LC_ALL=C LANG=C \
                 "$bootstrap_stage3_seed_cc" --version \
-                >"$bootstrap_stage3_seed_cc_version" 2>&1 ||
-                bootstrap_stage3_seed_cc_status=$?
-            printf 'cc-version-status=%s\n' \
-                "$bootstrap_stage3_seed_cc_status" \
-                >>"$bootstrap_stage3_seed_records" || exit 1
+                >"$bootstrap_stage3_seed_cc_version" 2>&1 || exit 1
             sed -n '1p' "$bootstrap_stage3_seed_cc_version" \
                 >>"$bootstrap_stage3_seed_records" || exit 1
+        else
+            echo "cc=absent" >>"$bootstrap_stage3_seed_records" || exit 1
         fi
         if command -v llvm-config >/dev/null 2>&1; then
             bootstrap_stage3_seed_llvm_config=$(command -v llvm-config) ||
@@ -1839,3 +2695,129 @@ bootstrap_stage3_seed_inputs_fingerprint() (
 # it. Every record is length-prefixed, including values with spaces.
 # Arguments before "--" are explicit NAME=VALUE entries; arguments after it are
 # the executable and argv exactly as passed to env(1).
+# HOLD recovery only: insert after bootstrap_stage3_regular_input.
+# This is the exact reviewed API shape; xhigh HOLD findings must be fixed before use.
+bootstrap_stage3_validate_descriptor_map() {
+    [ "$#" -eq 6 ] || return 1
+    bootstrap_stage3_descriptor_map=$1
+    bootstrap_stage3_descriptor_map_sha256=$2
+    bootstrap_stage3_descriptor_map_schema=$3
+    bootstrap_stage3_descriptor_map_run_id=$4
+    bootstrap_stage3_descriptor_map_architecture=$5
+    bootstrap_stage3_descriptor_map_roles=$6
+    case "$bootstrap_stage3_descriptor_map_sha256" in
+        ''|*[!0-9a-f]*|?????????????????????????????????????????????????????????????????*) return 1 ;;
+    esac
+    [ "${#bootstrap_stage3_descriptor_map_sha256}" -eq 64 ] || return 1
+    bootstrap_stage3_descriptor_map_tail=${bootstrap_stage3_descriptor_map#/proc/}
+    bootstrap_stage3_descriptor_map_pid=${bootstrap_stage3_descriptor_map_tail%%/*}
+    bootstrap_stage3_descriptor_map_tail=${bootstrap_stage3_descriptor_map_tail#*/fd/}
+    case "$bootstrap_stage3_descriptor_map_pid" in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    case "$bootstrap_stage3_descriptor_map_tail" in
+        ''|0|0*|*[!0-9]*) return 1 ;;
+    esac
+    [ "$bootstrap_stage3_descriptor_map" = \
+        "/proc/$bootstrap_stage3_descriptor_map_pid/fd/$bootstrap_stage3_descriptor_map_tail" ] ||
+        return 1
+    perl -MDigest::SHA -MFcntl=:mode -e '
+        use strict; use warnings; use bytes;
+        my ($map,$expected_sha,$schema_expected,$run_expected,$arch_expected,$roles_text)=@ARGV;
+        $expected_sha =~ /\A[0-9a-f]{64}\z/ or exit 1;
+        $map =~ m{\A/proc/([1-9][0-9]*)/fd/([1-9][0-9]*)\z} or exit 1;
+        my ($owner_pid,$map_fd)=($1,$2);
+        open(my $proc_stat,"<","/proc/$owner_pid/stat") or exit 1;
+        my $stat_text=<$proc_stat>; close($proc_stat) or exit 1;
+        defined($stat_text) or exit 1;
+        my $right=rindex($stat_text,")"); $right >= 0 or exit 1;
+        my @proc_field=split / /,substr($stat_text,$right+2);
+        my $owner_start=$proc_field[19];
+        defined($owner_start) && $owner_start =~ /\A[1-9][0-9]*\z/ or exit 1;
+        open(my $fh,"<",$map) or exit 1; binmode($fh) or exit 1;
+        my @map_stat=stat($fh);
+        @map_stat && S_ISREG($map_stat[2]) or exit 1;
+        local $/; my $bytes=<$fh>; defined($bytes) or exit 1;
+        Digest::SHA::sha256_hex($bytes) eq $expected_sha or exit 1;
+        seek($fh,0,0) or exit 1;
+        my @lines=<$fh>; close($fh) or exit 1; chomp @lines;
+        my @roles=split / /,$roles_text,-1;
+        @roles && !grep { $_ !~ /\A[a-z][a-z0-9_]*\z/ } @roles or exit 1;
+        my %seen_role; !grep { $seen_role{$_}++ } @roles or exit 1;
+        my @header_names=qw(schema status run_id architecture descriptor_owner_pid descriptor_owner_start_ticks entry_count map_vector_sha256);
+        my @fields=qw(descriptor display_token dev ino mode sha256);
+        @lines == @header_names + @roles * @fields or exit 1;
+        my %header;
+        for my $index (0..$#header_names) {
+            $lines[$index] =~ /\A\Q$header_names[$index]\E=(.*)\z/ or exit 1;
+            $header{$header_names[$index]}=$1;
+        }
+        $header{schema} eq $schema_expected && $header{status} eq "ready" &&
+          $header{run_id} eq $run_expected && $header{architecture} eq $arch_expected &&
+          $header{descriptor_owner_pid} eq "$owner_pid" &&
+          $header{descriptor_owner_start_ticks} eq "$owner_start" &&
+          $header{entry_count} eq scalar(@roles) &&
+          $header{map_vector_sha256} =~ /\A[0-9a-f]{64}\z/ or exit 1;
+        my $vector=""; my $line_index=scalar(@header_names);
+        for my $role (@roles) {
+            my %value;
+            for my $field (@fields) {
+                my $key="${role}_${field}";
+                $lines[$line_index++] =~ /\A\Q$key\E=(.*)\z/ or exit 1;
+                $value{$field}=$1;
+            }
+            for my $item ($role,map { $value{$_} } @fields) {
+                $vector .= pack("Q>",length($item)).$item;
+            }
+            length($value{display_token}) && $value{display_token} !~ /[\r\n=]/ or exit 1;
+            if ($value{descriptor} eq "descriptor-absent") {
+                $role eq "compiler_backfill" &&
+                  !grep { $value{$_} ne "absent" } qw(dev ino mode sha256) or exit 1;
+                next;
+            }
+            $value{descriptor} =~ m{\A/proc/\Q$owner_pid\E/fd/([1-9][0-9]*)\z} or exit 1;
+            open(my $bound,"<",$value{descriptor}) or exit 1; my @st=stat($bound);
+            @st && ($st[0] eq $value{dev}) && ($st[1] eq $value{ino}) &&
+              ($st[2] eq $value{mode}) or exit 1;
+            if (S_ISREG($st[2])) {
+                $value{sha256} =~ /\A[0-9a-f]{64}\z/ or exit 1;
+                binmode($bound) or exit 1; my $sha=Digest::SHA->new(256);
+                $sha->addfile($bound); $sha->hexdigest eq $value{sha256} or exit 1;
+            } elsif (S_ISDIR($st[2])) {
+                ($value{sha256} eq "identity-only" || $value{sha256} =~ /\A[0-9a-f]{64}\z/) or exit 1;
+            } else { exit 1; }
+            close($bound) or exit 1;
+        }
+        Digest::SHA::sha256_hex($vector) eq $header{map_vector_sha256} or exit 1;
+    ' "$bootstrap_stage3_descriptor_map" "$bootstrap_stage3_descriptor_map_sha256" \
+      "$bootstrap_stage3_descriptor_map_schema" \
+      "$bootstrap_stage3_descriptor_map_run_id" \
+      "$bootstrap_stage3_descriptor_map_architecture" \
+      "$bootstrap_stage3_descriptor_map_roles"
+}
+
+bootstrap_stage3_descriptor_map_value() {
+    [ "$#" -eq 3 ] || return 1
+    bootstrap_stage3_descriptor_value_map=$1
+    bootstrap_stage3_descriptor_value_role=$2
+    bootstrap_stage3_descriptor_value_field=$3
+    case "$bootstrap_stage3_descriptor_value_role" in ''|*[!a-z0-9_]*) return 1 ;; esac
+    case "$bootstrap_stage3_descriptor_value_field" in
+        descriptor|display_token|dev|ino|mode|sha256) ;; *) return 1 ;;
+    esac
+    bootstrap_stage3_descriptor_value_key="${bootstrap_stage3_descriptor_value_role}_${bootstrap_stage3_descriptor_value_field}"
+    awk -v key="$bootstrap_stage3_descriptor_value_key" '
+      index($0,key "=")==1 {count+=1; value=substr($0,length(key)+2)}
+      END {if(count!=1) exit 1; print value}
+    ' "$bootstrap_stage3_descriptor_value_map"
+}
+
+bootstrap_stage3_descriptor_map_expect_display_token() {
+    [ "$#" -eq 3 ] || return 1
+    [ -n "$3" ] || return 1
+    bootstrap_stage3_descriptor_map_actual=$(
+        bootstrap_stage3_descriptor_map_value "$1" "$2" display_token
+    ) || return 1
+    [ -n "$bootstrap_stage3_descriptor_map_actual" ] || return 1
+    [ "$bootstrap_stage3_descriptor_map_actual" = "$3" ]
+}

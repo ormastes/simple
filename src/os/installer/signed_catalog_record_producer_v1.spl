@@ -52,6 +52,7 @@ use os.kernel.loader.installed_artifact_catalog_boot_owner_v1.{
     installed_artifact_boot_policy_shape_valid_v1}
 
 val _CONTROL_TEXT_MAX_V1: i64 = 262144
+pub const SIGNED_CATALOG_TRUST_CONFIG_MAX_BYTES_V1: i64 = 16384
 
 pub struct SignedCatalogRecordProduceRequestV1:
     trusted_absolute_root: text
@@ -158,6 +159,54 @@ fn _hex_decode(value: text) -> [u8]:
         index = index + 2
     out
 
+fn _trust_key_id_valid_v1(value: text) -> bool:
+    if value.len() == 0 or value.len() > 128: return false
+    var index: i64 = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        if code < 33 or code > 126 or code == 58: return false
+        index = index + 1
+    true
+
+fn _trust_config_bytes_valid_v1(bytes: [u8]) -> bool:
+    if bytes.len() == 0 or
+        bytes.len() > SIGNED_CATALOG_TRUST_CONFIG_MAX_BYTES_V1:
+        return false
+    var index: i64 = 0
+    while index < bytes.len():
+        val byte = bytes[index]
+        if byte != 10u8 and (byte < 32u8 or byte > 126u8): return false
+        index = index + 1
+    true
+
+fn _trust_config_shape_valid_v1(document: text) -> bool:
+    var count: i64 = 0
+    for raw_line in document.split("\n"):
+        val line = raw_line.trim()
+        if line != "":
+            if not line.starts_with("key_id=") and
+                not line.starts_with("public_key_ed25519_hex="):
+                return false
+            count = count + 1
+    count == 2 and _field_count(document, "key_id") == 1 and
+        _field_count(document, "public_key_ed25519_hex") == 1
+
+pub fn signed_catalog_trusted_signer_parse_v1(
+    trust_bytes: [u8],
+) -> Result<ExecutableManifestTrustedSignerV1, text>:
+    """Parse one bounded SCR1 trust root without granting trust authority."""
+    if not _trust_config_bytes_valid_v1(trust_bytes): return Err("trust-config-invalid")
+    val trust = bytes_to_text(trust_bytes)
+    if not _trust_config_shape_valid_v1(trust): return Err("trust-config-invalid")
+    val key_id = _field(trust, "key_id")
+    val public_key_hex = _field(trust, "public_key_ed25519_hex")
+    if not _trust_key_id_valid_v1(key_id) or public_key_hex.len() != 64:
+        return Err("trust-config-invalid")
+    val public_key = _hex_decode(public_key_hex)
+    if public_key.len() != 32: return Err("trust-config-invalid")
+    Ok(ExecutableManifestTrustedSignerV1(
+        key_id: key_id, public_key: public_key))
+
 fn _hex_encode(value: [u8]) -> text:
     val digits = "0123456789abcdef"
     var out = ""
@@ -214,7 +263,6 @@ fn _signed_catalog_encode_authenticated_material_v1(
 ) -> Result<SignedCatalogEncodedRecordV1, text>:
     if sam1.len() == 0 or receipt == "" or seed.len() != 32 or trust_bytes.len() == 0:
         return Err("empty-or-invalid-control-input")
-    val trust = bytes_to_text(trust_bytes)
     if not _receipt_shape_valid(receipt) or
         _field(receipt, "schema") != "simpleos-artifact-identity-v1":
         return Err("artifact-identity-receipt-schema")
@@ -239,14 +287,10 @@ fn _signed_catalog_encode_authenticated_material_v1(
         target_arch != "riscv64" and target_arch != "riscv32":
         return Err("artifact-target-unsupported")
 
-    val key_id = _field(trust, "key_id")
-    val trusted_public = _hex_decode(_field(trust, "public_key_ed25519_hex"))
-    if _field_count(trust, "key_id") != 1 or
-        _field_count(trust, "public_key_ed25519_hex") != 1 or
-        key_id == "" or key_id.contains(":") or trusted_public.len() != 32:
-        return Err("trust-config-invalid")
+    val trusted_signer = signed_catalog_trusted_signer_parse_v1(trust_bytes)?
+    val key_id = trusted_signer.key_id
     val public_key = pure_ed25519_keypair_from_seed(seed).1
-    if not _same_bytes(public_key, trusted_public):
+    if not _same_bytes(public_key, trusted_signer.public_key):
         return Err("signer-not-provisioned-by-trust-config")
 
     val placeholder = "ed25519:" + key_id + ":" + ("0" * 128)
@@ -293,7 +337,8 @@ pub(package) fn signed_catalog_encode_authenticated_receipt_v1(authority: Hosted
     val sam1 = hosted_safe_artifact_read_once_v1(authority, manifest_relative, SIMPLE_ARTIFACT_MANIFEST_V1_MAX_SIGNING_BYTES)?
     val seed = hosted_safe_artifact_read_once_v1(authority, seed_relative, 32)?
     defer _wipe_seed(seed)
-    val trust_bytes = hosted_safe_artifact_read_once_v1(authority, trust_relative, 16384)?
+    val trust_bytes = hosted_safe_artifact_read_once_v1(
+        authority, trust_relative, SIGNED_CATALOG_TRUST_CONFIG_MAX_BYTES_V1)?
     var alias_bytes: [u8] = []
     if aliases_relative != "":
         alias_bytes = hosted_safe_artifact_read_once_v1(

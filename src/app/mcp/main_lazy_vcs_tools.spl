@@ -2,9 +2,6 @@
 # Extracted from main_lazy.spl
 # Handles: simple_diff, simple_log, simple_squash, simple_new, simple_commit, simple_push, simple_rebase, simple_pull
 
-use .main_lazy_json.{make_tool_result, mcp_run_argv, extract_field}
-use .main_lazy_query_tools.{_mcp_find_simple_binary}
-
 val _VCS_NL = "\n"
 
 fn _vcs_to_int_or(s: text, default_val: i64) -> i64:
@@ -34,18 +31,18 @@ fn handle_simple_diff(id: text, body: text) -> text:
     if revision != "":
         rev = revision
 
-    var diff_args = ["--no-pager", "--color", "never", "diff", "-r", rev]
+    var diff_cmd = "timeout 30 jj --no-pager --color never diff -r " + rev
     if paths_str != "":
-        diff_args.push("--")
         val path_parts = paths_str.split(",")
         for pp in path_parts:
             val pt = pp.trim()
             if pt != "":
-                diff_args.push(pt)
+                diff_cmd = diff_cmd + " " + pt
+    diff_cmd = diff_cmd + " 2>&1"
 
     var diff_out = ""
     var _u: i64 = 0
-    (diff_out, _u) = mcp_run_argv("jj", diff_args, 30000, 1048576)
+    (diff_out, _u) = shell_cmd(diff_cmd)
 
     var out_parts: [text] = []
     out_parts.push("-- simple_diff -r " + rev + " --" + _VCS_NL)
@@ -66,14 +63,14 @@ fn handle_simple_log(id: text, body: text) -> text:
         if limit < 1:
             limit = 10
 
-    var log_args = ["--no-pager", "--color", "never", "log", "--limit", str(limit)]
+    var log_cmd = "timeout 15 jj --no-pager --color never log --limit " + str(limit)
     if revsets != "":
-        log_args.push("-r")
-        log_args.push(revsets)
+        log_cmd = log_cmd + " -r " + revsets
+    log_cmd = log_cmd + " 2>&1"
 
     var log_out = ""
     var _u: i64 = 0
-    (log_out, _u) = mcp_run_argv("jj", log_args, 15000, 1048576)
+    (log_out, _u) = shell_cmd(log_cmd)
 
     var out_parts: [text] = []
     out_parts.push("-- simple_log --" + _VCS_NL)
@@ -88,17 +85,16 @@ fn handle_simple_squash(id: text, body: text) -> text:
     val revision = extract_field(body, "revision")
     val message = extract_field(body, "message")
 
-    var squash_args = ["--no-pager", "--color", "never", "squash"]
+    var squash_cmd = "timeout 30 jj --no-pager --color never squash"
     if revision != "":
-        squash_args.push("-r")
-        squash_args.push(revision)
+        squash_cmd = squash_cmd + " -r " + revision
     if message != "":
-        squash_args.push("-m")
-        squash_args.push(message)
+        squash_cmd = squash_cmd + " -m '" + message + "'"
+    squash_cmd = squash_cmd + " 2>&1"
 
     var squash_out = ""
     var squash_exit: i64 = 0
-    (squash_out, squash_exit) = mcp_run_argv("jj", squash_args, 30000, 1048576)
+    (squash_out, squash_exit) = shell_cmd(squash_cmd)
 
     var out_parts: [text] = []
     out_parts.push("-- simple_squash --" + _VCS_NL)
@@ -117,22 +113,21 @@ fn handle_simple_new(id: text, body: text) -> text:
     val revision = extract_field(body, "revision")
     val message = extract_field(body, "message")
 
-    var new_args = ["--no-pager", "--color", "never", "new"]
-    if message != "":
-        new_args.push("-m")
-        new_args.push(message)
+    var new_cmd = "timeout 30 jj --no-pager --color never new"
     if revision != "":
-        new_args.push("--")
-        new_args.push(revision)
+        new_cmd = new_cmd + " " + revision
+    if message != "":
+        new_cmd = new_cmd + " -m '" + message + "'"
+    new_cmd = new_cmd + " 2>&1"
 
     var new_out = ""
     var new_exit: i64 = 0
-    (new_out, new_exit) = mcp_run_argv("jj", new_args, 30000, 1048576)
+    (new_out, new_exit) = shell_cmd(new_cmd)
 
     # Get revision info
     var rev_info = ""
     var _u2: i64 = 0
-    (rev_info, _u2) = mcp_run_argv("jj", ["--no-pager", "--color", "never", "log", "-r", "@", "--limit", "1"], 10000, 1048576)
+    (rev_info, _u2) = shell_cmd("timeout 10 jj --no-pager --color never log -r @ --limit 1 2>&1")
 
     var out_parts: [text] = []
     out_parts.push("-- simple_new --" + _VCS_NL)
@@ -151,18 +146,18 @@ fn handle_simple_new(id: text, body: text) -> text:
 fn handle_simple_commit(id: text, body: text) -> text:
     val message = extract_field(body, "message")
 
-    var commit_args = ["--no-pager", "--color", "never", "commit"]
+    var commit_cmd = "timeout 30 jj --no-pager --color never commit"
     if message != "":
-        commit_args.push("-m")
-        commit_args.push(message)
+        commit_cmd = commit_cmd + " -m '" + message + "'"
+    commit_cmd = commit_cmd + " 2>&1"
 
     var commit_out = ""
     var commit_exit: i64 = 0
-    (commit_out, commit_exit) = mcp_run_argv("jj", commit_args, 30000, 1048576)
+    (commit_out, commit_exit) = shell_cmd(commit_cmd)
 
     var rev_info = ""
     var _u: i64 = 0
-    (rev_info, _u) = mcp_run_argv("jj", ["--no-pager", "--color", "never", "log", "-r", "@-", "--limit", "1"], 10000, 1048576)
+    (rev_info, _u) = shell_cmd("timeout 10 jj --no-pager --color never log -r @- --limit 1 2>&1")
 
     var out_parts: [text] = []
     out_parts.push("-- simple_commit --" + _VCS_NL)
@@ -181,6 +176,7 @@ fn handle_simple_commit(id: text, body: text) -> text:
 fn handle_simple_push(id: text, body: text) -> text:
     val bookmark = extract_field(body, "bookmark")
     val revision = extract_field(body, "revision")
+    val simple_bin = _mcp_find_simple_binary()
 
     var bm = "main"
     if bookmark != "":
@@ -190,11 +186,11 @@ fn handle_simple_push(id: text, body: text) -> text:
     if revision != "":
         rev = revision
 
-    # Keep public revision/bookmark values as literal jj arguments.
+    # Set bookmark via sj
+    var set_cmd = "timeout 30 " + simple_bin + " sj bookmark set " + bm + " -r " + rev + " 2>&1"
     var set_out = ""
     var set_exit: i64 = 0
-    (set_out, set_exit) = mcp_run_argv(
-        "jj", ["bookmark", "set", "-r", rev, "--", bm], 30000, 1048576)
+    (set_out, set_exit) = shell_cmd(set_cmd)
 
     var out_parts: [text] = []
     out_parts.push("-- simple_push --" + _VCS_NL)
@@ -204,10 +200,11 @@ fn handle_simple_push(id: text, body: text) -> text:
         out_parts.push("Bookmark set failed (exit code " + str(set_exit) + ").")
         return make_tool_result(id, out_parts.join(""))
 
+    # Push via sj
+    var push_cmd = "timeout 60 " + simple_bin + " sj git push --bookmark " + bm + " 2>&1"
     var push_out = ""
     var push_exit: i64 = 0
-    (push_out, push_exit) = mcp_run_argv(
-        "jj", ["git", "push", "--bookmark", bm], 60000, 1048576)
+    (push_out, push_exit) = shell_cmd(push_cmd)
 
     out_parts.push("push: " + push_out)
     if push_exit == 0:
@@ -224,20 +221,18 @@ fn handle_simple_rebase(id: text, body: text) -> text:
     val revision = extract_field(body, "revision")
     val destination = extract_field(body, "destination")
 
-    var rebase_args = ["--no-pager", "--color", "never", "rebase"]
+    var rebase_cmd = "timeout 30 jj --no-pager --color never rebase"
     if revision != "":
-        rebase_args.push("-r")
-        rebase_args.push(revision)
+        rebase_cmd = rebase_cmd + " -r " + revision
     if destination != "":
-        rebase_args.push("-d")
-        rebase_args.push(destination)
+        rebase_cmd = rebase_cmd + " -d " + destination
     else:
-        rebase_args.push("-d")
-        rebase_args.push("main@origin")
+        rebase_cmd = rebase_cmd + " -d main@origin"
+    rebase_cmd = rebase_cmd + " 2>&1"
 
     var rebase_out = ""
     var rebase_exit: i64 = 0
-    (rebase_out, rebase_exit) = mcp_run_argv("jj", rebase_args, 30000, 1048576)
+    (rebase_out, rebase_exit) = shell_cmd(rebase_cmd)
 
     var out_parts: [text] = []
     out_parts.push("-- simple_rebase --" + _VCS_NL)
@@ -258,7 +253,7 @@ fn handle_simple_pull(id: text, body: text) -> text:
     # Fetch
     var fetch_out = ""
     var fetch_exit: i64 = 0
-    (fetch_out, fetch_exit) = mcp_run_argv(simple_bin, ["sj", "raw", "jj", "git", "fetch"], 60000, 1048576)
+    (fetch_out, fetch_exit) = shell_cmd("timeout 60 " + simple_bin + " sj raw jj git fetch 2>&1")
 
     var out_parts: [text] = []
     out_parts.push("-- simple_pull --" + _VCS_NL)
@@ -271,7 +266,7 @@ fn handle_simple_pull(id: text, body: text) -> text:
     # Rebase onto fetched main
     var rebase_out = ""
     var rebase_exit: i64 = 0
-    (rebase_out, rebase_exit) = mcp_run_argv(simple_bin, ["sj", "raw", "jj", "rebase", "-d", "main@origin"], 30000, 1048576)
+    (rebase_out, rebase_exit) = shell_cmd("timeout 30 " + simple_bin + " sj raw jj rebase -d main@origin 2>&1")
 
     out_parts.push("rebase: " + rebase_out)
     if rebase_exit == 0:
@@ -279,7 +274,3 @@ fn handle_simple_pull(id: text, body: text) -> text:
     else:
         out_parts.push(_VCS_NL + "Rebase failed (exit code " + str(rebase_exit) + ").")
     make_tool_result(id, out_parts.join(""))
-
-export handle_simple_diff
-export handle_simple_log
-export handle_simple_commit

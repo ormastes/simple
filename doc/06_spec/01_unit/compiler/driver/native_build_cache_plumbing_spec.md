@@ -1,6 +1,6 @@
-# Native Build Cache Plumbing Specification
+# Contract spec: test/01_unit/compiler/driver/native_build_cache_plumbing_spec.spl
 
-> Tests covering native-build cache plumbing policy.
+> Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,47 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Native Build Cache Plumbing Specification
+# Contract spec: test/01_unit/compiler/driver/native_build_cache_plumbing_spec.spl
+
+Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Compiler |
+| Status | Active |
+| Source | `test/01_unit/compiler/driver/native_build_cache_plumbing_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and Audience
+
+Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
+contracts red-visible, so a regression in the owned code fails this spec
+instead of shipping silently.
+
+## Scope and Preconditions
+
+Precondition: the repository working tree holds the subject code under test.
+Each scenario exercises the subject and asserts its observable contract; no
+behavior outside the named subject is claimed.
+
+## Primary Workflow
+
+Run the scenarios; each one drives the subject through its pinned contract
+and asserts the expected observable outcome with an executed oracle.
+
+## Unsupported / Limitations
+
+Only the pinned contracts are asserted here; end-to-end and integration
+behavior of the surrounding system is covered by companion specs.
+
+## Verification and Recovery
+
+A red scenario names the contract that regressed. Recover by restoring the
+pinned behavior in the subject; verify with
+`bin/simple test test/01_unit/compiler/driver/native_build_cache_plumbing_spec.spl` and a green Results line.
 
 ## Scenarios
 
@@ -22,7 +62,6 @@
 
 
 - loads external entry aliases for AOT and direct interpretation
-   - Expected: src does not contain `and not nb_entry_closure_pre`
 
 
 <details>
@@ -37,7 +76,7 @@ step("loads external entry aliases for AOT and direct interpretation")
 val src = file_read("src/compiler/80.driver/driver.spl")
 expect(src).to_contain("val direct_interpret_entry = self.ctx.options.mode == CompileMode.Interpret and input_len == 1")
 expect(src).to_contain("if (nb_entry_env != \"\" or direct_interpret_entry) and not has_project_source")
-expect(src.contains("and not nb_entry_closure_pre")).to_equal(false)
+expect(src).to_not_contain("and not nb_entry_closure_pre")
 ```
 
 </details>
@@ -45,7 +84,6 @@ expect(src.contains("and not nb_entry_closure_pre")).to_equal(false)
 #### routes AOT cache metadata and objects through SIMPLE_NATIVE_BUILD_CACHE_DIR
 
 - routes AOT cache metadata and objects through SIMPLE_NATIVE_BUILD_CACHE_DIR
-   - Expected: src does not contain `object_files = reconstructed_outputs`
 
 
 <details>
@@ -64,7 +102,7 @@ expect(src).to_contain("rt_path_join(cache_dir, \"build_cache.sdn\")")
 expect(src).to_contain("val object_base = rt_path_join(cache_scope_root, \"object\")")
 expect(src).to_contain("BuildCache.load(cache_path)")
 expect(src).to_contain("object_files = object_files.push(obj_path)")
-expect(src.contains("object_files = reconstructed_outputs")).to_equal(false)
+expect(src).to_not_contain("object_files = reconstructed_outputs")
 ```
 
 </details>
@@ -72,15 +110,12 @@ expect(src.contains("object_files = reconstructed_outputs")).to_equal(false)
 #### does not advertise an unsafe pre-parse cache bypass
 
 - does not advertise an unsafe pre-parse cache bypass
-   - Expected: driver does not contain `SIMPLE_NATIVE_BUILD_SKIP_PRE_PARSE`
-   - Expected: driver does not contain `native_pre_parse_cache_only`
-   - Expected: output does not contain `native_pre_parse`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -89,9 +124,7 @@ step("does not advertise an unsafe pre-parse cache bypass")
 val driver = file_read("src/compiler/80.driver/driver.spl")
 val output = file_read(
     "src/compiler/80.driver/driver_aot_native_output.spl")
-expect(driver.contains("SIMPLE_NATIVE_BUILD_SKIP_PRE_PARSE")).to_equal(false)
-expect(driver.contains("native_pre_parse_cache_only")).to_equal(false)
-expect(output.contains("native_pre_parse")).to_equal(false)
+expect(driver).to_not_contain("SIMPLE_NATIVE_BUILD_SKIP_PRE_PARSE")        expect(driver).to_not_contain("native_pre_parse_cache_only")        expect(output).to_not_contain("native_pre_parse")
 ```
 
 </details>
@@ -99,13 +132,12 @@ expect(output.contains("native_pre_parse")).to_equal(false)
 #### scopes cached objects by every loaded source
 
 - scopes cached objects by every loaded source
-   - Expected: src does not contain `driver_native_sources_fingerprint(ctx.sources)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -130,8 +162,7 @@ val src = file_read(
     "src/compiler/80.driver/driver_aot_native_output.spl")
 expect(src).to_contain("ctx.native_sources_fingerprint")
 expect(src).to_contain("native build source fingerprint missing before cache setup")
-expect(src.contains("driver_native_sources_fingerprint(ctx.sources)")).to_equal(false)
-expect(src).to_contain("rt_dir_remove_all(base_cache_scope_root)")
+expect(src).to_not_contain("driver_native_sources_fingerprint(ctx.sources)")        expect(src).to_contain("rt_dir_remove_all(base_cache_scope_root)")
 expect(src).to_contain("if path_count == 1:")
 ```
 
@@ -206,19 +237,12 @@ expect(src).to_contain("native-build produced no code-bearing MIR modules")
 #### persists native build cache entries between retries
 
 - persists native build cache entries between retries
-   - Expected: driver_src does not contain `class BuildCache:`
-   - Expected: build_src does not contain `while SDN enum constructor lowering is unavailable`
-   - Expected: driver_src does not contain `while SDN enum constructor lowering is unavailable`
-   - Expected: build_src does not contain `use std.sdn.`
-   - Expected: driver_src does not contain `use std.sdn.`
-   - Expected: build_src does not contain `parse_file(cache_path)`
-   - Expected: driver_src does not contain `parse_file(cache_path)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -228,14 +252,7 @@ val build_src = file_read("src/compiler/80.driver/driver_build/incremental.spl")
 val driver_src = file_read("src/compiler/80.driver/driver/incremental.spl")
 expect(build_src).to_contain("class BuildCache:")
 expect(driver_src).to_contain("class LegacyBuildCache:")
-expect(driver_src.contains("class BuildCache:")).to_equal(false)
-expect(build_src.contains("while SDN enum constructor lowering is unavailable")).to_equal(false)
-expect(driver_src.contains("while SDN enum constructor lowering is unavailable")).to_equal(false)
-expect(build_src.contains("use std.sdn.")).to_equal(false)
-expect(driver_src.contains("use std.sdn.")).to_equal(false)
-expect(build_src.contains("parse_file(cache_path)")).to_equal(false)
-expect(driver_src.contains("parse_file(cache_path)")).to_equal(false)
-expect(build_src).to_contain("fn incremental_parse_file(path: text):")
+expect(driver_src).to_not_contain("class BuildCache:")        expect(build_src).to_not_contain("while SDN enum constructor lowering is unavailable")        expect(driver_src).to_not_contain("while SDN enum constructor lowering is unavailable")        expect(build_src).to_not_contain("use std.sdn.")        expect(driver_src).to_not_contain("use std.sdn.")        expect(build_src).to_not_contain("parse_file(cache_path)")        expect(driver_src).to_not_contain("parse_file(cache_path)")        expect(build_src).to_contain("fn incremental_parse_file(path: text):")
 expect(driver_src).to_contain("fn incremental_parse_file(path: text):")
 expect(build_src).to_contain("incremental_file_write_text(self.cache_path")
 expect(driver_src).to_contain("incremental_file_write_text(self.cache_path")
@@ -258,7 +275,6 @@ expect(driver_src).to_contain("val hash_value: SdnValue")
 #### keeps native cache text writes on the length-aware runtime ABI
 
 - keeps native cache text writes on the length-aware runtime ABI
-   - Expected: runtime does not contain `rt_file_write_text(const char* path, const char* content)`
 
 
 <details>
@@ -276,7 +292,7 @@ expect(runtime).to_contain("int rt_file_write_text(const uint8_t* path, uint64_t
 expect(runtime).to_contain("rt_core_file_write_data(path, path_len, content, content_len, \"wb\")")
 expect(runtime).to_contain("rt_core_file_write_data(path, path_len, content, content_len, \"ab\")")
 expect(header).to_contain("rt_file_write_text(const uint8_t* path, uint64_t path_len, const uint8_t* content, uint64_t content_len)")
-expect(runtime.contains("rt_file_write_text(const char* path, const char* content)")).to_equal(false)
+expect(runtime).to_not_contain("rt_file_write_text(const char* path, const char* content)")
 ```
 
 </details>
@@ -284,25 +300,21 @@ expect(runtime.contains("rt_file_write_text(const char* path, const char* conten
 #### keeps driver project SDN loading compatible with library compile
 
 - keeps driver project SDN loading compatible with library compile
-   - Expected: src does not contain `use std.sdn.`
-   - Expected: src does not contain `list_dir(parent)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-COMPILER
 step("keeps driver project SDN loading compatible with library compile")
 val src = file_read("src/compiler/80.driver/project.spl")
-expect(src.contains("use std.sdn.")).to_equal(false)
-expect(src).to_contain("use std.common.sdn.parser (parse)")
+expect(src).to_not_contain("use std.sdn.")        expect(src).to_contain("use std.common.sdn.parser (parse)")
 expect(src).to_contain("match parse(file_read(path)):")
-expect(src.contains("list_dir(parent)")).to_equal(false)
-expect(src).to_contain("dir_list(parent)")
+expect(src).to_not_contain("list_dir(parent)")        expect(src).to_contain("dir_list(parent)")
 ```
 
 </details>
@@ -444,14 +456,12 @@ expect(driver_src).to_contain("native_build_compiler_identity()")
 #### uses the runtime-backed directory owner for compiler fingerprint traversal
 
 - uses the runtime-backed directory owner for compiler fingerprint traversal
-   - Expected: incremental_src does not contain `use std.io_runtime.{dir_create_all, dir_list}`
-   - Expected: incremental_src does not contain `std.nogc_sync_mut.io.dir_ops`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -459,8 +469,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("uses the runtime-backed directory owner for compiler fingerprint traversal")
 val incremental_src = file_read("src/compiler/80.driver/driver_build/incremental.spl")
 expect(incremental_src).to_contain("use std.nogc_sync_mut.io_runtime.{dir_create_all, dir_list}")
-expect(incremental_src.contains("use std.io_runtime.{dir_create_all, dir_list}")).to_equal(false)
-expect(incremental_src.contains("std.nogc_sync_mut.io.dir_ops")).to_equal(false)
+expect(incremental_src).to_not_contain("use std.io_runtime.{dir_create_all, dir_list}")        expect(incremental_src).to_not_contain("std.nogc_sync_mut.io.dir_ops")
 ```
 
 </details>
@@ -494,7 +503,6 @@ expect(is_hex_string(first)).to_equal(true)
 #### no longer hardcodes build/smf in the cache-aware native builder
 
 - no longer hardcodes build/smf in the cache-aware native builder
-   - Expected: src does not contain `val cache_dir = "build/smf"`
 
 
 <details>
@@ -510,7 +518,7 @@ val src = file_read("src/compiler/70.backend/build_native.spl")
 expect(src).to_contain("SIMPLE_NATIVE_BUILD_CACHE_DIR")
 expect(src).to_contain("native_build_cache_scope_key")
 expect(src).to_contain("source_to_cache_path(cache_source, cache_dir, \".smf\")")
-expect(src.contains("val cache_dir = \"build/smf\"")).to_equal(false)
+expect(src).to_not_contain("val cache_dir = \"build/smf\"")
 ```
 
 </details>
@@ -595,25 +603,12 @@ expect(build_src).to_contain("if all_done and not self.ready_queue.contains(dep_
 #### does not bind reserved asm keyword in compiler inline assembly paths
 
 - does not bind reserved asm keyword in compiler inline assembly paths
-   - Expected: hir_expr_src does not contain `case ExprKind.AsmBlock(asm):`
-   - Expected: hir_expr_src does not contain `lower_asm(asm:`
-   - Expected: hir_defs_src does not contain `InlineAsm(asm:`
-   - Expected: mir_lower_src does not contain `lower_inline_asm(asm:`
-   - Expected: inline_codegen_src does not contain `fn generate(asm: InlineAsm)`
-   - Expected: arm_src does not contain `fn generate(asm: InlineAsm)`
-   - Expected: arm_src does not contain `var asm = InlineAsm.new`
-   - Expected: x86_src does not contain `fn generate(asm: InlineAsm)`
-   - Expected: x86_src does not contain `var asm = InlineAsm.new`
-   - Expected: riscv_src does not contain `fn generate(asm: InlineAsm)`
-   - Expected: riscv_src does not contain `var asm = InlineAsm.new`
-   - Expected: riscv32_src does not contain `fn generate(asm: InlineAsm)`
-   - Expected: riscv32_src does not contain `var asm = InlineAsm.new`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -627,19 +622,7 @@ val arm_src = file_read("src/compiler/70.backend/backend/arm_asm.spl")
 val x86_src = file_read("src/compiler/70.backend/backend/x86_asm.spl")
 val riscv_src = file_read("src/compiler/70.backend/backend/riscv_asm.spl")
 val riscv32_src = file_read("src/compiler/70.backend/backend/riscv32_asm.spl")
-expect(hir_expr_src.contains("case ExprKind.AsmBlock(asm):")).to_equal(false)
-expect(hir_expr_src.contains("lower_asm(asm:")).to_equal(false)
-expect(hir_defs_src.contains("InlineAsm(asm:")).to_equal(false)
-expect(mir_lower_src.contains("lower_inline_asm(asm:")).to_equal(false)
-expect(inline_codegen_src.contains("fn generate(asm: InlineAsm)")).to_equal(false)
-expect(arm_src.contains("fn generate(asm: InlineAsm)")).to_equal(false)
-expect(arm_src.contains("var asm = InlineAsm.new")).to_equal(false)
-expect(x86_src.contains("fn generate(asm: InlineAsm)")).to_equal(false)
-expect(x86_src.contains("var asm = InlineAsm.new")).to_equal(false)
-expect(riscv_src.contains("fn generate(asm: InlineAsm)")).to_equal(false)
-expect(riscv_src.contains("var asm = InlineAsm.new")).to_equal(false)
-expect(riscv32_src.contains("fn generate(asm: InlineAsm)")).to_equal(false)
-expect(riscv32_src.contains("var asm = InlineAsm.new")).to_equal(false)
+expect(hir_expr_src).to_not_contain("case ExprKind.AsmBlock(asm):")        expect(hir_expr_src).to_not_contain("lower_asm(asm:")        expect(hir_defs_src).to_not_contain("InlineAsm(asm:")        expect(mir_lower_src).to_not_contain("lower_inline_asm(asm:")        expect(inline_codegen_src).to_not_contain("fn generate(asm: InlineAsm)")        expect(arm_src).to_not_contain("fn generate(asm: InlineAsm)")        expect(arm_src).to_not_contain("var asm = InlineAsm.new")        expect(x86_src).to_not_contain("fn generate(asm: InlineAsm)")        expect(x86_src).to_not_contain("var asm = InlineAsm.new")        expect(riscv_src).to_not_contain("fn generate(asm: InlineAsm)")        expect(riscv_src).to_not_contain("var asm = InlineAsm.new")        expect(riscv32_src).to_not_contain("fn generate(asm: InlineAsm)")        expect(riscv32_src).to_not_contain("var asm = InlineAsm.new")
 ```
 
 </details>
@@ -647,43 +630,6 @@ expect(riscv32_src.contains("var asm = InlineAsm.new")).to_equal(false)
 #### keeps TreeSitter outline accumulation bound to module fields
 
 - keeps TreeSitter outline accumulation bound to module fields
-   - Expected: facade_src does not contain `module.imports_push(imports,`
-   - Expected: facade_src does not contain `module.exports_push(exports,`
-   - Expected: facade_src does not contain `module.functions_push(functions,`
-   - Expected: facade_src does not contain `module.errors_push(errors,`
-   - Expected: outline_src does not contain `module.imports_push(imports,`
-   - Expected: outline_src does not contain `module.exports_push(exports,`
-   - Expected: outline_src does not contain `module.functions_push(functions,`
-   - Expected: outline_src does not contain `module.errors_push(errors,`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-COMPILER
-step("keeps TreeSitter outline accumulation bound to module fields")
-val facade_src = file_read("src/compiler/10.frontend/treesitter.spl")
-val outline_src = file_read("src/compiler/10.frontend/treesitter/outline.spl")
-expect(facade_src.contains("module.imports_push(imports,")).to_equal(false)
-expect(facade_src.contains("module.exports_push(exports,")).to_equal(false)
-expect(facade_src.contains("module.functions_push(functions,")).to_equal(false)
-expect(facade_src.contains("module.errors_push(errors,")).to_equal(false)
-expect(outline_src.contains("module.imports_push(imports,")).to_equal(false)
-expect(outline_src.contains("module.exports_push(exports,")).to_equal(false)
-expect(outline_src.contains("module.functions_push(functions,")).to_equal(false)
-expect(outline_src.contains("module.errors_push(errors,")).to_equal(false)
-```
-
-</details>
-
-#### keeps MIR bootstrap return helper resolved through the lowerer
-
-- keeps MIR bootstrap return helper resolved through the lowerer
-   - Expected: src does not contain `terminate_return(bootstrap_default_return_operand(`
 
 
 <details>
@@ -694,10 +640,30 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-COMPILER
+step("keeps TreeSitter outline accumulation bound to module fields")
+val facade_src = file_read("src/compiler/10.frontend/treesitter.spl")
+val outline_src = file_read("src/compiler/10.frontend/treesitter/outline.spl")
+expect(facade_src).to_not_contain("module.imports_push(imports,")        expect(facade_src).to_not_contain("module.exports_push(exports,")        expect(facade_src).to_not_contain("module.functions_push(functions,")        expect(facade_src).to_not_contain("module.errors_push(errors,")        expect(outline_src).to_not_contain("module.imports_push(imports,")        expect(outline_src).to_not_contain("module.exports_push(exports,")        expect(outline_src).to_not_contain("module.functions_push(functions,")        expect(outline_src).to_not_contain("module.errors_push(errors,")
+```
+
+</details>
+
+#### keeps MIR bootstrap return helper resolved through the lowerer
+
+- keeps MIR bootstrap return helper resolved through the lowerer
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER
 step("keeps MIR bootstrap return helper resolved through the lowerer")
 val src = file_read("src/compiler/50.mir/_MirLowering/module_lowering.spl")
-expect(src.contains("terminate_return(bootstrap_default_return_operand(")).to_equal(false)
-expect(src).to_contain("terminate_return(self.bootstrap_default_return_operand(")
+expect(src).to_not_contain("terminate_return(bootstrap_default_return_operand(")        expect(src).to_contain("terminate_return(self.bootstrap_default_return_operand(")
 ```
 
 </details>
@@ -705,18 +671,12 @@ expect(src).to_contain("terminate_return(self.bootstrap_default_return_operand("
 #### keeps C type mapper bootstrap-safe without compact OR patterns
 
 - keeps C type mapper bootstrap-safe without compact OR patterns
-   - Expected: src does not contain `case I64 | U64 | F64`
-   - Expected: src does not contain `case Ptr(_, _) | Ref(_, _) | FuncPtr(_)`
-   - Expected: src does not contain `case Array(elem, size): self.size_of(elem) * size`
-   - Expected: common_src does not contain `self.size_of(f[1])`
-   - Expected: common_src does not contain `self.align_of(f[1])`
-   - Expected: common_src does not contain `case I64 | F64 | Ptr(_, _)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -724,13 +684,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("keeps C type mapper bootstrap-safe without compact OR patterns")
 val src = file_read("src/compiler/70.backend/backend/c_type_mapper.spl")
 val common_src = file_read("src/compiler/70.backend/backend/common/type_mapper.spl")
-expect(src.contains("case I64 | U64 | F64")).to_equal(false)
-expect(src.contains("case Ptr(_, _) | Ref(_, _) | FuncPtr(_)")).to_equal(false)
-expect(src.contains("case Array(elem, size): self.size_of(elem) * size")).to_equal(false)
-expect(common_src.contains("self.size_of(f[1])")).to_equal(false)
-expect(common_src.contains("self.align_of(f[1])")).to_equal(false)
-expect(common_src.contains("case I64 | F64 | Ptr(_, _)")).to_equal(false)
-expect(src).to_contain("case U8: 1")
+expect(src).to_not_contain("case I64 | U64 | F64")        expect(src).to_not_contain("case Ptr(_, _) | Ref(_, _) | FuncPtr(_)")        expect(src).to_not_contain("case Array(elem, size): self.size_of(elem) * size")        expect(common_src).to_not_contain("self.size_of(f[1])")        expect(common_src).to_not_contain("self.align_of(f[1])")        expect(common_src).to_not_contain("case I64 | F64 | Ptr(_, _)")        expect(src).to_contain("case U8: 1")
 expect(src).to_contain("C aggregates are runtime-backed here")
 ```
 
@@ -739,51 +693,19 @@ expect(src).to_contain("C aggregates are runtime-backed here")
 #### keeps codegen factory backend cases qualified for bootstrap
 
 - keeps codegen factory backend cases qualified for bootstrap
-   - Expected: src does not contain `case Llvm:`
-   - Expected: src does not contain `case LlvmLib:`
-   - Expected: src does not contain `case CCodegen:`
-   - Expected: src does not contain `case Wasm:`
-   - Expected: src does not contain `case Native:`
-   - Expected: src does not contain `case Interpreter:`
-   - Expected: src does not contain `case Cranelift:`
-   - Expected: src does not contain `case Cuda:`
-   - Expected: src does not contain `case Hip:`
-   - Expected: src does not contain `case OpenCl:`
-   - Expected: src does not contain `case Vulkan:`
-   - Expected: src does not contain `case Lean:`
-   - Expected: src does not contain `case Byl:`
-   - Expected: src does not contain `case Vhdl:`
-   - Expected: src does not contain `case IrTc:`
-   - Expected: src does not contain `case Lua:`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-COMPILER
 step("keeps codegen factory backend cases qualified for bootstrap")
 val src = file_read("src/compiler/70.backend/backend/codegen_factory.spl")
-expect(src.contains("case Llvm:")).to_equal(false)
-expect(src.contains("case LlvmLib:")).to_equal(false)
-expect(src.contains("case CCodegen:")).to_equal(false)
-expect(src.contains("case Wasm:")).to_equal(false)
-expect(src.contains("case Native:")).to_equal(false)
-expect(src.contains("case Interpreter:")).to_equal(false)
-expect(src.contains("case Cranelift:")).to_equal(false)
-expect(src.contains("case Cuda:")).to_equal(false)
-expect(src.contains("case Hip:")).to_equal(false)
-expect(src.contains("case OpenCl:")).to_equal(false)
-expect(src.contains("case Vulkan:")).to_equal(false)
-expect(src.contains("case Lean:")).to_equal(false)
-expect(src.contains("case Byl:")).to_equal(false)
-expect(src.contains("case Vhdl:")).to_equal(false)
-expect(src.contains("case IrTc:")).to_equal(false)
-expect(src.contains("case Lua:")).to_equal(false)
-expect(src).to_contain("case BackendKind.Byl:")
+expect(src).to_not_contain("case Llvm:")        expect(src).to_not_contain("case LlvmLib:")        expect(src).to_not_contain("case CCodegen:")        expect(src).to_not_contain("case Wasm:")        expect(src).to_not_contain("case Native:")        expect(src).to_not_contain("case Interpreter:")        expect(src).to_not_contain("case Cranelift:")        expect(src).to_not_contain("case Cuda:")        expect(src).to_not_contain("case Hip:")        expect(src).to_not_contain("case OpenCl:")        expect(src).to_not_contain("case Vulkan:")        expect(src).to_not_contain("case Lean:")        expect(src).to_not_contain("case Byl:")        expect(src).to_not_contain("case Vhdl:")        expect(src).to_not_contain("case IrTc:")        expect(src).to_not_contain("case Lua:")        expect(src).to_contain("case BackendKind.Byl:")
 ```
 
 </details>
@@ -791,16 +713,12 @@ expect(src).to_contain("case BackendKind.Byl:")
 #### keeps lib backend-kind enums from shadowing compiler BackendKind
 
 - keeps lib backend-kind enums from shadowing compiler BackendKind
-   - Expected: di_src does not contain `enum BackendKind:`
-   - Expected: engine_src does not contain `enum BackendKind:`
-   - Expected: nogc_export_src does not contain `export Backend, BackendKind`
-   - Expected: engine_mod_src does not contain `backend_capability.{BackendKind`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -810,13 +728,10 @@ val di_src = file_read("src/lib/nogc_sync_mut/src/di.spl")
 val engine_src = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_capability.spl")
 val nogc_export_src = file_read("src/lib/nogc_sync_mut/src/__init__.spl")
 val engine_mod_src = file_read("src/lib/gc_async_mut/gpu/engine2d/mod.spl")
-expect(di_src.contains("enum BackendKind:")).to_equal(false)
-expect(engine_src.contains("enum BackendKind:")).to_equal(false)
-expect(di_src).to_contain("enum DiBackendKind:")
+expect(di_src).to_not_contain("enum BackendKind:")        expect(engine_src).to_not_contain("enum BackendKind:")        expect(di_src).to_contain("enum DiBackendKind:")
 expect(engine_src).to_contain("enum Engine2dBackendKind:")
-expect(nogc_export_src.contains("export Backend, BackendKind")).to_equal(false)
-expect(nogc_export_src).to_contain("export DiBackendKind from di")
-expect(engine_mod_src.contains("backend_capability.{BackendKind")).to_equal(false)
+expect(nogc_export_src).to_not_contain("export Backend, BackendKind")        expect(nogc_export_src).to_contain("export DiBackendKind from di")
+expect(engine_mod_src).to_not_contain("backend_capability.{BackendKind")
 ```
 
 </details>
@@ -824,14 +739,12 @@ expect(engine_mod_src.contains("backend_capability.{BackendKind")).to_equal(fals
 #### keeps exactly one terminal BackendKind declaration behind two facades
 
 - keeps exactly one terminal BackendKind declaration behind two facades
-   - Expected: core_src does not contain `enum BackendKind:`
-   - Expected: legacy_src does not contain `enum BackendKind:`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -860,9 +773,8 @@ expect(canonical_src).to_contain("\n    IrTc ")
 
 # The two facades must RE-EXPORT it, never re-declare it.
 expect(core_src).to_contain("export use compiler.backend.backend.backend_types.{{BackendKind}}")
-expect(core_src.contains("enum BackendKind:")).to_equal(false)
-expect(legacy_src).to_contain("use compiler.backend.backend.backend_types.{{BackendKind, CompiledSymbol, CompiledSymbolKind}}")
-expect(legacy_src.contains("enum BackendKind:")).to_equal(false)
+expect(core_src).to_not_contain("enum BackendKind:")        expect(legacy_src).to_contain("use compiler.backend.backend.backend_types.{{BackendKind, CompiledSymbol, CompiledSymbolKind}}")
+expect(legacy_src).to_not_contain("enum BackendKind:")
 ```
 
 </details>
@@ -870,21 +782,19 @@ expect(legacy_src.contains("enum BackendKind:")).to_equal(false)
 #### keeps visibility warning helper using optional binding
 
 - keeps visibility warning helper using optional binding
-   - Expected: src does not contain `if has_warning:`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-COMPILER
 step("keeps visibility warning helper using optional binding")
 val src = file_read("src/compiler/35.semantics/visibility_checker.spl")
-expect(src.contains("if has_warning:")).to_equal(false)
-expect(src).to_contain("if val warning_value = warning:")
+expect(src).to_not_contain("if has_warning:")        expect(src).to_contain("if val warning_value = warning:")
 expect(src).to_contain("checker.record_warning(warning_value)")
 ```
 
@@ -893,13 +803,12 @@ expect(src).to_contain("checker.record_warning(warning_value)")
 #### keeps MIR Let lowering from dereferencing nil enum payload symbols
 
 - keeps MIR Let lowering from dereferencing nil enum payload symbols
-   - Expected: src does not contain `fn mir_hir_stmt_kind_disc(k: HirStmtKind) -> i64:\n    match k:`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -907,28 +816,12 @@ Reproduction: this block contains the complete executable scenario source.
 step("keeps MIR Let lowering from dereferencing nil enum payload symbols")
 val src = file_read("src/compiler/50.mir/mir_lowering_stmts.spl")
 expect(src).to_contain("fn mir_hir_stmt_kind_disc(k: HirStmtKind) -> i64:\n    rt_enum_discriminant(k)")
-expect(src.contains("fn mir_hir_stmt_kind_disc(k: HirStmtKind) -> i64:\n    match k:")).to_equal(false)
-expect(src).to_contain("if mir_hir_stmt_kind_disc(stmt_kind_value) == let_disc:")
+expect(src).to_not_contain("fn mir_hir_stmt_kind_disc(k: HirStmtKind) -> i64:\n    match k:")        expect(src).to_contain("if mir_hir_stmt_kind_disc(stmt_kind_value) == let_disc:")
 expect(src).to_contain("val let_symbol = match stmt_kind_value:")
 expect(src).to_contain("self.error(\"let binding has no resolved symbol\"")
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Compiler |
-| Status | Active |
-| Source | `test/01_unit/compiler/driver/native_build_cache_plumbing_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering native-build cache plumbing policy.
-- native-build cache plumbing policy
 
 ## Scenario Summary
 
@@ -954,42 +847,36 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `f5eeeb064cc5868f34389c9cc3a6f45bff68058763ddfd8e08b8895fe7bfa29b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `8af73d92628ebd0ed63488aa4fadd9b53d81aa093335757c87bea35f9df01a95`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `f5eeeb064cc5868f34389c9cc3a6f45bff68058763ddfd8e08b8895fe7bfa29b`.
+Source SHA-256: `8af73d92628ebd0ed63488aa4fadd9b53d81aa093335757c87bea35f9df01a95`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `f5eeeb064cc5868f34389c9cc3a6f45bff68058763ddfd8e08b8895fe7bfa29b`  
+Source SHA-256: `8af73d92628ebd0ed63488aa4fadd9b53d81aa093335757c87bea35f9df01a95`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+Raw score: **93/100**; effective score: **93/100**; blockers: **0**.
 
-SSpec documentization score: 90/100
+SSpec documentization score: 93/100
 source: test/01_unit/compiler/driver/native_build_cache_plumbing_spec.spl
 mirror: doc/06_spec/01_unit/compiler/driver/native_build_cache_plumbing_spec.md (current)
-findings: 6 blockers: 0
+findings: 4 blockers: 0
   narrative=100 structure=100 oracle=90
-  traceability=100 evidence=70 coverage=100 maintainability=70
+  traceability=100 evidence=70 coverage=100 maintainability=100
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/compiler/driver/native_build_cache_plumbing_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/compiler/driver/native_build_cache_plumbing_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
 test/01_unit/compiler/driver/native_build_cache_plumbing_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
   why: Reviewers need to know why a magic expected value is authoritative.
   improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/compiler/driver/native_build_cache_plumbing_spec.spl:44:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'loads external entry aliases for AOT and direct interpretation' has no retained capture or evidence
+test/01_unit/compiler/driver/native_build_cache_plumbing_spec.spl:76:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'loads external entry aliases for AOT and direct interpretation' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler/driver/native_build_cache_plumbing_spec.spl:52:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'routes AOT cache metadata and objects through SIMPLE_NATIVE_BUILD_CACHE_DIR' has no retained capture or evidence
+test/01_unit/compiler/driver/native_build_cache_plumbing_spec.spl:83:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'routes AOT cache metadata and objects through SIMPLE_NATIVE_BUILD_CACHE_DIR' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler/driver/native_build_cache_plumbing_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'does not advertise an unsafe pre-parse cache bypass' has no retained capture or evidence
+test/01_unit/compiler/driver/native_build_cache_plumbing_spec.spl:94:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'does not advertise an unsafe pre-parse cache bypass' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

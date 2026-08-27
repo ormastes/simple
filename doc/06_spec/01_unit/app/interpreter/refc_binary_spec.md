@@ -1,6 +1,29 @@
 # Refc Binary Specification
 
-> Tests covering CopyStrategy, BinaryRef, RefcBinary, SharedHeapConfig, SharedHeap - Allocation, SharedHeap - Sub-binaries, SharedHeap - Reference Counting, SharedHeap - Garbage Collection, SharedHeap - Pinning, SharedHeap - Statistics, SharedHeap - Defragmentation, SharedHeap - Queries, AllocResult.
+> 1. check
+
+<!-- sdn-diagram:id=refc_binary_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=refc_binary_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+refc_binary_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=refc_binary_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,22 +40,16 @@
 
 #### recommends deep copy for small values
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- recommends deep copy for small values
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("recommends deep copy for small values")
 val strategy = copy_strategy(32)
 check(strategy == "DeepCopy")
 ```
@@ -41,18 +58,16 @@ check(strategy == "DeepCopy")
 
 #### recommends share ref for large values
 
-- recommends share ref for large values
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("recommends share ref for large values")
 val strategy = copy_strategy(128)
 check(strategy == "ShareRef")
 ```
@@ -61,7 +76,29 @@ check(strategy == "ShareRef")
 
 #### uses threshold of 64 bytes
 
-- uses threshold of 64 bytes
+1. check
+2. check
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+check(copy_strategy(63) == "DeepCopy")
+check(copy_strategy(64) == "ShareRef")
+```
+
+</details>
+
+#### determines sharing based on strategy
+
+1. check
+2. check
+3. check
+4. check
 
 
 <details>
@@ -71,28 +108,6 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("uses threshold of 64 bytes")
-check(copy_strategy(63) == "DeepCopy")
-check(copy_strategy(64) == "ShareRef")
-```
-
-</details>
-
-#### determines sharing based on strategy
-
-- determines sharing based on strategy
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("determines sharing based on strategy")
 check(not CopyStrategy__DeepCopy__should_share(1000))
 check(CopyStrategy__ShareRef__should_share(10))
 check(not CopyStrategy__Hybrid__should_share(32))
@@ -105,18 +120,18 @@ check(CopyStrategy__Hybrid__should_share(128))
 
 #### creates reference
 
-- creates reference
+1. check
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates reference")
 val ref_val = BinaryRef.new(1, 100, 256)
 
 check(ref_val.id.value == 1)
@@ -128,18 +143,16 @@ check(ref_val.length.value == 256)
 
 #### reports size
 
-- reports size
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("reports size")
 val ref_val = BinaryRef.new(1, 0, 1024)
 check(ref_val.size() == 1024)
 ```
@@ -148,18 +161,17 @@ check(ref_val.size() == 1024)
 
 #### identifies small binaries
 
-- identifies small binaries
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("identifies small binaries")
 val small = BinaryRef.new(1, 0, 32)
 val large = BinaryRef.new(2, 0, 128)
 
@@ -171,18 +183,17 @@ check(not large.is_small())
 
 #### compares for equality
 
-- compares for equality
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("compares for equality")
 val ref1 = BinaryRef.new(1, 0, 100)
 val ref2 = BinaryRef.new(1, 50, 200)
 val ref3 = BinaryRef.new(2, 0, 100)
@@ -195,18 +206,18 @@ check(not ref1.eq(ref3))  # Different ID
 
 #### formats for display
 
-- formats for display
+1. check
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats for display")
 val ref_val = BinaryRef.new(42, 0, 256)
 val s = ref_val.fmt()
 
@@ -221,18 +232,18 @@ check(s.contains("256"))
 
 #### creates with initial refcount of 1
 
-- creates with initial refcount of 1
+1. check
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates with initial refcount of 1")
 val binary = RefcBinary.new(1, 1024, 0)
 
 check(binary.id.value == 1)
@@ -244,18 +255,18 @@ check(binary.length.value == 1024)
 
 #### increments refcount
 
-- increments refcount
+1. var binary = RefcBinary new
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("increments refcount")
 var binary = RefcBinary.new(1, 100, 0)
 
 val count = binary.incref()
@@ -268,18 +279,18 @@ check(binary.refcount.value == 2)
 
 #### decrements refcount
 
-- decrements refcount
+1. var binary = RefcBinary new
+2. binary incref
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("decrements refcount")
 var binary = RefcBinary.new(1, 100, 0)
 binary.incref()
 
@@ -292,18 +303,19 @@ check(count == 1)
 
 #### checks if can collect
 
-- checks if can collect
+1. var binary = RefcBinary new
+2. check
+3. binary decref
+4. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("checks if can collect")
 var binary = RefcBinary.new(1, 100, 0)
 
 check(not binary.can_collect())
@@ -316,18 +328,21 @@ check(binary.can_collect())
 
 #### respects pinning
 
-- respects pinning
+1. var binary = RefcBinary new
+2. binary decref
+3. binary pin
+4. check
+5. binary unpin
+6. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("respects pinning")
 var binary = RefcBinary.new(1, 100, 0)
 binary.decref()
 binary.pin()
@@ -342,18 +357,19 @@ check(binary.can_collect())
 
 #### creates sub-binary
 
-- creates sub-binary
+1. check
+2. check
+3. check
+4. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates sub-binary")
 val sub = RefcBinary.sub_binary(2, 1, 10, 50, 0)
 
 check(sub.id.value == 2)
@@ -366,18 +382,16 @@ check(sub.length.value == 50)
 
 #### calculates total size
 
-- calculates total size
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("calculates total size")
 val binary = RefcBinary.new(1, 1024, 1024)
 val total = binary.total_size()
 
@@ -389,18 +403,16 @@ check(total >= 1024)
 
 #### creates ref from binary
 
-- creates ref from binary
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates ref from binary")
 val binary = RefcBinary.new(1, 256, 256)
 # to_ref returns a BinaryRef with offset
 val ref_val = binary.to_ref(100)
@@ -415,18 +427,17 @@ check(ref_val.?)
 
 #### creates default config
 
-- creates default config
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates default config")
 val config = SharedHeapConfig.default()
 
 check(config.initial_size.value == 64 * 1024 * 1024)
@@ -437,18 +448,16 @@ check(config.gc_threshold == 0.8)
 
 #### creates small config
 
-- creates small config
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates small config")
 val config = SharedHeapConfig.small()
 
 check(config.initial_size.value == 1024 * 1024)
@@ -458,18 +467,16 @@ check(config.initial_size.value == 1024 * 1024)
 
 #### creates large config
 
-- creates large config
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates large config")
 val config = SharedHeapConfig.large()
 
 check(config.initial_size.value == 256 * 1024 * 1024)
@@ -481,18 +488,18 @@ check(config.initial_size.value == 256 * 1024 * 1024)
 
 #### allocates binary
 
-- allocates binary
+1. var heap = SharedHeap new
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("allocates binary")
 var heap = SharedHeap.new(SharedHeapConfig.small())
 
 val result = heap.allocate(0, 1024)
@@ -506,18 +513,21 @@ check(ref_val.length.value == 1024)
 
 #### tracks allocation stats
 
-- tracks allocation stats
+1. var heap = SharedHeap new
+2. heap allocate
+3. heap allocate
+4. check
+5. check
+6. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("tracks allocation stats")
 var heap = SharedHeap.new(SharedHeapConfig.small())
 
 heap.allocate(0, 1000)
@@ -533,18 +543,17 @@ check(stats.total_allocations.value == 2)
 
 #### rejects zero size
 
-- rejects zero size
+1. var heap = SharedHeap new
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("rejects zero size")
 var heap = SharedHeap.new(SharedHeapConfig.small())
 
 val result = heap.allocate(0, 0)
@@ -556,18 +565,17 @@ check(result.tag == "InvalidSize")
 
 #### rejects too large
 
-- rejects too large
+1. var heap = SharedHeap new
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("rejects too large")
 var heap = SharedHeap.new(SharedHeapConfig.small())
 
 val result = heap.allocate(0, 2 * 1024 * 1024 * 1024)  # 2 GB
@@ -582,18 +590,20 @@ check(result.tag == "TooLarge")
 
 #### returns out of memory when full
 
-- returns out of memory when full
+1. initial size: ByteSize
+2. max size: ByteSize
+3. var heap = SharedHeap new
+4. heap allocate
+5. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns out of memory when full")
 val config = SharedHeapConfig(
     initial_size: ByteSize(value: 1000),
     max_size: ByteSize(value: 1000),
@@ -618,18 +628,18 @@ check(result.tag == "OutOfMemory")
 
 #### allocates sub-binary
 
-- allocates sub-binary
+1. var heap = SharedHeap new
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("allocates sub-binary")
 var heap = SharedHeap.new(SharedHeapConfig.small())
 
 val parent_result = heap.allocate(0, 1024)
@@ -646,18 +656,17 @@ check(sub_ref.length.value == 200)
 
 #### fails for nonexistent parent
 
-- fails for nonexistent parent
+1. var heap = SharedHeap new
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("fails for nonexistent parent")
 var heap = SharedHeap.new(SharedHeapConfig.small())
 
 val result = heap.allocate_sub_binary(999, 0, 100)
@@ -669,18 +678,17 @@ check(result.tag == "ParentNotFound")
 
 #### fails for invalid range
 
-- fails for invalid range
+1. var heap = SharedHeap new
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("fails for invalid range")
 var heap = SharedHeap.new(SharedHeapConfig.small())
 
 val parent_result = heap.allocate(0, 100)
@@ -695,18 +703,19 @@ check(result.tag == "InvalidRange")
 
 #### tracks sub-binary count
 
-- tracks sub-binary count
+1. var heap = SharedHeap new
+2. heap allocate sub binary
+3. heap allocate sub binary
+4. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("tracks sub-binary count")
 var heap = SharedHeap.new(SharedHeapConfig.small())
 
 val parent_result = heap.allocate(0, 1024)
@@ -725,18 +734,18 @@ check(stats.sub_binary_count.value == 2)
 
 #### increments refcount
 
-- increments refcount
+1. var heap = SharedHeap new
+2. check
+3. Some
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("increments refcount")
 var heap = SharedHeap.new(SharedHeapConfig.small())
 
 val result = heap.allocate(0, 100)
@@ -754,18 +763,19 @@ match binary:
 
 #### decrements refcount
 
-- decrements refcount
+1. var heap = SharedHeap new
+2. heap incref
+3. check
+4. Some
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("decrements refcount")
 var heap = SharedHeap.new(SharedHeapConfig.small())
 
 val result = heap.allocate(0, 100)
@@ -784,18 +794,19 @@ match binary:
 
 #### deallocates when refcount reaches zero
 
-- deallocates when refcount reaches zero
+1. var heap = SharedHeap new
+2. heap decref
+3. check
+4. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("deallocates when refcount reaches zero")
 var heap = SharedHeap.new(SharedHeapConfig.small())
 
 val result = heap.allocate(0, 100)
@@ -811,18 +822,21 @@ check(heap.get_stats().binary_count.value == 0)
 
 #### tracks incref and decref stats
 
-- tracks incref and decref stats
+1. var heap = SharedHeap new
+2. heap incref
+3. heap incref
+4. heap decref
+5. check
+6. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("tracks incref and decref stats")
 var heap = SharedHeap.new(SharedHeapConfig.small())
 
 val result = heap.allocate(0, 100)
@@ -843,18 +857,21 @@ check(stats.total_decref.value == 1)
 
 #### collects unreferenced binaries
 
-- collects unreferenced binaries
+1. var heap = SharedHeap new
+2. heap allocate
+3. heap allocate
+4. heap decref
+5. heap decref
+6. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("collects unreferenced binaries")
 var heap = SharedHeap.new(SharedHeapConfig.small())
 
 heap.allocate(0, 1000)
@@ -872,18 +889,20 @@ check(heap.binary_count() == 0)
 
 #### preserves referenced binaries
 
-- preserves referenced binaries
+1. var heap = SharedHeap new
+2. heap incref
+3. heap decref
+4. heap collect garbage
+5. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("preserves referenced binaries")
 var heap = SharedHeap.new(SharedHeapConfig.small())
 
 val result = heap.allocate(0, 1000)
@@ -900,18 +919,20 @@ check(heap.contains(ref_val.id.value))
 
 #### preserves pinned binaries
 
-- preserves pinned binaries
+1. var heap = SharedHeap new
+2. heap pin
+3. heap decref
+4. heap collect garbage
+5. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("preserves pinned binaries")
 var heap = SharedHeap.new(SharedHeapConfig.small())
 
 val result = heap.allocate(0, 1000)
@@ -930,18 +951,18 @@ check(heap.contains(ref_val.id.value))  # Still there because pinned
 
 #### pins binary
 
-- pins binary
+1. var heap = SharedHeap new
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("pins binary")
 var heap = SharedHeap.new(SharedHeapConfig.small())
 
 val result = heap.allocate(0, 100)
@@ -957,18 +978,19 @@ check(stats.pinned_count.value == 1)
 
 #### unpins binary
 
-- unpins binary
+1. var heap = SharedHeap new
+2. heap pin
+3. heap unpin
+4. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("unpins binary")
 var heap = SharedHeap.new(SharedHeapConfig.small())
 
 val result = heap.allocate(0, 100)
@@ -987,18 +1009,20 @@ check(stats.pinned_count.value == 0)
 
 #### tracks peak usage
 
-- tracks peak usage
+1. var heap = SharedHeap new
+2. heap allocate
+3. heap allocate
+4. heap decref
+5. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("tracks peak usage")
 var heap = SharedHeap.new(SharedHeapConfig.small())
 
 heap.allocate(0, 1000)
@@ -1013,18 +1037,18 @@ check(stats.peak_usage.value == 3000)
 
 #### calculates utilization
 
-- calculates utilization
+1. var heap = SharedHeap new
+2. heap allocate
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("calculates utilization")
 var heap = SharedHeap.new(SharedHeapConfig.small())
 
 heap.allocate(0, 512 * 1024)  # 512 KB of 1 MB
@@ -1039,18 +1063,16 @@ check(ok)
 
 #### calculates fragmentation
 
-- calculates fragmentation
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("calculates fragmentation")
 val stats = SharedHeapStats.new()
 # Fragmentation depends on free block distribution
 val frag = stats.fragmentation()
@@ -1064,18 +1086,24 @@ check(ok)
 
 #### merges adjacent free blocks
 
-- merges adjacent free blocks
+1. var heap = SharedHeap new
+2. heap allocate
+3. heap allocate
+4. heap allocate
+5. heap decref
+6. heap decref
+7. heap decref
+8. heap defragment
+9. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("merges adjacent free blocks")
 var heap = SharedHeap.new(SharedHeapConfig.small())
 
 # Allocate and free multiple binaries
@@ -1099,18 +1127,18 @@ check(stats.defrag_count.value == 1)
 
 #### gets binary by ID
 
-- gets binary by ID
+1. var heap = SharedHeap new
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("gets binary by ID")
 var heap = SharedHeap.new(SharedHeapConfig.small())
 
 val result = heap.allocate(0, 256)
@@ -1126,18 +1154,19 @@ check(binary.length.value == 256)
 
 #### gets ref for binary
 
-- gets ref for binary
+1. var heap = SharedHeap new
+2. heap allocate
+3. check
+4. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("gets ref for binary")
 var heap = SharedHeap.new(SharedHeapConfig.small())
 
 heap.allocate(0, 256)
@@ -1152,18 +1181,19 @@ check(ref_val.length.value == 256)
 
 #### checks containment
 
-- checks containment
+1. var heap = SharedHeap new
+2. heap allocate
+3. check
+4. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("checks containment")
 var heap = SharedHeap.new(SharedHeapConfig.small())
 
 heap.allocate(0, 100)
@@ -1178,18 +1208,17 @@ check(not heap.contains(999))
 
 #### checks success
 
-- checks success
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("checks success")
 val success = AllocResult.success(BinaryRef.new(1, 0, 100))
 val failure = AllocResult.out_of_memory()
 
@@ -1201,18 +1230,16 @@ check(not failure.is_success())
 
 #### unwraps success
 
-- unwraps success
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("unwraps success")
 val result = AllocResult.success(BinaryRef.new(1, 0, 100))
 val ref_val = result.unwrap()
 
@@ -1223,18 +1250,17 @@ check(ref_val.id.value == 1)
 
 #### gets optional ref
 
-- gets optional ref
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("gets optional ref")
 val success = AllocResult.success(BinaryRef.new(1, 0, 100))
 val failure = AllocResult.out_of_memory()
 
@@ -1246,18 +1272,17 @@ check(not failure.ref_option().?)
 
 #### formats for display
 
-- formats for display
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats for display")
 val success = AllocResult.success(BinaryRef.new(1, 0, 100))
 val failure = AllocResult.out_of_memory()
 
@@ -1274,12 +1299,12 @@ check(failure.fmt() == "OutOfMemory")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/interpreter/refc_binary_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering CopyStrategy, BinaryRef, RefcBinary, SharedHeapConfig, SharedHeap - Allocation, SharedHeap - Sub-binaries, SharedHeap - Reference Counting, SharedHeap - Garbage Collection, SharedHeap - Pinning, SharedHeap - Statistics, SharedHeap - Defragmentation, SharedHeap - Queries, AllocResult.
+Tests covering:
 - CopyStrategy
 - BinaryRef
 - RefcBinary
@@ -1306,51 +1331,3 @@ Tests covering CopyStrategy, BinaryRef, RefcBinary, SharedHeapConfig, SharedHeap
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `1f69cf97a041e97778177e4d767440dadc8501d645e8d9147c6396ee2c2c76c2`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `1f69cf97a041e97778177e4d767440dadc8501d645e8d9147c6396ee2c2c76c2`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `1f69cf97a041e97778177e4d767440dadc8501d645e8d9147c6396ee2c2c76c2`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/interpreter/refc_binary_spec.spl
-mirror: doc/06_spec/01_unit/app/interpreter/refc_binary_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/interpreter/refc_binary_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/interpreter/refc_binary_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/interpreter/refc_binary_spec.spl:35:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'recommends deep copy for small values' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/interpreter/refc_binary_spec.spl:41:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'recommends share ref for large values' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/interpreter/refc_binary_spec.spl:47:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'uses threshold of 64 bytes' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

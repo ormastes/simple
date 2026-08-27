@@ -10,8 +10,8 @@
 
 use os.posix.pipe_compat.{posix_pipe, pipe_read, pipe_write, pipe_close_read, pipe_close_write, pipe_has_data}
 
-@unsafe(reason: "raw address extraction for bounded pipe output/input buffers", capabilities: [ffi, raw_ptr])
 extern fn unsafe_addr_of(ref: any) -> u64
+extern fn mmio_read8(addr: u64) -> u8
 
 # ============================================================================
 # Types
@@ -50,17 +50,10 @@ impl SshPty:
         var output_read: [i32; 1] = [0]
         var output_write: [i32; 1] = [0]
 
-        var input_read_addr: u64 = 0
-        var input_write_addr: u64 = 0
-        var output_read_addr: u64 = 0
-        var output_write_addr: u64 = 0
-        unsafe(capabilities: [ffi, raw_ptr]):
-            input_read_addr = unsafe_addr_of(input_read)
-            input_write_addr = unsafe_addr_of(input_write)
-            output_read_addr = unsafe_addr_of(output_read)
-            output_write_addr = unsafe_addr_of(output_write)
-        if input_read_addr == 0 or input_write_addr == 0 or output_read_addr == 0 or output_write_addr == 0:
-            return Err("failed to address PTY pipe descriptors")
+        val input_read_addr = unsafe_addr_of(input_read)
+        val input_write_addr = unsafe_addr_of(input_write)
+        val output_read_addr = unsafe_addr_of(output_read)
+        val output_write_addr = unsafe_addr_of(output_write)
 
         # Create input pipe (master -> slave)
         val r1 = posix_pipe(input_read_addr, input_write_addr)
@@ -92,19 +85,16 @@ impl SshPty:
         Reads up to max bytes from the output pipe's read end.
         Returns empty array if no data available.
         """
-        if self.closed or max == 0:
+        if self.closed:
             return []
 
         # Allocate a buffer
         var buf: [u8; 4096] = [0; 4096]
-        val buf_addr = unsafe(capabilities: [ffi, raw_ptr]):
-            unsafe_addr_of(buf)
-        if buf_addr == 0:
-            return []
+        val buf_addr = unsafe_addr_of(buf)
         val read_len = if max < 4096: max else: 4096
 
         val n = pipe_read(self.master_read_fd, buf_addr, read_len)
-        if n <= 0 or n.to_u64() > read_len:
+        if n <= 0:
             return []
 
         # Copy read bytes into result
@@ -133,32 +123,23 @@ impl SshPty:
         if data.len() == 0:
             return 0
 
-        val data_addr = unsafe(capabilities: [ffi, raw_ptr]):
-            unsafe_addr_of(data)
-        if data_addr == 0:
-            return -1
-        val written = pipe_write(self.master_write_fd, data_addr, data.len())
-        if written > data.len().to_i64():
-            return -1
-        written
+        val data_addr = unsafe_addr_of(data)
+        pipe_write(self.master_write_fd, data_addr, data.len())
 
     me slave_read(max: u64) -> [u8]:
         """Shell reads input from here.
 
         Called by the shell process to get user input.
         """
-        if self.closed or max == 0:
+        if self.closed:
             return []
 
         var buf: [u8; 4096] = [0; 4096]
-        val buf_addr = unsafe(capabilities: [ffi, raw_ptr]):
-            unsafe_addr_of(buf)
-        if buf_addr == 0:
-            return []
+        val buf_addr = unsafe_addr_of(buf)
         val read_len = if max < 4096: max else: 4096
 
         val n = pipe_read(self.slave_read_fd, buf_addr, read_len)
-        if n <= 0 or n.to_u64() > read_len:
+        if n <= 0:
             return []
 
         var result: [u8] = []
@@ -179,14 +160,8 @@ impl SshPty:
         if data.len() == 0:
             return 0
 
-        val data_addr = unsafe(capabilities: [ffi, raw_ptr]):
-            unsafe_addr_of(data)
-        if data_addr == 0:
-            return -1
-        val written = pipe_write(self.slave_write_fd, data_addr, data.len())
-        if written > data.len().to_i64():
-            return -1
-        written
+        val data_addr = unsafe_addr_of(data)
+        pipe_write(self.slave_write_fd, data_addr, data.len())
 
     me resize(cols: u32, rows: u32):
         """Handle terminal resize (window-change request)."""

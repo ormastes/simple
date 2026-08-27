@@ -1,0 +1,42 @@
+use app.io.mod.{file_read}
+
+fn section_between(source: text, start: text, finish: text) -> text:
+    val after_start = source.split(start)
+    if after_start.len() < 2:
+        return ""
+    val before_finish = after_start[1].split(finish)
+    if before_finish.len() < 1:
+        return ""
+    before_finish[0]
+
+describe "HTTP async SSR disconnect safety contract":
+    it "does not arm a competing receive while an async handler is pending":
+        val worker = file_read("src/lib/nogc_async_mut/http_server/worker.spl")
+        val submit = section_between(
+            worker,
+            "me submit_async_handler(",
+            "me complete_async_handler("
+        )
+        expect(submit.len()).to_be_greater_than(0)
+        expect(submit).to_contain("self.async_job_by_fd[fd] = job_id")
+        expect(submit.contains("submit_recv")).to_equal(false)
+
+    it "routes an observed close through exactly-once async cancellation":
+        val worker = file_read("src/lib/nogc_async_mut/http_server/worker.spl")
+        val close_path = section_between(
+            worker,
+            "me close_connection(fd: i64):",
+            "me close_all_connections():"
+        )
+        expect(close_path.len()).to_be_greater_than(0)
+        expect(close_path).to_contain("self.cancel_async_handler(fd)")
+        expect(close_path).to_contain("self.driver.cancel_fd(fd)")
+
+    it "tracks the non-consuming peer-probe prerequisite explicitly":
+        val blocker = file_read(
+            "doc/08_tracking/bug/http_async_ssr_disconnect_probe_missing_2026-08-11.md"
+        )
+        expect(blocker).to_contain("non-consuming peer-state probe")
+        expect(blocker).to_contain("DataPending")
+        expect(blocker).to_contain("never create a second receive completion")
+        expect(blocker).to_contain("Unsupported")

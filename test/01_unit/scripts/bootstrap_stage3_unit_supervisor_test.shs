@@ -1,0 +1,506 @@
+#!/bin/sh
+set -eu
+case $0 in /*) self=$0 ;; *) self=$PWD/$0 ;; esac
+root=$(CDPATH= cd -- "$(dirname -- "$self")/../../.." && pwd)
+supervisor="$root/scripts/check/lib/bootstrap-stage3-unit-supervisor.pl"
+gate="$root/scripts/check/lib/bootstrap-stage3-unit-gate.shs"
+fake_run="$root/test/fixtures/stage3_fake_systemd/systemd-run"
+fake_ctl="$root/test/fixtures/stage3_fake_systemd/systemctl"
+payload="$root/test/fixtures/stage3_fake_systemd/payload-lock-check"
+tmp=$(mktemp -d)
+case_job=
+barrier_supervisor=
+barrier_release_open=no
+diagnostic_step=startup
+assert_cmd() {
+  assert_label=$1
+  shift
+  diagnostic_step=$assert_label
+  if "$@"; then
+    return 0
+  else
+    assert_status=$?
+    printf 'FAIL: assertion=%s status=%s\n' \
+      "$assert_label" "$assert_status" >&2
+    return "$assert_status"
+  fi
+}
+close_barrier_release() {
+  if [ "$barrier_release_open" = yes ]; then
+    exec 9>&-
+    barrier_release_open=no
+  fi
+}
+cleanup() {
+  cleanup_status=$?
+  close_barrier_release
+  if [ -n "$barrier_supervisor" ]; then
+    kill "$barrier_supervisor" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$case_job" ]; then
+    kill "$case_job" >/dev/null 2>&1 || true
+    wait "$case_job" >/dev/null 2>&1 || true
+  fi
+  if [ "$cleanup_status" -eq 0 ]; then
+    rm -rf "$tmp"
+  else
+    printf 'FAIL: step=%s status=%s preserved_tmp=%s\n' \
+      "$diagnostic_step" "$cleanup_status" "$tmp" >&2
+  fi
+}
+trap cleanup EXIT HUP INT TERM
+chmod 0755 "$supervisor" "$gate" "$fake_run" "$fake_ctl" "$payload"
+
+run_case() {
+  name=$1 mode=$2
+  case_root="$tmp/$name"
+  mkdir -p "$case_root/state/units" "$case_root/state/cgroup/fake" \
+    "$case_root/evidence-parent" "$case_root/authority" "$case_root/home" \
+    "$case_root/tmp" "$case_root/role-source"
+  cp "$fake_run" "$case_root/role-source/systemd-run"
+  cp "$fake_ctl" "$case_root/role-source/systemctl"
+  cp "$gate" "$case_root/role-source/preexec-gate"
+  cp "$payload" "$case_root/role-source/payload"
+  chmod 0755 "$case_root/role-source/"*
+  heavy="$case_root/authority/heavy.lock"
+  owner="$case_root/authority/owner.env"
+  quarantine="$case_root/authority/quarantine.env"
+  evidence="$case_root/evidence-parent/evidence"
+  STAGE3_FAKE_SYSTEMD_STATE="$case_root/state" STAGE3_FAKE_SYSTEMD_MODE="$mode" \
+  STAGE3_FAKE_SYSTEMCTL_MODE="${STAGE3_CASE_SYSTEMCTL_MODE:-normal}" \
+  STAGE3_SUPERVISOR_TEST_READ_ERROR_ONCE="${STAGE3_CASE_READ_ERROR_ONCE:-}" \
+  STAGE3_SUPERVISOR_TEST_WAITPID_EINTR_ONCE="${STAGE3_CASE_WAITPID_EINTR_ONCE:-}" \
+  STAGE3_SUPERVISOR_TEST_WAITPID_PRETERM_EINTR_ALWAYS="${STAGE3_CASE_WAITPID_PRETERM_EINTR_ALWAYS:-}" \
+  STAGE3_SUPERVISOR_TEST_FAIL_POINT="${STAGE3_CASE_FAIL_POINT:-}" \
+  STAGE3_SUPERVISOR_TEST_BARRIER_POINT="${STAGE3_CASE_BARRIER_POINT:-}" \
+  STAGE3_SUPERVISOR_TEST_BARRIER_REACHED="${STAGE3_CASE_BARRIER_REACHED:-}" \
+  STAGE3_SUPERVISOR_TEST_BARRIER_RELEASE="${STAGE3_CASE_BARRIER_RELEASE:-}" \
+  "$supervisor" --allow-test-hooks --phase=stage3 --root="$root" \
+    --evidence-dir="$evidence" --run-id="run_${name}_1234" \
+    --architecture=x86_64-unknown-linux-gnu --memory-max=8589934592 \
+    --heavy-lock="$heavy" --owner-journal="$owner" --quarantine="$quarantine" \
+    --systemd-run="$case_root/role-source/systemd-run" \
+    --systemctl="$case_root/role-source/systemctl" \
+    --cgroup-root="$case_root/state/cgroup" --service-timeout-ms=5000 \
+    --stop-timeout-ms=1000 --helper-timeout-ms=1000 \
+    --env="HOME=$case_root/home" --env="TMPDIR=$case_root/tmp" \
+    --env="PATH=/usr/bin" --env=LC_ALL=C --env=LANG=C \
+    --role="env=/usr/bin/env" --role="gate_interpreter=/bin/dash" \
+    --role="gate_helper=$case_root/role-source/preexec-gate" \
+    --role="payload=$case_root/role-source/payload" \
+    --arg='{role:payload}' --arg="$heavy" &
+  supervisor_pid=$!
+  printf '%s\n' "$supervisor_pid" >"$case_root/supervisor.pid"
+  wait "$supervisor_pid"
+}
+
+start_barrier_case() {
+  barrier_name=$1 barrier_mode=$2 barrier_point=$3
+  diagnostic_step="start_barrier_case.$barrier_name.wait_reached"
+  barrier_reached="$tmp/$barrier_name.reached"
+  barrier_release="$tmp/$barrier_name.release"
+  rm -f "$barrier_reached" "$barrier_release"
+  mkfifo "$barrier_reached" "$barrier_release"
+  STAGE3_CASE_BARRIER_POINT=$barrier_point \
+  STAGE3_CASE_BARRIER_REACHED=$barrier_reached \
+  STAGE3_CASE_BARRIER_RELEASE=$barrier_release \
+    run_case "$barrier_name" "$barrier_mode" \
+      >"$tmp/$barrier_name.out" 2>&1 &
+  case_job=$!
+  IFS= read -r barrier_observed <"$barrier_reached"
+  assert_cmd "start_barrier_case.$barrier_name.barrier_observed" \
+    test "$barrier_observed" = "$barrier_point"
+  exec 9<>"$barrier_release"
+  barrier_release_open=yes
+  perl -e '
+    my @path = stat($ARGV[0]);
+    my @fd = stat($ARGV[1]);
+    @path && @fd && $path[0] == $fd[0] && $path[1] == $fd[1]
+      or die "retained barrier release endpoint mismatch\n";
+  ' "$barrier_release" "/proc/$$/fd/9"
+  barrier_supervisor=$(sed -n '1p' "$tmp/$barrier_name/supervisor.pid")
+  assert_cmd "start_barrier_case.$barrier_name.supervisor_pid" \
+    test -n "$barrier_supervisor"
+}
+
+finish_barrier_case() {
+  printf 'continue\n' >&9
+  close_barrier_release
+  if wait "$case_job"; then barrier_status=0; else barrier_status=$?; fi
+  case_job=
+  barrier_supervisor=
+}
+
+lane_id=$(perl -MDigest::SHA=sha256_hex -e \
+  'print substr(sha256_hex($ARGV[0] . "\0" . $ARGV[1]), 0, 20)' \
+  "$root" x86_64-unknown-linux-gnu)
+stale_unit="simple-stage3-$lane_id-stage3"
+prepare_stale_case() {
+  stale_name=$1 stale_cgroup_unit=$2
+  stale_receipt_path=${3:-/fake/$stale_unit}
+  stale_control_group=${4:-/fake/$stale_unit}
+  stale_root="$tmp/$stale_name"
+  stale_cgroup="$stale_root/state/cgroup/fake/$stale_unit"
+  stale_unit_dir="$stale_root/state/units/$stale_unit"
+  mkdir -p "$stale_cgroup" "$stale_unit_dir" \
+    "$stale_root/authority" "$stale_root/evidence-parent" \
+    "$stale_root/home" "$stale_root/tmp"
+  printf 'active\n' >"$stale_unit_dir/ActiveState"
+  printf '%s\n' "$stale_control_group" >"$stale_unit_dir/ControlGroup"
+  printf 'populated 1\nfrozen 0\n' >"$stale_cgroup/cgroup.events"
+  printf 'max 0\noom 0\noom_kill 0\noom_group_kill 0\n' \
+    >"$stale_cgroup/memory.events"
+  printf '0\n' >"$stale_cgroup/memory.current"
+  printf '1048576\n' >"$stale_cgroup/memory.peak"
+  printf '8589934592\n' >"$stale_cgroup/memory.max"
+  printf '0\n' >"$stale_cgroup/memory.swap.current"
+  printf '0\n' >"$stale_cgroup/memory.swap.max"
+  printf '1\n' >"$stale_cgroup/memory.oom.group"
+  set -- $(perl -e '@s = stat($ARGV[0]); print "$s[0] $s[1]\n"' \
+    "$stale_cgroup")
+  stale_dev=$1 stale_ino=$2
+  printf '%s\n' \
+    'schema=simple-stage3-unit-owner-v1' \
+    'architecture=x86_64-unknown-linux-gnu' \
+    "run_id=stale_${stale_name}_1234" \
+    'phase=stage3' "unit=$stale_unit" \
+    'supervisor_pid=2147483647' \
+    >"$stale_root/authority/owner.env"
+  printf '%s\n' \
+    'schema=simple-stage3-active-cgroup-v1' \
+    'architecture=x86_64-unknown-linux-gnu' \
+    "run_id=stale_${stale_name}_1234" \
+    'phase=stage3' "unit=$stale_cgroup_unit" \
+    "cgroup=$stale_receipt_path" "cgroup_dev=$stale_dev" \
+    "cgroup_ino=$stale_ino" \
+    >"$stale_root/authority/owner.env.cgroup"
+}
+
+terminal_commit_valid() {
+  terminal_case=$1 terminal_name=$2
+  terminal_dir="$tmp/$terminal_case/evidence-parent/evidence"
+  perl -MDigest::SHA -e '
+    use strict; use warnings;
+    sub receipt {
+      my ($path) = @_;
+      open(my $fh, "<", $path) or die "open $path: $!\n";
+      my %v;
+      while (my $line = <$fh>) {
+        chomp($line);
+        $line =~ /\A([a-z0-9_]+)=(.*)\z/ or die "malformed $path\n";
+        !exists($v{$1}) or die "duplicate $1\n";
+        $v{$1} = $2;
+      }
+      close($fh) or die "close $path: $!\n";
+      return %v;
+    }
+    my ($terminal, $marker, $arch, $run, $phase) = @ARGV;
+    my %m = receipt($marker);
+    join("\0", sort keys %m) eq join("\0", sort qw(schema status
+      architecture run_id phase unit terminal_sha256 terminal_dev terminal_ino))
+      or die "marker keys\n";
+    $m{schema} eq "simple-stage3-unit-terminal-commit-v1" &&
+      $m{status} eq "prepared" && $m{architecture} eq $arch &&
+      $m{run_id} eq $run && $m{phase} eq $phase or die "marker binding\n";
+    open(my $tfh, "<", $terminal) or die "open terminal: $!\n";
+    my @st = stat($tfh); @st && -f _ or die "terminal type\n";
+    my $sha = Digest::SHA->new(256); $sha->addfile($tfh);
+    close($tfh) or die "close terminal: $!\n";
+    "$st[0]" eq $m{terminal_dev} && "$st[1]" eq $m{terminal_ino} &&
+      $sha->hexdigest eq $m{terminal_sha256} or die "terminal identity\n";
+    my %t = receipt($terminal);
+    $t{schema} eq "simple-stage3-unit-terminal-v2" && $t{status} eq "pass" &&
+      $t{architecture} eq $arch && $t{run_id} eq $run &&
+      $t{phase} eq $phase && $t{unit} eq $m{unit} or die "terminal binding\n";
+  ' "$terminal_dir/terminal.env" \
+    "$terminal_dir/.terminal.env.commit.run_${terminal_name}_1234" \
+    x86_64-unknown-linux-gnu "run_${terminal_name}_1234" stage3
+}
+
+run_case success success
+grep -q '^status=pass$' "$tmp/success/evidence-parent/evidence/terminal.env"
+terminal_commit_valid success success
+grep -q '^runtime_max_sec=3900$' "$tmp/success/evidence-parent/evidence/launch-plan.env"
+grep -q '^retained_executable_access=readonly$' \
+  "$tmp/success/state/units/$stale_unit/launch.env"
+grep -q '^memory_oom_group_kill_delta=0$' "$tmp/success/evidence-parent/evidence/terminal.env"
+[ ! -e "$tmp/success/authority/owner.env" ]
+[ ! -e "$tmp/success/authority/owner.env.cgroup" ]
+[ ! -e "$tmp/success/authority/quarantine.env" ]
+
+prepare_stale_case stale_valid "$stale_unit"
+run_case stale_valid success
+[ -e "$tmp/stale_valid/state/units/$stale_unit/stopped" ]
+[ ! -e "$tmp/stale_valid/authority/owner.env" ]
+[ ! -e "$tmp/stale_valid/authority/owner.env.cgroup" ]
+[ ! -e "$tmp/stale_valid/authority/quarantine.env" ]
+grep -q '^status=pass$' \
+  "$tmp/stale_valid/evidence-parent/evidence/terminal.env"
+terminal_commit_valid stale_valid stale_valid
+
+prepare_stale_case stale_mismatch "${stale_unit}x"
+if run_case stale_mismatch success >"$tmp/stale_mismatch.out" 2>&1; then
+  echo 'mismatched stale journal unexpectedly stopped a unit' >&2
+  exit 1
+fi
+[ ! -e "$tmp/stale_mismatch/state/units/$stale_unit/stopped" ]
+[ ! -e "$tmp/stale_mismatch/evidence-parent/evidence" ]
+grep -q '^reason=malformed-stale-cgroup-journal$' \
+  "$tmp/stale_mismatch/authority/quarantine.env"
+grep -q 'malformed stale cgroup journal' "$tmp/stale_mismatch.out"
+
+prepare_stale_case stale_traversal "$stale_unit" \
+  "/fake/../fake/$stale_unit" "/fake/$stale_unit"
+if run_case stale_traversal success >"$tmp/stale_traversal.out" 2>&1; then
+  echo 'traversing stale cgroup path unexpectedly stopped a unit' >&2
+  exit 1
+fi
+[ ! -e "$tmp/stale_traversal/state/units/$stale_unit/stopped" ]
+grep -q '^reason=malformed-stale-cgroup-journal$' \
+  "$tmp/stale_traversal/authority/quarantine.env"
+
+prepare_stale_case stale_controlgroup "$stale_unit" \
+  "/fake/$stale_unit" "/fake/$stale_unit.service"
+if run_case stale_controlgroup success >"$tmp/stale_controlgroup.out" 2>&1; then
+  echo 'mismatched stale ControlGroup unexpectedly stopped a unit' >&2
+  exit 1
+fi
+[ ! -e "$tmp/stale_controlgroup/state/units/$stale_unit/stopped" ]
+grep -q '^reason=stale-control-group-mismatch$' \
+  "$tmp/stale_controlgroup/authority/quarantine.env"
+grep -q 'stale ControlGroup mismatch' "$tmp/stale_controlgroup.out"
+
+if run_case event event-delta >"$tmp/event.out" 2>&1; then
+  echo 'event-delta case unexpectedly passed' >&2
+  exit 1
+fi
+[ ! -e "$tmp/event/evidence-parent/evidence/terminal.env" ]
+[ ! -e "$tmp/event/authority/owner.env" ]
+[ ! -e "$tmp/event/authority/quarantine.env" ]
+grep -q 'memory.events delta is positive for max' "$tmp/event.out"
+
+if run_case missing missing-control-group >"$tmp/missing.out" 2>&1; then
+  echo 'missing-ControlGroup case unexpectedly passed' >&2
+  exit 1
+fi
+[ ! -e "$tmp/missing/evidence-parent/evidence/terminal.env" ]
+grep -q '^schema=simple-stage3-global-quarantine-v1$' "$tmp/missing/authority/quarantine.env"
+grep -q 'unit ControlGroup is missing or malformed' "$tmp/missing.out"
+
+if STAGE3_CASE_SYSTEMCTL_MODE=overflow \
+  run_case helper_overflow success >"$tmp/helper_overflow.out" 2>&1; then
+  echo 'systemctl-overflow case unexpectedly passed' >&2
+  exit 1
+fi
+overflow_pid=$(sed -n '1p' "$tmp/helper_overflow/state/injected-helper.pid")
+if kill -0 "$overflow_pid" >/dev/null 2>&1; then
+  kill -KILL "$overflow_pid" >/dev/null 2>&1 || true
+  echo 'overflowing systemctl helper survived supervisor failure' >&2
+  exit 1
+fi
+[ ! -e "$tmp/helper_overflow/evidence-parent/evidence/terminal.env" ]
+grep -q 'systemctl output exceeded bound' "$tmp/helper_overflow.out"
+
+if STAGE3_CASE_SYSTEMCTL_MODE=timeout \
+  run_case helper_timeout success >"$tmp/helper_timeout.out" 2>&1; then
+  echo 'systemctl-timeout case unexpectedly passed' >&2
+  exit 1
+fi
+timeout_pid=$(sed -n '1p' "$tmp/helper_timeout/state/injected-helper.pid")
+if kill -0 "$timeout_pid" >/dev/null 2>&1; then
+  kill -KILL "$timeout_pid" >/dev/null 2>&1 || true
+  echo 'timed-out systemctl helper survived supervisor failure' >&2
+  exit 1
+fi
+[ ! -e "$tmp/helper_timeout/evidence-parent/evidence/terminal.env" ]
+grep -q 'systemctl helper timeout' "$tmp/helper_timeout.out"
+
+if STAGE3_CASE_SYSTEMCTL_MODE=read-error STAGE3_CASE_READ_ERROR_ONCE=1 \
+  STAGE3_CASE_WAITPID_EINTR_ONCE=1 \
+  run_case helper_read_error success >"$tmp/helper_read_error.out" 2>&1; then
+  echo 'systemctl-read-error case unexpectedly passed' >&2
+  exit 1
+fi
+read_error_pid=$(sed -n '1p' "$tmp/helper_read_error/state/injected-helper.pid")
+if kill -0 "$read_error_pid" >/dev/null 2>&1; then
+  kill -KILL "$read_error_pid" >/dev/null 2>&1 || true
+  echo 'read-error systemctl helper survived EINTR cleanup' >&2
+  exit 1
+fi
+[ ! -e "$tmp/helper_read_error/evidence-parent/evidence/terminal.env" ]
+grep -q 'read systemctl output: injected failure' "$tmp/helper_read_error.out"
+
+# Sustained EINTR must never delay the first TERM. This case intentionally
+# interrupts every pre-TERM waitpid observation; the supervisor must proceed
+# into its absolute helper deadlines and fail closed instead of hanging.
+sustained_status="$tmp/helper_sustained_eintr.status"
+(
+  set +e
+  STAGE3_CASE_SYSTEMCTL_MODE=read-error-term-marker STAGE3_CASE_READ_ERROR_ONCE=1 \
+    STAGE3_CASE_WAITPID_PRETERM_EINTR_ALWAYS=1 \
+    run_case helper_sustained_eintr success \
+      >"$tmp/helper_sustained_eintr.out" 2>&1
+  printf '%s\n' "$?" >"$sustained_status"
+) &
+case_job=$!
+sustained_poll=0
+while [ ! -f "$sustained_status" ] && [ "$sustained_poll" -lt 400 ]; do
+  sleep 0.01
+  sustained_poll=$((sustained_poll + 1))
+done
+if [ ! -f "$sustained_status" ]; then
+  sustained_supervisor_pid=
+  sustained_helper_pid=
+  if [ -f "$tmp/helper_sustained_eintr/supervisor.pid" ]; then
+    sustained_supervisor_pid=$(sed -n '1p' \
+      "$tmp/helper_sustained_eintr/supervisor.pid")
+    kill -KILL "$sustained_supervisor_pid" >/dev/null 2>&1 || true
+  fi
+  if [ -f "$tmp/helper_sustained_eintr/state/injected-helper.pid" ]; then
+    sustained_helper_pid=$(sed -n '1p' \
+      "$tmp/helper_sustained_eintr/state/injected-helper.pid")
+    kill -KILL "$sustained_helper_pid" >/dev/null 2>&1 || true
+  fi
+  sustained_cleanup_poll=0
+  while [ ! -f "$sustained_status" ] &&
+      [ "$sustained_cleanup_poll" -lt 100 ]; do
+    sleep 0.01
+    sustained_cleanup_poll=$((sustained_cleanup_poll + 1))
+  done
+  kill -KILL "$case_job" >/dev/null 2>&1 || true
+  wait "$case_job" >/dev/null 2>&1 || true
+  case_job=
+  for sustained_dead_pid in "$sustained_supervisor_pid" "$sustained_helper_pid"; do
+    [ -n "$sustained_dead_pid" ] || continue
+    sustained_reap_poll=0
+    while kill -0 "$sustained_dead_pid" >/dev/null 2>&1 &&
+        [ "$sustained_reap_poll" -lt 100 ]; do
+      sleep 0.01
+      sustained_reap_poll=$((sustained_reap_poll + 1))
+    done
+  done
+  [ -z "$sustained_supervisor_pid" ] ||
+    ! kill -0 "$sustained_supervisor_pid" >/dev/null 2>&1 || {
+      echo 'watchdog left sustained-EINTR supervisor alive' >&2
+      exit 1
+    }
+  [ -z "$sustained_helper_pid" ] ||
+    ! kill -0 "$sustained_helper_pid" >/dev/null 2>&1 || {
+      echo 'watchdog left sustained-EINTR helper alive' >&2
+      exit 1
+    }
+  echo 'sustained waitpid(EINTR) postponed TERM/KILL past absolute deadlines' >&2
+  exit 1
+fi
+wait "$case_job" >/dev/null 2>&1 || true
+case_job=
+[ "$(sed -n '1p' "$sustained_status")" -ne 0 ]
+[ -f "$tmp/helper_sustained_eintr/state/term-observed" ]
+[ -f "$tmp/helper_sustained_eintr/state/injected-helper.pid" ]
+sustained_helper_pid=$(sed -n '1p' "$tmp/helper_sustained_eintr/state/injected-helper.pid")
+if kill -0 "$sustained_helper_pid" >/dev/null 2>&1; then
+  kill -KILL "$sustained_helper_pid" >/dev/null 2>&1 || true
+  echo 'sustained-EINTR systemctl helper survived bounded cleanup' >&2
+  exit 1
+fi
+[ ! -e "$tmp/helper_sustained_eintr/evidence-parent/evidence/terminal.env" ]
+grep -q 'read systemctl output: injected failure' "$tmp/helper_sustained_eintr.out"
+
+if run_case service_signal signal-systemd >"$tmp/service_signal.out" 2>&1; then
+  echo 'signaled systemd-run case unexpectedly passed' >&2
+  exit 1
+fi
+[ ! -e "$tmp/service_signal/evidence-parent/evidence/terminal.env" ]
+grep -q 'systemd-run failed with status 143' "$tmp/service_signal.out"
+
+diagnostic_step=supervisor_signal.start
+start_barrier_case supervisor_signal success cgroup-ready
+kill -TERM "$barrier_supervisor"
+finish_barrier_case
+assert_cmd supervisor_signal.nonzero test "$barrier_status" -ne 0
+assert_cmd supervisor_signal.no_terminal test ! -e \
+  "$tmp/supervisor_signal/evidence-parent/evidence/terminal.env"
+assert_cmd supervisor_signal.no_owner test ! -e \
+  "$tmp/supervisor_signal/authority/owner.env"
+assert_cmd supervisor_signal.no_cgroup_owner test ! -e \
+  "$tmp/supervisor_signal/authority/owner.env.cgroup"
+assert_cmd supervisor_signal.unit_stopped test -e \
+  "$tmp/supervisor_signal/state/units/$stale_unit/stopped"
+assert_cmd supervisor_signal.cgroup_empty grep -q '^populated 0$' \
+  "$tmp/supervisor_signal/state/cgroup/fake/$stale_unit/cgroup.events"
+assert_cmd supervisor_signal.term_diagnostic grep -q \
+  'supervisor interrupted by TERM' "$tmp/supervisor_signal.out"
+
+start_barrier_case role_replace success owner-ready
+printf '#!/bin/sh\nexit 99\n' \
+  >"$tmp/role_replace/role-source/payload"
+chmod 0755 "$tmp/role_replace/role-source/payload"
+finish_barrier_case
+[ "$barrier_status" -eq 0 ]
+grep -q '^status=pass$' \
+  "$tmp/role_replace/evidence-parent/evidence/terminal.env"
+terminal_commit_valid role_replace role_replace
+
+start_barrier_case collision success terminal-prepared
+printf 'preexisting-terminal-must-survive\n' \
+  >"$tmp/collision/evidence-parent/evidence/terminal.env"
+finish_barrier_case
+[ "$barrier_status" -ne 0 ]
+grep -qx 'preexisting-terminal-must-survive' \
+  "$tmp/collision/evidence-parent/evidence/terminal.env"
+[ -f "$tmp/collision/evidence-parent/evidence/.terminal.env.prepared.run_collision_1234" ]
+if terminal_commit_valid collision collision >/dev/null 2>&1; then
+  echo 'collision sentinel unexpectedly satisfied commit receipt' >&2
+  exit 1
+fi
+grep -q 'terminal publication collision' "$tmp/collision.out"
+perl -MFcntl=:flock -e '
+  open(my $fh, "+<", $ARGV[0]) or die "open lock: $!\n";
+  flock($fh, LOCK_EX | LOCK_NB) or die "lock remained held\n";
+' "$tmp/collision/authority/heavy.lock"
+
+if STAGE3_CASE_FAIL_POINT=terminal-commit-parent-fsync \
+  run_case commit_fsync success >"$tmp/commit_fsync.out" 2>&1; then
+  echo 'terminal commit fsync-failure case unexpectedly passed' >&2
+  exit 1
+fi
+[ ! -e "$tmp/commit_fsync/evidence-parent/evidence/terminal.env" ]
+grep -q 'injected terminal commit parent fsync failure' "$tmp/commit_fsync.out"
+
+start_barrier_case commit_crash success terminal-commit-durable
+kill -KILL "$barrier_supervisor"
+if wait "$case_job"; then barrier_status=0; else barrier_status=$?; fi
+close_barrier_release
+case_job=
+barrier_supervisor=
+[ "$barrier_status" -ne 0 ]
+[ ! -e "$tmp/commit_crash/evidence-parent/evidence/terminal.env" ]
+[ -f "$tmp/commit_crash/evidence-parent/evidence/.terminal.env.commit.run_commit_crash_1234" ]
+perl -MFcntl=:flock -e '
+  open(my $fh, "+<", $ARGV[0]) or die "open lock: $!\n";
+  flock($fh, LOCK_EX | LOCK_NB) or die "lock remained held after SIGKILL\n";
+' "$tmp/commit_crash/authority/heavy.lock"
+
+case_root="$tmp/injection"
+mkdir -p "$case_root/state/units" "$case_root/state/cgroup/fake" \
+  "$case_root/evidence-parent" "$case_root/authority" "$case_root/home" "$case_root/tmp"
+if STAGE3_FAKE_SYSTEMD_STATE="$case_root/state" "$supervisor" --allow-test-hooks \
+  --phase=stage3 --root="$root" --evidence-dir="$case_root/evidence-parent/evidence" \
+  --run-id=run_inject_1234 --architecture=x86_64-unknown-linux-gnu \
+  --memory-max=8589934592 --heavy-lock="$case_root/authority/heavy.lock" \
+  --owner-journal="$case_root/authority/owner.env" \
+  --quarantine="$case_root/authority/quarantine.env" --systemd-run="$fake_run" \
+  --systemctl="$fake_ctl" --cgroup-root="$case_root/state/cgroup" \
+  --service-timeout-ms=5000 --stop-timeout-ms=1000 --helper-timeout-ms=1000 \
+  --env="HOME=$case_root/home" --env="TMPDIR=$case_root/tmp" \
+  --env="PATH=/usr/bin" --env=LC_ALL=C --env=LANG=C --env=LD_PRELOAD=x \
+  --role="env=/usr/bin/env" --role="gate_interpreter=/bin/dash" --role="gate_helper=$gate" \
+  --role="payload=$payload" --arg='{role:payload}' --arg="$case_root/authority/heavy.lock" \
+  >"$tmp/injection.out" 2>&1; then
+  echo 'loader-injection case unexpectedly passed' >&2
+  exit 1
+fi
+[ ! -e "$case_root/evidence-parent/evidence" ]
+grep -q 'loader or interpreter injection key forbidden: LD_PRELOAD' "$tmp/injection.out"
+
+echo 'bootstrap_stage3_unit_supervisor=true'

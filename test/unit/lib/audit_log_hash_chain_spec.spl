@@ -1,8 +1,4 @@
 """
-## Purpose and audience
-Purpose: Verify audit chain — genesis & append (AC-5, AC-6e).
-Audience: compiler and tooling engineers who maintain this spec.
-
 log-lib-drivers Phase 4 spec — audit-log tamper-evident hash chain.
 
 Covers AC-5 (audit-log uses tamper-evident framing — sequence + hash
@@ -38,8 +34,6 @@ Phase 3 contract (locked, §E):
   to compile and behave identically.
 """
 
-# @req: REQ-LIB-AUDIT-LOG-HASH-001 — stable requirement identity for this spec.
-
 use std.spec
 use std.security.audit_chain.{
     audit_chain_init, audit_chain_append, audit_chain_verify,
@@ -49,7 +43,7 @@ use std.security.audit_log.{
     AuditEntry, AuditConfig, SecurityEvent, SecuritySeverity,
     severity_for_event, meets_severity
 }
-use std.io_runtime.{remove_file_if_exists}  # NOTE: never `app.io` — see project memory.
+use std.io_runtime  # NOTE: never `app.io` — see project memory.
 
 # Helper paths for tests (Phase 5 wires these into a tmp dir).
 val TMP_AUDIT_PATH: text = "/tmp/sstack_audit_chain_test.log"
@@ -57,10 +51,8 @@ val TMP_AUDIT_PATH: text = "/tmp/sstack_audit_chain_test.log"
 describe "audit chain — genesis & append (AC-5, AC-6e)":
 
     it "AC-5: genesis entry has seq=1 and prev_hash=[0u8;32]":
-        step("Verify: AC-5: genesis entry has seq=1 and prev_hash=[0u8;32]")
-        # @req: REQ-LIB-AUDIT-LOG-HASH-001
         # Fresh file → genesis state.
-        remove_file_if_exists(TMP_AUDIT_PATH)
+        std.io_runtime.remove_file_if_exists(TMP_AUDIT_PATH)
         audit_chain_init(TMP_AUDIT_PATH, false)
         val cfg = AuditConfig(
             enabled: true,
@@ -77,11 +69,10 @@ describe "audit chain — genesis & append (AC-5, AC-6e)":
         audit_chain_append(entry, cfg)
         # Verify the produced file: 1 valid entry.
         val result = audit_chain_verify(TMP_AUDIT_PATH)
-        expect(result).to_equal(1)  # oracle: authoritative expected value documented by this spec's contract
+        expect(result).to_equal(1)
 
     it "AC-5: three appended entries verify clean":
-        step("Verify: AC-5: three appended entries verify clean")
-        remove_file_if_exists(TMP_AUDIT_PATH)
+        std.io_runtime.remove_file_if_exists(TMP_AUDIT_PATH)
         audit_chain_init(TMP_AUDIT_PATH, false)
         val cfg = AuditConfig(
             enabled: true,
@@ -99,12 +90,11 @@ describe "audit chain — genesis & append (AC-5, AC-6e)":
             )
             audit_chain_append(e, cfg)
             i = i + 1
-        expect(audit_chain_verify(TMP_AUDIT_PATH)).to_equal(3)  # oracle: authoritative expected value documented by this spec's contract
+        expect(audit_chain_verify(TMP_AUDIT_PATH)).to_equal(3)
 
     it "AC-5: each entry_hash equals sha256(seq_be||ts_be||sev||json||prev_hash)":
-        step("Verify: AC-5: each entry_hash equals sha256(seq_be||ts_be||sev||json||prev_hash)")
         # Phase 5 exposes audit_chain_recompute_hash(entry) for testing.
-        remove_file_if_exists(TMP_AUDIT_PATH)
+        std.io_runtime.remove_file_if_exists(TMP_AUDIT_PATH)
         audit_chain_init(TMP_AUDIT_PATH, false)
         val cfg = AuditConfig(
             enabled: true,
@@ -120,7 +110,7 @@ describe "audit chain — genesis & append (AC-5, AC-6e)":
         )
         audit_chain_append(e, cfg)
         # After append, e.seq, e.prev_hash, e.entry_hash are populated.
-        expect(e.seq).to_equal(1)  # oracle: authoritative expected value documented by this spec's contract
+        expect(e.seq).to_equal(1)
         # prev_hash must be the genesis zero hash.
         expect(audit_chain_is_zero_hash(e.prev_hash)).to_equal(true)
         # entry_hash recomputes deterministically.
@@ -131,9 +121,8 @@ describe "audit chain — genesis & append (AC-5, AC-6e)":
 describe "audit chain — tamper detection (AC-5, AC-6e)":
 
     it "AC-6e: flipping a byte in middle entry returns Err(ChainBreakAt(2))":
-        step("Verify: AC-6e: flipping a byte in middle entry returns Err(ChainBreakAt(2))")
         # Append 3 entries, then corrupt entry #2 (1-based seq).
-        remove_file_if_exists(TMP_AUDIT_PATH)
+        std.io_runtime.remove_file_if_exists(TMP_AUDIT_PATH)
         audit_chain_init(TMP_AUDIT_PATH, false)
         val cfg = AuditConfig(
             enabled: true,
@@ -162,9 +151,8 @@ describe "audit chain — tamper detection (AC-5, AC-6e)":
 describe "audit chain — recovery (AC-5)":
 
     it "AC-5: opening existing chain reads only last line for prev_hash":
-        step("Verify: AC-5: opening existing chain reads only last line for prev_hash")
         # Pre-seed the file with 2 entries.
-        remove_file_if_exists(TMP_AUDIT_PATH)
+        std.io_runtime.remove_file_if_exists(TMP_AUDIT_PATH)
         audit_chain_init(TMP_AUDIT_PATH, false)
         val cfg = AuditConfig(
             enabled: true,
@@ -190,15 +178,14 @@ describe "audit chain — recovery (AC-5)":
             module_path: "m"
         )
         audit_chain_append(e3, cfg)
-        expect(e3.seq).to_equal(3)  # oracle: authoritative expected value documented by this spec's contract
+        expect(e3.seq).to_equal(3)
         # Full chain still verifies after recovery+append.
-        expect(audit_chain_verify(TMP_AUDIT_PATH)).to_equal(3)  # oracle: authoritative expected value documented by this spec's contract
+        expect(audit_chain_verify(TMP_AUDIT_PATH)).to_equal(3)
 
 
 describe "audit chain — back-compat with severity (AC-5)":
 
     it "AC-5: meets_severity ordering preserved (Info < Warning < Critical)":
-        step("Verify: AC-5: meets_severity ordering preserved (Info < Warning < Critical)")
         # Phase-3 contract: existing severity ranks are unchanged.
         expect(meets_severity(SecuritySeverity.Info, SecuritySeverity.Info)).to_equal(true)
         expect(meets_severity(SecuritySeverity.Warning, SecuritySeverity.Info)).to_equal(true)
@@ -207,6 +194,5 @@ describe "audit chain — back-compat with severity (AC-5)":
         expect(meets_severity(SecuritySeverity.Info, SecuritySeverity.Critical)).to_equal(false)
 
     it "AC-5: severity_for_event mapping unchanged":
-        step("Verify: AC-5: severity_for_event mapping unchanged")
         val s = severity_for_event(SecurityEvent.CsrfViolation(peer: "127.0.0.1", path: "/admin"))
         expect(s).to_equal(SecuritySeverity.Critical)

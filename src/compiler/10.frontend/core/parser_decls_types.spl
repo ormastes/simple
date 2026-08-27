@@ -8,7 +8,7 @@ use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_UNDERSCORE}
 use compiler.core.tokens.{TOK_COLON, TOK_COMMA, TOK_QUESTION}
 use compiler.core.tokens.{TOK_ASSIGN, TOK_LBRACKET, TOK_RBRACKET}
 use compiler.core.tokens.{TOK_INDENT, TOK_DEDENT, TOK_EOF}
-use compiler.core.ast.{decl_struct_def, decl_enum_def, decl_enum_payload_unnamed_marker, decl_impl_block, module_add_decl}
+use compiler.core.ast.{decl_struct_def, decl_enum_def, decl_impl_block, module_add_decl}
 use compiler.core.types.{type_tag_name, int_to_str}
 use compiler.core.types.{named_type_register}
 use compiler.core.parser.{par_kind_get, par_text_get, par_struct_names}
@@ -56,6 +56,106 @@ fn has_seen_name(names: [text], target: text) -> bool:
             return true
     false
 
+# ===== Struct/Class Declarations =====
+
+fn parse_struct_decl() -> i64:
+    parser_advance()
+    val struct_name = par_text_get()
+    parser_expect(TOK_IDENT)
+    par_struct_names.push(struct_name)
+
+    # Parse optional type parameters: class Box<T>:, struct Node<T>:
+    val type_params = parse_type_params()
+
+    # Pre-register struct name so type references resolve during parsing
+    named_type_register(struct_name, [], [])
+    # Handle struct inheritance: struct X(Parent):
+    if par_kind_get() == TOK_LPAREN:
+        parser_advance()
+        # Skip parent type name(s)
+        for i in 0..10:
+            if par_kind_get() == TOK_RPAREN:
+                break
+            parser_advance()
+        parser_expect(TOK_RPAREN)
+    # Handle "with" mixin: struct X with Y:
+    if par_kind_get() == TOK_IDENT:
+        if par_text_get() == "with":
+            parser_advance()
+            parser_expect(TOK_IDENT)
+    parser_expect(TOK_COLON)
+    parser_skip_newlines()
+    parser_expect(TOK_INDENT)
+
+    var field_names: [text] = []
+    var field_types: [i64] = []
+    var field_defaults: [i64] = []
+    var class_method_ids: [i64] = []
+
+    for i in 0..1000:
+        parser_skip_newlines()
+        if par_kind_get() == TOK_DEDENT:
+            parser_advance()
+            break
+        if par_kind_get() == TOK_EOF:
+            break
+
+        # Skip docstrings in class/struct body
+        if par_kind_get() == TOK_STRING_LIT:
+            parser_advance()
+            parser_skip_newlines_and_semicolons()
+            continue
+
+        # Associated types: type Item = T (skip for now, just parse and ignore)
+        if par_kind_get() == TOK_KW_TYPE:
+            parser_advance()
+            # Skip: 'type IDENT' or 'type IDENT = Type'
+            if par_kind_get() == TOK_IDENT:
+                parser_advance()
+            if par_kind_get() == TOK_ASSIGN:
+                parser_advance()
+                parser_parse_type()
+            parser_skip_newlines_and_semicolons()
+            continue
+
+        # Handle methods in class/struct body
+        if par_kind_get() == TOK_KW_STATIC:
+            val sm_id = parse_class_body_method(struct_name, true, false)
+            if sm_id >= 0:
+                class_method_ids.push(sm_id)
+            continue
+        if par_kind_get() == TOK_KW_FN:
+            val fm_id = parse_class_body_method(struct_name, false, false)
+            if fm_id >= 0:
+                class_method_ids.push(fm_id)
+            continue
+        if par_kind_get() == TOK_KW_ME:
+            val mm_id = parse_class_body_method(struct_name, false, true)
+            if mm_id >= 0:
+                class_method_ids.push(mm_id)
+            continue
+
+        val fname = par_text_get()
+        parser_expect(TOK_IDENT)
+        parser_expect(TOK_COLON)
+        val ftype = parser_parse_type()
+        field_names.push(fname)
+        field_types.push(ftype)
+        var fdefault: i64 = -1
+        if par_kind_get() == TOK_ASSIGN:
+            parser_advance()
+            fdefault = parse_expr()
+        field_defaults.push(fdefault)
+        parser_skip_newlines_and_semicolons()
+
+    val struct_d = decl_struct_def(struct_name, field_names, field_types, field_defaults, 0)
+
+    # If class had methods, create an impl block for them
+    if class_method_ids.len() > 0:
+        val impl_d = decl_impl_block(struct_name, class_method_ids, 0)
+        module_add_decl(impl_d)
+
+    struct_d
 
 # ===== Enum Declarations =====
 
@@ -79,12 +179,9 @@ fn parse_enum_decl() -> i64:
     # See decl_enum_def's docstring in _Ast/decl_nodes.spl.
     var variant_payload_types_flat: [i64] = []
     var variant_payload_counts: [i64] = []
-    # S1 (hardening plan 15 Phase 4): parallel element-for-element to
-    # variant_payload_types_flat -- see decl_enum_def's docstring.
-    var variant_payload_field_names_flat: [text] = []
     var enum_method_ids: [i64] = []
 
-    while true:
+    for i in 0..1000:
         parser_skip_newlines()
         if par_kind_get() == TOK_DEDENT:
             parser_advance()
@@ -143,62 +240,41 @@ fn parse_enum_decl() -> i64:
         # _ParserDecls/enum_module_body.spl's copy instead) -- kept in sync
         # anyway per the bug doc, which names both discard sites.
         var variant_field_types: [i64] = []
-        # S1 (hardening plan 15 Phase 4): parallel to variant_field_types --
-        # the declared identifier for a NAMED payload field,
-        # decl_enum_payload_unnamed_marker() for a positional one.
-        var variant_field_names: [text] = []
         if par_kind_get() == TOK_LPAREN:
             parser_advance()
-            while true:
+            for j in 0..100:
                 if par_kind_get() == TOK_RPAREN:
                     break
                 if par_kind_get() == TOK_EOF:
                     break
-                # `field_name: type` and bare positional `type` both start on an
-                # identifier and this parser has NO lookahead, so parse a full
-                # type FIRST and only reinterpret the consumed identifier as a
-                # FIELD NAME if a `:` turns out to follow. Before S1 this arm
-                # dropped positional payload types outright (`A(i64, text)`
-                # recorded arity ZERO). Mirrors the live copy in
-                # _ParserDecls/enum_module_body.spl -- keep the two in sync.
+                # Skip field_name: type pairs
                 if par_kind_get() == TOK_IDENT:
-                    val ident_text = par_text_get()
-                    val first_type = parser_parse_type()
+                    parser_advance()
                     if par_kind_get() == TOK_COLON:
                         parser_advance()
                         val fld_type = parser_parse_type()
                         variant_field_types.push(fld_type)
-                        variant_field_names.push(ident_text)
-                    else:
-                        variant_field_types.push(first_type)
-                        variant_field_names.push(decl_enum_payload_unnamed_marker())
-                    # Handle optional ? after type
-                    if par_kind_get() == TOK_QUESTION:
-                        parser_advance()
+                        # Handle optional ? after type
+                        if par_kind_get() == TOK_QUESTION:
+                            parser_advance()
                 elif par_kind_get() == TOK_LBRACKET:
                     val bracket_type = parser_parse_type()
                     variant_field_types.push(bracket_type)
-                    variant_field_names.push(decl_enum_payload_unnamed_marker())
                 else:
                     parser_advance()
                 if par_kind_get() == TOK_COMMA:
                     parser_advance()
             parser_expect(TOK_RPAREN)
-        var discriminant = -1
-        if par_kind_get() == TOK_ASSIGN:
-            parser_advance()
-            discriminant = parse_expr()
         variant_names.push(vname)
         variant_discriminants.push(discriminant)
         variant_payload_counts.push(variant_field_types.len())
         var vft_i = 0
         while vft_i < variant_field_types.len():
             variant_payload_types_flat.push(variant_field_types[vft_i])
-            variant_payload_field_names_flat.push(variant_field_names[vft_i])
             vft_i = vft_i + 1
         parser_skip_newlines_and_semicolons()
 
-    val enum_did = decl_enum_def(enum_name, variant_names, variant_discriminants, variant_payload_types_flat, variant_payload_counts, variant_payload_field_names_flat, 0)
+    val enum_did = decl_enum_def(enum_name, variant_names, variant_discriminants, variant_payload_types_flat, variant_payload_counts, 0)
 
     # If enum had methods, create an impl block for them
     if enum_method_ids.len() > 0:
@@ -241,7 +317,7 @@ fn parse_bitfield_decl() -> i64:
     var seen_names: [text] = []
     var used_bits: i64 = 0
 
-    while true:
+    for bf_i in 0..200:
         parser_skip_newlines()
         if par_kind_get() == TOK_DEDENT:
             parser_advance()

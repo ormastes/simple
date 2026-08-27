@@ -1,0 +1,96 @@
+# Checked byte-layout bridge from exact damage rectangles to one packed,
+# strided transfer per rectangle. Backend-independent: CPU mirrors and GPU
+# storage buffers consume the same immutable offsets and byte receipts.
+
+use common.ui.render_opt.damage_plan.{
+    DamageFramePlan, DAMAGE_PLAN_NONE, DAMAGE_PLAN_LOCAL, DAMAGE_PLAN_FULL
+}
+
+class DamageTransferPlan:
+    valid: bool
+    reason: text
+    source_offsets: [i64]
+    row_bytes: [i64]
+    row_counts: [i64]
+    source_strides: [i64]
+    packed_bytes: [i64]
+    rect_count: i64
+    total_bytes: i64
+    full_frame_bytes: i64
+
+fn _damage_transfer_invalid(reason: text) -> DamageTransferPlan:
+    DamageTransferPlan(
+        valid: false, reason: reason, source_offsets: [], row_bytes: [],
+        row_counts: [], source_strides: [], packed_bytes: [], rect_count: 0,
+        total_bytes: 0, full_frame_bytes: 0)
+
+fn build_damage_transfer_plan(plan: DamageFramePlan, surface_w: i64,
+                              surface_h: i64) -> DamageTransferPlan:
+    val max_i64: i64 = 9223372036854775807
+    val bytes_per_pixel: i64 = 4
+    if surface_w <= 0 or surface_h <= 0:
+        return _damage_transfer_invalid("invalid-surface")
+    if surface_w > (max_i64 / bytes_per_pixel) / surface_h:
+        return _damage_transfer_invalid("surface-byte-overflow")
+    val stride = surface_w * bytes_per_pixel
+    val full_bytes = stride * surface_h
+    if plan.mode == DAMAGE_PLAN_NONE:
+        if plan.rects.len() != 0:
+            return _damage_transfer_invalid("none-with-rectangles")
+        return DamageTransferPlan(
+            valid: true, reason: "none", source_offsets: [], row_bytes: [],
+            row_counts: [], source_strides: [], packed_bytes: [], rect_count: 0,
+            total_bytes: 0, full_frame_bytes: full_bytes)
+    if plan.mode != DAMAGE_PLAN_LOCAL and plan.mode != DAMAGE_PLAN_FULL:
+        return _damage_transfer_invalid("invalid-mode")
+    if plan.rects.len() == 0 or plan.rects.len() % 4 != 0:
+        return _damage_transfer_invalid("invalid-rectangle-layout")
+
+    val planned_rects = (plan.rects.len() / 4) as i64
+    var offsets: [i64] = [0; planned_rects.to_i32()]
+    var widths: [i64] = [0; planned_rects.to_i32()]
+    var rows: [i64] = [0; planned_rects.to_i32()]
+    var strides: [i64] = [0; planned_rects.to_i32()]
+    var packed: [i64] = [0; planned_rects.to_i32()]
+    var total: i64 = 0
+    var cursor = 0
+    while cursor < plan.rects.len():
+        val x = plan.rects[cursor]
+        val y = plan.rects[cursor + 1]
+        val w = plan.rects[cursor + 2]
+        val h = plan.rects[cursor + 3]
+        if (x < 0 or y < 0 or w <= 0 or h <= 0 or x > surface_w or
+            y > surface_h or w > surface_w - x or h > surface_h - y):
+            return _damage_transfer_invalid("rectangle-out-of-bounds")
+        val row_size = w * bytes_per_pixel
+        val byte_count = row_size * h
+        if total > max_i64 - byte_count:
+            return _damage_transfer_invalid("transfer-byte-overflow")
+        val rect_index = cursor / 4
+        offsets[rect_index] = (y * surface_w + x) * bytes_per_pixel
+        widths[rect_index] = row_size
+        rows[rect_index] = h
+        strides[rect_index] = stride
+        packed[rect_index] = byte_count
+        total = total + byte_count
+        cursor = cursor + 4
+    if total > full_bytes:
+        return _damage_transfer_invalid("transfer-exceeds-frame")
+    if plan.planned_pixels > 0:
+        if plan.planned_pixels > max_i64 / bytes_per_pixel:
+            return _damage_transfer_invalid("receipt-byte-overflow")
+        if plan.planned_pixels * bytes_per_pixel != total:
+            return _damage_transfer_invalid("receipt-byte-mismatch")
+    if plan.mode == DAMAGE_PLAN_FULL:
+        if (plan.rects.len() != 4 or plan.rects[0] != 0 or plan.rects[1] != 0 or
+            plan.rects[2] != surface_w or plan.rects[3] != surface_h):
+            return _damage_transfer_invalid("invalid-full-frame")
+    DamageTransferPlan(
+        valid: true,
+        reason: if plan.mode == DAMAGE_PLAN_FULL: "full" else: "local",
+        source_offsets: offsets, row_bytes: widths, row_counts: rows,
+        source_strides: strides, packed_bytes: packed,
+        rect_count: offsets.len(), total_bytes: total,
+        full_frame_bytes: full_bytes)
+
+export DamageTransferPlan, build_damage_transfer_plan

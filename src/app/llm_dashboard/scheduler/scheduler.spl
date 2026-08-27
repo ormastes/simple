@@ -2,18 +2,19 @@
 #
 # Simple-native recurring task runner for the LLM dashboard.
 # Stores tasks as files in .build/llm_dashboard/schedules/.
-# Each tick checks which tasks are due and spawns them via process_spawn_async.
+# Each tick checks which tasks are due and spawns them via rt_process_spawn_async.
 #
 # Builds on the daemon_sdk pattern: file-based IPC, lock file for singleton.
 
 use app.llm_dashboard.data.types.{ManagedTask, TaskKind, TaskState, task_kind_name}
 use app.llm_dashboard.scheduler.cron.{cron_matches, cron_next_time, interval_next_time}
-use app.io.mod.{process_spawn_async, process_is_running, dir_create}
+use app.io.mod.{process_spawn_async, process_is_running}
 use std.common.encoding.utf8.{text_truncate_bytes}
 
 use std.io_runtime.{file_exists}
 use std.io_runtime.{read_file_text_result}
 use std.io_runtime.{file_write}
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
 use std.io_runtime.{dir_list}
 use std.io_runtime.{time_now_unix_micros}
 use std.io_runtime.{getpid}
@@ -27,9 +28,9 @@ val RESULTS_DIR = ".build/llm_dashboard/results"
 
 fn scheduler_create_loop(prompt: text, interval_sec: i64) -> ManagedTask:
     """Create a new loop task that runs a prompt on a fixed interval."""
-    val now_ms = time_now_unix_micros() / 1000
+    val now_ms = rt_time_now_unix_micros() / 1000
     val id = "loop_{now_ms}"
-    var task = ManagedTask.new(id, TaskKind.Loop, "loop: {text_truncate_bytes(prompt, 40)}", prompt)
+    var task = ManagedTask.new(id, TaskKind.Loop, "loop: {prompt.slice(0, 40)}", prompt)
     task.interval_seconds = interval_sec
     task.state = TaskState.Active
     task.created_at = now_ms
@@ -39,9 +40,9 @@ fn scheduler_create_loop(prompt: text, interval_sec: i64) -> ManagedTask:
 
 fn scheduler_create_schedule(prompt: text, cron_expr: text) -> ManagedTask:
     """Create a new cron-scheduled task."""
-    val now_ms = time_now_unix_micros() / 1000
+    val now_ms = rt_time_now_unix_micros() / 1000
     val id = "sched_{now_ms}"
-    var task = ManagedTask.new(id, TaskKind.Schedule, "sched: {text_truncate_bytes(prompt, 40)}", prompt)
+    var task = ManagedTask.new(id, TaskKind.Schedule, "sched: {prompt.slice(0, 40)}", prompt)
     task.cron_expr = cron_expr
     task.state = TaskState.Active
     task.created_at = now_ms
@@ -51,9 +52,7 @@ fn scheduler_create_schedule(prompt: text, cron_expr: text) -> ManagedTask:
 
 fn scheduler_cancel(task_id: text):
     """Cancel a task by ID."""
-    val tasks = match scheduler_list_tasks():
-        case Ok(value): value
-        case Err(_): return
+    val tasks = scheduler_list_tasks()
     for task in tasks:
         if task.id == task_id:
             var t = task
@@ -61,7 +60,7 @@ fn scheduler_cancel(task_id: text):
             _save_task(t)
             return
 
-fn scheduler_list_tasks() -> Result<[ManagedTask], text>:
+fn scheduler_list_tasks() -> [ManagedTask]:
     """List all persisted tasks."""
     val tasks: [ManagedTask] = []
     if not file_exists(SCHED_DIR):
@@ -71,13 +70,11 @@ fn scheduler_list_tasks() -> Result<[ManagedTask], text>:
     for fname in files:
         if fname.ends_with(".task"):
             val path = "{SCHED_DIR}/{fname}"
-            val content = match read_file_text_result(path):
-                case Ok(value): value
-                case Err(error): return Err("could not read scheduled task {path}: {error}")
+            val content = rt_file_read_text(path)
             val task = _load_task(content)
             if task.id != "":
                 result.push(task)
-    return Ok(result)
+    return result
 
 fn scheduler_tick():
     """Check all active tasks and run any that are due. Call from main loop."""
@@ -105,10 +102,10 @@ fn _is_due(task: ManagedTask, now_ms: i64) -> bool:
 
 fn _run_task(task: ManagedTask, now_ms: i64):
     """Execute a task and update its state."""
-    dir_create(RESULTS_DIR, true)
+    rt_dir_create(RESULTS_DIR, true)
     val result_file = "{RESULTS_DIR}/{task.id}.out"
     val cmd = "claude --print \"{task.command}\" > {result_file} 2>&1"
-    val pid = process_spawn_async("/bin/sh", ["-c", cmd])
+    val pid = rt_process_spawn_async("/bin/sh", ["-c", cmd])
 
     var updated = task
     updated.last_run_time = now_ms
@@ -122,10 +119,10 @@ fn _run_task(task: ManagedTask, now_ms: i64):
 
 fn _save_task(task: ManagedTask):
     """Persist a task to disk."""
-    dir_create(SCHED_DIR, true)
+    rt_dir_create(SCHED_DIR, true)
     val path = "{SCHED_DIR}/{task.id}.task"
     val content = _serialize_task(task)
-    file_write(path, content)
+    rt_file_write_text(path, content)
 
 fn _serialize_task(task: ManagedTask) -> text:
     """Serialize task to key=value format."""

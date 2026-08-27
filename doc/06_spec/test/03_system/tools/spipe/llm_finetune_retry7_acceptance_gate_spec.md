@@ -27,7 +27,7 @@ llm_finetune_retry7_acceptance_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -168,7 +168,7 @@ expect(executable_code).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -181,7 +181,6 @@ expect(output).to_contain("model_manifest_exists=false")
 expect(output).to_contain("eval_result_exists=false")
 expect(output).to_contain("target_accuracy=missing")
 expect(output).to_contain("target_eval_reached=false")
-expect(output).to_contain("app_handoff_doc_ready=false")
 expect(output).to_contain("acceptance_allowed=false")
 expect(output).to_contain("result=BLOCKED_RETRY6_NOT_READY")
 expect(output).to_contain("STATUS: WARN retry7-acceptance-gate")
@@ -218,20 +217,26 @@ expect(output.split(absence_marker()).len()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val (output, exit_code) = run_spipe_command(["fine-tune-ready", ATTEMPT_ID])
 
 expect(exit_code).to_equal(1)
+expect(output).to_contain("data_check_gate_ready=pending")
 expect(output).to_contain("model_artifact_created=pending")
 expect(output).to_contain("target_eval_reached=pending")
 expect(output).to_contain("decision_accepted=pending")
 expect(output).to_contain("license_constraints_reviewed=pending")
 expect(output).to_contain("safety_eval_complete=pending")
 expect(output).to_contain("deployment_evidence_ready=pending")
-expect(output).to_contain("app_handoff_doc_ready=pending")
+expect(output).to_contain("app_handoff_doc_ready=ready")
+expect(output).to_contain("data_check_execution=warn")
+expect(output).to_contain("data_check_status=\"STATUS: WARN retry7-acceptance-gate\"")
+expect(output).to_contain("result=BLOCKED_RETRY6_NOT_READY")
+expect(output).to_contain("target_eval_reached=false")
+expect(output).to_contain("acceptance_allowed=false")
 expect(output).to_contain("STATUS: FAIL llm-finetune-ready")
 expect(output.split(absence_marker()).len()).to_equal(1)
 ```
@@ -243,39 +248,18 @@ expect(output.split(absence_marker()).len()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val (output, exit_code) = run_spipe_command(["fine-tune-doctor", ATTEMPT_ID])
 
 expect(exit_code).to_equal(1)
-expect(output).to_contain("WARN placeholder license_constraints=pending")
-expect(output).to_contain("WARN placeholder safety_eval=not-run")
-expect(output).to_contain("WARN placeholder deployment_evidence=not-deployable")
+expect(output).to_contain("WARN missing_evidence license_constraints=pending")
+expect(output).to_contain("WARN missing_evidence safety_eval=not-run")
+expect(output).to_contain("WARN missing_evidence deployment_evidence=not-deployable")
+expect(output.split(legacy_placeholder_label()).len()).to_equal(1)
 expect(output).to_contain("STATUS: WARN llm-finetune-doctor")
-expect(output.split(absence_marker()).len()).to_equal(1)
-```
-
-</details>
-
-#### surfaces retry7 next action with machine-readable WARN status
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 9 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val (output, exit_code) = run_spipe_command(["fine-tune-next", ATTEMPT_ID])
-
-expect(exit_code).to_equal(1)
-expect(output).to_contain("attempt_id={ATTEMPT_ID}")
-expect(output).to_contain("next_action=retry-implementation")
-expect(output).to_contain("retry_target=complete retry6 real QLoRA artifact and target eval, then normal review may accept or choose another retry")
-expect(output).to_contain("readiness_blocker=model-artifact")
-expect(output).to_contain("STATUS: WARN llm-finetune-next")
 expect(output.split(absence_marker()).len()).to_equal(1)
 ```
 
@@ -285,8 +269,8 @@ expect(output.split(absence_marker()).len()).to_equal(1)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

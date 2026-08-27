@@ -6,7 +6,14 @@ use app.cli_debug.commands.*
 extern fn stdout_write(s: text)
 extern fn stdout_flush()
 
-use app.io.mod.{process_run}
+use app.io.mod.{process_run, file_exists, file_hash_sha256}
+use std.common.debug.contracts_v1.{
+    DebugRootOperationV1, DebugPerturbationV1, debug_policy_development_v1,
+}
+use app.mcpgdb.debug_service_bridge_v1.{
+    mcpgdb_debug_bind_session_v1, mcpgdb_debug_authorize_operation_v1,
+    mcpgdb_debug_record_operation_outcome_v1, mcpgdb_debug_unbind_session_v1,
+}
 use app.cli_debug.format.{
     fmt_help_main, fmt_help_break, fmt_help_print, fmt_help_info,
     fmt_error, fmt_info, fmt_breakpoint_set, fmt_session_created,
@@ -63,42 +70,43 @@ fn sdb_print_raw(output: text):
 fn extract_json_field(json: text, field: text) -> text:
     """Simple JSON field extractor — looks for "field":"value" pattern."""
     val key = "\"" + field + "\":"
-    val idx = json.index_of(key)
-    if idx >= 0:
-        val after = json.substring(idx + key.len())
-        if after.starts_with("\""):
-            # String value — find closing quote (handle escaped quotes)
-            val content = after.substring(1)
-            var end_idx = 0
-            var escaped = false
-            while end_idx < content.len():
-                val ch = content.substring(end_idx, end_idx + 1)
-                if escaped:
-                    escaped = false
-                elif ch == "\\":
-                    escaped = true
-                elif ch == "\"":
-                    break
-                end_idx = end_idx + 1
-            val raw = content.substring(0, end_idx)
-            # Unescape basic sequences
-            var result = raw
-            result = result.replace("\\n", "\n")
-            result = result.replace("\\t", "\t")
-            result = result.replace("\\\"", "\"")
-            result = result.replace("\\\\", "\\")
-            return result
-        else:
-            # Non-string value (number, bool, null)
-            var end_idx = 0
-            while end_idx < after.len():
-                val ch = after.substring(end_idx, end_idx + 1)
-                if ch == "," or ch == "}":
-                    break
-                end_idx = end_idx + 1
-            return after.substring(0, end_idx).trim()
-    else:
-        return ""
+    val idx_opt = json.index_of(key)
+    match idx_opt:
+        Some(idx):
+            val after = json.substring(idx + key.len())
+            if after.starts_with("\""):
+                # String value — find closing quote (handle escaped quotes)
+                val content = after.substring(1)
+                var end_idx = 0
+                var escaped = false
+                while end_idx < content.len():
+                    val ch = content.substring(end_idx, end_idx + 1)
+                    if escaped:
+                        escaped = false
+                    elif ch == "\\":
+                        escaped = true
+                    elif ch == "\"":
+                        break
+                    end_idx = end_idx + 1
+                val raw = content.substring(0, end_idx)
+                # Unescape basic sequences
+                var result = raw
+                result = result.replace("\\n", "\n")
+                result = result.replace("\\t", "\t")
+                result = result.replace("\\\"", "\"")
+                result = result.replace("\\\\", "\\")
+                return result
+            else:
+                # Non-string value (number, bool, null)
+                var end_idx = 0
+                while end_idx < after.len():
+                    val ch = after.substring(end_idx, end_idx + 1)
+                    if ch == "," or ch == "}":
+                        break
+                    end_idx = end_idx + 1
+                return after.substring(0, end_idx).trim()
+        nil:
+            return ""
 
 # ============================================================================
 # Session Management
@@ -111,17 +119,61 @@ fn sdb_ensure_session() -> bool:
             if session.process_pid != "" and ps_is_alive(session.process_pid):
                 return true
             sdb_print(fmt_error("debug session died"))
+            mcpgdb_debug_unbind_session_v1(session.session_id)
             SDB_SESSION = nil
             return false
         nil:
             sdb_print(fmt_error("no debug session. Use 'file <program>' to load an executable."))
             return false
 
+fn sdb_command_contract_v1(command: text) -> (DebugRootOperationV1, DebugPerturbationV1, text, bool):
+    val verb = command.split(" ")[0]
+    if (verb == "break" or verb == "tbreak" or verb == "rbreak" or
+        verb == "watch" or verb == "awatch" or verb == "rwatch" or
+        verb == "catch" or verb == "delete" or verb == "enable" or
+        verb == "disable" or verb == "clear" or verb == "condition"):
+        return (DebugRootOperationV1.Probe, DebugPerturbationV1.Cooperative, verb, false)
+    # Debugger expression evaluation can invoke functions or overloaded
+    # operators; it is not passive inspection merely because its command is
+    # named `print`.
+    if verb == "print" or verb == "set" or verb == "return" or verb == "jump":
+        return (DebugRootOperationV1.Control, DebugPerturbationV1.Mutating, verb, true)
+    if (verb == "ptype" or verb == "whatis" or
+        verb == "backtrace" or verb == "frame" or verb == "list" or
+        verb == "info" or verb == "show" or verb == "x" or
+        verb == "disassemble"):
+        return (DebugRootOperationV1.Inspect, DebugPerturbationV1.Passive, verb, false)
+    if verb == "file":
+        return (DebugRootOperationV1.Inspect, DebugPerturbationV1.Cooperative, verb, false)
+    (DebugRootOperationV1.Control, DebugPerturbationV1.Stopping, verb, true)
+
+fn sdb_bind_service_v1(session: DebugSession, build_id: text) -> bool:
+    match mcpgdb_debug_bind_session_v1(session.session_id, session.backend, build_id, debug_policy_development_v1()):
+        case Ok(_): true
+        case Err(reason):
+            sdb_print(fmt_error("DebugServiceV1 binding failed: " + reason))
+            false
+
+fn sdb_unbind_service_v1(local_session_id: text):
+    # Closing is idempotent from the CLI's perspective; an absent binding has
+    # no backend process to preserve and is not a user-facing error.
+    mcpgdb_debug_unbind_session_v1(local_session_id)
+
 fn sdb_run_cmd(command: text) -> text:
     """Run a command on the current debug session."""
     match SDB_SESSION:
         Some(session):
+            val (operation, perturbation, action, execution_changed) = sdb_command_contract_v1(command)
+            match mcpgdb_debug_authorize_operation_v1(session.session_id, operation, action, perturbation):
+                case Err(reason): return "error: DebugServiceV1 denied " + action + ": " + reason
+                case Ok(_): ()
             val result = run_session_command(session, command, false)
+            val succeeded = extract_json_field(result, "status") != "error"
+            val reason = if succeeded: "" else: extract_json_field(result, "message")
+            mcpgdb_debug_record_operation_outcome_v1(
+                session.session_id, operation, action, perturbation,
+                succeeded, execution_changed and succeeded, reason,
+            )
             return extract_json_field(result, "output")
         nil:
             return ""
@@ -148,6 +200,11 @@ fn sdb_create_session(backend: text):
     set_current_session(session_id)
     SDB_SESSION = Some(updated)
     SDB_BACKEND = backend
+    if not sdb_bind_service_v1(updated, "cli-session:" + session_id):
+        stop_session_process(updated)
+        remove_session(session_id)
+        SDB_SESSION = nil
+        return
     sdb_print(fmt_session_created(session_id, backend))
 
 fn cmd_backend(args: text):
@@ -177,6 +234,7 @@ fn cmd_backend(args: text):
                 if session.backend != new_backend:
                     stop_session_process(session)
                     remove_session(session.session_id)
+                    sdb_unbind_service_v1(session.session_id)
                     SDB_SESSION = nil
                     sdb_print("Previous session closed (backend changed).")
             nil: pass
@@ -207,10 +265,17 @@ fn cmd_file(args: text):
             if session.backend != detected:
                 stop_session_process(session)
                 remove_session(session.session_id)
+                sdb_unbind_service_v1(session.session_id)
                 SDB_SESSION = nil
                 sdb_create_session(detected)
     if not sdb_ensure_session():
         return
+    match SDB_SESSION:
+        case Some(session):
+            val build_id = if file_exists(args): "sha256:" + file_hash_sha256(args) else: "unresolved-path:" + args
+            if not sdb_bind_service_v1(session, build_id):
+                return
+        case None: return
     val output = sdb_run_cmd("file " + args)
     if output != "":
         sdb_print(output)
@@ -616,7 +681,28 @@ fn cmd_shell(args: text):
     if args == "":
         sdb_print("Usage: shell <command>  or  !<command>")
         return
+    match SDB_SESSION:
+        case Some(session):
+            match mcpgdb_debug_authorize_operation_v1(
+                session.session_id, DebugRootOperationV1.Domain,
+                "shell", DebugPerturbationV1.Mutating,
+            ):
+                case Err(reason):
+                    sdb_print(fmt_error("DebugServiceV1 denied shell: " + reason))
+                    return
+                case Ok(_): ()
+        case None:
+            sdb_print(fmt_error("shell requires a debug session for policy authorization"))
+            return
     val (out, err, code) = process_run("bash", ["-c", args])
+    match SDB_SESSION:
+        case Some(session):
+            mcpgdb_debug_record_operation_outcome_v1(
+                session.session_id, DebugRootOperationV1.Domain, "shell",
+                DebugPerturbationV1.Mutating, code == 0, code == 0,
+                if code == 0: "" else: err.trim(),
+            )
+        case None: ()
     if out.trim() != "":
         sdb_print(out.trim())
     if err.trim() != "" and code != 0:

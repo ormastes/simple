@@ -1,0 +1,769 @@
+# Scalar declaration-metadata authority for destination HIR publication.
+#
+# Every row is a fixed-shape SoA record.  Text and integer columns are typed
+# scalar payloads; no Hir value, Any, closure, or aggregate graph crosses this
+# boundary.  A producer publishes child rows first and then an exact module
+# range row.  The store has one process owner and one BUILDING -> FROZEN
+# lifecycle per generation.
+
+val HDDM_TRAIT_DECL = 1
+val HDDM_TRAIT_IMPL = 2
+val HDDM_TYPE_ALIAS = 3
+val HDDM_TRAIT_BOUND = 4
+val HDDM_ASSOC_DECL = 5
+val HDDM_ASSOC_IMPL = 6
+val HDDM_FUNCTION_REF = 7
+val HDDM_TYPE_BINDING = 8
+val HDDM_DOMAIN = 9
+val HDDM_STATIC_ASSERT = 10
+val HDDM_AOP = 11
+val HDDM_DI = 12
+val HDDM_ARCH = 13
+val HDDM_MOCK = 14
+val HDDM_TYPE_PARAM = 15
+val HDDM_CLASS_DECL = 16
+val HDDM_STRUCT_DECL = 17
+val HDDM_NOMINAL_ATTRIBUTE = 18
+
+fn hddm_kind_valid(kind_id: i64) -> bool:
+    kind_id>=HDDM_TRAIT_DECL and kind_id<=HDDM_NOMINAL_ATTRIBUTE
+
+class HirDestinationDeclarationMetadata:
+    generation: i64 = -1
+    frozen: bool = false
+    error: bool = false
+    count: i64 = 0
+    capacity: i64 = 0
+
+    ready: [bool] = []
+    row_generation: [i64] = []
+    row_kind: [i64] = []
+    module_row: [i64] = []
+    owner_symbol: [i64] = []
+    name: [text] = []
+    text0: [text] = []
+    text1: [text] = []
+    flag0: [bool] = []
+    flag1: [bool] = []
+    flag2: [bool] = []
+    value0: [i64] = []
+    value1: [i64] = []
+    value2: [i64] = []
+    value3: [i64] = []
+    value4: [i64] = []
+    value5: [i64] = []
+    span_row: [i64] = []
+
+    # One exact range receipt per (module, metadata kind).  The range table is
+    # scalar and is rebuilt deterministically after rollback.
+    range_count: i64 = 0
+    range_capacity: i64 = 0
+    range_ready: [bool] = []
+    range_generation: [i64] = []
+    range_module: [i64] = []
+    range_kind: [i64] = []
+    range_start: [i64] = []
+    range_len: [i64] = []
+    range_by_module: [Dict<i64, i64>] = []
+
+    # Multiple exact child ranges may describe one owner declaration.  Unlike
+    # module ranges these receipts are intentionally not unique by module/kind.
+    child_range_count: i64 = 0
+    child_range_capacity: i64 = 0
+    child_range_ready: [bool] = []
+    child_range_generation: [i64] = []
+    child_range_kind: [i64] = []
+    child_range_start: [i64] = []
+    child_range_len: [i64] = []
+
+    # Unified append journal. kind 1 removes the last metadata row; kind 2
+    # removes the last range receipt.  Checkpoints therefore need only this
+    # scalar count plus the previous error bit.
+    log_count: i64 = 0
+    log_capacity: i64 = 0
+    log_kind: [i64] = []
+    log_index: [i64] = []
+
+    me begin(g: i64) -> bool:
+        if g<0:
+            return false
+        self.generation=g
+        self.frozen=false
+        self.error=false
+        self.count=0
+        self.range_count=0
+        self.range_by_module=[]
+        self.child_range_count=0
+        self.log_count=0
+        true
+
+    me checkpoint_count_snapshot() -> i64:
+        if self.frozen:
+            -1
+        else:
+            self.log_count
+
+    me checkpoint_error_snapshot() -> bool: self.error
+
+    me ensure(required: i64):
+        if required<=self.capacity:
+            return
+        var target = if self.capacity<8: 8 else: self.capacity
+        while target<required:
+            target=target*2
+        while self.ready.len()<target:
+            self.ready.push(false)
+            self.row_generation.push(-1)
+            self.row_kind.push(0)
+            self.module_row.push(-1)
+            self.owner_symbol.push(-1)
+            self.name.push("")
+            self.text0.push("")
+            self.text1.push("")
+            self.flag0.push(false)
+            self.flag1.push(false)
+            self.flag2.push(false)
+            self.value0.push(-1)
+            self.value1.push(-1)
+            self.value2.push(-1)
+            self.value3.push(-1)
+            self.value4.push(-1)
+            self.value5.push(-1)
+            self.span_row.push(-1)
+        self.capacity=target
+
+    me ensure_range(required: i64):
+        if required<=self.range_capacity:
+            return
+        var target = if self.range_capacity<8: 8 else: self.range_capacity
+        while target<required:
+            target=target*2
+        while self.range_ready.len()<target:
+            self.range_ready.push(false)
+            self.range_generation.push(-1)
+            self.range_module.push(-1)
+            self.range_kind.push(0)
+            self.range_start.push(-1)
+            self.range_len.push(0)
+        self.range_capacity=target
+
+    me ensure_log(required: i64):
+        if required<=self.log_capacity:
+            return
+        var target = if self.log_capacity<8: 8 else: self.log_capacity
+        while target<required:
+            target=target*2
+        while self.log_kind.len()<target:
+            self.log_kind.push(0)
+            self.log_index.push(-1)
+        self.log_capacity=target
+
+    me ensure_child_range(required: i64):
+        if required<=self.child_range_capacity:
+            return
+        var target = if self.child_range_capacity<8: 8 else: self.child_range_capacity
+        while target<required:
+            target=target*2
+        while self.child_range_ready.len()<target:
+            self.child_range_ready.push(false)
+            self.child_range_generation.push(-1)
+            self.child_range_kind.push(0)
+            self.child_range_start.push(-1)
+            self.child_range_len.push(0)
+        self.child_range_capacity=target
+
+    me record_log(kind_id: i64,row: i64):
+        self.ensure_log(self.log_count+1)
+        self.log_kind[self.log_count]=kind_id
+        self.log_index[self.log_count]=row
+        self.log_count=self.log_count+1
+
+    me append_scalar(kind_id: i64,module_index: i64,owner: i64,n: text,t0: text,t1: text,f0: bool,f1: bool,f2: bool,v0: i64,v1: i64,v2: i64,v3: i64,v4: i64,v5: i64,span: i64) -> i64:
+        if self.frozen or self.error or not hddm_kind_valid(kind_id) or module_index<0 or owner< -1 or span<0:
+            self.error=true
+            return -1
+        val row = self.count
+        self.ensure(row+1)
+        self.ready[row]=false
+        self.row_generation[row]=self.generation
+        self.row_kind[row]=kind_id
+        self.module_row[row]=module_index
+        self.owner_symbol[row]=owner
+        self.name[row]=n
+        self.text0[row]=t0
+        self.text1[row]=t1
+        self.flag0[row]=f0
+        self.flag1[row]=f1
+        self.flag2[row]=f2
+        self.value0[row]=v0
+        self.value1[row]=v1
+        self.value2[row]=v2
+        self.value3[row]=v3
+        self.value4[row]=v4
+        self.value5[row]=v5
+        self.span_row[row]=span
+        self.ready[row]=true
+        self.count=row+1
+        self.record_log(1,row)
+        row
+
+    # ParserTrait, losslessly scalarized.  v0 visibility, v1 type parameters,
+    # v2 super-traits, v3 where bounds, v4 methods, v5 associated types.
+    me append_trait_decl(module_index: i64,trait_symbol: i64,n: text,visibility: i64,is_public: bool,has_doc: bool,doc: text,type_param_range: i64,super_trait_range: i64,where_range: i64,method_range: i64,assoc_range: i64,span: i64) -> i64:
+        if not has_doc and doc!="":
+            self.error=true
+            return -1
+        self.append_scalar(HDDM_TRAIT_DECL,module_index,trait_symbol,n,doc,"",is_public,has_doc,false,visibility,type_param_range,super_trait_range,where_range,method_range,assoc_range,span)
+
+    # Parser Impl: v0 target type, v1 optional trait type, v2 type params,
+    # v3 where bounds, v4 ordered methods, v5 associated implementations.
+    me append_trait_impl(module_index: i64,owner: i64,target_type: i64,has_trait: bool,trait_type: i64,type_param_range: i64,where_range: i64,method_range: i64,assoc_range: i64,span: i64) -> i64:
+        if (has_trait and trait_type<0) or (not has_trait and trait_type!=-1):
+            self.error=true
+            return -1
+        self.append_scalar(HDDM_TRAIT_IMPL,module_index,owner,"","","",has_trait,false,false,target_type,trait_type,type_param_range,where_range,method_range,assoc_range,span)
+
+    # Alias: owner is its symbol, v0 target type, v1 type-parameter range.
+    me append_type_alias(module_index: i64,alias_symbol: i64,n: text,target_type: i64,type_param_range: i64,visibility: i64,is_public: bool,span: i64) -> i64:
+        self.append_scalar(HDDM_TYPE_ALIAS,module_index,alias_symbol,n,"","",is_public,false,false,target_type,type_param_range,visibility,-1,-1,-1,span)
+
+    # Nominal declarations retain exact destination-member provenance. v0 is
+    # visibility, v1 type parameters, v2/v3 the contiguous member start/count,
+    # v4 is the optional base type and v5 the exact implemented-trait type
+    # range. Raw attributes are separate HDDM_NOMINAL_ATTRIBUTE rows keyed by
+    # owner_symbol, preserving each attribute span and expression range.
+    me append_class_decl(module_index: i64,symbol: i64,n: text,visibility: i64,
+        is_public: bool,has_doc: bool,doc: text,generic: bool,type_params: i64,
+        member_start: i64,member_count: i64,base_type: i64,traits: i64,
+        span: i64) -> i64:
+        if ((not has_doc and doc != "") or member_count < 0 or
+            (member_count > 0 and member_start < 0) or
+            (member_count == 0 and member_start != -1)):
+            self.error=true
+            return -1
+        self.append_scalar(HDDM_CLASS_DECL,module_index,symbol,n,doc,"",
+            is_public,has_doc,generic,visibility,type_params,member_start,
+            member_count,base_type,traits,span)
+
+    me append_struct_decl(module_index: i64,symbol: i64,n: text,visibility: i64,
+        is_public: bool,has_doc: bool,doc: text,generic: bool,type_params: i64,
+        member_start: i64,member_count: i64,base_type: i64,traits: i64,
+        span: i64) -> i64:
+        if ((not has_doc and doc != "") or member_count < 0 or
+            (member_count > 0 and member_start < 0) or
+            (member_count == 0 and member_start != -1)):
+            self.error=true
+            return -1
+        self.append_scalar(HDDM_STRUCT_DECL,module_index,symbol,n,doc,"",
+            is_public,has_doc,generic,visibility,type_params,member_start,
+            member_count,base_type,traits,span)
+
+    # ParserTypeParam: v0 exact bounds range and v1 optional default type.
+    me append_type_param(module_index: i64,owner: i64,n: text,bound_range: i64,has_default: bool,default_type: i64,span: i64) -> i64:
+        if (has_default and default_type<0) or (not has_default and default_type!=-1):
+            self.error=true
+            return -1
+        self.append_scalar(HDDM_TYPE_PARAM,module_index,owner,n,"","",has_default,false,false,bound_range,default_type,-1,-1,-1,-1,span)
+
+    # Canonical TraitBound: name is type_param and v0 is trait_.
+    me append_trait_bound(module_index: i64,owner: i64,type_param: text,trait_type: i64,span: i64) -> i64:
+        self.append_scalar(HDDM_TRAIT_BOUND,module_index,owner,type_param,"","",false,false,false,trait_type,-1,-1,-1,-1,-1,span)
+
+    # Canonical AssocTypeDecl: v0 exact Type bounds child range and v1
+    # optional default Type.  The implementation form has the same parser
+    # shape; its default is the concrete associated type assignment.
+    me append_assoc_decl(module_index: i64,trait_symbol: i64,n: text,bound_range: i64,has_default: bool,default_type: i64,span: i64) -> i64:
+        if (has_default and default_type<0) or (not has_default and default_type!=-1):
+            self.error=true
+            return -1
+        self.append_scalar(HDDM_ASSOC_DECL,module_index,trait_symbol,n,"","",has_default,false,false,bound_range,default_type,-1,-1,-1,-1,span)
+
+    me append_assoc_impl(module_index: i64,owner: i64,n: text,bound_range: i64,has_default: bool,default_type: i64,span: i64) -> i64:
+        if (has_default and default_type<0) or (not has_default and default_type!=-1):
+            self.error=true
+            return -1
+        self.append_scalar(HDDM_ASSOC_IMPL,module_index,owner,n,"","",has_default,false,false,bound_range,default_type,-1,-1,-1,-1,span)
+
+    # Function reference: v0 row, v1 token, v2 root, v3 parameter range,
+    # v4 return type, v5 optional canonical callable signature. flag2 states
+    # whether v5 is present; producers must never alias the return type as it.
+    me append_function_ref(module_index: i64,owner: i64,n: text,function_row: i64,
+        token: i64,root: i64,parameter_range: i64,return_type: i64,
+        has_callable_signature: bool,callable_signature: i64,is_method: bool,
+        is_static: bool,span: i64) -> i64:
+        if ((has_callable_signature and callable_signature < 0) or
+            (not has_callable_signature and callable_signature != -1)):
+            self.error=true
+            return -1
+        self.append_scalar(HDDM_FUNCTION_REF,module_index,owner,n,"","",
+            is_method,is_static,has_callable_signature,function_row,token,root,
+            parameter_range,return_type,callable_signature,span)
+
+    # Type binding: owner declaration, name of type parameter, v0 parameter
+    # row, v1 concrete type, v2 source bound row.
+    me append_type_binding(module_index: i64,owner: i64,n: text,parameter_row: i64,bound_type: i64,bound_row: i64,inferred: bool,defaulted: bool,span: i64) -> i64:
+        self.append_scalar(HDDM_TYPE_BINDING,module_index,owner,n,"","",inferred,defaulted,false,parameter_row,bound_type,bound_row,-1,-1,-1,span)
+
+    # Module metadata rows.  Their scalar slots deliberately remain domain
+    # specific instead of transporting parser/HIR aggregate values.
+    me append_domain(module_index: i64,domain_kind: text,payload: text,domain_context: text,span: i64) -> i64:
+        self.append_scalar(HDDM_DOMAIN,module_index,-1,domain_context,domain_kind,payload,false,false,false,-1,-1,-1,-1,-1,-1,span)
+
+    me append_static_assert(module_index: i64,condition_expr: i64,has_message: bool,message: text,span: i64) -> i64:
+        if not has_message and message!="":
+            self.error=true
+            return -1
+        self.append_scalar(HDDM_STATIC_ASSERT,module_index,-1,"",message,"",has_message,false,false,condition_expr,-1,-1,-1,-1,-1,span)
+
+    me append_aop(module_index: i64,pointcut: text,advice_form: text,handler: text,priority: i64,span: i64) -> i64:
+        self.append_scalar(HDDM_AOP,module_index,-1,handler,pointcut,advice_form,false,false,false,priority,-1,-1,-1,-1,-1,span)
+
+    me append_di(module_index: i64,pointcut: text,implementation: text,span: i64) -> i64:
+        self.append_scalar(HDDM_DI,module_index,-1,"",pointcut,implementation,false,false,false,-1,-1,-1,-1,-1,-1,span)
+
+    me append_arch(module_index: i64,arch_kind: text,pointcut: text,message: text,span: i64) -> i64:
+        self.append_scalar(HDDM_ARCH,module_index,-1,message,arch_kind,pointcut,false,false,false,-1,-1,-1,-1,-1,-1,span)
+
+    me append_mock(module_index: i64,n: text,trait_name: text,has_resolved_target: bool,resolved_target: i64,span: i64) -> i64:
+        if (has_resolved_target and resolved_target<0) or (not has_resolved_target and resolved_target!=-1):
+            self.error=true
+            return -1
+        self.append_scalar(HDDM_MOCK,module_index,-1,n,trait_name,"",has_resolved_target,false,false,resolved_target,-1,-1,-1,-1,-1,span)
+
+    me module_range_exists(module_index: i64,kind_id: i64) -> bool:
+        module_index<self.range_by_module.len() and self.range_by_module[module_index].contains_key(kind_id)
+
+    me publish_module_range(module_index: i64,kind_id: i64,start: i64,len: i64) -> i64:
+        if self.frozen or self.error or module_index<0 or not hddm_kind_valid(kind_id) or start<0 or len<0 or start+len<start or start+len>self.count or self.module_range_exists(module_index,kind_id):
+            self.error=true
+            return -1
+        var i = start
+        while i<start+len:
+            if not self.ready[i] or self.row_generation[i]!=self.generation or self.module_row[i]!=module_index or self.row_kind[i]!=kind_id:
+                self.error=true
+                return -1
+            i=i+1
+        val range_row = self.range_count
+        self.ensure_range(range_row+1)
+        self.range_ready[range_row]=false
+        self.range_generation[range_row]=self.generation
+        self.range_module[range_row]=module_index
+        self.range_kind[range_row]=kind_id
+        self.range_start[range_row]=start
+        self.range_len[range_row]=len
+        while self.range_by_module.len()<=module_index:
+            val empty: Dict<i64, i64> = {}
+            self.range_by_module.push(empty)
+        self.range_by_module[module_index][kind_id]=range_row
+        self.range_ready[range_row]=true
+        self.range_count=range_row+1
+        self.record_log(2,range_row)
+        range_row
+
+    me publish_child_range(kind_id: i64,start: i64,len: i64) -> i64:
+        if self.frozen or self.error or not hddm_kind_valid(kind_id) or start<0 or len<0 or start+len<start or start+len>self.count:
+            self.error=true
+            return -1
+        var i = start
+        while i<start+len:
+            if not self.ready[i] or self.row_generation[i]!=self.generation or self.row_kind[i]!=kind_id:
+                self.error=true
+                return -1
+            i=i+1
+        val receipt = self.child_range_count
+        self.ensure_child_range(receipt+1)
+        self.child_range_ready[receipt]=false
+        self.child_range_generation[receipt]=self.generation
+        self.child_range_kind[receipt]=kind_id
+        self.child_range_start[receipt]=start
+        self.child_range_len[receipt]=len
+        self.child_range_ready[receipt]=true
+        self.child_range_count=receipt+1
+        self.record_log(3,receipt)
+        receipt
+
+    me child_range_valid(receipt: i64,g: i64,read_mode: bool) -> bool:
+        g==self.generation and receipt>=0 and receipt<self.child_range_count and self.child_range_ready[receipt] and self.child_range_generation[receipt]==g and ((read_mode and self.frozen) or (not read_mode and not self.frozen))
+
+    me child_range_start_at(receipt: i64,g: i64,read_mode: bool) -> i64:
+        if self.child_range_valid(receipt,g,read_mode):
+            self.child_range_start[receipt]
+        else:
+            -1
+
+    me child_range_len_at(receipt: i64,g: i64,read_mode: bool) -> i64:
+        if self.child_range_valid(receipt,g,read_mode):
+            self.child_range_len[receipt]
+        else:
+            -1
+
+    me child_range_kind_at(receipt: i64,g: i64,read_mode: bool) -> i64:
+        if self.child_range_valid(receipt,g,read_mode):
+            self.child_range_kind[receipt]
+        else:
+            0
+
+    me building_valid(row: i64,g: i64) -> bool:
+        not self.frozen and g==self.generation and row>=0 and row<self.count and self.ready[row] and self.row_generation[row]==g
+
+    me valid(row: i64,g: i64) -> bool:
+        self.frozen and g==self.generation and row>=0 and row<self.count and self.ready[row] and self.row_generation[row]==g
+
+    me range_valid(row: i64,g: i64,read_mode: bool) -> bool:
+        g==self.generation and row>=0 and row<self.range_count and self.range_ready[row] and self.range_generation[row]==g and ((read_mode and self.frozen) or (not read_mode and not self.frozen))
+
+    me find_module_range(module_index: i64,kind_id: i64,g: i64,read_mode: bool) -> i64:
+        if g!=self.generation or (read_mode and not self.frozen) or (not read_mode and self.frozen):
+            return -1
+        if module_index<0 or module_index>=self.range_by_module.len() or not self.range_by_module[module_index].contains_key(kind_id):
+            return -1
+        val row = self.range_by_module[module_index][kind_id]
+        if self.range_valid(row,g,read_mode):
+            row
+        else:
+            -1
+
+    me range_start_at(range_row: i64,g: i64,read_mode: bool) -> i64:
+        if self.range_valid(range_row,g,read_mode):
+            self.range_start[range_row]
+        else:
+            -1
+
+    me range_len_at(range_row: i64,g: i64,read_mode: bool) -> i64:
+        if self.range_valid(range_row,g,read_mode):
+            self.range_len[range_row]
+        else:
+            -1
+
+    me kind_at(row: i64,g: i64) -> i64:
+        if self.valid(row,g):
+            self.row_kind[row]
+        else:
+            0
+    me module_at(row: i64,g: i64) -> i64:
+        if self.valid(row,g):
+            self.module_row[row]
+        else:
+            -1
+    me owner_at(row: i64,g: i64) -> i64:
+        if self.valid(row,g):
+            self.owner_symbol[row]
+        else:
+            -1
+    me name_at(row: i64,g: i64) -> text:
+        if self.valid(row,g):
+            self.name[row]
+        else:
+            ""
+    me text0_at(row: i64,g: i64) -> text:
+        if self.valid(row,g):
+            self.text0[row]
+        else:
+            ""
+    me text1_at(row: i64,g: i64) -> text:
+        if self.valid(row,g):
+            self.text1[row]
+        else:
+            ""
+    me flag0_at(row: i64,g: i64) -> bool: self.valid(row,g) and self.flag0[row]
+    me flag1_at(row: i64,g: i64) -> bool: self.valid(row,g) and self.flag1[row]
+    me flag2_at(row: i64,g: i64) -> bool: self.valid(row,g) and self.flag2[row]
+    me value0_at(row: i64,g: i64) -> i64:
+        if self.valid(row,g):
+            self.value0[row]
+        else:
+            -1
+    me value1_at(row: i64,g: i64) -> i64:
+        if self.valid(row,g):
+            self.value1[row]
+        else:
+            -1
+    me value2_at(row: i64,g: i64) -> i64:
+        if self.valid(row,g):
+            self.value2[row]
+        else:
+            -1
+    me value3_at(row: i64,g: i64) -> i64:
+        if self.valid(row,g):
+            self.value3[row]
+        else:
+            -1
+    me value4_at(row: i64,g: i64) -> i64:
+        if self.valid(row,g):
+            self.value4[row]
+        else:
+            -1
+    me value5_at(row: i64,g: i64) -> i64:
+        if self.valid(row,g):
+            self.value5[row]
+        else:
+            -1
+    me span_at(row: i64,g: i64) -> i64:
+        if self.valid(row,g):
+            self.span_row[row]
+        else:
+            -1
+
+    # Canonical text/presence readers for shapes whose scalar placement is not
+    # obvious from the generic columns.
+    me trait_has_doc_at(row: i64,g: i64) -> bool: self.valid(row,g) and self.row_kind[row]==HDDM_TRAIT_DECL and self.flag1[row]
+    me trait_doc_at(row: i64,g: i64) -> text:
+        if self.valid(row,g) and self.row_kind[row]==HDDM_TRAIT_DECL:
+            self.text0[row]
+        else:
+            ""
+    me domain_kind_at(row: i64,g: i64) -> text:
+        if self.valid(row,g) and self.row_kind[row]==HDDM_DOMAIN:
+            self.text0[row]
+        else:
+            ""
+    me domain_payload_at(row: i64,g: i64) -> text:
+        if self.valid(row,g) and self.row_kind[row]==HDDM_DOMAIN:
+            self.text1[row]
+        else:
+            ""
+    me domain_context_at(row: i64,g: i64) -> text:
+        if self.valid(row,g) and self.row_kind[row]==HDDM_DOMAIN:
+            self.name[row]
+        else:
+            ""
+    me aop_pointcut_at(row: i64,g: i64) -> text:
+        if self.valid(row,g) and self.row_kind[row]==HDDM_AOP:
+            self.text0[row]
+        else:
+            ""
+    me aop_form_at(row: i64,g: i64) -> text:
+        if self.valid(row,g) and self.row_kind[row]==HDDM_AOP:
+            self.text1[row]
+        else:
+            ""
+    me aop_handler_at(row: i64,g: i64) -> text:
+        if self.valid(row,g) and self.row_kind[row]==HDDM_AOP:
+            self.name[row]
+        else:
+            ""
+    me aop_priority_at(row: i64,g: i64) -> i64:
+        if self.valid(row,g) and self.row_kind[row]==HDDM_AOP:
+            self.value0[row]
+        else:
+            0
+    me di_pointcut_at(row: i64,g: i64) -> text:
+        if self.valid(row,g) and self.row_kind[row]==HDDM_DI:
+            self.text0[row]
+        else:
+            ""
+    me di_implementation_at(row: i64,g: i64) -> text:
+        if self.valid(row,g) and self.row_kind[row]==HDDM_DI:
+            self.text1[row]
+        else:
+            ""
+    me arch_kind_at(row: i64,g: i64) -> text:
+        if self.valid(row,g) and self.row_kind[row]==HDDM_ARCH:
+            self.text0[row]
+        else:
+            ""
+    me arch_pointcut_at(row: i64,g: i64) -> text:
+        if self.valid(row,g) and self.row_kind[row]==HDDM_ARCH:
+            self.text1[row]
+        else:
+            ""
+    me arch_message_at(row: i64,g: i64) -> text:
+        if self.valid(row,g) and self.row_kind[row]==HDDM_ARCH:
+            self.name[row]
+        else:
+            ""
+    me mock_trait_name_at(row: i64,g: i64) -> text:
+        if self.valid(row,g) and self.row_kind[row]==HDDM_MOCK:
+            self.text0[row]
+        else:
+            ""
+    me mock_has_resolved_target_at(row: i64,g: i64) -> bool: self.valid(row,g) and self.row_kind[row]==HDDM_MOCK and self.flag0[row]
+    me mock_resolved_target_at(row: i64,g: i64) -> i64:
+        if self.valid(row,g) and self.row_kind[row]==HDDM_MOCK and self.flag0[row]:
+            self.value0[row]
+        else:
+            -1
+
+    me rollback(target_count: i64,old_error: bool) -> bool:
+        if self.frozen or target_count<0 or target_count>self.log_count:
+            return false
+        while self.log_count>target_count:
+            val event = self.log_count-1
+            val event_kind = self.log_kind[event]
+            val row = self.log_index[event]
+            if event_kind==1:
+                if row!=self.count-1:
+                    return false
+                self.ready[row]=false
+                self.row_generation[row]=-1
+                self.row_kind[row]=0
+                self.module_row[row]=-1
+                self.owner_symbol[row]=-1
+                self.name[row]=""
+                self.text0[row]=""
+                self.text1[row]=""
+                self.flag0[row]=false
+                self.flag1[row]=false
+                self.flag2[row]=false
+                self.value0[row]=-1
+                self.value1[row]=-1
+                self.value2[row]=-1
+                self.value3[row]=-1
+                self.value4[row]=-1
+                self.value5[row]=-1
+                self.span_row[row]=-1
+                self.count=row
+            elif event_kind==2:
+                if row!=self.range_count-1:
+                    return false
+                self.range_by_module[self.range_module[row]].remove(self.range_kind[row])
+                self.range_ready[row]=false
+                self.range_generation[row]=-1
+                self.range_module[row]=-1
+                self.range_kind[row]=0
+                self.range_start[row]=-1
+                self.range_len[row]=0
+                self.range_count=row
+            elif event_kind==3:
+                if row!=self.child_range_count-1:
+                    return false
+                self.child_range_ready[row]=false
+                self.child_range_generation[row]=-1
+                self.child_range_kind[row]=0
+                self.child_range_start[row]=-1
+                self.child_range_len[row]=0
+                self.child_range_count=row
+            else:
+                return false
+            self.log_kind[event]=0
+            self.log_index[event]=-1
+            self.log_count=event
+        self.error=old_error
+        true
+
+    me row_shape_valid(row: i64) -> bool:
+        val kind_id = self.row_kind[row]
+        if kind_id==HDDM_TRAIT_DECL:
+            # value2 is a destination graph Type-range handle.  -1 is the
+            # canonical exact-empty range and is validated by the graph owner,
+            # never as a declaration-metadata child receipt.
+            return self.owner_symbol[row]>=0 and self.name[row]!="" and (self.flag1[row] or self.text0[row]=="") and self.value0[row]>=0 and self.value1[row]>=0 and self.value2[row]>=-1 and self.value3[row]>=0 and self.value4[row]>=0 and self.value5[row]>=0
+        if kind_id==HDDM_TRAIT_IMPL:
+            return self.owner_symbol[row]>=0 and self.value0[row]>=0 and ((self.flag0[row] and self.value1[row]>=0) or (not self.flag0[row] and self.value1[row]==-1)) and self.value2[row]>=0 and self.value3[row]>=0 and self.value4[row]>=0 and self.value5[row]>=0
+        if kind_id==HDDM_TYPE_ALIAS:
+            return self.owner_symbol[row]>=0 and self.name[row]!="" and self.value0[row]>=0 and self.value1[row]>=0 and self.value2[row]>=0
+        if kind_id==HDDM_TYPE_PARAM or kind_id==HDDM_ASSOC_DECL or kind_id==HDDM_ASSOC_IMPL:
+            # value0 is a destination graph Type-range handle; -1 denotes the
+            # exact empty bounds list.
+            return self.owner_symbol[row]>=0 and self.name[row]!="" and self.value0[row]>=-1 and ((self.flag0[row] and self.value1[row]>=0) or (not self.flag0[row] and self.value1[row]==-1))
+        if kind_id==HDDM_TRAIT_BOUND:
+            return self.owner_symbol[row]>=0 and self.name[row]!="" and self.value0[row]>=0
+        if kind_id==HDDM_FUNCTION_REF:
+            return (self.owner_symbol[row]>=0 and self.name[row]!="" and
+                self.value0[row]>=0 and self.value1[row]>=0 and
+                self.value2[row]>=0 and self.value3[row]>=0 and
+                self.value4[row]>=0 and
+                ((self.flag2[row] and self.value5[row]>=0) or
+                 (not self.flag2[row] and self.value5[row]==-1)))
+        if kind_id==HDDM_TYPE_BINDING:
+            return self.owner_symbol[row]>=0 and self.name[row]!="" and self.value0[row]>=0 and self.value1[row]>=0
+        if kind_id==HDDM_DOMAIN:
+            return self.text0[row]!=""
+        if kind_id==HDDM_STATIC_ASSERT:
+            return self.value0[row]>=0 and (self.flag0[row] or self.text0[row]=="")
+        if kind_id==HDDM_AOP:
+            return self.name[row]!="" and self.text0[row]!="" and self.text1[row]!=""
+        if kind_id==HDDM_DI:
+            return self.text0[row]!="" and self.text1[row]!=""
+        if kind_id==HDDM_ARCH:
+            return self.text0[row]!="" and self.text1[row]!=""
+        if kind_id==HDDM_MOCK:
+            return self.name[row]!="" and self.text0[row]!="" and ((self.flag0[row] and self.value0[row]>=0) or (not self.flag0[row] and self.value0[row]==-1))
+        false
+
+    me child_receipt_building_valid(receipt: i64,kind_id: i64) -> bool:
+        receipt>=0 and receipt<self.child_range_count and self.child_range_ready[receipt] and self.child_range_generation[receipt]==self.generation and self.child_range_kind[receipt]==kind_id
+
+    me row_child_receipts_valid(row: i64) -> bool:
+        val kind_id = self.row_kind[row]
+        if kind_id==HDDM_TRAIT_DECL:
+            return self.child_receipt_building_valid(self.value1[row],HDDM_TYPE_PARAM) and self.child_receipt_building_valid(self.value3[row],HDDM_TRAIT_BOUND) and self.child_receipt_building_valid(self.value4[row],HDDM_FUNCTION_REF) and self.child_receipt_building_valid(self.value5[row],HDDM_ASSOC_DECL)
+        if kind_id==HDDM_TRAIT_IMPL:
+            return self.child_receipt_building_valid(self.value2[row],HDDM_TYPE_PARAM) and self.child_receipt_building_valid(self.value3[row],HDDM_TRAIT_BOUND) and self.child_receipt_building_valid(self.value4[row],HDDM_FUNCTION_REF) and self.child_receipt_building_valid(self.value5[row],HDDM_ASSOC_IMPL)
+        if kind_id==HDDM_TYPE_ALIAS:
+            return self.child_receipt_building_valid(self.value1[row],HDDM_TYPE_PARAM)
+        if kind_id==HDDM_TYPE_PARAM or kind_id==HDDM_ASSOC_DECL or kind_id==HDDM_ASSOC_IMPL:
+            return true
+        true
+
+    me can_freeze() -> bool:
+        if self.frozen or self.error or self.generation<0:
+            return false
+        var i = 0
+        while i<self.count:
+            if not self.ready[i] or self.row_generation[i]!=self.generation or not hddm_kind_valid(self.row_kind[i]) or self.module_row[i]<0 or self.owner_symbol[i]< -1 or self.span_row[i]<0 or not self.row_shape_valid(i) or not self.row_child_receipts_valid(i):
+                return false
+            i=i+1
+        i=0
+        while i<self.range_count:
+            if not self.range_ready[i] or self.range_generation[i]!=self.generation or self.range_module[i]<0 or not hddm_kind_valid(self.range_kind[i]) or self.range_start[i]<0 or self.range_len[i]<0 or self.range_start[i]+self.range_len[i]<self.range_start[i] or self.range_start[i]+self.range_len[i]>self.count:
+                return false
+            var row = self.range_start[i]
+            while row<self.range_start[i]+self.range_len[i]:
+                if self.module_row[row]!=self.range_module[i] or self.row_kind[row]!=self.range_kind[i]:
+                    return false
+                row=row+1
+            i=i+1
+        i=0
+        while i<self.child_range_count:
+            if not self.child_range_ready[i] or self.child_range_generation[i]!=self.generation or not hddm_kind_valid(self.child_range_kind[i]) or self.child_range_start[i]<0 or self.child_range_len[i]<0 or self.child_range_start[i]+self.child_range_len[i]<self.child_range_start[i] or self.child_range_start[i]+self.child_range_len[i]>self.count:
+                return false
+            var child = self.child_range_start[i]
+            while child<self.child_range_start[i]+self.child_range_len[i]:
+                if self.row_kind[child]!=self.child_range_kind[i]:
+                    return false
+                child=child+1
+            i=i+1
+        true
+
+    me freeze() -> bool:
+        if not self.can_freeze():
+            return false
+        self.frozen=true
+        true
+    me commit_freeze():
+        self.frozen = true
+
+    me capacity_bytes_estimate() -> i64:
+        # bool columns are conservatively charged one byte; text references
+        # are charged 16 bytes.  This excludes allocator overhead and payload.
+        self.capacity*148+self.range_capacity*49+self.child_range_capacity*41+self.log_capacity*16
+
+    me text_payload_bytes() -> i64:
+        var total = 0
+        var i = 0
+        while i<self.name.len():
+            total=total+self.name[i].len()+self.text0[i].len()+self.text1[i].len()
+            i=i+1
+        total
+
+export HDDM_TRAIT_DECL
+export HDDM_TRAIT_IMPL
+export HDDM_TYPE_ALIAS
+export HDDM_TRAIT_BOUND
+export HDDM_ASSOC_DECL
+export HDDM_ASSOC_IMPL
+export HDDM_FUNCTION_REF
+export HDDM_TYPE_BINDING
+export HDDM_DOMAIN
+export HDDM_STATIC_ASSERT
+export HDDM_AOP
+export HDDM_DI
+export HDDM_ARCH
+export HDDM_MOCK
+export HDDM_TYPE_PARAM
+export HDDM_CLASS_DECL
+export HDDM_STRUCT_DECL
+export HDDM_NOMINAL_ATTRIBUTE
+export hddm_kind_valid
+export HirDestinationDeclarationMetadata

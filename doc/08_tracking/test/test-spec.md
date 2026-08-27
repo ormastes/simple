@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-07-06 18:04:19*
+*Generated: 2026-06-25 22:27:32*
 
-## test/01_unit/compiler/parser
+## test/01_unit/lib/gc_async_mut/gpu/browser_engine
 
-❌ **parser_await_spawn_spec.spl** (424ms)
-  - Source: `test/01_unit/compiler/parser/parser_await_spawn_spec.spl`
-  - Generated doc: `doc/06_spec/parser_await_spawn_spec.md`
+✅ **browser_renderer_spec.spl** (31365ms)
+  - Source: `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl`
+  - Generated doc: `doc/06_spec/browser_renderer_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 2 ✅
-- **Failed:** 1 ❌
-- **Duration:** 427ms
+- **Passed:** 121 ✅
+- **Failed:** 0 ❌
+- **Duration:** 31387ms

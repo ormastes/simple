@@ -1,0 +1,515 @@
+# Production component-to-dynSMF startup wiring.
+#
+# The only host-facing entry accepts one exact configuration file. That file
+# names one exact descriptor catalog and one exact resolver catalog; this
+# module never scans a directory, compiles an artifact, or starts a child.
+# Descriptor activation is authoritative: only `startup` components are roots
+# and load candidates. `manual` and `first_use` descriptors remain unloaded.
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.structural.component.descriptor.{
+    ComponentDescriptorV1,
+    component_descriptor_parse_sdn,
+    component_descriptor_v1
+}
+use std.common.structural.component.resolver.{
+    ComponentResolution,
+    component_resolver_catalog_parse_sdn,
+    component_resolver_catalog_validate
+}
+use app.io.mod.{file_exists, file_read_bytes, file_read_text}
+use app.startup.component_resolver.{
+    StartupComponentGraphRequest,
+    StartupResolvedComponent,
+    startup_component_graph_request,
+    resolve_startup_component_graph
+}
+use os.smf.component_admission.{smf_component_admit}
+use os.smf.dynsmf_manifest_contract.{DynSmfManifestEntry}
+use os.smf.aspect_pack_directory.{AspectPackLookupRequest}
+use os.smf.dynsmf_session.{
+    DynSmfSession,
+    dynsmf_session_load_admitted
+}
+use os.smf.dynsmf_trust_registry.{
+    DynSmfAdmittedRegistry,
+    dynsmf_admitted_registry_find
+}
+
+struct ComponentDynSmfBinding:
+    component_id: text
+    interface_name: text
+    required_capability_bits: i64
+
+struct ComponentDynSmfConfig:
+    target: text
+    profile: text
+    descriptor_path: text
+    resolver_path: text
+    bindings: [ComponentDynSmfBinding]
+
+struct ComponentDynSmfConfigParse:
+    ok: bool
+    reason: text
+    config: ComponentDynSmfConfig
+
+struct ComponentDynSmfDiagnostic:
+    fatal: bool
+    code: text
+    component_id: text
+    detail: text
+
+struct ComponentDynSmfStartupResult:
+    ok: bool
+    session: DynSmfSession
+    diagnostics: [ComponentDynSmfDiagnostic]
+
+# Retained exact image admitted during the first pass. This private record is
+# the only handoff to the load pass, so no path can be reopened after digest
+# verification.
+class ComponentDynSmfAdmittedImage:
+    component_id: text
+    request: AspectPackLookupRequest
+    artifact_bytes: [u8]
+
+class ComponentDynSmfRequestMatch:
+    ok: bool
+    reason: text
+    request: AspectPackLookupRequest?
+
+fn _component_dynsmf_config_default() -> ComponentDynSmfConfig:
+    val bindings: [ComponentDynSmfBinding] = []
+    ComponentDynSmfConfig(target: "", profile: "", descriptor_path: "", resolver_path: "", bindings: bindings)
+
+fn _component_dynsmf_parse_error(reason: text, config: ComponentDynSmfConfig) -> ComponentDynSmfConfigParse:
+    ComponentDynSmfConfigParse(ok: false, reason: reason, config: config)
+
+fn _component_dynsmf_binding_valid(binding: ComponentDynSmfBinding) -> bool:
+    binding.component_id != "" and binding.interface_name != "" and binding.required_capability_bits >= 0
+
+fn _component_dynsmf_binding_index(bindings: [ComponentDynSmfBinding], component_id: text) -> i64:
+    var idx = 0
+    while idx < bindings.len():
+        if bindings[idx].component_id == component_id:
+            return idx
+        idx = idx + 1
+    -1
+
+# Fail-closed exact-file config grammar:
+#
+#   target: linux-x86_64
+#   profile: release
+#   descriptor_path: config/components.sdn
+#   resolver_path: config/component_resolver.sdn
+#   binding:
+#     component_id: file_io
+#     interface_name: io.file
+#     required_capability_bits: 1
+#
+# Scalar keys precede binding blocks. Repeated component bindings are invalid.
+pub fn component_dynsmf_config_parse(source: text) -> ComponentDynSmfConfigParse:
+    var config = _component_dynsmf_config_default()
+    var in_binding = false
+    var binding = ComponentDynSmfBinding(component_id: "", interface_name: "", required_capability_bits: -1)
+    val lines = source.split("\n")
+    var idx = 0
+    while idx < lines.len():
+        val line = lines[idx].trim()
+        idx = idx + 1
+        if line == "" or line.starts_with("#"):
+            continue
+        if line == "binding:":
+            if in_binding:
+                if not _component_dynsmf_binding_valid(binding):
+                    return _component_dynsmf_parse_error("incomplete_binding:" + binding.component_id, config)
+                if _component_dynsmf_binding_index(config.bindings, binding.component_id) >= 0:
+                    return _component_dynsmf_parse_error("duplicate_binding:" + binding.component_id, config)
+                config.bindings.push(binding)
+            in_binding = true
+            binding = ComponentDynSmfBinding(component_id: "", interface_name: "", required_capability_bits: -1)
+            continue
+        val sep = line.index_of(":")
+        if sep < 0:
+            return _component_dynsmf_parse_error("malformed_line:" + line, config)
+        val key = line.substring(0, sep).trim()
+        val value = line.substring(sep + 1, line.len()).trim()
+        if in_binding:
+            if key == "component_id":
+                binding.component_id = value
+            elif key == "interface_name":
+                binding.interface_name = value
+            elif key == "required_capability_bits":
+                binding.required_capability_bits = value.to_i64() ?? -1
+            else:
+                return _component_dynsmf_parse_error("unknown_binding_key:" + key, config)
+        elif key == "target":
+            config.target = value
+        elif key == "profile":
+            config.profile = value
+        elif key == "descriptor_path":
+            config.descriptor_path = value
+        elif key == "resolver_path":
+            config.resolver_path = value
+        else:
+            return _component_dynsmf_parse_error("unknown_config_key:" + key, config)
+    if in_binding:
+        if not _component_dynsmf_binding_valid(binding):
+            return _component_dynsmf_parse_error("incomplete_binding:" + binding.component_id, config)
+        if _component_dynsmf_binding_index(config.bindings, binding.component_id) >= 0:
+            return _component_dynsmf_parse_error("duplicate_binding:" + binding.component_id, config)
+        config.bindings.push(binding)
+    if config.target == "" or config.profile == "" or config.descriptor_path == "" or config.resolver_path == "":
+        return _component_dynsmf_parse_error("missing_required_config", config)
+    ComponentDynSmfConfigParse(ok: true, reason: "parsed", config: config)
+
+fn _component_dynsmf_diag(fatal: bool, code: text, component_id: text, detail: text) -> ComponentDynSmfDiagnostic:
+    ComponentDynSmfDiagnostic(fatal: fatal, code: code, component_id: component_id, detail: detail)
+
+fn _component_dynsmf_failure(session: DynSmfSession, diagnostics: [ComponentDynSmfDiagnostic], code: text, component_id: text, detail: text) -> ComponentDynSmfStartupResult:
+    var out = diagnostics
+    out.push(_component_dynsmf_diag(true, code, component_id, detail))
+    ComponentDynSmfStartupResult(ok: false, session: session, diagnostics: out)
+
+fn _component_dynsmf_descriptor_index(descriptors: [ComponentDescriptorV1], component_id: text) -> i64:
+    var idx = 0
+    while idx < descriptors.len():
+        if descriptors[idx].body.id == component_id:
+            return idx
+        idx = idx + 1
+    -1
+
+fn _component_dynsmf_manifest_index(manifest: [DynSmfManifestEntry], component_id: text) -> i64:
+    var found = -1
+    var matches = 0
+    var idx = 0
+    while idx < manifest.len():
+        if manifest[idx].id == component_id:
+            found = idx
+            matches = matches + 1
+        idx = idx + 1
+    if matches == 1:
+        return found
+    -1
+
+fn _component_dynsmf_exports_equal(left: [text], right: [text]) -> bool:
+    if left.len() != right.len():
+        return false
+    var idx = 0
+    while idx < left.len():
+        if left[idx] != right[idx]:
+            return false
+        idx = idx + 1
+    true
+
+fn _component_dynsmf_trusted_request(trusted_requests: [AspectPackLookupRequest], entry: DynSmfManifestEntry) -> ComponentDynSmfRequestMatch:
+    var found: AspectPackLookupRequest? = nil
+    var matches = 0
+    var idx = 0
+    while idx < trusted_requests.len():
+        val candidate = trusted_requests[idx]
+        if candidate.artifact.library_id == entry.id:
+            matches = matches + 1
+            found = candidate
+        idx = idx + 1
+    if matches == 0:
+        return ComponentDynSmfRequestMatch(ok: false, reason: "trusted_admission_missing", request: nil)
+    if matches != 1:
+        return ComponentDynSmfRequestMatch(ok: false, reason: "trusted_admission_ambiguous", request: nil)
+    if found!.artifact.path != entry.path:
+        return ComponentDynSmfRequestMatch(ok: false, reason: "trusted_admission_path_mismatch", request: nil)
+    var manifest_matches = 0
+    var manifest_exact = false
+    var manifest_index = 0
+    while manifest_index < found!.manifest.len():
+        val trusted_entry = found!.manifest[manifest_index]
+        if trusted_entry.id == entry.id:
+            manifest_matches = manifest_matches + 1
+            manifest_exact = (trusted_entry.path == entry.path and trusted_entry.abi_version == entry.abi_version and
+                trusted_entry.artifact_kind == entry.artifact_kind and
+                _component_dynsmf_exports_equal(trusted_entry.exports, entry.exports))
+        manifest_index = manifest_index + 1
+    if manifest_matches != 1 or not manifest_exact:
+        return ComponentDynSmfRequestMatch(ok: false, reason: "trusted_admission_manifest_mismatch", request: nil)
+    ComponentDynSmfRequestMatch(ok: true, reason: "matched", request: found)
+
+fn _component_dynsmf_admitted_image(images: [ComponentDynSmfAdmittedImage], component_id: text) -> ComponentDynSmfAdmittedImage?:
+    var idx = 0
+    while idx < images.len():
+        if images[idx].component_id == component_id:
+            return images[idx]
+        idx = idx + 1
+    nil
+
+fn _component_dynsmf_loaded(session: DynSmfSession, component_id: text) -> bool:
+    var idx = 0
+    while idx < session.loaded.len():
+        if session.loaded[idx].id == component_id and session.loaded[idx].status == "loaded":
+            return true
+        idx = idx + 1
+    false
+
+fn _component_dynsmf_last_reason(session: DynSmfSession, component_id: text) -> text:
+    var idx = session.evidence.len()
+    while idx > 0:
+        idx = idx - 1
+        if session.evidence[idx].library_id == component_id:
+            return session.evidence[idx].reason
+    "no_dynsmf_evidence"
+
+fn _component_dynsmf_resolution(item: StartupResolvedComponent) -> ComponentResolution:
+    ComponentResolution(
+        component_id: item.component_id,
+        interface_name: item.interface_name,
+        implementation_id: item.implementation_id,
+        version: item.version,
+        impl_digest: item.impl_digest,
+        capability_bits: item.capability_bits,
+        mode: item.mode,
+        source_kind: item.source_kind,
+        locator: item.locator
+    )
+
+fn _component_dynsmf_graph_request(config: ComponentDynSmfConfig, descriptors: [ComponentDescriptorV1]) -> StartupComponentGraphRequest:
+    var req = startup_component_graph_request(config.target, config.profile)
+    var binding_idx = 0
+    while binding_idx < config.bindings.len():
+        val binding = config.bindings[binding_idx]
+        req.component_ids.push(binding.component_id)
+        req.interface_names.push(binding.interface_name)
+        req.required_capability_bits.push(binding.required_capability_bits)
+        binding_idx = binding_idx + 1
+    var descriptor_idx = 0
+    while descriptor_idx < descriptors.len():
+        val body = descriptors[descriptor_idx].body
+        if body.activation == "startup" and body.presence != "off":
+            req.roots.push(body.id)
+        descriptor_idx = descriptor_idx + 1
+    req
+
+# The shared descriptor parser intentionally supplies a library-level
+# `first_use` default. Production activation is stricter: every component
+# block must name its activation so an omitted key can never become policy.
+fn _component_dynsmf_explicit_activation_error(source: text) -> text:
+    val lines = source.split("\n")
+    var in_component = false
+    var component_id = ""
+    var have_activation = false
+    var idx = 0
+    while idx < lines.len():
+        val line = lines[idx].trim()
+        idx = idx + 1
+        if line == "" or line.starts_with("#"):
+            continue
+        if line == "component:":
+            if in_component and not have_activation:
+                return "missing_explicit_activation:" + component_id
+            in_component = true
+            component_id = ""
+            have_activation = false
+            continue
+        if in_component:
+            val sep = line.index_of(":")
+            if sep >= 0:
+                val key = line.substring(0, sep).trim()
+                val value = line.substring(sep + 1, line.len()).trim()
+                if key == "id":
+                    component_id = value
+                elif key == "activation":
+                    have_activation = value != ""
+    if in_component and not have_activation:
+        return "missing_explicit_activation:" + component_id
+    ""
+
+# Compatibility values entry has no OS-owned aspect admission registry. It is
+# retained for callers that only need static/deferred planning; any selected
+# dynamic startup component fails closed before the artifact is read.
+pub fn component_dynsmf_startup_from_values(
+    session: DynSmfSession,
+    manifest: [DynSmfManifestEntry],
+    config_source: text,
+    descriptor_source: text,
+    resolver_source: text
+) -> ComponentDynSmfStartupResult:
+    component_dynsmf_startup_from_admitted_values(session, manifest, config_source, descriptor_source, resolver_source, [])
+
+# Trusted values entry. Catalog and export contracts arrive only through the
+# explicit OS-owned request set. Each selected artifact is read once, hashed,
+# retained, and passed unchanged to dynsmf_session_load_admitted.
+pub fn component_dynsmf_startup_from_admitted_values(
+    session: DynSmfSession,
+    manifest: [DynSmfManifestEntry],
+    config_source: text,
+    descriptor_source: text,
+    resolver_source: text,
+    trusted_requests: [AspectPackLookupRequest]
+) -> ComponentDynSmfStartupResult:
+    _component_dynsmf_startup_from_trust_values(
+        session, manifest, config_source, descriptor_source,
+        resolver_source, trusted_requests, nil)
+
+pub fn component_dynsmf_startup_from_registry_values(
+    session: DynSmfSession,
+    manifest: [DynSmfManifestEntry],
+    config_source: text,
+    descriptor_source: text,
+    resolver_source: text,
+    registry: DynSmfAdmittedRegistry
+) -> ComponentDynSmfStartupResult:
+    _component_dynsmf_startup_from_trust_values(
+        session, manifest, config_source, descriptor_source,
+        resolver_source, [], Some(registry))
+
+fn _component_dynsmf_startup_from_trust_values(
+    session: DynSmfSession,
+    manifest: [DynSmfManifestEntry],
+    config_source: text,
+    descriptor_source: text,
+    resolver_source: text,
+    trusted_requests: [AspectPackLookupRequest],
+    registry: DynSmfAdmittedRegistry?
+) -> ComponentDynSmfStartupResult:
+    val config_parse = component_dynsmf_config_parse(config_source)
+    val no_diagnostics: [ComponentDynSmfDiagnostic] = []
+    if registry != nil and not registry!.ok:
+        return _component_dynsmf_failure(session, no_diagnostics, "trusted_registry_invalid", "*", registry!.reason)
+    if not config_parse.ok:
+        return _component_dynsmf_failure(session, no_diagnostics, "config_invalid", "*", config_parse.reason)
+    val activation_error = _component_dynsmf_explicit_activation_error(descriptor_source)
+    if activation_error != "":
+        return _component_dynsmf_failure(session, no_diagnostics, "descriptor_catalog_invalid", "*", activation_error)
+    val descriptor_parse = component_descriptor_parse_sdn(descriptor_source)
+    if not descriptor_parse.ok:
+        return _component_dynsmf_failure(session, no_diagnostics, "descriptor_catalog_invalid", "*", descriptor_parse.reason)
+    var descriptors: [ComponentDescriptorV1] = []
+    var descriptor_idx = 0
+    while descriptor_idx < descriptor_parse.descriptors.len():
+        descriptors.push(component_descriptor_v1(descriptor_parse.descriptors[descriptor_idx]))
+        descriptor_idx = descriptor_idx + 1
+    val resolver_parse = component_resolver_catalog_parse_sdn(resolver_source)
+    if not resolver_parse.ok:
+        return _component_dynsmf_failure(session, no_diagnostics, "resolver_catalog_invalid", "*", resolver_parse.reason)
+    val resolver_validation = component_resolver_catalog_validate(resolver_parse.catalog)
+    if not resolver_validation.ok:
+        return _component_dynsmf_failure(session, no_diagnostics, "resolver_catalog_invalid", "*", resolver_validation.errors[0])
+    val request = _component_dynsmf_graph_request(config_parse.config, descriptors)
+    val plan = resolve_startup_component_graph(request, descriptors, resolver_parse.catalog)
+    if not plan.ok:
+        return _component_dynsmf_failure(session, no_diagnostics, "component_graph_rejected", "*", plan.reason)
+    var diagnostics: [ComponentDynSmfDiagnostic] = []
+    var admitted_images: [ComponentDynSmfAdmittedImage] = []
+    var plan_idx = 0
+    # Pre-admit every selected dynamic startup component before loading any.
+    while plan_idx < plan.ordered.len():
+        val item = plan.ordered[plan_idx]
+        val item_descriptor_idx = _component_dynsmf_descriptor_index(descriptors, item.component_id)
+        if item_descriptor_idx < 0:
+            return _component_dynsmf_failure(session, diagnostics, "descriptor_missing_after_resolution", item.component_id, item.implementation_id)
+        val body = descriptors[item_descriptor_idx].body
+        if body.activation != "startup":
+            diagnostics.push(_component_dynsmf_diag(false, "activation_deferred", item.component_id, body.activation))
+        elif item.mode == "static":
+            diagnostics.push(_component_dynsmf_diag(false, "static_component_ready", item.component_id, item.implementation_id))
+        else:
+            val admitted = smf_component_admit(_component_dynsmf_resolution(item))
+            if not admitted.accepted:
+                return _component_dynsmf_failure(session, diagnostics, "artifact_admission_denied", item.component_id, admitted.reason)
+            val manifest_idx = _component_dynsmf_manifest_index(manifest, item.component_id)
+            if manifest_idx < 0:
+                return _component_dynsmf_failure(session, diagnostics, "manifest_identity_missing_or_ambiguous", item.component_id, admitted.artifact_path)
+            if manifest[manifest_idx].path != admitted.artifact_path:
+                return _component_dynsmf_failure(session, diagnostics, "manifest_artifact_path_mismatch", item.component_id, admitted.artifact_path)
+            var request_candidates = trusted_requests
+            var retained_registry_bytes: [u8] = []
+            if registry != nil:
+                val registry_artifact = dynsmf_admitted_registry_find(registry!, item.component_id)
+                if registry_artifact == nil:
+                    return _component_dynsmf_failure(session, diagnostics, "trusted_admission_missing", item.component_id, admitted.artifact_path)
+                request_candidates = [registry_artifact!.request]
+                retained_registry_bytes = registry_artifact!.artifact_bytes
+            val trusted = _component_dynsmf_trusted_request(request_candidates, manifest[manifest_idx])
+            if not trusted.ok:
+                return _component_dynsmf_failure(session, diagnostics, trusted.reason, item.component_id, admitted.artifact_path)
+            val trusted_request = trusted.request!
+            if trusted_request.artifact.content_hash != admitted.impl_digest:
+                return _component_dynsmf_failure(session, diagnostics, "trusted_admission_digest_mismatch", item.component_id, admitted.artifact_path)
+            var exact_bytes = retained_registry_bytes
+            if registry == nil:
+                if not file_exists(admitted.artifact_path):
+                    return _component_dynsmf_failure(session, diagnostics, "artifact_missing", item.component_id, admitted.artifact_path)
+                # Explicit-request compatibility callers still get one read.
+                # Production uses the registry branch and never reopens here.
+                exact_bytes = file_read_bytes(admitted.artifact_path)
+            val actual_digest = sha256_u8_hex(exact_bytes)
+            if actual_digest != admitted.impl_digest:
+                return _component_dynsmf_failure(session, diagnostics, "artifact_digest_mismatch", item.component_id, actual_digest)
+            admitted_images.push(ComponentDynSmfAdmittedImage(component_id: item.component_id, request: trusted_request, artifact_bytes: exact_bytes))
+            diagnostics.push(_component_dynsmf_diag(false, "smf_artifact_admitted", item.component_id, admitted.artifact_path))
+        plan_idx = plan_idx + 1
+    var out_session = session
+    plan_idx = 0
+    while plan_idx < plan.ordered.len():
+        val item = plan.ordered[plan_idx]
+        val item_descriptor_idx = _component_dynsmf_descriptor_index(descriptors, item.component_id)
+        if item_descriptor_idx >= 0 and descriptors[item_descriptor_idx].body.activation == "startup" and item.mode == "dynamic":
+            val image = _component_dynsmf_admitted_image(admitted_images, item.component_id)
+            if image == nil:
+                return _component_dynsmf_failure(out_session, diagnostics, "retained_admitted_image_missing", item.component_id, item.implementation_id)
+            out_session = dynsmf_session_load_admitted(out_session, item.component_id, image!.request, image!.artifact_bytes)
+            if not _component_dynsmf_loaded(out_session, item.component_id):
+                return _component_dynsmf_failure(out_session, diagnostics, "admitted_dynsmf_load_failed", item.component_id, _component_dynsmf_last_reason(out_session, item.component_id))
+            diagnostics.push(_component_dynsmf_diag(false, "admitted_dynsmf_loaded", item.component_id, item.implementation_id))
+        plan_idx = plan_idx + 1
+    ComponentDynSmfStartupResult(ok: true, session: out_session, diagnostics: diagnostics)
+
+# Host entry: exact reads only. Missing or malformed files are typed failures;
+# there is no directory fallback and no attempt to build missing artifacts.
+pub fn component_dynsmf_startup_from_config_path(session: DynSmfSession, manifest: [DynSmfManifestEntry], config_path: text) -> ComponentDynSmfStartupResult:
+    component_dynsmf_startup_from_admitted_config_path(session, manifest, config_path, [])
+
+pub fn component_dynsmf_startup_from_admitted_config_path(session: DynSmfSession, manifest: [DynSmfManifestEntry], config_path: text, trusted_requests: [AspectPackLookupRequest]) -> ComponentDynSmfStartupResult:
+    val no_diagnostics: [ComponentDynSmfDiagnostic] = []
+    if config_path == "" or not file_exists(config_path):
+        return _component_dynsmf_failure(session, no_diagnostics, "config_file_missing", "*", config_path)
+    val config_source = file_read_text(config_path)
+    val parsed = component_dynsmf_config_parse(config_source)
+    if not parsed.ok:
+        return _component_dynsmf_failure(session, no_diagnostics, "config_invalid", "*", parsed.reason)
+    if not file_exists(parsed.config.descriptor_path):
+        return _component_dynsmf_failure(session, no_diagnostics, "descriptor_file_missing", "*", parsed.config.descriptor_path)
+    if not file_exists(parsed.config.resolver_path):
+        return _component_dynsmf_failure(session, no_diagnostics, "resolver_file_missing", "*", parsed.config.resolver_path)
+    component_dynsmf_startup_from_admitted_values(session, manifest, config_source, file_read_text(parsed.config.descriptor_path), file_read_text(parsed.config.resolver_path), trusted_requests)
+
+pub fn component_dynsmf_startup_from_registry_config_path(session: DynSmfSession, manifest: [DynSmfManifestEntry], config_path: text, registry: DynSmfAdmittedRegistry) -> ComponentDynSmfStartupResult:
+    val no_diagnostics: [ComponentDynSmfDiagnostic] = []
+    if config_path == "" or not file_exists(config_path):
+        return _component_dynsmf_failure(session, no_diagnostics, "config_file_missing", "*", config_path)
+    val config_source = file_read_text(config_path)
+    val parsed = component_dynsmf_config_parse(config_source)
+    if not parsed.ok:
+        return _component_dynsmf_failure(session, no_diagnostics, "config_invalid", "*", parsed.reason)
+    if not file_exists(parsed.config.descriptor_path):
+        return _component_dynsmf_failure(session, no_diagnostics, "descriptor_file_missing", "*", parsed.config.descriptor_path)
+    if not file_exists(parsed.config.resolver_path):
+        return _component_dynsmf_failure(session, no_diagnostics, "resolver_file_missing", "*", parsed.config.resolver_path)
+    component_dynsmf_startup_from_registry_values(
+        session,
+        manifest,
+        config_source,
+        file_read_text(parsed.config.descriptor_path),
+        file_read_text(parsed.config.resolver_path),
+        registry
+    )
+
+pub fn component_dynsmf_result_render(result: ComponentDynSmfStartupResult) -> text:
+    var out = if result.ok: "ok" else: "err"
+    out = out + ":loaded=" + result.session.loaded.len().to_text()
+    var idx = 0
+    while idx < result.diagnostics.len():
+        val row = result.diagnostics[idx]
+        out = out + "|" + row.code + ":" + row.component_id + ":" + row.detail
+        idx = idx + 1
+    out
+
+export ComponentDynSmfBinding, ComponentDynSmfConfig, ComponentDynSmfConfigParse
+export ComponentDynSmfDiagnostic, ComponentDynSmfStartupResult

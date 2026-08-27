@@ -1,0 +1,16 @@
+#!/bin/sh
+# Static gate only: assemble the real ELF32 payload and prove its load/ABI shape.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+src="$root/examples/09_embedded/simple_os/arch/x86_32/user_fsexec_src/mounted_elf32.S"
+clang --target=i386-unknown-none-elf -c -ffreestanding -nostdlib -o "$tmp/payload.o" "$src"
+ld.lld -m elf_i386 -static --build-id=none -e _start -Ttext=0x00401000 -o "$tmp/payload.elf" "$tmp/payload.o"
+readelf -h "$tmp/payload.elf" | grep -Eq 'Class:[[:space:]]+ELF32'
+readelf -h "$tmp/payload.elf" | grep -Eq 'Machine:[[:space:]]+Intel 80386'
+readelf -W -l "$tmp/payload.elf" | grep -Eq 'LOAD .* R E '
+objdump -d "$tmp/payload.elf" | grep -Eq 'mov[[:space:]]+\$0x3c,%eax'
+objdump -d "$tmp/payload.elf" | grep -Eq 'mov[[:space:]]+\$0x25,%ebx'
+[ "$(objdump -d "$tmp/payload.elf" | grep -c 'int.*\$0x80')" -eq 2 ]
+printf '%s\n' 'PASS x86_32 real ELF32 payload/static syscall simulator'

@@ -14,14 +14,59 @@ use compiler.mir.hwir.riscv_scalar_core.{RiscvGen2ScalarDispatchPlan,
 fn scalar_alu_operation(entry_id: text) -> text:
     if entry_id == "rv.i.add" or entry_id == "rv.i.addi": return "add"
     if entry_id == "rv.i.sub": return "sub"
+    if entry_id == "rv.i.slt" or entry_id == "rv.i.slti": return "slt"
+    if entry_id == "rv.i.sltu" or entry_id == "rv.i.sltiu": return "ult"
+    if entry_id == "rv.i.sll" or entry_id == "rv32.i.slli" or
+        entry_id == "rv64.i.slli" or entry_id == "rv64.i.slliw" or
+        entry_id == "rv64.i.sllw": return "shl"
+    if entry_id == "rv.i.srl" or entry_id == "rv32.i.srli" or
+        entry_id == "rv64.i.srli" or entry_id == "rv64.i.srliw" or
+        entry_id == "rv64.i.srlw": return "shr"
+    if entry_id == "rv.i.sra" or entry_id == "rv32.i.srai" or
+        entry_id == "rv64.i.srai" or entry_id == "rv64.i.sraiw" or
+        entry_id == "rv64.i.sraw": return "sar"
     if entry_id == "rv.i.and" or entry_id == "rv.i.andi": return "and"
     if entry_id == "rv.i.or" or entry_id == "rv.i.ori": return "or"
     if entry_id == "rv.i.xor" or entry_id == "rv.i.xori": return "xor"
+    if entry_id == "rv.i.lui": return "passthrough"
+    if entry_id == "rv.i.auipc": return "add"
+    if entry_id == "rv64.i.addiw" or entry_id == "rv64.i.addw": return "add"
+    if entry_id == "rv64.i.subw": return "sub"
     ""
 
 fn scalar_alu_is_immediate(entry_id: text) -> bool:
     entry_id == "rv.i.addi" or entry_id == "rv.i.andi" or
-        entry_id == "rv.i.ori" or entry_id == "rv.i.xori"
+        entry_id == "rv.i.ori" or entry_id == "rv.i.xori" or
+        entry_id == "rv.i.slti" or entry_id == "rv.i.sltiu" or
+        entry_id == "rv32.i.slli" or entry_id == "rv32.i.srli" or
+        entry_id == "rv32.i.srai" or entry_id == "rv64.i.slli" or
+        entry_id == "rv64.i.srli" or entry_id == "rv64.i.srai" or
+        entry_id == "rv64.i.addiw" or entry_id == "rv64.i.slliw" or
+        entry_id == "rv64.i.srliw" or entry_id == "rv64.i.sraiw"
+
+fn scalar_alu_is_word(entry_id: text) -> bool:
+    entry_id == "rv64.i.addiw" or entry_id == "rv64.i.slliw" or
+        entry_id == "rv64.i.srliw" or entry_id == "rv64.i.sraiw" or
+        entry_id == "rv64.i.addw" or entry_id == "rv64.i.subw" or
+        entry_id == "rv64.i.sllw" or entry_id == "rv64.i.srlw" or
+        entry_id == "rv64.i.sraw"
+
+fn scalar_alu_is_shift(entry_id: text) -> bool:
+    val operation = scalar_alu_operation(entry_id)
+    operation == "shl" or operation == "shr" or operation == "sar"
+
+fn scalar_alu_is_register_shift(entry_id: text) -> bool:
+    scalar_alu_is_shift(entry_id) and not scalar_alu_is_immediate(entry_id)
+
+fn scalar_alu_u_immediate(instruction: u32, xlen: i32) -> i64:
+    val raw = (instruction & 0xFFFFF000) as i64
+    if (raw & 0x80000000) != 0:
+        raw | (-1 << 32)
+    else:
+        raw
+
+fn scalar_alu_shift_immediate(instruction: u32, mask: i64) -> i64:
+    ((instruction >> 20) as i64) & mask
 
 fn scalar_alu_immediate(instruction: u32) -> i64:
     val raw = ((instruction >> 20) & 4095) as i64
@@ -92,11 +137,19 @@ pub fn strict_riscv_scalar_alu_retire_projection_hwir(module_name: text, config:
     val dispatch: RiscvGen2ScalarDispatchPlan = riscv_gen2_scalar_dispatch(elaboration, instruction)?
     val operation = scalar_alu_operation(dispatch.entry.id)
     if operation == "" or dispatch.provider != "scalar-integer" or
-        dispatch.entry.execution_class != "integer" or dispatch.entry.memory_effect != "none" or
+        (dispatch.entry.execution_class != "integer" and dispatch.entry.execution_class != "integer-word") or
+        dispatch.entry.memory_effect != "none" or
         dispatch.entry.trap_behavior != "precise":
         return Err("HWIR-E-RISCV-SCALAR-EMIT-SCOPE: scalar ALU slice admits only precise base-I ADD/SUB/AND/OR/XOR register or immediate rows")
     val xlen = config.xlen
     val rd = ((instruction >> 7) & 31) as i64
+    val is_word = scalar_alu_is_word(dispatch.entry.id)
+    val operand_width = if is_word: 32 else xlen
+    val is_compare = operation == "slt" or operation == "ult"
+    val is_auipc = dispatch.entry.id == "rv.i.auipc"
+    val is_lui = dispatch.entry.id == "rv.i.lui"
+    val is_register_shift = scalar_alu_is_register_shift(dispatch.entry.id)
+    val shift_mask = if is_word: 31 else (if xlen == 32: 31 else 63)
     var constants = [HwConstant.bits("instruction", 32, instruction as i64),
         HwConstant.bits("xlen_value", 7, xlen as i64),
         HwConstant.bits("length4", 3, 4), HwConstant.bits("rd_index", 5, rd),
@@ -105,16 +158,55 @@ pub fn strict_riscv_scalar_alu_retire_projection_hwir(module_name: text, config:
         HwConstant.bits("zero5", 5, 0), HwConstant.bits("zero7", 7, 0),
         HwConstant.bits("zero32", 32, 0), HwConstant.bits("zero64", 64, 0),
         HwConstant.bits("zero_xlen", xlen, 0)]
-    val rhs = if scalar_alu_is_immediate(dispatch.entry.id): "immediate" else: "rs2_value"
-    if scalar_alu_is_immediate(dispatch.entry.id):
-        constants.push(HwConstant.bits("immediate", xlen, scalar_alu_immediate(instruction)))
+    var signals = [HwSignal.comb("alu_result", "Bits", xlen),
+        HwSignal.comb("pc_after_value", "Bits", xlen)]
     var operations = scalar_alu_default_drivers(xlen, rd != 0)
-    operations.push(HwCombOp.binary(operation, "alu_result", "rs1_value", rhs, xlen))
+    var lhs = if is_auipc: "in_pc" else: "rs1_value"
+    var rhs = if scalar_alu_is_immediate(dispatch.entry.id) or is_auipc: "immediate" else: "rs2_value"
+    if is_word:
+        signals.push(HwSignal.comb("rs1_word", "Bits", 32))
+        operations.push(HwCombOp.unary("trunc", "rs1_word", "rs1_value", 32))
+        lhs = "rs1_word"
+        if not scalar_alu_is_immediate(dispatch.entry.id):
+            signals.push(HwSignal.comb("rs2_word", "Bits", 32))
+            operations.push(HwCombOp.unary("trunc", "rs2_word", "rs2_value", 32))
+            rhs = "rs2_word"
+    if is_lui or is_auipc:
+        constants.push(HwConstant.bits("immediate", xlen, scalar_alu_u_immediate(instruction, xlen)))
+    elif scalar_alu_is_immediate(dispatch.entry.id):
+        val immediate = if scalar_alu_is_shift(dispatch.entry.id):
+            scalar_alu_shift_immediate(instruction, shift_mask)
+        else: scalar_alu_immediate(instruction)
+        constants.push(HwConstant.bits("immediate", operand_width, immediate))
+    if is_register_shift:
+        val mask_name = if is_word: "word_shift_mask" else: "shift_mask"
+        val shift_name = if is_word: "word_shift_amount" else: "shift_amount"
+        constants.push(HwConstant.bits(mask_name, operand_width, shift_mask))
+        signals.push(HwSignal.comb(shift_name, "Bits", operand_width))
+        operations.push(HwCombOp.binary("and", shift_name, rhs, mask_name, operand_width))
+        rhs = shift_name
+    elif scalar_alu_is_shift(dispatch.entry.id):
+        val shift_name = if is_word: "word_shift_amount" else: "shift_amount"
+        signals.push(HwSignal.comb(shift_name, "Bits", operand_width))
+        operations.push(HwCombOp.unary("passthrough", shift_name, "immediate", operand_width))
+        rhs = shift_name
+    if is_word:
+        signals.push(HwSignal.comb("word_result", "Bits", 32))
+        operations.push(HwCombOp.binary(operation, "word_result", lhs, rhs, 32))
+        operations.push(HwCombOp.unary("sext", "alu_result", "word_result", xlen))
+    elif is_lui:
+        operations.push(HwCombOp.unary("passthrough", "alu_result", "immediate", xlen))
+    elif is_compare:
+        signals.push(HwSignal.comb("compare_result", "Bits", 1))
+        operations.push(HwCombOp.binary(operation, "compare_result", lhs, rhs, xlen))
+        operations.push(HwCombOp.unary("zext", "alu_result", "compare_result", xlen))
+    else:
+        operations.push(HwCombOp.binary(operation, "alu_result", lhs, rhs, xlen))
     operations.push(HwCombOp.binary("add", "pc_after_value", "in_pc", "four", xlen))
     val selects = scalar_alu_payload_selects(xlen, rd != 0)
     val ports = scalar_alu_ports(xlen)
     val summary = HwModule(name: module_name, profile: config.profile,
-        port_count: ports.len(), signal_count: 2, register_count: 0, memory_count: 0,
+        port_count: ports.len(), signal_count: signals.len(), register_count: 0, memory_count: 0,
         comb_op_count: operations.len() + selects.len(), clock_domain_count: 1, fallback_function: "",
         cost: HwCostModel.empty())
     val module = HwModuleDef(summary: summary, config: config,
@@ -125,8 +217,7 @@ pub fn strict_riscv_scalar_alu_retire_projection_hwir(module_name: text, config:
                 source_name: "riscv.scalar.execute." + operation),
             HwOrigin(node_id: HwNodeId.child(module_name, "retire_projection"),
                 source_name: "riscv.scalar.alu_retire_projection.combinational")],
-        ports: ports, signals: [HwSignal.comb("alu_result", "Bits", xlen),
-            HwSignal.comb("pc_after_value", "Bits", xlen)], constants: constants,
+        ports: ports, signals: signals, constants: constants,
         comb_ops: operations, compare_ops: [], select_ops: selects,
         clock_domains: [HwClockDomain.default_domain()])
     val diagnostic = module.shape_diagnostic()

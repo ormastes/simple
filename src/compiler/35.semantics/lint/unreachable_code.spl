@@ -16,17 +16,18 @@
 
 use compiler.frontend.core.ast_expr.{
     EXPR_RETURN, EXPR_BREAK, EXPR_CONTINUE,
+    EXPR_IF_CHAIN, EXPR_BLOCK,
     EXPR_PASS_TODO, EXPR_PASS_DO_NOTHING, EXPR_PASS_DN,
-    expr_get_tag, expr_get_left
+    expr_tag, expr_left
 }
 use compiler.frontend.core.ast_stmt.{
     STMT_EXPR, STMT_RETURN, STMT_BREAK, STMT_CONTINUE,
     STMT_IF, STMT_FOR, STMT_WHILE, STMT_MATCH, STMT_BLOCK,
-    stmt_get_tag, stmt_get_expr, stmt_get_body
+    stmt_tag, stmt_expr, stmt_body
 }
 use compiler.frontend.core.ast.{
     DECL_FN, DECL_EXTERN_FN,
-    decl_get_tag, decl_get_name, decl_get_body
+    decl_tag, decl_name, decl_body_stmts
 }
 
 # ============================================================================
@@ -57,14 +58,14 @@ fn check_unreachable_code(decl_indices: [i64]) -> [UnreachableCodeWarning]:
     var warnings: [UnreachableCodeWarning] = []
 
     for idx in decl_indices:
-        val tag = decl_get_tag(idx)
+        val tag = decl_tag[idx]
 
         # Only check regular functions
         if tag != DECL_FN:
             continue
 
-        val fn_name = decl_get_name(idx)
-        val body = decl_get_body(idx)
+        val fn_name = decl_name[idx]
+        val body = decl_body_stmts[idx]
 
         # Skip empty bodies
         if body.len() == 0:
@@ -132,35 +133,89 @@ fn check_nested_reachability(s: i64, fn_name: text) -> [UnreachableCodeWarning]:
     if s < 0:
         return warnings
 
-    val tag = stmt_get_tag(s)
+    val tag = stmt_tag[s]
+
+    if tag == STMT_IF_CHAIN:
+        val chain_id = stmt_get_type(s)
+        var arm_id = flat_if_chain_first_arm_get(chain_id)
+        var remaining = flat_if_chain_arm_count_get(chain_id)
+        while arm_id >= 0 and remaining > 0:
+            if flat_if_arm_kind_get(arm_id) == ARM_CONDITION:
+                val head_ws = check_expr_chain_reachability(flat_if_arm_head_get(arm_id), fn_name)
+                for w in head_ws: warnings.push(w)
+            val init_ws = check_expr_chain_reachability(flat_if_arm_init_get(arm_id), fn_name)
+            for w in init_ws: warnings.push(w)
+            var arm_body: [i64] = []
+            var bi = 0
+            while bi < flat_if_arm_body_count_get(arm_id):
+                arm_body.push(flat_if_arm_body_at(arm_id, bi))
+                bi = bi + 1
+            val ws = check_stmts_reachability(arm_body, fn_name)
+            for w in ws: warnings.push(w)
+            arm_id = flat_if_arm_next_get(arm_id)
+            remaining = remaining - 1
+        var else_body: [i64] = []
+        var ei = 0
+        while ei < flat_if_chain_else_stmt_count_get(chain_id):
+            else_body.push(flat_if_chain_else_stmt_at(chain_id, ei))
+            ei = ei + 1
+        val else_ws = check_stmts_reachability(else_body, fn_name)
+        for w in else_ws: warnings.push(w)
+        return warnings
 
     # Recurse into block bodies
     if tag == STMT_BLOCK:
-        val ws = check_stmts_reachability(stmt_get_body(s), fn_name)
+        val ws = check_stmts_reachability(stmt_body[s], fn_name)
         for w in ws:
             warnings.push(w)
 
     # Recurse into if-then body
     elif tag == STMT_IF:
-        val ws = check_stmts_reachability(stmt_get_body(s), fn_name)
+        val ws = check_stmts_reachability(stmt_body[s], fn_name)
         for w in ws:
             warnings.push(w)
 
     # Recurse into for/while loop bodies
     elif tag == STMT_FOR or tag == STMT_WHILE:
-        val ws = check_stmts_reachability(stmt_get_body(s), fn_name)
+        val ws = check_stmts_reachability(stmt_body[s], fn_name)
         for w in ws:
             warnings.push(w)
 
     # Recurse into match arm bodies (stored as stmt_body)
     elif tag == STMT_MATCH:
-        val arms = stmt_get_body(s)
+        val arms = stmt_body[s]
         for arm_idx in arms:
             if arm_idx >= 0:
                 # Match arms use the arm arena, recurse into arm bodies
                 # arm bodies are stored separately in arm_body pool
                 val ignored_match_arm = arm_idx
 
+    val expr_ws = check_expr_chain_reachability(stmt_get_expr(s), fn_name)
+    for w in expr_ws: warnings.push(w)
+
+    warnings
+
+fn check_expr_chain_reachability(e: i64, fn_name: text) -> [UnreachableCodeWarning]:
+    var warnings: [UnreachableCodeWarning] = []
+    if e < 0: return warnings
+    val tag = expr_get_tag(e)
+    if tag == EXPR_BLOCK:
+        return check_stmts_reachability(expr_get_stmts(e), fn_name)
+    if tag == EXPR_IF_CHAIN:
+        val chain_id = expr_get_extra(e)
+        var arm_id = flat_if_chain_first_arm_get(chain_id)
+        var remaining = flat_if_chain_arm_count_get(chain_id)
+        while arm_id >= 0 and remaining > 0:
+            if flat_if_arm_kind_get(arm_id) == ARM_CONDITION:
+                val head_ws = check_expr_chain_reachability(flat_if_arm_head_get(arm_id), fn_name)
+                for w in head_ws: warnings.push(w)
+            for child in [flat_if_arm_init_get(arm_id), flat_if_arm_then_expr_get(arm_id)]:
+                val ws = check_expr_chain_reachability(child, fn_name)
+                for w in ws: warnings.push(w)
+            arm_id = flat_if_arm_next_get(arm_id)
+            remaining = remaining - 1
+        val else_ws = check_expr_chain_reachability(flat_if_chain_else_expr_get(chain_id), fn_name)
+        for w in else_ws: warnings.push(w)
     warnings
 
 # ============================================================================
@@ -175,7 +230,7 @@ fn classify_terminal(s: i64) -> text:
     if s < 0:
         return ""
 
-    val tag = stmt_get_tag(s)
+    val tag = stmt_tag[s]
 
     # Explicit return statement
     if tag == STMT_RETURN:
@@ -191,9 +246,9 @@ fn classify_terminal(s: i64) -> text:
 
     # Expression-level return/break/continue/pass_todo
     if tag == STMT_EXPR:
-        val e = stmt_get_expr(s)
+        val e = stmt_expr[s]
         if e >= 0:
-            val etag = expr_get_tag(e)
+            val etag = expr_tag[e]
 
             if etag == EXPR_RETURN:
                 return "return"

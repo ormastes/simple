@@ -1,0 +1,43 @@
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_write}
+use app.mcpgdb.state.{reset_state, next_session_id, put_session, set_current_session, save_persisted_state}
+use app.mcpgdb.debug_backend_common.{make_session, create_debugger_process, run_session_command, stop_session_process, choose_workspace_root}
+use app.cli_debug.probe_executor_v1.{execute_cli_debug_probe_v1}
+
+val PROFILE = "/tmp/cli_debug_probe_live_context.sdn"
+
+describe "CLI probe lifecycle over a real persisted mcpgdb adapter":
+    it "applies, lists, and removes the service-issued probe on the live backend":
+        file_write(PROFILE + ".binding-v1", "")
+        reset_state()
+        val local_id = next_session_id()
+        val initial = make_session(local_id, "gdb", choose_workspace_root(""))
+        val created = create_debugger_process(initial)
+        expect(created.1).to_equal("")
+        val session = created.0
+        put_session(session)
+        set_current_session(local_id)
+        save_persisted_state()
+        val loaded = run_session_command(session, "file /bin/true", false)
+        expect(loaded.contains("\"status\":\"error\"")).to_equal(false)
+        file_write(PROFILE,
+            "debug_probe:\n  schema: simple.debug-probe-profile/v1\n  session_id: " + local_id +
+            "\n  build_id: sha256:bin-true\n  kind: stop\n  source_anchor: _start" +
+            "\n  perturbation: stopping\n  expires_at_ns: -1\n")
+
+        val applied = execute_cli_debug_probe_v1("apply", PROFILE)
+        var issued_id = ""
+        match applied:
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(result):
+                issued_id = result.probe_id
+                expect(issued_id.starts_with("probe-")).to_equal(true)
+
+        match execute_cli_debug_probe_v1("list", PROFILE):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(result): expect(result.probe_id).to_equal(issued_id)
+
+        match execute_cli_debug_probe_v1("remove", PROFILE):
+            case Err(reason): expect(reason).to_equal("")
+            case Ok(result): expect(result.probe_id).to_equal(issued_id)
+        stop_session_process(session)

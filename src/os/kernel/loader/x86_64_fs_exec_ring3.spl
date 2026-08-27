@@ -1,9 +1,14 @@
 # x86_64 filesystem-exec ring-3 control-transfer handoff.
 #
-# This module retains a private low-level mechanism for an eventual
-# scheduler-owned handoff. It exports no raw header/blob/image entrypoint.
-# Production execution is admitted only through the loader registry token and
-# Scheduler.adopt_authenticated_executable_pid_v1; raw memory is never authority.
+# The GENERAL spawn (x86_64_fs_exec_spawn_as -> fs_exec_prepare_spawn_from_bytes
+# -> build_user_process_image_unchecked) builds a UserProcessImage but never maps
+# its segments into a live address space and never transfers control to ring 3 —
+# only the one-shot smoke kernel did that, for a hardcoded blob. This module is
+# the missing handoff: it maps a general-built UserProcessImage into a fresh user
+# address space and iretq's to CPL3, reusing the ring-3 primitives that are
+# actually present and proven in this checkout (create_user_address_space +
+# vmm_clone_kernel_low_identity + vmm_map_page_in + vmm_copy_bytes_to_phys +
+# arch_x86_64_enter_user_task — the same set ring3_smoke_entry.spl uses).
 #
 # Freestanding discipline (native-build does NOT run module-level `val`
 # initializers — see ring3_smoke_entry.spl and the module-val note below):
@@ -23,37 +28,34 @@
 # general path is usable freestanding is tracked as a separate blocker.
 
 use os.kernel.memory.vmm_address_space.{
-    create_user_address_space, destroy_user_address_space,
-    vmm_map_user_low_page,
+    create_user_address_space, vmm_map_user_low_page,
     vmm_clone_kernel_low_private, vmm_zero_phys_range
 }
-use os.kernel.memory.pmm.{pmm_free_page_raw}
 use os.kernel.types.memory_types.{VmFlags, VirtAddr, PhysAddr}
-use os.kernel.types.task_types.{TaskContext, AddressSpace}
-use os.kernel.arch_adapt.x86_64_user_entry.{x86_64_enter_user_task}
+use os.kernel.types.task_types.{
+    TaskContext, AddressSpace, UserProcessImage,
+    user_process_image_entry, user_process_image_segment_count,
+    user_process_image_file_bytes, user_process_image_initial_sp,
+    user_process_image_stack_top, user_process_image_initial_stack_bytes
+}
+use os.kernel.arch.hal.{hal_context_enter_user_task}
 use os.kernel.boot.mmio.{mmio_read8, mmio_read16, mmio_read32, mmio_read64, mmio_write8}
 
-@unsafe(reason: "foreign serial output provider is not artifact-verified", capabilities: [ffi])
 extern fn serial_println(msg: text)
-@unsafe(reason: "allocates an untyped raw physical page", capabilities: [ffi, raw_ptr])
 extern fn pmm_alloc_page_raw() -> u64
-@unsafe(reason: "streams file bytes into caller-owned raw physical memory", capabilities: [ffi, raw_ptr])
 extern fn simpleos_fat32_stream_read_at(file_off: u64, dst: u64, len: u64) -> i64
-@unsafe(reason: "foreign text conversion ownership is not artifact-verified", capabilities: [ffi])
 extern fn rt_text_to_bytes(s: text) -> [u8]
 # C-side text->memory copy (baremetal_stubs.c): the .spl [u8]-element channel
 # baremetal_stubs.c): the .spl [u8]-element channel yields ZEROS under
 # freestanding native-build, and mmio_read8 readbacks of kernel .bss are
 # untrustworthy (address-dependent rt_mmio_read_u8 zero bug), so string bytes
 # are written AND verified by plain C loads.
-@unsafe(reason: "copies text into caller-owned raw physical memory", capabilities: [ffi, raw_ptr])
 extern fn rt_text_copy_to_phys(s: text, phys: u64) -> i64
 # Registers a pre-mapped anonymous RW heap region with the boot user-exec syscall
 # dispatcher so a ring-3 libc program's mmap(10)/brk(15) bump-allocate from it,
 # and routes write(60)/exit(0) through the freestanding user-exec path. Required
 # by real programs (clang); the trivial FDR test payload's syscall-60/exit go
 # through the same path.
-@unsafe(reason: "publishes a raw user virtual-address range to process-global syscall state", capabilities: [ffi, raw_ptr])
 extern fn rt_user_heap_init(base: u64, size: u64)
 # Identical, EXCEPT the ring-3 program's exit(2) resumes the suspended kernel
 # frame instead of outb(0xF4)/hlt. This is what every _x86_64_fs_exec_enter_ring3
@@ -62,9 +64,8 @@ extern fn rt_user_heap_init(base: u64, size: u64)
 extern fn rt_user_heap_init_returning(base: u64, size: u64)
 # Multi-command SSH: rt_x86_enter_user_first saves a kernel savepoint before
 # iretq'ing to CPL3; on the ring-3 program's exit(2) syscall the kernel longjmps
-# back here (so x86_64_enter_user_task RETURNS) and stashes the exit status.
+# back here (so arch_x86_64_enter_user_task RETURNS) and stashes the exit status.
 # rax is clobbered by the intervening serial_println calls, so read it explicitly.
-@unsafe(reason: "reads process-global ring-3 handoff state", capabilities: [ffi, raw_ptr])
 extern fn rt_x86_ring3_exit_rc() -> i64
 
 # Little-endian scalar reads straight off the identity-mapped RAW file buffer.
@@ -72,16 +73,11 @@ extern fn rt_x86_ring3_exit_rc() -> i64
 # RuntimeValues stride-1 under freestanding native-build → phoff=16 garbage; the
 # raw buffer holds the unboxed on-disk bytes, so mmio reads decode correctly
 # (mirrors fs_elf_exec_smoke_entry.spl's _rd*).
-@unsafe(reason: "reads an untyped raw physical address", capabilities: [ffi, raw_ptr])
 fn _rd8(base: u64, off: u64)  -> u64: (mmio_read8(base + off)) as u64
-@unsafe(reason: "reads an untyped raw physical address", capabilities: [ffi, raw_ptr])
 fn _rd16(base: u64, off: u64) -> u64: (mmio_read16(base + off)) as u64
-@unsafe(reason: "reads an untyped raw physical address", capabilities: [ffi, raw_ptr])
 fn _rd32(base: u64, off: u64) -> u64: (mmio_read32(base + off)) as u64
-@unsafe(reason: "reads an untyped raw physical address", capabilities: [ffi, raw_ptr])
 fn _rd64(base: u64, off: u64) -> u64: mmio_read64(base + off)
 
-@unsafe(reason: "writes an untyped raw physical address", capabilities: [ffi, raw_ptr])
 fn _wr64(addr: u64, value: u64):
     var i: u64 = 0
     while i < 8:
@@ -89,11 +85,8 @@ fn _wr64(addr: u64, value: u64):
         i = i + 1
 
 fn _text_z_size(value: text) -> u64:
-    val bytes = unsafe(capabilities: [ffi]):
-        rt_text_to_bytes(value)
-    (bytes.len() as u64) + 1
+    (rt_text_to_bytes(value).len() as u64) + 1
 
-@unsafe(reason: "copies text into caller-owned raw physical memory", capabilities: [ffi, raw_ptr])
 fn _write_text_z(phys: u64, offset: u64, value: text) -> u64:
     # Bytes copied entirely on the C side (plain C loads/stores — the .spl
     # [u8]-element channel AND freestanding mmio_read8 of kernel .bss both
@@ -102,7 +95,6 @@ fn _write_text_z(phys: u64, offset: u64, value: text) -> u64:
     rt_text_copy_to_phys(value, phys + offset)
     _text_z_size(value)
 
-@unsafe(reason: "constructs a user stack frame in caller-owned raw physical memory", capabilities: [ffi, raw_ptr])
 fn _build_sysv_stack_frame(stack_phys: u64, stack_top: u64, binary_path: text, argv: [text], envp: [text]) -> u64:
     """Build a bounded one-page argc/argv/envp/auxv frame; return zero on overflow."""
     val PAGE: u64 = 4096
@@ -193,129 +185,6 @@ fn _build_sysv_stack_frame(stack_phys: u64, stack_top: u64, binary_path: text, a
     _wr64(stack_phys + frame_off + ((slot + 5) * 8), 0)
     user_rsp
 
-# Validate the raw ELF layout before allocating or mapping any process pages.
-# This direct freestanding path cannot use elf_loader's aggregate Result ABI,
-# so it must reproduce the security-relevant admission invariants locally.
-# In particular, never let a file manufacture W+X/overlapping mappings, point
-# RIP into BSS, collide with the fixed stack/heap, or turn the mapper's dense
-# lo..hi walk into an unbounded sparse-image allocation.
-@unsafe(reason: "validates an ELF image through an untyped raw physical address", capabilities: [ffi, raw_ptr])
-fn _admit_raw_elf64(blob: u64, hdr_len: u64, file_len: u64, map_heap: bool) -> i64:
-    val ELF64_EHDR_SIZE: u64 = 64
-    val ELF64_PHDR_SIZE: u64 = 56
-    val ET_EXEC: u64 = 2
-    val EM_X86_64: u64 = 62
-    val EV_CURRENT: u64 = 1
-    val PT_LOAD: u64 = 1
-    val PF_X: u64 = 1
-    val PF_W: u64 = 2
-    val PAGE: u64 = 4096
-    val USER_MIN: u64 = 0x1000
-    val USER_LIMIT: u64 = 0x0000800000000000
-    val STACK_BOTTOM: u64 = 0x8000000000
-    val STACK_TOP: u64 = 0x8000200000
-    val HEAP_BOTTOM: u64 = 0x9000000000
-    val HEAP_TOP: u64 = 0x9020000000
-    val MAX_IMAGE_SPAN: u64 = 0x40000000
-    val MAX_LOAD_SEGMENTS: u64 = 64
-    val U64_MAX: u64 = 0xFFFFFFFFFFFFFFFF
-
-    if hdr_len < ELF64_EHDR_SIZE or file_len < ELF64_EHDR_SIZE:
-        return 0
-    if (_rd32(blob, 0) != 0x464C457F or _rd8(blob, 4) != 2 or
-        _rd8(blob, 5) != 1 or _rd8(blob, 6) != EV_CURRENT):
-        return 0
-    if (_rd16(blob, 16) != ET_EXEC or _rd16(blob, 18) != EM_X86_64 or
-        _rd32(blob, 20) != EV_CURRENT or _rd16(blob, 52) != ELF64_EHDR_SIZE):
-        return 0
-
-    val phoff = _rd64(blob, 32)
-    val phentsize = _rd16(blob, 54)
-    val phnum = _rd16(blob, 56)
-    if phentsize != ELF64_PHDR_SIZE or phnum == 0:
-        return 0
-    if phoff < ELF64_EHDR_SIZE or phoff > hdr_len or phnum > (hdr_len - phoff) / phentsize:
-        return 0
-
-    val entry = _rd64(blob, 24)
-    var entry_is_file_backed_executable = false
-    var load_count: u64 = 0
-    var image_lo: u64 = U64_MAX
-    var image_hi: u64 = 0
-    var i: u64 = 0
-    while i < phnum:
-        val ph = phoff + i * phentsize
-        if _rd32(blob, ph) == PT_LOAD:
-            load_count = load_count + 1
-            if load_count > MAX_LOAD_SEGMENTS:
-                return 0
-            val flags = _rd32(blob, ph + 4)
-            val file_offset = _rd64(blob, ph + 8)
-            val virt_addr = _rd64(blob, ph + 16)
-            val file_size = _rd64(blob, ph + 32)
-            val mem_size = _rd64(blob, ph + 40)
-            val align = _rd64(blob, ph + 48)
-            if ((flags & 0xFFFFFFFFFFFFFFF8) != 0 or
-                (flags & (PF_W | PF_X)) == (PF_W | PF_X)):
-                return 0
-            if file_size > mem_size or file_offset > file_len or file_size > file_len - file_offset:
-                return 0
-            if mem_size == 0:
-                i = i + 1
-                continue
-            if virt_addr < USER_MIN or virt_addr >= USER_LIMIT or mem_size > USER_LIMIT - virt_addr:
-                return 0
-            if align > 1 and ((align & (align - 1)) != 0 or
-                file_offset % align != virt_addr % align):
-                return 0
-            val memory_end = virt_addr + mem_size
-            if ((virt_addr < STACK_TOP and STACK_BOTTOM < memory_end) or
-                (map_heap and virt_addr < HEAP_TOP and HEAP_BOTTOM < memory_end)):
-                return 0
-            if virt_addr < image_lo: image_lo = virt_addr
-            if memory_end > image_hi: image_hi = memory_end
-            if ((flags & PF_X) != 0 and file_size > 0 and
-                entry >= virt_addr and entry - virt_addr < file_size):
-                entry_is_file_backed_executable = true
-
-            var earlier: u64 = 0
-            while earlier < i:
-                val earlier_ph = phoff + earlier * phentsize
-                if _rd32(blob, earlier_ph) == PT_LOAD:
-                    val earlier_flags = _rd32(blob, earlier_ph + 4)
-                    val earlier_va = _rd64(blob, earlier_ph + 16)
-                    val earlier_size = _rd64(blob, earlier_ph + 40)
-                    if earlier_size > 0:
-                        if earlier_va >= USER_LIMIT or earlier_size > USER_LIMIT - earlier_va:
-                            return 0
-                        val earlier_end = earlier_va + earlier_size
-                        if virt_addr < earlier_end and earlier_va < memory_end:
-                            return 0
-                        # The mapper unions permissions for segments sharing a
-                        # physical page.  Even disjoint byte ranges must not
-                        # combine an executable segment with a writable one,
-                        # or the resulting PTE would silently become W+X.
-                        val page_start = virt_addr - virt_addr % PAGE
-                        val page_end = (memory_end + PAGE - 1) / PAGE * PAGE
-                        val earlier_page_start = earlier_va - earlier_va % PAGE
-                        val earlier_page_end = (
-                            earlier_end + PAGE - 1) / PAGE * PAGE
-                        if (page_start < earlier_page_end and
-                            earlier_page_start < page_end and
-                            (((flags | earlier_flags) & (PF_W | PF_X)) ==
-                                (PF_W | PF_X))):
-                            return 0
-                earlier = earlier + 1
-        i = i + 1
-    if load_count == 0 or not entry_is_file_backed_executable:
-        return 0
-    if image_hi < image_lo or image_hi - image_lo > MAX_IMAGE_SPAN:
-        return 0
-    # The dense page walker rounds the high end up; reject wrap before it does.
-    if image_hi > U64_MAX - (PAGE - 1):
-        return 0
-    1
-
 # Map every PT_LOAD of the ELF described by the header+phdr table resident at
 # `blob` into `space` at its p_vaddr, page by page (one frame per page, so
 # segments sharing a page are mapped once with the UNION of their perms). Each
@@ -332,7 +201,6 @@ fn _admit_raw_elf64(blob: u64, hdr_len: u64, file_len: u64, map_heap: bool) -> i
 # size (per-segment file-range OOB check; the streamer also EOF-clamps).
 # Per-page perms: user_rw if any covering PT_LOAD is writable, else user_rx.
 # Returns 1 on success, 0 on failure.
-@unsafe(reason: "allocates, maps, and fills user pages from untyped raw physical memory", capabilities: [ffi, raw_ptr])
 fn _map_pt_loads(space: AddressSpace, blob: u64, hdr_len: u64, file_len: u64, use_stream: bool) -> i64:
     val PAGE: u64 = 4096
     val PT_LOAD: u64 = 1
@@ -341,14 +209,16 @@ fn _map_pt_loads(space: AddressSpace, blob: u64, hdr_len: u64, file_len: u64, us
     val phoff = _rd64(blob, 32)
     val phentsize = _rd16(blob, 54)
     val phnum = _rd16(blob, 56)
-    serial_println("[spawn] phoff={phoff} phentsize={phentsize} phnum={phnum} use_stream={use_stream}")
-    if phnum == 0 or phentsize < 56:
+    serial_println("[spawn] phoff={phoff} phentsize={phentsize} phnum={phnum}")
+    if phnum == 0:
         serial_println("[spawn] FAIL no program headers")
         return 0
-    # Bound the phdr table against the RESIDENT header bytes, and each segment's
-    # file range against the true file size — the raw buffer carries no length.
-    if phoff < 64 or phoff > hdr_len or phnum > ((hdr_len - phoff) / phentsize):
-        serial_println("[spawn] FAIL phdr table OOB phoff={phoff} phnum={phnum} phentsize={phentsize} hdr_len={hdr_len}")
+    # Bound the phdr table + each segment's file range against the known file size,
+    # so a corrupt/oversized phdr can't drive mmio reads past the raw buffer into
+    # adjacent kernel memory (info-leak / fault) — the raw buffer carries no length.
+    val ph_table_end = phoff + (phnum * phentsize)
+    if phoff < 64 or ph_table_end > file_len:
+        serial_println("[spawn] FAIL phdr table OOB phoff={phoff} end={ph_table_end} file_len={file_len}")
         return 0
 
     var lo: u64 = 0xFFFFFFFFFFFFFFFF
@@ -359,19 +229,11 @@ fn _map_pt_loads(space: AddressSpace, blob: u64, hdr_len: u64, file_len: u64, us
         if _rd32(blob, ph) == PT_LOAD:
             val foff = _rd64(blob, ph + 8)
             val fsz = _rd64(blob, ph + 32)
-            if foff > file_len or fsz > file_len - foff:
+            if foff + fsz > file_len:
                 serial_println("[spawn] FAIL segment file range OOB foff={foff} fsz={fsz} file_len={file_len}")
                 return 0
             val sv = _rd64(blob, ph + 16)
-            val memsz = _rd64(blob, ph + 40)
-            val U64_MAX: u64 = 0xFFFFFFFFFFFFFFFF
-            if fsz > memsz or memsz > U64_MAX - sv or fsz > U64_MAX - sv:
-                serial_println("[spawn] FAIL segment address overflow sv={sv} fsz={fsz} memsz={memsz}")
-                return 0
-            val se = sv + memsz
-            if se > U64_MAX - (PAGE - 1):
-                serial_println("[spawn] FAIL segment page range overflow sv={sv} se={se}")
-                return 0
+            val se = sv + _rd64(blob, ph + 40)
             if sv < lo:
                 lo = sv
             if se > hi:
@@ -406,11 +268,8 @@ fn _map_pt_loads(space: AddressSpace, blob: u64, hdr_len: u64, file_len: u64, us
             j = j + 1
 
         val flags = if writable: VmFlags.user_rw() else: VmFlags.user_rx()
-        if not vmm_map_user_low_page(space, VirtAddr(addr: va), PhysAddr(addr: phys), flags):
+        if not vmm_map_page_in(space, VirtAddr(addr: va), PhysAddr(addr: phys), flags):
             serial_println("[spawn] FAIL map page va=0x{va}")
-            # The VMM destructor can only discover successfully installed
-            # leaves. This frame is still solely owned by the local mapper.
-            pmm_free_page_raw(phys)
             return 0
 
         var k: u64 = 0
@@ -420,27 +279,19 @@ fn _map_pt_loads(space: AddressSpace, blob: u64, hdr_len: u64, file_len: u64, us
                 val sv = _rd64(blob, ph + 16)
                 val foff = _rd64(blob, ph + 8)
                 val fsz = _rd64(blob, ph + 32)
-                var copy_start = va
-                if copy_start < sv:
-                    copy_start = sv
-                var copy_end = va + PAGE
+                var cs = va
+                if cs < sv:
+                    cs = sv
+                var ce = va + PAGE
                 val sfe = sv + fsz
-                if copy_end > sfe:
-                    copy_end = sfe
-                if copy_start < copy_end:
-                    val clen = copy_end - copy_start
-                    val file_pos = foff + (copy_start - sv)
-                    val dst = phys + (copy_start - va)
-                    if use_stream:
-                        val read_len = simpleos_fat32_stream_read_at(file_pos, dst, clen)
-                        if read_len < 0 or (read_len as u64) != clen:
-                            serial_println("[spawn] FAIL short PT_LOAD read off={file_pos} want={clen} got={read_len}")
-                            return 0
-                    else:
-                        var t: u64 = 0
-                        while t < clen:
-                            mmio_write8(dst + t, mmio_read8(blob + file_pos + t))
-                            t = t + 1
+                if ce > sfe:
+                    ce = sfe
+                if cs < ce:
+                    var t: u64 = 0
+                    val clen = ce - cs
+                    while t < clen:
+                        mmio_write8(phys + (cs - va) + t, mmio_read8(blob + foff + (cs - sv) + t))
+                        t = t + 1
             k = k + 1
 
         va = va + PAGE
@@ -448,7 +299,6 @@ fn _map_pt_loads(space: AddressSpace, blob: u64, hdr_len: u64, file_len: u64, us
     serial_println("[spawn] PT_LOAD segments mapped")
     1
 
-@unsafe(reason: "owns raw executable mapping and transfers control to ring 3", capabilities: [ffi, raw_ptr])
 fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_len: u64, use_stream: bool, map_heap: bool, argv: [text], envp: [text]) -> i64:
     # Parse the ELF from the identity-mapped RAW file buffer `blob` (mmio), NOT the
     # [u8] image.file_bytes channel — freestanding native-build stores [u8] as boxed
@@ -463,9 +313,6 @@ fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_
     if _rd8(blob, 4) != 2:
         serial_println("[spawn] FAIL not ELFCLASS64 class={_rd8(blob, 4)}")
         return -5
-    if _admit_raw_elf64(blob, hdr_len, file_len, map_heap) == 0:
-        serial_println("[spawn] FAIL raw ELF admission rejected")
-        return -5
 
     # Trustworthy entry: ELF e_entry @ offset 24, read straight from the raw buffer.
     val entry = _rd64(blob, 24)
@@ -476,72 +323,88 @@ fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_
         serial_println("[spawn] FAIL user-AS synthetic root={space.phys_root}")
         return -1
     # PRIVATE low-half clone: gives this AS its own PML4[0] PDPT so PT_LOADs at
-    # low VAs (clang links at 0x40000000, PML4[0]) can install private 4K user
+    # low VAs (clang links at 0x10000000, PML4[0]) can install private 4K user
     # pages — vmm_map_user_low_page splits the shared kernel 2MiB identity page
     # copy-on-map instead of corrupting the kernel's tables. Safe for the PML4[1]
     # fixture/stack VAs too (fresh tables, no privatization triggers).
     if not vmm_clone_kernel_low_private(space.phys_root):
         serial_println("[spawn] FAIL clone kernel low private root={space.phys_root}")
-        destroy_user_address_space(space)
         return -1
     serial_println("[spawn] user AS ready (private low) root={space.phys_root}")
 
-    if _map_pt_loads(space, blob, hdr_len, file_len, use_stream) == 0:
+    if _map_pt_loads(space, blob, fb.len().to_u64()) == 0:
         serial_println("[spawn] FAIL segment mapping")
-        destroy_user_address_space(space)
         return -2
 
-    # User stack: a bounded RW low-canonical region in the process-private page
-    # tables. The top page carries the populated SysV binary_path/argv/envp frame.
-    # 8 MiB (2048 pages): real programs need real stacks — clang_static faults
-    # writing below a small stack (proven smoke lane uses the same 2048 pages;
-    # with 32 pages clang aborted exit=134 before any output). No demand paging
-    # here, so the full region is pre-mapped.
+    # User stack: a small RW region growing down from a FUNCTION-LOCAL literal top
+    # (the builder's stack_top is module-val-bound and unreliable freestanding).
+    # The SysV argv frame (build_initial_stack) is likewise unreliable here; the
+    # verification payload ignores argv, so a valid mapped stack + a 16-aligned
+    # rsp is the ring-3 contract.
+    #
+    # STACK_TOP must sit in the SAME low-canonical region as the mapped ELF image
+    # (fsexec_hello links at 0x8000000000). The prior 0x00007FFFFFFFF000 top lands
+    # in PML4[255] — a subtree the fresh user AS never populates under
+    # vmm_clone_kernel_low_identity, so the very first push post-iretq took a #PF.
+    # 0x8000200000 shares the PML4[1]/PDPT/PD subtree of the proven code mapping
+    # (same region the FS-exec smoke uses). Keep the region SMALL (32 pages, top
+    # at 0x80001E0000) so it stays clear of the code page at 0x8000000000 — the
+    # smoke's 8 MiB (2048 pages) would grow down to 0x7FFFA00000 and clobber it.
     val PAGE: i64 = 4096
     val STACK_TOP: i64 = 0x8000200000
-    val STACK_PAGES: i64 = 2048
-    var top_phys: u64 = 0
+    val STACK_PAGES: i64 = 32
     var p: i64 = 0
     while p < STACK_PAGES:
         val sva = STACK_TOP - ((p + 1) * PAGE)
         val sph = pmm_alloc_page_raw()
         if sph == 0:
             serial_println("[spawn] FAIL stack alloc p={p}")
-            destroy_user_address_space(space)
             return -3
         vmm_zero_phys_range(sph, PAGE.to_u64())
-        if not vmm_map_user_low_page(space, VirtAddr(addr: sva.to_u64()), PhysAddr(addr: sph), VmFlags.user_rw()):
+        if not vmm_map_page_in(space, VirtAddr(addr: sva.to_u64()), PhysAddr(addr: sph), VmFlags.user_rw()):
             serial_println("[spawn] FAIL stack map p={p}")
-            # The failed leaf never entered the page-table tree, so return it
-            # directly before recursively releasing the successfully mapped
-            # image/stack leaves and private paging structures.
-            pmm_free_page_raw(sph)
-            destroy_user_address_space(space)
             return -4
-        # Capture the TOP stack page's physical address (p==0: sva==STACK_TOP-PAGE
-        # ==top_page_base). Low-canonical phys is identity-mapped in the kernel, so
-        # kernel-context mmio writes to top_phys land in the user stack — exactly
-        # how _map_pt_loads copies segment bytes (mmio_write8(phys+off,…)).
-        if p == 0:
-            top_phys = sph
         p = p + 1
 
-    # Keep the initial frame in the mapped top page. The bounded builder writes
-    # binary_path as argv[0], caller argv/envp strings, NULL terminators, and auxv.
+    # M2: build the SysV-ABI initial frame INLINE via direct-phys mmio. An earlier
+    # cross-function helper (_top_phys_for_vaddr, now deleted) miscompiled under
+    # freestanding native-build — its u64 range comparison returned 0 for the
+    # in-range vaddr 0x80001FFFE0 (filed as a codegen bug). Writing inline in this
+    # function's own scope, the way _map_pt_loads already does, sidesteps it. rsp0 is
+    # in the mapped top page BY CONSTRUCTION, so no range guard is needed: we know
+    # its offset within the top page and write the physical slots directly. Minimal
+    # frame (argc=0, argv=[NULL], envp=[NULL], auxv=[AT_NULL]) — the standard SysV
+    # minimum a libc crt0 walks. Expand auxv (AT_PAGESZ/AT_RANDOM) only if a real
+    # crt0 faults for a missing entry.
+    # All u64 with typed locals + bare integer literals — mirror _map_pt_loads'
+    # working idiom. `.to_u64()` on a literal (e.g. `15.to_u64()`) BOXES it under
+    # freestanding native-build, corrupting the arithmetic (first attempt yielded
+    # rsp=0x2000...); typed u64 locals and bare literals lower correctly.
     val PAGE_U: u64 = 4096
     val STACK_TOP_U: u64 = 0x8000200000
+    val ALIGN_MASK: u64 = 0xFFFFFFFFFFFFFFF0
     val TOP_PAGE_BASE_U: u64 = STACK_TOP_U - PAGE_U
     val user_rsp_u = _build_sysv_stack_frame(top_phys, STACK_TOP_U, binary_path, argv, envp)
     if user_rsp_u == 0:
         serial_println("[spawn] FAIL argv/envp exceed one-page startup bound")
-        destroy_user_address_space(space)
         return -4
     val frame_off: u64 = user_rsp_u - TOP_PAGE_BASE_U
+    # Sentinel: prove the direct-phys write path lands where we expect before
+    # trusting the frame (kernel readback of the exact slot we wrote).
+    _wr64(top_phys + frame_off, 0xDEADBEEFCAFEF00D)
+    val sentinel = _rd64(top_phys + frame_off, 0)
+    serial_println("[spawn] frame phys top_phys=0x{top_phys} off=0x{frame_off} rsp=0x{user_rsp_u} sentinel=0x{sentinel}")
+    _wr64(top_phys + frame_off, 0)             # argc = 0
+    _wr64(top_phys + frame_off + 8, 0)         # argv[0] = NULL
+    _wr64(top_phys + frame_off + 16, 0)        # envp[0] = NULL
+    _wr64(top_phys + frame_off + 24, 0)        # auxv[0].type = AT_NULL
+    _wr64(top_phys + frame_off + 32, 0)        # auxv[0].value = 0
+    # Readback verify: the guest maps this same physical page at user_rsp, so a
+    # correct argc slot here == what the guest sees at [rsp].
     val argc_rb = _rd64(top_phys + frame_off, 0)
     val expected_argc = (argv.len() as u64) + 1
     serial_println("[spawn] frame argc readback={argc_rb} expected={expected_argc}")
     if argc_rb != expected_argc:
-        destroy_user_address_space(space)
         return -4
     serial_println("[spawn] user stack mapped top=0x{STACK_TOP} pages={STACK_PAGES} rsp=0x{user_rsp_u}")
 
@@ -578,13 +441,10 @@ fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_
             val hph = pmm_alloc_page_raw()
             if hph == 0:
                 serial_println("[spawn] FAIL heap alloc page={hp}")
-                destroy_user_address_space(space)
                 return -5
             vmm_zero_phys_range(hph, HEAP_PAGE_SZ)
             if not vmm_map_user_low_page(space, VirtAddr(addr: HEAP_VA + (hp * HEAP_PAGE_SZ)), PhysAddr(addr: hph), VmFlags.user_rw()):
                 serial_println("[spawn] FAIL heap map page={hp}")
-                pmm_free_page_raw(hph)
-                destroy_user_address_space(space)
                 return -6
             hp = hp + 1
         rt_user_heap_init_returning(HEAP_VA, HEAP_PAGES * HEAP_PAGE_SZ)
@@ -592,7 +452,7 @@ fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_
 
     val ctx = TaskContext(
         rax: 0, rbx: 0, rcx: 0, rdx: 0,
-        rsi: 0, rdi: 0, rbp: 0, rsp: user_rsp_u,
+        rsi: 0, rdi: 0, rbp: 0, rsp: user_rsp.to_u64(),
         r8: 0, r9: 0, r10: 0, r11: 0,
         r12: 0, r13: 0, r14: 0, r15: 0,
         rip: entry,
@@ -602,18 +462,18 @@ fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_
         fpu_state: 0
     )
     serial_println("[spawn] entering user cs=0x2b iopl=3 rip=0x{entry} rsp=0x{user_rsp_u}")
-    x86_64_enter_user_task(ctx, space.phys_root)
+    hal_context_enter_user_task(ctx, space.phys_root)
 
     # Multi-command SSH: control lands HERE when the ring-3 program exits — the
     # exit(2) syscall longjmps back through rt_x86_enter_user_first's savepoint,
-    # so x86_64_enter_user_task returns instead of QEMU halting. Surface the
+    # so arch_x86_64_enter_user_task returns instead of QEMU halting. Surface the
     # program's exit status up to the sshd accept loop, which then accepts the
     # next connection/command in the same boot.
     #
+    # Remaining gap: the user address space built above is abandoned (its PML4 +
+    # PT_LOAD/stack frames leak); each spawn calls create_user_address_space()
+    # fresh with fresh pmm frames, so a later command's ELF load cannot be
+    # corrupted by this one's mappings — but the frames are not reclaimed.
     val exit_rc = rt_x86_ring3_exit_rc()
-    # Control has returned to the kernel address space, so the process-private
-    # PML4 now has no execution owner. The VMM destructor recursively releases
-    # user leaves (PT_LOAD, stack, and optional heap) and private paging tables.
-    destroy_user_address_space(space)
     serial_println("[spawn] ring3 program exited rc={exit_rc} (kernel resumed)")
     exit_rc

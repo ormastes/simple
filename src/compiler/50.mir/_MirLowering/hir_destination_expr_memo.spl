@@ -1,0 +1,72 @@
+# Per-function destination-HIR expression memo. The owner retains capacity
+# across functions; an epoch change makes every old slot logically empty in
+# O(1), so reset never scans or reallocates the hot table.
+use compiler.hir.hir_lowering.hir_destination_graph.*
+use compiler.mir.mir_instructions.{MirOperand, MirOperandKind}
+use compiler.mir.mir_types.{LocalId}
+
+const HD_EXPR_MEMO_EMPTY: i64 = 0
+const HD_EXPR_MEMO_VALUE: i64 = 1
+
+struct HirDestinationExprMemo:
+    epoch: i64 = 1
+    function_row: i64 = -1
+    row_limit: i64 = 0
+    slot_epoch: [i64] = []
+    slot_status: [i64] = []
+    slot_block: [i64] = []
+    slot_value: [MirOperand] = []
+
+impl HirDestinationExprMemo:
+    me ensure_capacity(required: i64):
+        if required <= self.slot_epoch.len(): return
+        var target = if self.slot_epoch.len() < 8: 8 else: self.slot_epoch.len()
+        while target < required: target = target * 2
+        while self.slot_epoch.len() < target:
+            self.slot_epoch.push(0)
+            self.slot_status.push(HD_EXPR_MEMO_EMPTY)
+            self.slot_block.push(-1)
+            self.slot_value.push(MirOperand(kind: MirOperandKind.Copy(LocalId(id: -1))))
+
+    me reset_for_function(function_row: i64, expr_row_count: i64):
+        self.ensure_capacity(if expr_row_count < 0: 0 else: expr_row_count)
+        self.function_row = function_row
+        self.row_limit = if expr_row_count < 0: 0 else: expr_row_count
+        self.epoch = self.epoch + 1
+        # Epoch zero is reserved for never-written slots. Overflow is remote,
+        # but clearing once is safer than allowing stale values to reappear.
+        if self.epoch <= 0:
+            var i = 0
+            while i < self.slot_epoch.len():
+                self.slot_epoch[i] = 0
+                self.slot_status[i] = HD_EXPR_MEMO_EMPTY
+                i = i + 1
+            self.epoch = 1
+
+    fn lookup(row: i64, block_id: i64) -> MirOperand?:
+        if row < 0 or row >= self.row_limit: return nil
+        if self.slot_epoch[row] != self.epoch or self.slot_status[row] != HD_EXPR_MEMO_VALUE:
+            return nil
+        if self.slot_block[row] != block_id: return nil
+        Some(self.slot_value[row])
+
+    me publish(row: i64, block_id: i64, value: MirOperand) -> bool:
+        if row < 0 or row >= self.row_limit: return false
+        self.slot_value[row] = value
+        self.slot_block[row] = block_id
+        self.slot_status[row] = HD_EXPR_MEMO_VALUE
+        self.slot_epoch[row] = self.epoch
+        true
+
+# Conservative allowlist. Reads, calls, allocation, control flow, suspension,
+# error transfer, aggregates, and target intrinsics must be re-evaluated at
+# every source occurrence. Compound rows are excluded because parent purity
+# alone cannot prove that every reachable child is pure.
+fn hir_destination_expr_shape_memoizable(shape: i64, operator_shape: i64 = -1) -> bool:
+    if (shape == HD_EXPR_INT or shape == HD_EXPR_FLOAT or
+            shape == HD_EXPR_BOOL or shape == HD_EXPR_CHAR or shape == HD_EXPR_UNIT or
+            shape == HD_EXPR_NIL):
+        return true
+    false
+
+export HirDestinationExprMemo, hir_destination_expr_shape_memoizable

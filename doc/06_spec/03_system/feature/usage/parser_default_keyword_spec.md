@@ -2,6 +2,29 @@
 
 > Tests the `default` keyword for function parameter default values using `=` syntax. Covers basic defaults, typed parameters, methods (instance and static), collection defaults, edge cases (booleans, negatives, expressions), and combinations of required and default parameters across functions, classes, and nested scopes.
 
+<!-- sdn-diagram:id=parser_default_keyword_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=parser_default_keyword_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+parser_default_keyword_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=parser_default_keyword_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 18 | 18 | 0 | 0 |
@@ -21,7 +44,7 @@ Tests the `default` keyword for function parameter default values using `=` synt
 | Category | Syntax |
 | Status | Active |
 | Source | `test/03_system/feature/usage/parser_default_keyword_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -35,8 +58,6 @@ and nested scopes.
 ## Syntax
 
 ```simple
-use std.spec.step
-
 fn greet(name = "World"):
 return "Hello, {name}"
 fn typed_default(count: i32 = 0):
@@ -49,22 +70,18 @@ return count
 
 #### parses default parameter value with = syntax
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- parses default parameter value with = syntax
+1. fn greet
+2. expect greet
+3. expect greet
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses default parameter value with = syntax")
 fn greet(name = "World"):
     return "Hello, {name}"
 expect greet() == "Hello, World"
@@ -75,18 +92,16 @@ expect greet("Alice") == "Hello, Alice"
 
 #### parses multiple default parameters
 
-- parses multiple default parameters
+1. fn create range
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses multiple default parameters")
 fn create_range(min = 0, max = 100):
     return [min, max]
 val range = create_range()
@@ -98,18 +113,19 @@ expect range[1] == 100
 
 #### overrides single default parameter
 
-- overrides single default parameter
+1. fn with defaults
+2. expect with defaults
+3. expect with defaults
+4. expect with defaults
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("overrides single default parameter")
 fn with_defaults(x = 1, y = 2):
     return x + y
 expect with_defaults() == 3
@@ -121,18 +137,17 @@ expect with_defaults(5, 10) == 15
 
 #### parses default with expressions
 
-- parses default with expressions
+1. fn with expr default
+2. expect with expr default
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses default with expressions")
 fn with_expr_default(size = 2 ** 10):
     return size
 expect with_expr_default() == 1024
@@ -142,18 +157,17 @@ expect with_expr_default() == 1024
 
 #### parses default with arithmetic
 
-- parses default with arithmetic
+1. fn compute
+2. expect compute
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses default with arithmetic")
 fn compute(base = 100, offset = 10 + 5):
     return base + offset
 expect compute() == 115
@@ -163,18 +177,18 @@ expect compute() == 115
 
 #### uses default in nested function
 
-- uses default in nested function
+1. fn outer
+2. fn inner
+3. expect outer
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses default in nested function")
 fn outer():
     fn inner(value = 42):
         return value
@@ -188,18 +202,18 @@ expect outer() == 42
 
 #### parses default parameter with type annotation
 
-- parses default parameter with type annotation
+1. fn typed default
+2. expect typed default
+3. expect typed default
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses default parameter with type annotation")
 fn typed_default(count: i32 = 0):
     return count
 expect typed_default() == 0
@@ -210,18 +224,18 @@ expect typed_default(5) == 5
 
 #### parses default text parameter
 
-- parses default text parameter
+1. fn with text
+2. expect with text
+3. expect with text
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses default text parameter")
 fn with_text(message: text = "default"):
     return message
 expect with_text() == "default"
@@ -232,18 +246,17 @@ expect with_text("custom") == "custom"
 
 #### parses default float parameter
 
-- parses default float parameter
+1. fn with float
+2. expect with float
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses default float parameter")
 fn with_float(value: f64 = 3.14):
     return value
 expect with_float() > 3.0
@@ -255,18 +268,18 @@ expect with_float() > 3.0
 
 #### parses default in class method
 
-- parses default in class method
+1. me increment
+2. var c = Counter
+3. c increment
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses default in class method")
 class Counter:
     value: i32
 
@@ -282,18 +295,18 @@ expect c.value == 11
 
 #### parses default in static method
 
-- parses default in static method
+1. static fn create
+2. expect Factory create
+3. expect Factory create
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses default in static method")
 class Factory:
     static fn create(size = 10) -> i32:
         return size
@@ -308,18 +321,18 @@ expect Factory.create(20) == 20
 
 #### parses default empty array
 
-- parses default empty array
+1. fn with array
+2. expect with array
+3. expect with array
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses default empty array")
 fn with_array(items = []):
     return items.len()
 expect with_array() == 0
@@ -330,18 +343,17 @@ expect with_array([1, 2, 3]) == 3
 
 #### parses default array literal
 
-- parses default array literal
+1. fn with values
+2. expect with values
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses default array literal")
 fn with_values(data = [1, 2, 3]):
     return data.len()
 expect with_values() == 3
@@ -353,18 +365,18 @@ expect with_values() == 3
 
 #### parses default with boolean
 
-- parses default with boolean
+1. fn with flag
+2. expect with flag
+3. expect with flag
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses default with boolean")
 fn with_flag(enabled = true):
     return enabled
 expect with_flag() == true
@@ -375,18 +387,17 @@ expect with_flag(false) == false
 
 #### parses default with negative number
 
-- parses default with negative number
+1. fn with negative
+2. expect with negative
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses default with negative number")
 fn with_negative(value = -10):
     return value
 expect with_negative() == -10
@@ -396,18 +407,17 @@ expect with_negative() == -10
 
 #### parses default with string interpolation
 
-- parses default with string interpolation
+1. fn greet default
+2. expect greet default
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses default with string interpolation")
 val default_name = "World"
 fn greet_default(name = default_name):
     return "Hello, {name}"
@@ -420,18 +430,18 @@ expect greet_default() == "Hello, World"
 
 #### parses mix of required and default parameters
 
-- parses mix of required and default parameters
+1. fn mixed
+2. expect mixed
+3. expect mixed
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses mix of required and default parameters")
 fn mixed(required, optional = 5):
     return required + optional
 expect mixed(10) == 15
@@ -442,18 +452,19 @@ expect mixed(10, 20) == 30
 
 #### parses multiple functions with defaults
 
-- parses multiple functions with defaults
+1. fn first
+2. fn second
+3. expect first
+4. expect second
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses multiple functions with defaults")
 fn first(x = 1):
     return x
 fn second(y = 2):
@@ -476,51 +487,3 @@ expect second() == 2
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `4edb41b1c4e07968c02c52c43afdd425555ee8aff39b2862eac1e51c21189c4d`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `4edb41b1c4e07968c02c52c43afdd425555ee8aff39b2862eac1e51c21189c4d`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `4edb41b1c4e07968c02c52c43afdd425555ee8aff39b2862eac1e51c21189c4d`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/parser_default_keyword_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/parser_default_keyword_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/parser_default_keyword_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/parser_default_keyword_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/parser_default_keyword_spec.spl:33:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses default parameter value with = syntax' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/parser_default_keyword_spec.spl:41:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses multiple default parameters' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/parser_default_keyword_spec.spl:50:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'overrides single default parameter' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

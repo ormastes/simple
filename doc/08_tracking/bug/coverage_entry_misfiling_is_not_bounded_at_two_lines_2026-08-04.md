@@ -1,8 +1,7 @@
 # Coverage `<entry>` misfiling is not bounded at "<=2 lines (<=0.9%) per module" — it swallows method bodies too, up to 21 points
 
 - **Filed:** 2026-08-04
-- Status: OPEN (P2)
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- **Status:** OPEN
 - **Direction:** under-reports. A published number is a floor, never flattering.
 - **Supersedes:** the RESIDUAL note in `src/app/test_runner_new/test_runner_single.spl`,
   which states the residual is "module-level recordable statements ... <=2 lines

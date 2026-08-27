@@ -1,0 +1,315 @@
+# Fail-closed attachment of one finalized coverage plan to typed MIR probes.
+#
+# This boundary does not lower HIR, emit runtime calls, or admit a backend. It
+# only establishes that the already-present typed MIR probes are an exact,
+# snapshot-bound realization of a finalized catalog/plan pair. A later,
+# separately admitted lowering owns executable coverage behavior.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.mir.mir_coverage.{MirCoverageCatalogV1,
+    mir_coverage_catalog_snapshot_diagnostic_v1}
+use compiler.mir.mir_coverage_probe_plan.{MirCoverageBooleanOperandV1,
+    MirCoverageProvisionalDecisionProbeV1,
+    MirCoverageProvisionalConditionProbeV1, MirCoverageProbePlanV1,
+    MirCoverageDecisionProbePayloadV1, MirCoverageConditionProbePayloadV1,
+    mir_coverage_resolve_probe_plan_v1}
+use compiler.mir.mir_instructions.{MirConstValue, MirInstKind, MirModule,
+    MirLocal, MirOperand, MirOperandKind, MirTypeKind}
+
+pub struct MirCoverageProbeAttachmentV1:
+    catalog_sha256: text
+    plan_sha256: text
+    probe_list_sha256: text
+    decision_count: i64
+    condition_count: i64
+    admitted: bool
+
+fn mir_coverage_probe_attachment_frame_v1(value: text) -> text:
+    value.len().to_string() + ":" + value
+
+fn mir_coverage_plan_decision_index_v1(
+    values: [MirCoverageDecisionProbePayloadV1],
+    semantic_id: text
+) -> i64:
+    var found = -1
+    var index = 0
+    while index < values.len():
+        if values[index].semantic_id == semantic_id:
+            if found >= 0: return -2
+            found = index
+        index = index + 1
+    found
+
+fn mir_coverage_plan_condition_index_v1(
+    values: [MirCoverageConditionProbePayloadV1],
+    semantic_id: text
+) -> i64:
+    var found = -1
+    var index = 0
+    while index < values.len():
+        if values[index].semantic_id == semantic_id:
+            if found >= 0: return -2
+            found = index
+        index = index + 1
+    found
+
+# Catalog site ownership is currently bound to canonical function *names*.
+# Reject an ambiguous module before matching any concrete probe so a duplicate
+# name cannot replay a valid payload through a different MIR function.
+fn mir_coverage_module_function_name_diagnostic_v1(module: MirModule) -> text:
+    var seen_names: [text] = []
+    for function in module.functions.values():
+        if seen_names.contains(function.name):
+            return "MIRCOV-ATTACH-E-FUNCTION-NAME-DUPLICATE: MIR module contains duplicate function names"
+        seen_names.push(function.name)
+    ""
+
+fn mir_coverage_plan_provisionals_v1(
+    catalog: MirCoverageCatalogV1,
+    plan: MirCoverageProbePlanV1
+) -> Result<([MirCoverageProvisionalDecisionProbeV1],
+    [MirCoverageProvisionalConditionProbeV1]), text>:
+    var decisions: [MirCoverageProvisionalDecisionProbeV1] = []
+    for payload in plan.decisions:
+        var match_index = -1
+        var index = 0
+        while index < catalog.decisions.len():
+            if catalog.decisions[index].semantic_id == payload.semantic_id:
+                if match_index >= 0:
+                    return Err("MIRCOV-ATTACH-E-PLAN: decision semantic ID is ambiguous in catalog")
+                match_index = index
+            index = index + 1
+        if match_index < 0:
+            return Err("MIRCOV-ATTACH-E-PLAN: decision payload has no catalog site")
+        decisions.push(MirCoverageProvisionalDecisionProbeV1(
+            catalog.decisions[match_index].site, payload.operand))
+
+    var conditions: [MirCoverageProvisionalConditionProbeV1] = []
+    for payload in plan.conditions:
+        var condition_index = -1
+        var index = 0
+        while index < catalog.conditions.len():
+            if catalog.conditions[index].semantic_id == payload.semantic_id:
+                if condition_index >= 0:
+                    return Err("MIRCOV-ATTACH-E-PLAN: condition semantic ID is ambiguous in catalog")
+                condition_index = index
+            index = index + 1
+        if condition_index < 0:
+            return Err("MIRCOV-ATTACH-E-PLAN: condition payload has no catalog site")
+        val condition = catalog.conditions[condition_index]
+        var decision_index = -1
+        var decision_cursor = 0
+        while decision_cursor < catalog.decisions.len():
+            if catalog.decisions[decision_cursor].semantic_id ==
+                    condition.decision_semantic_id:
+                if decision_index >= 0:
+                    return Err("MIRCOV-ATTACH-E-PLAN: condition parent is ambiguous in catalog")
+                decision_index = decision_cursor
+            decision_cursor = decision_cursor + 1
+        if decision_index < 0:
+            return Err("MIRCOV-ATTACH-E-PLAN: condition payload has no catalog parent")
+        conditions.push(MirCoverageProvisionalConditionProbeV1(
+            catalog.decisions[decision_index].site, condition.site,
+            payload.operand))
+    Ok((decisions, conditions))
+
+fn mir_coverage_resolved_plan_v1(
+    catalog: MirCoverageCatalogV1,
+    plan: MirCoverageProbePlanV1
+) -> Result<MirCoverageProbePlanV1, text>:
+    val provisional_result = mir_coverage_plan_provisionals_v1(catalog, plan)
+    val provisionals = match provisional_result:
+        case Ok(value): value
+        case Err(message): return Err(message)
+    val resolved_result = mir_coverage_resolve_probe_plan_v1(
+        catalog, provisionals.0, provisionals.1)
+    val resolved = match resolved_result:
+        case Ok(value): value
+        case Err(message): return Err("MIRCOV-ATTACH-E-CATALOG: " + message)
+    if resolved.canonical_text != plan.canonical_text:
+        return Err("MIRCOV-ATTACH-E-PLAN: plan is not the canonical catalog resolution")
+    Ok(resolved)
+
+fn mir_coverage_probe_operand_matches_v1(
+    expected: MirCoverageBooleanOperandV1,
+    actual: MirOperand,
+    locals: [MirLocal]
+) -> bool:
+    match expected:
+        case Local(expected_local):
+            match actual.kind:
+                # Probes are observational; Move would make this boundary
+                # implicitly own value semantics that the plan does not model.
+                case Copy(local):
+                    if local.id != expected_local: return false
+                    for candidate in locals:
+                        if candidate.id.id == local.id:
+                            return candidate.type_.kind == MirTypeKind.Bool
+                    false
+                case _: false
+        case Literal(expected_value):
+            match actual.kind:
+                case Const(Bool(actual_value), type_):
+                    actual_value == expected_value and type_.kind == MirTypeKind.Bool
+                case _: false
+
+fn mir_coverage_decision_probe_matches_v1(
+    kind: MirInstKind,
+    expected: MirCoverageDecisionProbePayloadV1,
+    catalog: MirCoverageCatalogV1,
+    locals: [MirLocal],
+    function_name: text
+) -> bool:
+    var record_index = -1
+    var index = 0
+    while index < catalog.decisions.len():
+        if catalog.decisions[index].semantic_id == expected.semantic_id:
+            record_index = index
+        index = index + 1
+    if record_index < 0: return false
+    val record = catalog.decisions[record_index]
+    if function_name != record.site.canonical_function_name: return false
+    match kind:
+        case DecisionProbe(runtime_id, semantic_id, result, authored_path, line, column):
+            runtime_id == expected.runtime_id and semantic_id == expected.semantic_id and
+                authored_path == record.site.authored_path and line == record.site.line and
+                column == record.site.column and
+                mir_coverage_probe_operand_matches_v1(expected.operand, result, locals)
+        case _: false
+
+fn mir_coverage_condition_probe_matches_v1(
+    kind: MirInstKind,
+    expected: MirCoverageConditionProbePayloadV1,
+    catalog: MirCoverageCatalogV1,
+    locals: [MirLocal],
+    function_name: text
+) -> bool:
+    var record_index = -1
+    var index = 0
+    while index < catalog.conditions.len():
+        if catalog.conditions[index].semantic_id == expected.semantic_id:
+            record_index = index
+        index = index + 1
+    if record_index < 0: return false
+    val record = catalog.conditions[record_index]
+    if function_name != record.site.canonical_function_name: return false
+    match kind:
+        case ConditionProbe(runtime_id, semantic_id, parent_runtime_id,
+                parent_semantic_id, result, authored_path, line, column):
+            runtime_id == expected.runtime_id and semantic_id == expected.semantic_id and
+                parent_runtime_id == expected.decision_runtime_id and
+                parent_semantic_id == expected.decision_semantic_id and
+                authored_path == record.site.authored_path and line == record.site.line and
+                column == record.site.column and
+                mir_coverage_probe_operand_matches_v1(expected.operand, result, locals)
+        case _: false
+
+fn mir_coverage_probe_attachment_operand_text_v1(operand: MirOperand) -> text:
+    match operand.kind:
+        case Copy(local): "copy:" + local.id.to_string()
+        case Move(local): "move:" + local.id.to_string()
+        case Const(Bool(value), type_):
+            if type_.kind != MirTypeKind.Bool:
+                "bool-with-nonbool-type"
+            else if value:
+                "literal:true"
+            else:
+                "literal:false"
+        case _: "noncanonical"
+
+# This intentionally binds only the canonical list of typed probes. It is not
+# a whole-module snapshot and must not be represented as one by later evidence
+# consumers.
+fn mir_coverage_probe_attachment_probe_list_hash_v1(module: MirModule) -> text:
+    var rows: [text] = []
+    for function in module.functions.values():
+        for block in function.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case DecisionProbe(runtime_id, semantic_id, result,
+                            authored_path, line, column):
+                        rows.push("decision" +
+                            mir_coverage_probe_attachment_frame_v1(function.symbol.id.to_string()) +
+                            mir_coverage_probe_attachment_frame_v1(runtime_id.to_string()) +
+                            mir_coverage_probe_attachment_frame_v1(semantic_id) +
+                            mir_coverage_probe_attachment_frame_v1(authored_path) +
+                            mir_coverage_probe_attachment_frame_v1(line.to_string()) +
+                            mir_coverage_probe_attachment_frame_v1(column.to_string()) +
+                            mir_coverage_probe_attachment_frame_v1(
+                                mir_coverage_probe_attachment_operand_text_v1(result)))
+                    case ConditionProbe(runtime_id, semantic_id, parent_runtime_id,
+                            parent_semantic_id, result, authored_path, line, column):
+                        rows.push("condition" +
+                            mir_coverage_probe_attachment_frame_v1(function.symbol.id.to_string()) +
+                            mir_coverage_probe_attachment_frame_v1(runtime_id.to_string()) +
+                            mir_coverage_probe_attachment_frame_v1(semantic_id) +
+                            mir_coverage_probe_attachment_frame_v1(parent_runtime_id.to_string()) +
+                            mir_coverage_probe_attachment_frame_v1(parent_semantic_id) +
+                            mir_coverage_probe_attachment_frame_v1(authored_path) +
+                            mir_coverage_probe_attachment_frame_v1(line.to_string()) +
+                            mir_coverage_probe_attachment_frame_v1(column.to_string()) +
+                            mir_coverage_probe_attachment_frame_v1(
+                                mir_coverage_probe_attachment_operand_text_v1(result)))
+                    case _: ()
+    rows.sort()
+    sha256_text("MirCoverageProbeAttachmentProbeList-v1" +
+        mir_coverage_probe_attachment_frame_v1(module.name) + rows.join(""))
+
+pub fn mir_coverage_attach_probe_plan_v1(
+    catalog: MirCoverageCatalogV1,
+    plan: MirCoverageProbePlanV1,
+    module: MirModule
+) -> Result<MirCoverageProbeAttachmentV1, text>:
+    val catalog_snapshot_error = mir_coverage_catalog_snapshot_diagnostic_v1(catalog)
+    if catalog_snapshot_error != "": return Err(catalog_snapshot_error)
+    val resolved_result = mir_coverage_resolved_plan_v1(catalog, plan)
+    val resolved = match resolved_result:
+        case Ok(value): value
+        case Err(message): return Err(message)
+    val function_name_error = mir_coverage_module_function_name_diagnostic_v1(module)
+    if function_name_error != "": return Err(function_name_error)
+    var seen_decisions: [text] = []
+    var seen_conditions: [text] = []
+    for function in module.functions.values():
+        for block in function.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case DecisionProbe(_, semantic_id, _, _, _, _):
+                        val index = mir_coverage_plan_decision_index_v1(
+                            resolved.decisions, semantic_id)
+                        if index < 0:
+                            return Err("MIRCOV-ATTACH-E-CONCRETE-DECISION: MIR decision probe has no unique plan payload")
+                        if seen_decisions.contains(semantic_id):
+                            return Err("MIRCOV-ATTACH-E-DUPLICATE: MIR decision probe appears more than once")
+                        if not mir_coverage_decision_probe_matches_v1(
+                                inst.kind, resolved.decisions[index], catalog,
+                                function.locals, function.name):
+                            return Err("MIRCOV-ATTACH-E-CONCRETE-DECISION: MIR decision probe differs from its plan payload")
+                        seen_decisions.push(semantic_id)
+                    case ConditionProbe(_, semantic_id, _, _, _, _, _, _):
+                        val index = mir_coverage_plan_condition_index_v1(
+                            resolved.conditions, semantic_id)
+                        if index < 0:
+                            return Err("MIRCOV-ATTACH-E-CONCRETE-CONDITION: MIR condition probe has no unique plan payload")
+                        if seen_conditions.contains(semantic_id):
+                            return Err("MIRCOV-ATTACH-E-DUPLICATE: MIR condition probe appears more than once")
+                        if not mir_coverage_condition_probe_matches_v1(
+                                inst.kind, resolved.conditions[index], catalog,
+                                function.locals, function.name):
+                            return Err("MIRCOV-ATTACH-E-CONCRETE-CONDITION: MIR condition probe differs from its plan payload")
+                        seen_conditions.push(semantic_id)
+                    case _: ()
+    if seen_decisions.len() != resolved.decisions.len() or
+            seen_conditions.len() != resolved.conditions.len():
+        return Err("MIRCOV-ATTACH-E-BIJECTION: finalized plan and concrete MIR probes differ in cardinality")
+    Ok(MirCoverageProbeAttachmentV1(
+        catalog.catalog_sha256, sha256_text(plan.canonical_text),
+        mir_coverage_probe_attachment_probe_list_hash_v1(module),
+        seen_decisions.len(), seen_conditions.len(), false))
+
+# An attachment proves only static correspondence. It must never open the
+# catalog publication or backend-lowering gate on its own.
+pub fn mir_coverage_probe_attachment_publication_guard_v1(
+    _attachment: MirCoverageProbeAttachmentV1
+) -> Result<bool, text>:
+    Err("MIRCOV-ATTACH-E-UNLOWERED: concrete MIR probe attachment has no admitted runtime or backend lowering")

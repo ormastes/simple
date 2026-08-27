@@ -2,8 +2,7 @@
 
 - **ID:** interp_qualified_enum_is_payload_variant
 - **Severity:** P1 (silent wrong result)
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- **Status:** resolved (2026-06-14)
 - **Date:** 2026-06-14
 - **Component:** interpreter / seed (`src/compiler`)
 

@@ -2,6 +2,31 @@
 
 > This system spec verifies the wrapper VirtIO-GPU Engine2D proof lane before broader GUI/2D framework implementation work continues. It builds the guest, boots it under QEMU when available, waits for either a documented transport failure marker or `render-ready`, and captures a nonblank framebuffer.
 
+<!-- sdn-diagram:id=gui_entry_engine2d_virtio_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=gui_entry_engine2d_virtio_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+gui_entry_engine2d_virtio_spec -> std
+gui_entry_engine2d_virtio_spec -> os
+gui_entry_engine2d_virtio_spec -> test
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=gui_entry_engine2d_virtio_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 2 | 2 | 0 | 0 |
@@ -24,7 +49,7 @@ This system spec verifies the wrapper VirtIO-GPU Engine2D proof lane before broa
 | Design | N/A |
 | Research | N/A |
 | Source | `test/03_system/gui/gui_entry_engine2d_virtio_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -56,28 +81,16 @@ the render-ready marker.
 
 #### builds gui_entry_engine2d_virtio.spl into a baremetal kernel
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- builds gui_entry_engine2d_virtio.spl into a baremetal kernel
-   - Expected: dir_create_all(run_dir) is true
-   - Expected: ok is true
-   - Expected: file_exists(target.output) is true
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("builds gui_entry_engine2d_virtio.spl into a baremetal kernel")
 val run_id = _run_id()
 val run_dir = _run_dir(run_id)
-expect(dir_create_all(run_dir)).to_equal(true)
+expect(rt_dir_create_all(run_dir)).to_equal(true)
 
 val target = _wrapper_virtio_gpu_target(run_id)
 val ok = build_os(target)
@@ -89,32 +102,36 @@ expect(file_exists(target.output)).to_equal(true)
 
 #### boots the wrapper lane and reaches the render-ready marker
 
-- boots the wrapper lane and reaches the render-ready marker
-   - Expected: dir_create_all(run_dir) is true
-   - Expected: _build_once(target) is true
-   - Expected: file_exists(target.output) is true
-   - Expected: qemu_available is false
+1. Ok
+
+2. stop guest
    - Expected: saw_init_failed is true
+
+3. stop guest
    - Expected: saw_ready is true
+
+4. stop guest
    - Expected: result.success is true
+
+5. stop guest
    - Expected: file_exists(capture_ppm) is true
    - Expected: result.pixels.len() > 0 is true
    - Expected: _non_black_count(result.pixels) > 0 is true
+
+6. Err
    - Expected: spawned is true
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 54 lines folded for reproduction.
+Runnable source: 52 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("boots the wrapper lane and reaches the render-ready marker")
 val run_id = _run_id()
 val run_dir = _run_dir(run_id)
-expect(dir_create_all(run_dir)).to_equal(true)
+expect(rt_dir_create_all(run_dir)).to_equal(true)
 
 val target = _wrapper_virtio_gpu_target(run_id)
 expect(_build_once(target)).to_equal(true)
@@ -128,8 +145,8 @@ if not qemu_available:
 
 val qmp_socket = _qmp_socket(run_id)
 val serial_log = _serial_log(run_id)
-val working_dir = cwd()
-val capture_ppm = _capture_ppm(working_dir, run_id)
+val cwd = rt_get_cwd()
+val capture_ppm = _capture_ppm(cwd, run_id)
 
 var spawned = false
 match spawn_guest_with_qmp(target, qmp_socket, serial_log):
@@ -180,45 +197,3 @@ expect(spawned).to_equal(true)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `c1757c4c08b91fe4618121f8c2f34e1a79940c4c9c6f0ead8dcdd88f1f50c269`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `c1757c4c08b91fe4618121f8c2f34e1a79940c4c9c6f0ead8dcdd88f1f50c269`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `c1757c4c08b91fe4618121f8c2f34e1a79940c4c9c6f0ead8dcdd88f1f50c269`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **95/100**; effective score: **95/100**; blockers: **0**.
-
-SSpec documentization score: 95/100
-source: test/03_system/gui/gui_entry_engine2d_virtio_spec.spl
-mirror: doc/06_spec/03_system/gui/gui_entry_engine2d_virtio_spec.md (current)
-findings: 3 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=90 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/gui/gui_entry_engine2d_virtio_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/gui/gui_entry_engine2d_virtio_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/gui/gui_entry_engine2d_virtio_spec.spl:112:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'builds gui_entry_engine2d_virtio.spl into a baremetal kernel' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -1,0 +1,313 @@
+# cert_verify_ecdsa_spec
+
+> Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 8 | 8 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# cert_verify_ecdsa_spec
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Hardware & OS |
+| Status | Active |
+| Source | `test/01_unit/os/tls13/cert_verify_ecdsa_spec.spl` |
+| Updated | 2026-08-22 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/os/tls13/cert_verify_ecdsa_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Covers the behavior asserted here; platform-specific behavior is out of scope.
+
+## Scenarios
+
+### ECDSA-P256 DER sig decode
+
+#### fixed64_to_der produces a non-empty byte sequence
+
+- Verify: fixed64_to_der produces a non-empty byte sequence
+   - Expected: der.len() > 0 is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: fixed64_to_der produces a non-empty byte sequence")
+# @req: REQ-SSPEC-LOCAL-001
+val sig = ecdsa_p256_sign_fixed(_pkcs8(), _test_msg())
+val der = _fixed64_to_der(sig)
+expect(der.len() > 0).to_equal(true)
+```
+
+</details>
+
+#### DER-encoded sig starts with SEQUENCE tag 0x30
+
+- Verify: DER-encoded sig starts with SEQUENCE tag 0x30
+   - Expected: der[0u64] equals `0x30u8`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: DER-encoded sig starts with SEQUENCE tag 0x30")
+# @req: REQ-SSPEC-LOCAL-001
+val sig = ecdsa_p256_sign_fixed(_pkcs8(), _test_msg())
+val der = _fixed64_to_der(sig)
+expect(der[0u64]).to_equal(0x30u8)
+```
+
+</details>
+
+#### DER-encoded sig verifies correctly with ecdsa_p256_verify_fixed after round-trip
+
+- Verify: DER-encoded sig verifies correctly with ecdsa_p256_verify_fixed after round-trip
+   - Expected: fixed64.len() equals `64u64`
+   - Expected: der[0u64] equals `0x30u8`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: DER-encoded sig verifies correctly with ecdsa_p256_verify_fixed after round-trip")
+# @req: REQ-SSPEC-LOCAL-001
+# Sign → DER-encode → decode back to fixed64 → verify
+# This tests the DER decoder path that cert_verify uses internally
+val msg = _test_msg()
+val fixed64 = ecdsa_p256_sign_fixed(_pkcs8(), msg)
+val der = _fixed64_to_der(fixed64)
+# Decode the DER back to fixed64 via the cert_verify API
+# (We test via verify_certificate_verify_msg_scheme which uses the decoder)
+val result = verify_certificate_verify_msg_scheme(_spki(), 0x0403u16, msg, der)
+if val CertVerifyResult.Ok = result:
+    expect(fixed64.len()).to_equal(64u64)
+    expect(der[0u64]).to_equal(0x30u8)
+else:
+    fail("DER-encoded ECDSA-P256 signature did not verify after round-trip")
+```
+
+</details>
+
+### verify_certificate_verify_msg_scheme ECDSA-P256-SHA-256 (0x0403)
+
+#### verifies a valid ECDSA-P256 CertificateVerify message
+
+- Verify: verifies a valid ECDSA-P256 CertificateVerify message
+   - Expected: _spki().len() equals `91u64`
+   - Expected: der_sig[0u64] equals `0x30u8`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SSPEC-LOCAL-001
+step("Verify: verifies a valid ECDSA-P256 CertificateVerify message")
+val msg = _test_msg()
+val der_sig = _sign_msg_der()
+val result = verify_certificate_verify_msg_scheme(_spki(), 0x0403u16, msg, der_sig)
+if val CertVerifyResult.Ok = result:
+    expect(_spki().len()).to_equal(91u64)
+    expect(der_sig[0u64]).to_equal(0x30u8)
+else:
+    fail("valid ECDSA-P256 CertificateVerify message was rejected")
+```
+
+</details>
+
+#### rejects signature verified under a different public key
+
+- Verify: rejects signature verified under a different public key
+   - Expected: _other_spki().len() equals `91u64`
+   - Expected: err_msg equals `CertificateVerify signature invalid (ecdsa_secp256r1_sha256)`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: rejects signature verified under a different public key")
+# @req: REQ-SSPEC-LOCAL-001
+val msg = _test_msg()
+val der_sig = _sign_msg_der()
+val result = verify_certificate_verify_msg_scheme(_other_spki(), 0x0403u16, msg, der_sig)
+if val CertVerifyResult.Err(err_msg) = result:
+    expect(_other_spki().len()).to_equal(91u64)
+    expect(err_msg).to_equal("CertificateVerify signature invalid (ecdsa_secp256r1_sha256)")
+else:
+    fail("ECDSA-P256 CertificateVerify unexpectedly accepted a different public key")
+```
+
+</details>
+
+#### rejects a DER signature with a flipped byte
+
+- Verify: rejects a DER signature with a flipped byte
+   - Expected: bad_sig[0u64] equals `0x30u8`
+   - Expected: err_msg equals `CertificateVerify signature invalid (ecdsa_secp256r1_sha256)`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: rejects a DER signature with a flipped byte")
+# @req: REQ-SSPEC-LOCAL-001
+val msg = _test_msg()
+val der_sig = _sign_msg_der()
+# Flip a byte inside the signature content (byte 4 = first byte of r value)
+val bad_sig = _flip_byte_at(der_sig, 4u64)
+val result = verify_certificate_verify_msg_scheme(_spki(), 0x0403u16, msg, bad_sig)
+if val CertVerifyResult.Err(err_msg) = result:
+    expect(bad_sig[0u64]).to_equal(0x30u8)
+    expect(err_msg).to_equal("CertificateVerify signature invalid (ecdsa_secp256r1_sha256)")
+else:
+    fail("ECDSA-P256 CertificateVerify unexpectedly accepted a flipped DER signature byte")
+```
+
+</details>
+
+### verify_certificate_verify_msg_scheme unsupported ECDSA schemes
+
+#### sig_scheme 0x0503 (ecdsa_secp384r1_sha384) returns unsupported error
+
+- Verify: sig_scheme 0x0503 (ecdsa_secp384r1_sha384) returns unsupported error
+   - Expected: err_msg contains `P-384`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: sig_scheme 0x0503 (ecdsa_secp384r1_sha384) returns unsupported error")
+# @req: REQ-SSPEC-LOCAL-001
+val msg = _test_msg()
+val dummy_sig: [u8] = [0x30u8, 0x06u8, 0x02u8, 0x01u8, 0x01u8, 0x02u8, 0x01u8, 0x01u8]
+val result = verify_certificate_verify_msg_scheme(_spki(), 0x0503u16, msg, dummy_sig)
+if val CertVerifyResult.Err(err_msg) = result:
+    expect(err_msg.contains("P-384")).to_equal(true)
+else:
+    fail("unsupported ECDSA P-384 signature scheme was accepted")
+```
+
+</details>
+
+#### sig_scheme 0x0603 (ecdsa_secp521r1_sha512) returns unsupported error
+
+- Verify: sig_scheme 0x0603 (ecdsa_secp521r1_sha512) returns unsupported error
+   - Expected: err_msg contains `P-521`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SSPEC-LOCAL-001
+step("Verify: sig_scheme 0x0603 (ecdsa_secp521r1_sha512) returns unsupported error")
+val msg = _test_msg()
+val dummy_sig: [u8] = [0x30u8, 0x06u8, 0x02u8, 0x01u8, 0x01u8, 0x02u8, 0x01u8, 0x01u8]
+val result = verify_certificate_verify_msg_scheme(_spki(), 0x0603u16, msg, dummy_sig)
+if val CertVerifyResult.Err(err_msg) = result:
+    expect(err_msg.contains("P-521")).to_equal(true)
+else:
+    fail("unsupported ECDSA P-521 signature scheme was accepted")
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 8 |
+| Active scenarios | 8 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `1bf4fdcbbc9752bfe2e611356dfe0d0733b427d8792931e59e4ed51e7ecd3d01`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `1bf4fdcbbc9752bfe2e611356dfe0d0733b427d8792931e59e4ed51e7ecd3d01`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `1bf4fdcbbc9752bfe2e611356dfe0d0733b427d8792931e59e4ed51e7ecd3d01`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/os/tls13/cert_verify_ecdsa_spec.spl
+mirror: doc/06_spec/01_unit/os/tls13/cert_verify_ecdsa_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/os/tls13/cert_verify_ecdsa_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/tls13/cert_verify_ecdsa_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, evidence, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/tls13/cert_verify_ecdsa_spec.spl:179:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fixed64_to_der produces a non-empty byte sequence' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/tls13/cert_verify_ecdsa_spec.spl:186:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'DER-encoded sig starts with SEQUENCE tag 0x30' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/tls13/cert_verify_ecdsa_spec.spl:193:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'DER-encoded sig verifies correctly with ecdsa_p256_verify_fixed after round-trip' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -67,9 +67,6 @@ impl UiAccessStore:
         store.init_schema()?
         Ok(store)
 
-    static fn open_existing(path: text) -> Result<UiAccessStore, DbError>:
-        Ok(UiAccessStore(db: Database.open_read_only(path)?))
-
     static fn memory() -> Result<UiAccessStore, DbError>:
         val db = Database.memory()?
         var store = UiAccessStore(db: db)
@@ -113,9 +110,6 @@ impl UiAccessStore:
             "child_ids_text TEXT NOT NULL," +
             "action_names_text TEXT NOT NULL)"
         )?
-        match self.db.exec_sql("ALTER TABLE ui_access_nodes ADD COLUMN props_text TEXT NOT NULL DEFAULT ''"):
-            Ok(_): pass_dn
-            Err(_): pass_dn
         self.db.exec_sql("CREATE INDEX IF NOT EXISTS idx_ui_access_events_surface_seq ON ui_access_events(surface_id, sequence)")?
         self.db.exec_sql("CREATE INDEX IF NOT EXISTS idx_ui_access_nodes_surface_kind ON ui_access_nodes(surface_id, kind)")?
         self.db.exec_sql("CREATE INDEX IF NOT EXISTS idx_ui_access_nodes_text ON ui_access_nodes(text_value)")?
@@ -132,9 +126,7 @@ impl UiAccessStore:
             DbValue.Text(value: event.payload)
         ]
         self.db.exec(sql, params)?
-        val inserted_id = self.db.last_insert_rowid()
-        self.db.exec("DELETE FROM ui_access_events WHERE id NOT IN (SELECT id FROM ui_access_events ORDER BY sequence DESC, id DESC LIMIT 64)", [])?
-        Ok(inserted_id)
+        Ok(self.db.last_insert_rowid())
 
     me persist_snapshot(snapshot: UiAccessSnapshot) -> Result<(), DbError>:
         var tx = self.db.begin()?
@@ -173,7 +165,7 @@ impl UiAccessStore:
         if surface_id != "":
             sql = "{sql} WHERE surface_id = ?"
             params = [DbValue.Text(value: surface_id)]
-        sql = "{sql} ORDER BY sequence DESC, id DESC LIMIT ?"
+        sql = "{sql} ORDER BY sequence DESC LIMIT ?"
         params = params.push(DbValue.Integer(value: limit))
         val rows = self.db.query(sql, params)?
         var events: [UiAccessEvent] = []
@@ -192,8 +184,7 @@ impl UiAccessStore:
         Ok(surfaces)
 
     fn query_nodes(surface_id: text, kind: text, text_query: text, limit: i64) -> Result<[UiAccessNode], DbError>:
-        val props_expr = self._node_props_select_expr()?
-        var sql = "SELECT canonical_id, surface_id, widget_id, kind, visible, focused, enabled, selected, text_value, {props_expr}, child_ids_text, action_names_text FROM ui_access_nodes WHERE 1 = 1"
+        var sql = "SELECT canonical_id, surface_id, widget_id, kind, visible, focused, enabled, selected, text_value, child_ids_text, action_names_text FROM ui_access_nodes WHERE 1 = 1"
         var params: [DbValue] = []
         if surface_id != "":
             sql = "{sql} AND surface_id = ?"
@@ -215,23 +206,6 @@ impl UiAccessStore:
             nodes = nodes.push(_decode_node_row(row)?)
         Ok(nodes)
 
-    fn _node_props_select_expr() -> Result<text, DbError>:
-        val rows = self.db.query("PRAGMA table_info(ui_access_nodes)", [])?
-        for row in rows:
-            if row.get_text("name") == "props_text":
-                return Ok("props_text")
-        Ok("'' AS props_text")
-
-    fn read_snapshot(limit: i64) -> Result<UiAccessSnapshot, DbError>:
-        val surfaces = self.list_surfaces()?
-        val nodes = self.query_nodes("", "", "", limit + 1)?
-        val events = self.list_events("", limit)?
-        var active_surface = ""
-        for surface in surfaces:
-            if surface.active: active_surface = surface.surface_id
-        val revision = if events.len() > 0: events[0].sequence else: 0
-        Ok(UiAccessSnapshot(protocol_version: 1, snapshot_revision: revision, mode: "persisted", active_surface: active_surface, surfaces: surfaces, nodes: nodes, recent_events: events))
-
     me _insert_surface(surface: UiAccessSurface) -> Result<i64, DbError>:
         val sql = "INSERT INTO ui_access_surfaces (surface_id, title, active, window_id, app_id, root_canonical_id) VALUES (?, ?, ?, ?, ?, ?)"
         val params: [DbValue] = [
@@ -246,7 +220,7 @@ impl UiAccessStore:
         Ok(1)
 
     me _insert_node(node: UiAccessNode) -> Result<i64, DbError>:
-        val sql = "INSERT INTO ui_access_nodes (canonical_id, surface_id, widget_id, kind, visible, focused, enabled, selected, text_value, props_text, child_ids_text, action_names_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        val sql = "INSERT INTO ui_access_nodes (canonical_id, surface_id, widget_id, kind, visible, focused, enabled, selected, text_value, child_ids_text, action_names_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         val params: [DbValue] = [
             DbValue.Text(value: node.canonical_id),
             DbValue.Text(value: node.surface_id),
@@ -257,7 +231,6 @@ impl UiAccessStore:
             DbValue.Integer(value: _bool_to_i64(node.enabled)),
             DbValue.Integer(value: _bool_to_i64(node.selected)),
             DbValue.Text(value: node.text_value),
-            DbValue.Text(value: _join_props(node.props)),
             DbValue.Text(value: _join_with_pipe(node.child_ids)),
             DbValue.Text(value: _join_with_pipe(node.action_names))
         ]
@@ -310,10 +283,9 @@ fn _decode_node_row(row: DbRow) -> Result<UiAccessNode, DbError>:
     val enabled = row.get_int("enabled")
     val selected = row.get_int("selected")
     val text_value = row.get_text("text_value")
-    val props_text = row.get_text("props_text")
     val child_ids_text = row.get_text("child_ids_text")
     val action_names_text = row.get_text("action_names_text")
-    if canonical_id == nil or surface_id == nil or widget_id == nil or kind == nil or visible == nil or focused == nil or enabled == nil or selected == nil or text_value == nil or props_text == nil or child_ids_text == nil or action_names_text == nil:
+    if canonical_id == nil or surface_id == nil or widget_id == nil or kind == nil or visible == nil or focused == nil or enabled == nil or selected == nil or text_value == nil or child_ids_text == nil or action_names_text == nil:
         return Err(DbError.TypeMismatch(column: "ui_access_nodes", expected: "complete node row", actual: "missing column"))
     Ok(UiAccessNode(
         canonical_id: canonical_id,
@@ -324,8 +296,8 @@ fn _decode_node_row(row: DbRow) -> Result<UiAccessNode, DbError>:
         focused: focused != 0,
         enabled: enabled != 0,
         selected: selected != 0,
-        text_value: text_value,
-        props: _split_props(props_text),
+        text: text_value,
+        props: [],
         child_ids: _split_pipe(child_ids_text),
         action_names: _split_pipe(action_names_text)
     ))
@@ -344,22 +316,6 @@ fn _join_with_pipe(items: [text]) -> text:
         sb.push(item)
         first = false
     return sb.to_text()
-
-fn _join_props(props: [UiAccessProp]) -> text:
-    var encoded: [text] = []
-    for prop in props:
-        encoded = encoded.push(base64_encode(prop.key) + ":" + base64_encode(prop.value))
-    _join_with_pipe(encoded)
-
-fn _split_props(value: text) -> [UiAccessProp]:
-    var props: [UiAccessProp] = []
-    if value == "":
-        return props
-    for entry in value.split("|"):
-        val pair = entry.split(":")
-        if pair.len() == 2:
-            props = props.push(UiAccessProp(key: base64_decode(pair[0]), value: base64_decode(pair[1])))
-    props
 
 fn _split_pipe(value: text) -> [text]:
     if value == "":

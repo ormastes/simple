@@ -1,0 +1,890 @@
+"""Fixed-worker Linux pgwire server with single-owner database execution.
+
+Each worker owns a SO_REUSEPORT listener and serves one connection at a time.
+Workers parse and encode pgwire independently, exchanging typed jobs only via
+`PgDispatchGate`. The caller thread is the sole `PgDatabaseOwner` executor.
+"""
+
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+use std.nogc_sync_mut.io.types.{IoError, IoErrorKind}
+use std.nogc_async_mut.io.{time_now_unix_micros}
+use std.concurrent.thread.{
+    ThreadHandle, thread_spawn_with_args, thread_sleep,
+    thread_available_parallelism
+}
+use std.concurrent.server_worker_policy.{server_worker_plan}
+use std.database.postgres_mimic.scalar_runtime_abi.{
+    PG_DB_ABI_TRUE, PG_DB_OP_ADMIT_CONNECTION, PG_DB_OP_BEGIN_DRAIN,
+    PG_DB_OP_MARK_STARTED, PG_DB_OP_MARK_COMPLETED,
+    PG_DB_OP_STARTED_COUNT, PG_DB_OP_COMPLETED_COUNT,
+    PG_DB_OP_ACTIVE_COUNT, PG_DB_OP_IS_DRAINING,
+    PG_DB_OP_MARK_STOPPED, PG_DB_OP_STOPPED_COUNT,
+    PG_DB_STATUS_OK, rt_pg_db_control_create, rt_pg_db_control_operation,
+    rt_pg_db_control_release, rt_pg_db_result_ok, rt_pg_db_result_status,
+    rt_pg_db_result_value, rt_pg_db_result_active_count,
+    rt_pg_db_result_draining, rt_pg_db_result_release,
+    rt_pg_wire_limits_scalar_new, rt_pg_wire_limits_scalar_get,
+    rt_pg_wire_limits_scalar_release,
+    rt_pg_wire_server_config_scalar_new,
+    rt_pg_wire_server_config_scalar_release
+}
+use std.database.postgres_mimic.connection.{PgWireSslPolicy}
+use std.database.postgres_mimic.frontend_dispatcher.{
+    PgFrontendAction, PgFrontendActionKind, PgWireFrontendDispatcher
+}
+use std.database.postgres_mimic.database_owner.{PgDatabaseOwner}
+use std.database.postgres_mimic.dispatch_gate.{PgDispatchGate}
+use std.database.postgres_mimic.linux_limits.{PgWireLinuxLimits}
+use std.database.postgres_mimic.scalar_dispatch_adapter.{
+    PgScalarFrontendAdapter, PgScalarFrontendResult, PgScalarDispatchOwner,
+    PgScalarDispatchPortV1
+}
+use std.database.postgres_mimic.scalar_frontend.{
+    PgScalarFrontendAction, PgScalarFrontendActionKind, PgWireScalarFrontend
+}
+use std.database.postgres_mimic.scalar_worker_config.{
+    PgScalarWorkerConfig, pg_scalar_worker_config_from_token
+}
+use std.database.postgres_mimic.dispatch_lifecycle.{
+    PgDispatchOperation, PgDispatchSubmitResult, PgDispatchTakeResult,
+    PgDispatchCompletion
+}
+use std.database.postgres_mimic.wire_encode.{
+    pgwire_encode_startup, pgwire_encode_query
+}
+
+extern fn rt_bytes_to_text(data: [u8]) -> text
+extern fn rt_string_data(value: text) -> i64
+extern fn rt_string_len(value: text) -> i64
+
+# Keep producer-side configuration at the exact bound accepted by the scalar
+# consumer.  The runtime record has a wider defensive allocation limit, but
+# accepting larger values here would create a descriptor the worker rejects.
+const PG_SCALAR_CONFIG_MAX_TEXT: i64 = 256
+const PG_DISPATCH_CANCEL_DRAIN_LIMIT: i64 = 64
+
+# Experimental opt-in scalar worker boundary. The default server remains on
+# its compatibility path until the vertical fixture is admitted broadly.
+class PgScalarParallelWorkerV1:
+    frontend: PgScalarFrontendAdapter
+
+    static fn create(port_token: i64, config_token: i64,
+            connection_id: i64) -> PgScalarParallelWorkerV1:
+        PgScalarParallelWorkerV1(frontend: PgScalarFrontendAdapter(
+            port_token: port_token, config_token: config_token,
+            connection_id: connection_id))
+
+    fn startup(user: text, database: text, application: text,
+            deadline: i64) -> i64:
+        self.frontend.publish_startup(user, database, application, deadline)
+    fn query(session: i64, sql: text, deadline: i64) -> i64:
+        self.frontend.publish_query(session, sql, deadline)
+    fn poll(request: i64) -> PgScalarFrontendResult?:
+        self.frontend.poll(request)
+    fn close(session: i64) -> i64: self.frontend.terminate(session)
+
+class PgScalarParallelOwnerV1:
+    scalar: PgScalarDispatchOwner
+
+    static fn create(port_token: i64) -> PgScalarParallelOwnerV1:
+        PgScalarParallelOwnerV1(
+            scalar: PgScalarDispatchOwner(port_token: port_token))
+
+    # The scalar port belongs to socket workers; the database owner is the
+    # only execution domain allowed to reconstruct text and touch its
+    # PgDispatchGate.  A claim is consumed on every result path, so the
+    # runtime queue cannot retain a stale request after an owner failure.
+    me pump_one(owner: PgDatabaseOwner, now_ms: i64,
+            timeout_ms: i64, max_response: i64) -> (bool, PgDatabaseOwner):
+        var current_owner = owner
+        val claim = self.scalar.claim_next()
+        if claim <= 0: return (false, current_owner)
+        val operation = self.scalar.claim_operation(claim)
+        val connection = self.scalar.claim_connection(claim)
+        val session = self.scalar.claim_session(claim)
+        val deadline = self.scalar.claim_deadline(claim)
+        if connection <= 0:
+            val _ = self.scalar.abort_claim(claim, 1)
+            return (false, current_owner)
+        # Cancellation revokes the request's publication lease even after its
+        # deadline.  Check it before the deadline branch so an expired cancel
+        # cannot leave a connection's queued work live.
+        if operation == 2:
+            # The gate is owner-held here.  Reclaim only this connection's
+            # queued jobs; executing/completed jobs remain for owner cleanup,
+            # and other connections' queued work is never discarded.
+            val _ = current_owner.dispatch.cancel_connection_and_remove(
+                connection, PG_DISPATCH_CANCEL_DRAIN_LIMIT)
+            val _ = self.scalar.abort_claim(claim, 1)
+            return (true, current_owner)
+        if timeout_ms <= 0 or max_response <= 0 or deadline <= now_ms:
+            val _ = self.scalar.abort_claim(claim, 1)
+            return (false, current_owner)
+        val remaining_timeout = deadline - now_ms
+        val submitted = if operation == 4:
+            current_owner.dispatch.submit_startup(connection,
+                rt_bytes_to_text(self.scalar.claim_text(claim, 0)),
+                rt_bytes_to_text(self.scalar.claim_text(claim, 1)),
+                rt_bytes_to_text(self.scalar.claim_text(claim, 2)),
+                now_ms, remaining_timeout)
+        elif operation == 1:
+            current_owner.dispatch.submit(connection, session, PgDispatchOperation.Query,
+                rt_bytes_to_text(self.scalar.claim_text(claim, 0)),
+                now_ms, remaining_timeout)
+        elif operation == 3:
+            current_owner.dispatch.submit(connection, session, PgDispatchOperation.Terminate,
+                "", now_ms, remaining_timeout)
+        else:
+            val _ = self.scalar.abort_claim(claim, 1)
+            return (false, current_owner)
+        val job_id = match submitted:
+            PgDispatchSubmitResult.Accepted(id): id
+            PgDispatchSubmitResult.Rejected:
+                val _ = self.scalar.abort_claim(claim, 1)
+                return (false, current_owner)
+        if current_owner.process_bounded(now_ms, 1) != 1:
+            val _ = current_owner.dispatch.take(job_id)
+            val _ = self.scalar.abort_claim(claim, 1)
+            return (false, current_owner)
+        match current_owner.dispatch.take(job_id):
+            PgDispatchTakeResult.Ready(done):
+                val encoded = if operation == 4:
+                    pgwire_encode_startup(done.responses, max_response)
+                else:
+                    if done.responses.len() != 1:
+                        val _ = self.scalar.abort_claim(claim, 1)
+                        return (false, current_owner)
+                    pgwire_encode_query(done.responses[0], max_response)
+                match encoded:
+                    Ok(bytes):
+                        val published = self.scalar.publish_encoded(claim, operation,
+                            done.session_id, done.close_connection, bytes)
+                        (published, current_owner)
+                    Err(_):
+                        val _ = self.scalar.abort_claim(claim, 1)
+                        (false, current_owner)
+            _:
+                val _ = self.scalar.abort_claim(claim, 1)
+                (false, current_owner)
+
+# Socket-worker preparation for the scalar vertical path. These helpers are
+# intentionally independent of the compatibility aggregate worker below.
+fn pg_scalar_ssl_policy_code(policy: PgWireSslPolicy) -> i64:
+    match policy:
+        PgWireSslPolicy.Disabled: 1
+        PgWireSslPolicy.Optional: 2
+        PgWireSslPolicy.Required: 3
+
+fn pg_scalar_config_admissible(policy: PgWireSslPolicy, user: text,
+        database: text) -> bool:
+    # This socket worker owns no TLS stream adapter.  Required therefore must
+    # fail before listener allocation, rather than accepting a port that can
+    # only serve plaintext.
+    if policy == PgWireSslPolicy.Required: return false
+    val user_length = rt_string_len(user)
+    val database_length = rt_string_len(database)
+    user_length > 0 and user_length <= PG_SCALAR_CONFIG_MAX_TEXT and
+        database_length > 0 and database_length <= PG_SCALAR_CONFIG_MAX_TEXT
+
+fn pg_scalar_register_worker_config(policy: PgWireSslPolicy, user: text,
+        database: text) -> i64:
+    if not pg_scalar_config_admissible(policy, user, database): return 0
+    rt_pg_wire_server_config_scalar_new(1, pg_scalar_ssl_policy_code(policy),
+        rt_string_data(user), rt_string_len(user),
+        rt_string_data(database), rt_string_len(database))
+
+class PgScalarSocketWorkerV1:
+    worker_id: i64
+    listener: TcpListener
+    limits: PgWireLinuxLimits
+    config: PgScalarWorkerConfig
+    control_owner_handle: i64
+    control_handle: i64
+    port_token: i64
+
+    me apply_actions(socket: TcpStream,
+            actions: [PgScalarFrontendAction]) -> bool:
+        for action in actions:
+            if action.kind == PgScalarFrontendActionKind.Write:
+                if socket.write_all(action.bytes).is_err(): return false
+            elif action.kind == PgScalarFrontendActionKind.Close:
+                return false
+        true
+
+    me serve_stream(stream: TcpStream, connection_id: i64):
+        var socket = stream
+        val poll_timeout_ms = if self.limits.read_timeout_ms < 25:
+            self.limits.read_timeout_ms
+        else:
+            25
+        if socket.set_read_timeout(poll_timeout_ms).is_err() or
+                socket.set_write_timeout(self.limits.write_timeout_ms).is_err():
+            val _ = socket.close()
+            return
+        val frontend_port = PgScalarFrontendAdapter(port_token: self.port_token,
+            config_token: 0, connection_id: connection_id)
+        var frontend = PgWireScalarFrontend.create(connection_id, frontend_port,
+            self.config.ssl_policy, self.limits.max_frame,
+            self.limits.max_parameters, self.limits.max_buffer)
+        var open = true
+        var idle_deadline = pg_parallel_now_ms() + self.limits.read_timeout_ms
+        while open and not pg_parallel_control_is_draining(
+                self.control_owner_handle, self.control_handle):
+            if pg_parallel_now_ms() >= idle_deadline:
+                open = false
+                continue
+            val pending = frontend.poll_port(self.config.allowed_user,
+                self.config.allowed_database, pg_parallel_now_ms(),
+                self.limits.read_timeout_ms)
+            open = self.apply_actions(socket, pending)
+            if not open: break
+            match socket.read(self.limits.read_chunk):
+                Err(_): ()
+                Ok(chunk):
+                    if chunk.len() == 0:
+                        open = false
+                    else:
+                        idle_deadline = pg_parallel_now_ms() + self.limits.read_timeout_ms
+                        var octets: [i64] = []
+                        for byte in chunk: octets.push(byte.to_i64())
+                        val actions = frontend.feed(octets,
+                            self.config.allowed_user,
+                            self.config.allowed_database,
+                            pg_parallel_now_ms(),
+                            self.limits.read_timeout_ms)
+                        open = self.apply_actions(socket, actions)
+        frontend.disconnect(pg_parallel_now_ms(), self.limits.write_timeout_ms)
+        val _ = socket.close()
+
+    me run() -> i64:
+        val _ = pg_parallel_control_scalar(self.control_owner_handle,
+            self.control_handle, PG_DB_OP_MARK_STARTED, 0)
+        while not pg_parallel_control_is_draining(self.control_owner_handle,
+                self.control_handle):
+            match self.listener.accept_timeout(25):
+                Err(_): ()
+                Ok(stream):
+                    val admitted_id = pg_parallel_control_scalar(
+                        self.control_owner_handle, self.control_handle,
+                        PG_DB_OP_ADMIT_CONNECTION, 0)
+                    if admitted_id <= 0:
+                        var rejected = stream
+                        val _ = rejected.close()
+                    else:
+                        val connection_id = self.worker_id * 1000000000 +
+                            admitted_id
+                        self.serve_stream(stream, connection_id)
+                        val _ = pg_parallel_control_scalar(
+                            self.control_owner_handle, self.control_handle,
+                            PG_DB_OP_MARK_COMPLETED, 0)
+        val _ = self.listener.close()
+        val _ = pg_parallel_control_scalar(self.control_owner_handle,
+            self.control_handle, PG_DB_OP_MARK_STOPPED, 0)
+        0
+
+fn pg_scalar_limits_from_token(limits_id: i64) -> PgWireLinuxLimits?:
+    val max_sessions = rt_pg_wire_limits_scalar_get(1, limits_id, 0)
+    val read_chunk = rt_pg_wire_limits_scalar_get(1, limits_id, 1)
+    val max_frame = rt_pg_wire_limits_scalar_get(1, limits_id, 2)
+    val max_parameters = rt_pg_wire_limits_scalar_get(1, limits_id, 3)
+    val max_buffer = rt_pg_wire_limits_scalar_get(1, limits_id, 4)
+    val max_response = rt_pg_wire_limits_scalar_get(1, limits_id, 5)
+    val read_timeout_ms = rt_pg_wire_limits_scalar_get(1, limits_id, 6)
+    val write_timeout_ms = rt_pg_wire_limits_scalar_get(1, limits_id, 7)
+    if max_sessions <= 0 or read_chunk <= 0 or max_frame < 8 or
+            max_parameters <= 0 or max_buffer < max_frame or
+            max_response < 64 or read_timeout_ms <= 0 or
+            write_timeout_ms <= 0:
+        return nil
+    Some(PgWireLinuxLimits(max_sessions: max_sessions,
+        read_chunk: read_chunk, max_frame: max_frame,
+        max_parameters: max_parameters, max_buffer: max_buffer,
+        max_response: max_response, read_timeout_ms: read_timeout_ms,
+        write_timeout_ms: write_timeout_ms))
+
+fn pg_scalar_register_descriptor(worker_id: i64, listener_fd: i64,
+        control_id: i64, port_token: i64, limits: PgWireLinuxLimits,
+        policy: PgWireSslPolicy, user: text, database: text) -> i64:
+    if worker_id < 0 or listener_fd < 0 or control_id <= 0 or port_token <= 0:
+        return 0
+    val limits_id = rt_pg_wire_limits_scalar_new(1, limits.max_sessions,
+        limits.read_chunk, limits.max_frame, limits.max_parameters,
+        limits.max_buffer, limits.max_response, limits.read_timeout_ms,
+        limits.write_timeout_ms)
+    if limits_id <= 0: return 0
+    val config_id = pg_scalar_register_worker_config(policy, user, database)
+    if config_id <= 0:
+        val _ = rt_pg_wire_limits_scalar_release(1, limits_id)
+        return 0
+    val descriptor = rt_pg_worker_descriptor_new(worker_id, listener_fd,
+        control_id, port_token, limits_id, config_id)
+    if descriptor <= 0:
+        val _ = rt_pg_wire_limits_scalar_release(1, limits_id)
+        val _ = rt_pg_wire_server_config_scalar_release(1, config_id)
+    descriptor
+
+fn pg_scalar_release_descriptor(descriptor: i64) -> bool:
+    if descriptor <= 0: return false
+    val limits_id = rt_pg_worker_descriptor_get(descriptor, 4)
+    val config_id = rt_pg_worker_descriptor_get(descriptor, 5)
+    if limits_id <= 0 or config_id <= 0: return false
+    if rt_pg_worker_descriptor_release(descriptor) != 1: return false
+    val limits_released = rt_pg_wire_limits_scalar_release(1, limits_id)
+    val config_released = rt_pg_wire_server_config_scalar_release(1, config_id)
+    limits_released == 1 and config_released == 1
+
+fn pg_scalar_socket_worker_from_descriptor(
+        descriptor: i64) -> PgScalarSocketWorkerV1?:
+    val worker_id = rt_pg_worker_descriptor_get(descriptor, 0)
+    val listener_fd = rt_pg_worker_descriptor_get(descriptor, 1)
+    val control_id = rt_pg_worker_descriptor_get(descriptor, 2)
+    val port_token = rt_pg_worker_descriptor_get(descriptor, 3)
+    val limits_id = rt_pg_worker_descriptor_get(descriptor, 4)
+    val config_id = rt_pg_worker_descriptor_get(descriptor, 5)
+    if worker_id < 0 or listener_fd < 0 or control_id <= 0 or
+            port_token <= 0 or limits_id <= 0 or config_id <= 0:
+        return nil
+    val limits = pg_scalar_limits_from_token(limits_id)?
+    val config = pg_scalar_worker_config_from_token(config_id)?
+    Some(PgScalarSocketWorkerV1(worker_id: worker_id,
+        listener: TcpListener(fd: listener_fd, open: true), limits: limits,
+        config: config, control_owner_handle: 1, control_handle: control_id,
+        port_token: port_token))
+
+fn pg_scalar_socket_worker_entry(token: i64, _ignored: i64) -> i64:
+    if val worker = pg_scalar_socket_worker_from_descriptor(token):
+        var current = worker
+        return current.run()
+    val listener_fd = rt_pg_worker_descriptor_get(token, 1)
+    if listener_fd >= 0:
+        var listener = TcpListener(fd: listener_fd, open: true)
+        val _ = listener.close()
+    -1
+
+fn pg_scalar_spawn_slot(descriptor: i64) -> ThreadHandle:
+    # The runtime calls a closure record before its two payload values.  Keep
+    # this wrapper noncapturing and forward only the explicit scalar args.
+    thread_spawn_with_args(descriptor, 0,
+        \token, ignored: pg_scalar_socket_worker_entry(token, ignored))
+
+fn pg_scalar_unregister(slots: [i64]):
+    for slot in slots:
+        val _ = pg_scalar_release_descriptor(slot)
+
+fn pg_parallel_now_ms() -> i64: time_now_unix_micros() / 1000
+
+class PgParallelControl:
+    # Only these scalar handles are copied into a worker. The mutable control
+    # record and every result snapshot remain in the runtime owner registry.
+    owner_handle: i64
+    control_handle: i64
+
+    static fn create(max_connections: i64) -> PgParallelControl:
+        # The server process is the owner namespace; the control handle is
+        # generation checked by the runtime. A positive stable owner token is
+        # sufficient because control handles are independently generation
+        # checked and never exposed as language values.
+        val owner_handle = 1
+        val control_handle = rt_pg_db_control_create(owner_handle,
+            max_connections)
+        PgParallelControl(owner_handle: owner_handle,
+            control_handle: control_handle)
+
+    fn operation(operation: i64, argument: i64 = 0) -> i64:
+        pg_parallel_control_scalar(self.owner_handle, self.control_handle,
+            operation, argument)
+
+    me release() -> bool:
+        if self.control_handle <= 0: return false
+        val released = rt_pg_db_control_release(self.owner_handle,
+            self.control_handle) == PG_DB_ABI_TRUE
+        if released:
+            self.control_handle = 0
+        released
+
+    me mark_worker_started():
+        val _ = self.operation(PG_DB_OP_MARK_STARTED)
+
+    me started_count() -> i64:
+        self.operation(PG_DB_OP_STARTED_COUNT)
+
+    me can_accept() -> bool:
+        self.operation(PG_DB_OP_IS_DRAINING) == 0
+
+    me admit() -> i64:
+        self.operation(PG_DB_OP_ADMIT_CONNECTION)
+
+    me finish():
+        val _ = self.operation(PG_DB_OP_MARK_COMPLETED)
+
+    me begin_drain():
+        val _ = self.operation(PG_DB_OP_BEGIN_DRAIN)
+
+    me is_draining() -> bool:
+        self.operation(PG_DB_OP_IS_DRAINING) != 0
+
+    me is_complete() -> bool:
+        pg_parallel_control_is_complete(self.owner_handle,
+            self.control_handle)
+
+    me completed_count() -> i64:
+        self.operation(PG_DB_OP_COMPLETED_COUNT)
+
+    me active_count() -> i64:
+        self.operation(PG_DB_OP_ACTIVE_COUNT)
+
+    me stopped_count() -> i64:
+        self.operation(PG_DB_OP_STOPPED_COUNT)
+
+fn pg_parallel_control_scalar(owner_handle: i64, control_handle: i64,
+        operation: i64, argument: i64) -> i64:
+    if owner_handle <= 0 or control_handle <= 0: return 0
+    val cursor = rt_pg_db_control_operation(owner_handle, control_handle,
+        operation, argument)
+    if cursor <= 0: return 0
+    # A result cursor is a scoped loan: read its status/value before releasing
+    # it. No cursor is retained in a worker or in the parent control object.
+    val ok = rt_pg_db_result_ok(owner_handle, cursor)
+    val status = rt_pg_db_result_status(owner_handle, cursor)
+    val value = rt_pg_db_result_value(owner_handle, cursor)
+    val _ = rt_pg_db_result_release(owner_handle, cursor)
+    if ok == PG_DB_ABI_TRUE and status == PG_DB_STATUS_OK: value else: 0
+
+fn pg_parallel_control_is_draining(owner_handle: i64,
+        control_handle: i64) -> bool:
+    pg_parallel_control_scalar(owner_handle, control_handle,
+        PG_DB_OP_IS_DRAINING, 0) != 0
+
+fn pg_parallel_control_is_complete(owner_handle: i64,
+        control_handle: i64) -> bool:
+    if owner_handle <= 0 or control_handle <= 0: return false
+    val cursor = rt_pg_db_control_operation(owner_handle, control_handle,
+        PG_DB_OP_IS_DRAINING, 0)
+    if cursor <= 0: return false
+    val ok = rt_pg_db_result_ok(owner_handle, cursor)
+    val status = rt_pg_db_result_status(owner_handle, cursor)
+    val draining = rt_pg_db_result_draining(owner_handle, cursor)
+    val active = rt_pg_db_result_active_count(owner_handle, cursor)
+    val _ = rt_pg_db_result_release(owner_handle, cursor)
+    ok == PG_DB_ABI_TRUE and status == PG_DB_STATUS_OK and
+        draining != 0 and active == 0
+
+extern fn rt_pg_worker_descriptor_new(worker_id: i64, listener_fd: i64,
+    control_id: i64, port_token: i64, limits_id: i64, config_id: i64) -> i64
+extern fn rt_pg_worker_descriptor_get(token: i64, field: i64) -> i64
+extern fn rt_pg_worker_descriptor_release(token: i64) -> i64
+
+class PgParallelWorker:
+    worker_id: i64
+    listener: TcpListener
+    limits: PgWireLinuxLimits
+    ssl_policy: PgWireSslPolicy
+    allowed_user: text
+    allowed_database: text
+    # Worker control state is scalar only. It never receives the parent class,
+    # mutex, atomic, or a result cursor.
+    control_owner_handle: i64
+    control_handle: i64
+    dispatch: PgDispatchGate
+
+    me apply_actions(socket: TcpStream, actions: [PgFrontendAction]) -> bool:
+        for action in actions:
+            if action.kind == PgFrontendActionKind.Write:
+                if socket.write_all(action.bytes).is_err(): return false
+            elif action.kind == PgFrontendActionKind.Close:
+                return false
+        true
+
+    me await_owner(socket: TcpStream,
+            frontend: PgWireFrontendDispatcher) -> (bool, PgWireFrontendDispatcher):
+        # Dispatchers have value semantics. Return the mutated state so the
+        # connection keeps the established session and any deferred command.
+        var current_frontend = frontend
+        while current_frontend.pending_job_id > 0 and
+                not pg_parallel_control_is_draining(
+                    self.control_owner_handle, self.control_handle):
+            val actions = current_frontend.poll_owner(
+                self.allowed_user, self.allowed_database,
+                pg_parallel_now_ms(), self.limits.read_timeout_ms,
+                self.limits.max_response)
+            if not self.apply_actions(socket, actions):
+                return (false, current_frontend)
+            if current_frontend.pending_job_id > 0: thread_sleep(1)
+        (not current_frontend.closed, current_frontend)
+
+    me await_owner_inline(socket: TcpStream, frontend: PgWireFrontendDispatcher,
+            owner: PgDatabaseOwner) -> (bool, PgWireFrontendDispatcher, PgDatabaseOwner):
+        # Both owner and frontend are value-semantic state machines; neither
+        # updated value may be discarded at this call boundary.
+        var current_frontend = frontend
+        var inline_owner = owner
+        while current_frontend.pending_job_id > 0 and
+                not pg_parallel_control_is_draining(
+                    self.control_owner_handle, self.control_handle):
+            val completed = inline_owner.process_bounded(pg_parallel_now_ms(), 1)
+            val actions = current_frontend.poll_owner(
+                self.allowed_user, self.allowed_database,
+                pg_parallel_now_ms(), self.limits.read_timeout_ms,
+                self.limits.max_response)
+            if not self.apply_actions(socket, actions):
+                return (false, current_frontend, inline_owner)
+            if current_frontend.pending_job_id > 0 and completed == 0:
+                thread_sleep(1)
+        (not current_frontend.closed, current_frontend, inline_owner)
+
+    me serve_stream(stream: TcpStream, connection_id: i64):
+        var socket = stream
+        if socket.set_read_timeout(self.limits.read_timeout_ms).is_err():
+            val _ = socket.close()
+            return
+        if socket.set_write_timeout(self.limits.write_timeout_ms).is_err():
+            val _ = socket.close()
+            return
+        val effective_policy = if self.ssl_policy == PgWireSslPolicy.Optional:
+            PgWireSslPolicy.Disabled
+        else: self.ssl_policy
+        var frontend = PgWireFrontendDispatcher.create(connection_id,
+            self.dispatch, effective_policy,
+            self.limits.max_frame, self.limits.max_parameters,
+            self.limits.max_buffer)
+        var open = true
+        while open and not pg_parallel_control_is_draining(
+                self.control_owner_handle, self.control_handle):
+            match socket.read(self.limits.read_chunk):
+                Err(_): open = false
+                Ok(chunk):
+                    if chunk.len() == 0:
+                        open = false
+                    else:
+                        var octets: [i64] = []
+                        for byte in chunk: octets.push(byte.to_i64())
+                        val actions = frontend.feed(octets,
+                            self.allowed_user, self.allowed_database,
+                            pg_parallel_now_ms(), self.limits.read_timeout_ms)
+                        open = self.apply_actions(socket, actions)
+                        if open and frontend.pending_job_id > 0:
+                            val owner_result = self.await_owner(socket, frontend)
+                            open = owner_result.0
+                            frontend = owner_result.1
+        frontend.disconnect(pg_parallel_now_ms(), self.limits.write_timeout_ms)
+        val _ = socket.close()
+
+    me serve_stream_inline(stream: TcpStream, connection_id: i64,
+            owner: PgDatabaseOwner) -> PgDatabaseOwner:
+        var inline_owner = owner
+        var socket = stream
+        if socket.set_read_timeout(self.limits.read_timeout_ms).is_err():
+            val _ = socket.close()
+            return inline_owner
+        if socket.set_write_timeout(self.limits.write_timeout_ms).is_err():
+            val _ = socket.close()
+            return inline_owner
+        val effective_policy = if self.ssl_policy == PgWireSslPolicy.Optional:
+            PgWireSslPolicy.Disabled
+        else: self.ssl_policy
+        var frontend = PgWireFrontendDispatcher.create(connection_id,
+            self.dispatch, effective_policy,
+            self.limits.max_frame, self.limits.max_parameters,
+            self.limits.max_buffer)
+        var open = true
+        while open and not pg_parallel_control_is_draining(
+                self.control_owner_handle, self.control_handle):
+            match socket.read(self.limits.read_chunk):
+                Err(_): open = false
+                Ok(chunk):
+                    if chunk.len() == 0:
+                        open = false
+                    else:
+                        var octets: [i64] = []
+                        for byte in chunk: octets.push(byte.to_i64())
+                        val actions = frontend.feed(octets,
+                            self.allowed_user, self.allowed_database,
+                            pg_parallel_now_ms(), self.limits.read_timeout_ms)
+                        open = self.apply_actions(socket, actions)
+                        if open and frontend.pending_job_id > 0:
+                            val inline_result = self.await_owner_inline(
+                                socket, frontend, inline_owner)
+                            open = inline_result.0
+                            frontend = inline_result.1
+                            inline_owner = inline_result.2
+        frontend.disconnect(pg_parallel_now_ms(), self.limits.write_timeout_ms)
+        while self.dispatch.active_count() > 0:
+            if inline_owner.process_bounded(pg_parallel_now_ms(), 1) == 0:
+                break
+        val _ = socket.close()
+        inline_owner
+
+    me run() -> i64:
+        val _ = pg_parallel_control_scalar(self.control_owner_handle,
+            self.control_handle, PG_DB_OP_MARK_STARTED, 0)
+        while pg_parallel_control_is_draining(self.control_owner_handle,
+                self.control_handle) == false:
+            match self.listener.accept_timeout(50):
+                Err(_): ()
+                Ok(stream):
+                    val admitted_id = pg_parallel_control_scalar(
+                        self.control_owner_handle, self.control_handle,
+                        PG_DB_OP_ADMIT_CONNECTION, 0)
+                    if admitted_id <= 0:
+                        var rejected = stream
+                        val _ = rejected.close()
+                    else:
+                        val connection_id = self.worker_id * 1000000000 +
+                            admitted_id
+                        self.serve_stream(stream, connection_id)
+                        val _ = pg_parallel_control_scalar(
+                            self.control_owner_handle, self.control_handle,
+                            PG_DB_OP_MARK_COMPLETED, 0)
+        val _ = self.listener.close()
+        0
+
+    me run_inline(owner: PgDatabaseOwner) -> (i64, PgDatabaseOwner):
+        var inline_owner = owner
+        val _ = pg_parallel_control_scalar(self.control_owner_handle,
+            self.control_handle, PG_DB_OP_MARK_STARTED, 0)
+        while pg_parallel_control_is_draining(self.control_owner_handle,
+                self.control_handle) == false:
+            match self.listener.accept_timeout(50):
+                Err(_): ()
+                Ok(stream):
+                    val admitted_id = pg_parallel_control_scalar(
+                        self.control_owner_handle, self.control_handle,
+                        PG_DB_OP_ADMIT_CONNECTION, 0)
+                    if admitted_id <= 0:
+                        var rejected = stream
+                        val _ = rejected.close()
+                    else:
+                        inline_owner = self.serve_stream_inline(
+                            stream, admitted_id, inline_owner)
+                        val _ = pg_parallel_control_scalar(
+                            self.control_owner_handle, self.control_handle,
+                            PG_DB_OP_MARK_COMPLETED, 0)
+        val _ = self.listener.close()
+        (pg_parallel_control_scalar(self.control_owner_handle,
+            self.control_handle, PG_DB_OP_COMPLETED_COUNT, 0), inline_owner)
+
+fn pg_scalar_close_unspawned(slots: [i64], spawned_count: i64):
+    # The runtime-owned scalar descriptor exposes the listener only as an fd.
+    # Never close a descriptor whose worker started: it owns close-after-drain,
+    # and a duplicate close could target a reused fd.  This path only closes
+    # descriptors that were never handed to a child.
+    var index = spawned_count
+    while index < slots.len():
+        val slot = slots[index]
+        val listener_fd = rt_pg_worker_descriptor_get(slot, 1)
+        if listener_fd >= 0:
+            var listener = TcpListener(fd: listener_fd, open: true)
+            val _ = listener.close()
+        index = index + 1
+
+class PgServeBoundary:
+    status_code: i64
+    completed: i64
+    error_text: text
+
+    static fn create() -> PgServeBoundary:
+        PgServeBoundary(status_code: 0, completed: 0, error_text: "")
+
+    me record_success(completed: i64) -> i64:
+        self.status_code = 0
+        self.completed = completed
+        self.error_text = ""
+        self.status_code
+
+    me record_failure(code: i64, message: text) -> i64:
+        self.status_code = if code > 0: code else: 1
+        self.completed = 0
+        self.error_text = message
+        self.status_code
+
+class PgWireParallelLinuxServer:
+    address: text
+    owner: PgDatabaseOwner
+    limits: PgWireLinuxLimits
+    ssl_policy: PgWireSslPolicy
+    allowed_user: text
+    allowed_database: text
+    worker_count: i64
+    # Keep Result<i64, IoError> payloads inside this module. Native callers of
+    # the server entrypoint consume only scalar status/count values and text;
+    # they never decode an imported enum/aggregate layout.
+    serve_boundary: PgServeBoundary
+
+    me record_serve_result(result: Result<i64, IoError>) -> i64:
+        match result:
+            Ok(completed):
+                self.serve_boundary.record_success(completed)
+            Err(error):
+                self.serve_boundary.record_failure(1, error.to_string())
+
+    me serve_inline_bounded_status(max_connections: i64) -> i64:
+        self.record_serve_result(self.serve_inline_bounded(max_connections))
+
+    me serve_bounded_status(max_connections: i64) -> i64:
+        self.record_serve_result(self.serve_bounded(max_connections))
+
+    me serve_scalar_parallel_bounded_status(max_connections: i64) -> i64:
+        self.record_serve_result(self.serve_scalar_parallel_bounded(
+            max_connections))
+
+    fn serve_error_text() -> text:
+        self.serve_boundary.error_text
+
+    fn serve_completed_count() -> i64:
+        self.serve_boundary.completed
+
+    me serve_inline_bounded(max_connections: i64) -> Result<i64, IoError>:
+        val listener = TcpListener.bind(self.address)?
+        var control = PgParallelControl.create(max_connections)
+        if control.control_handle <= 0:
+            val _ = listener.close()
+            return Err(IoError(kind: IoErrorKind.Other,
+                message: "parallel pgwire scalar control allocation failed",
+                source: nil))
+        var worker = PgParallelWorker(worker_id: 0, listener: listener,
+            limits: self.limits, ssl_policy: self.ssl_policy,
+            allowed_user: self.allowed_user,
+            allowed_database: self.allowed_database,
+            control_owner_handle: control.owner_handle,
+            control_handle: control.control_handle,
+            dispatch: self.owner.dispatch)
+        val result = worker.run_inline(self.owner)
+        self.owner = result.1
+        val _ = control.release()
+        Ok(result.0)
+
+    me serve_bounded(max_connections: i64) -> Result<i64, IoError>:
+        if max_connections <= 0 or self.worker_count <= 0:
+            return Err(IoError(kind: IoErrorKind.InvalidInput,
+                message: "parallel pgwire bounds must be positive", source: nil))
+        # The former multi-threaded path transported ``PgDispatchGate`` and
+        # server configuration aggregates through extern registries.  That
+        # violates the native one-word boundary and has produced invalid
+        # receiver crashes.  Keep production behavior functional and honest:
+        # the caller owns parsing, dispatch, database mutation, and listener
+        # until the separate scalar port/descriptor vertical slice is wired
+        # end-to-end and has native evidence.
+        self.serve_inline_bounded(max_connections)
+
+    # Explicit experimental admission path for the scalar-only worker
+    # boundary.  It is intentionally separate from ``serve_bounded`` until a
+    # native run proves descriptor creation, thread handoff, pgwire exchange,
+    # and teardown together.  Parent ownership is preserved throughout:
+    # socket workers only publish scalar requests, while this method pumps the
+    # sole PgDatabaseOwner and commits completions.
+    me serve_scalar_parallel_bounded(max_connections: i64) -> Result<i64, IoError>:
+        if max_connections <= 0 or self.worker_count <= 0:
+            return Err(IoError(kind: IoErrorKind.InvalidInput,
+                message: "parallel pgwire bounds must be positive", source: nil))
+        if not pg_scalar_config_admissible(self.ssl_policy,
+                self.allowed_user, self.allowed_database):
+            return Err(IoError(kind: IoErrorKind.InvalidInput,
+                message: "parallel pgwire scalar workers require bounded plaintext configuration",
+                source: nil))
+        val plan = server_worker_plan(self.worker_count,
+            thread_available_parallelism())
+        if plan.spawn_count == 0:
+            return self.serve_inline_bounded(max_connections)
+        var control = PgParallelControl.create(max_connections)
+        if control.control_handle <= 0:
+            return Err(IoError(kind: IoErrorKind.Other,
+                message: "parallel pgwire scalar control allocation failed", source: nil))
+        val port = match PgScalarDispatchPortV1.create():
+            Some(value): value
+            nil:
+                val _ = control.release()
+                return Err(IoError(kind: IoErrorKind.Other,
+                    message: "parallel pgwire scalar port allocation failed", source: nil))
+        var scalar_port = port
+        var handles: [ThreadHandle] = []
+        var slots: [i64] = []
+        var worker_id = 0
+        while worker_id < self.worker_count:
+            val listener = match TcpListener.bind_reuseport(self.address):
+                Ok(value): value
+                Err(error):
+                    control.begin_drain()
+                    pg_scalar_close_unspawned(slots, 0)
+                    pg_scalar_unregister(slots)
+                    val _ = scalar_port.release()
+                    val _ = control.release()
+                    return Err(error)
+            val descriptor = pg_scalar_register_descriptor(worker_id,
+                listener.fd, control.control_handle, scalar_port.port_token,
+                self.limits, self.ssl_policy, self.allowed_user,
+                self.allowed_database)
+            if descriptor <= 0:
+                control.begin_drain()
+                val _ = listener.close()
+                pg_scalar_close_unspawned(slots, 0)
+                pg_scalar_unregister(slots)
+                val _ = scalar_port.release()
+                val _ = control.release()
+                return Err(IoError(kind: IoErrorKind.Other,
+                    message: "parallel pgwire scalar descriptor allocation failed",
+                    source: nil))
+            slots.push(descriptor)
+            worker_id = worker_id + 1
+        var spawn_index = 0
+        while spawn_index < slots.len():
+            val handle = pg_scalar_spawn_slot(slots[spawn_index])
+            if handle.handle <= 0:
+                control.begin_drain()
+                pg_scalar_close_unspawned(slots, handles.len())
+                for started in handles: started.join()
+                pg_scalar_unregister(slots)
+                val _ = scalar_port.release()
+                val _ = control.release()
+                return Err(IoError(kind: IoErrorKind.Other,
+                    message: "parallel pgwire scalar worker spawn failed", source: nil))
+            handles.push(handle)
+            spawn_index = spawn_index + 1
+        val startup_deadline = pg_parallel_now_ms() + 5000
+        while control.started_count() < self.worker_count and
+                pg_parallel_now_ms() < startup_deadline:
+            thread_sleep(1)
+        if control.started_count() != self.worker_count:
+            control.begin_drain()
+            for handle in handles: handle.join()
+            pg_scalar_unregister(slots)
+            val _ = scalar_port.release()
+            val _ = control.release()
+            return Err(IoError(kind: IoErrorKind.TimedOut,
+                message: "parallel pgwire scalar workers did not reach ready state",
+                source: nil))
+        var owner_pump = PgScalarParallelOwnerV1.create(scalar_port.port_token)
+        # The parent owns the bounded shutdown decision.  ``is_complete``
+        # requires draining, so using it as the pre-drain loop condition would
+        # deadlock before workers can observe the drain request.
+        var drain_started = false
+        var idle_deadline = pg_parallel_now_ms() + self.limits.read_timeout_ms
+        while not drain_started or control.stopped_count() < self.worker_count:
+            if not drain_started:
+                val now_ms = pg_parallel_now_ms()
+                val pumped = owner_pump.pump_one(self.owner, now_ms,
+                    self.limits.read_timeout_ms, self.limits.max_response)
+                self.owner = pumped.1
+                if pumped.0:
+                    idle_deadline = now_ms + self.limits.read_timeout_ms
+                elif owner_pump.scalar.pending_count() == 0 and
+                        control.active_count() == 0 and now_ms >= idle_deadline:
+                    control.begin_drain()
+                    drain_started = true
+                else:
+                    thread_sleep(1)
+            else:
+                thread_sleep(1)
+        for handle in handles: handle.join()
+        pg_scalar_unregister(slots)
+        val completed = control.completed_count()
+        val _ = scalar_port.release()
+        val _ = control.release()
+        Ok(completed)
+
+fn pg_parallel_default_workers() -> i64:
+    val count = thread_available_parallelism()
+    if count > 0: count else: 1
+
+export PgScalarParallelOwnerV1, PgScalarSocketWorkerV1
+export PgParallelControl, PgParallelWorker, PgServeBoundary, PgWireParallelLinuxServer
+export pg_parallel_default_workers

@@ -32,27 +32,14 @@
 #
 # Interpreter landmine (verified in-session): Dict.get() returns the raw
 # value or nil, NOT a Some(..)-tagged Option — `if val Some(x) = d.get(k):`
-# silently never matches. Use `?? default` / `!= nil` instead.
-#
-# Dict writes: use `d[k] = v`, NOT `.set(k, v)`.
-# A previous version of this comment claimed the opposite — that subscript-assign
-# on a module-global dict from another function does not work. That was RETRACTED
-# on 2026-07-31: all 7 `.set()` sites here were converted to subscript-assign and
-# diag_spec.spl stays 14/14. The claim was also actively harmful, because builtin
-# `.set()` silently DROPS the insert under native codegen (the key reads back
-# absent, with no error) — see doc/07_guide/language/dict_native_pitfalls.md.
-# Following the old advice would have made every counter, timer and deadline in
-# this module silently dead in native builds while passing every interpreter test.
-#
-# The conversion is MEASURED under the interpreter only, via a sentinel probe:
-# mis-keying one write took the spec to 13/14 with `counter bytes_sent = 0`,
-# proving the spec really covers these writes and that the green is not vacuous.
-# Native codegen remains UNVERIFIED here until the pending bootstrap redeploy.
+# silently never matches. Use `?? default` / `!= nil` instead. Same for
+# subscript-assign on module-global dicts from another function: use
+# `.set(k, v)`, not `d[k] = v`.
 
-use std.io_runtime.{env_get}
+extern fn rt_env_get(key: text) -> text
 extern fn rt_stderr_write(s: text)
-use std.io_runtime.{file_append_text}
-use std.io_runtime.{time_now_monotonic_ms}
+extern fn rt_file_append_text(path: text, content: text) -> bool
+extern fn rt_time_now_monotonic_ms() -> i64
 
 use lib.log.{log_dispatch_text, subsys_from_scope, LOG_INFO, LOG_WARN}
 use std.failsafe.timeout.{Deadline}
@@ -68,14 +55,13 @@ var _g_facet_stage: bool = false
 var _g_facet_watchdog: bool = false
 var _g_facet_timers: bool = false
 var _g_facet_events: bool = false
-var _g_diag_file: text = ""
 
 fn _read_env_once():
     if _g_env_read:
         return
     _g_env_read = true
-    _g_diag_file = env_get("SIMPLE_DIAG_FILE") ?? ""
-    val raw = env_get("SIMPLE_DIAG") ?? ""
+    _g_diag_file = rt_env_get("SIMPLE_DIAG_FILE") ?? ""
+    val raw = rt_env_get("SIMPLE_DIAG") ?? ""
     if raw == "":
         return
     for part in raw.split(","):
@@ -137,10 +123,9 @@ fn dbg_reset_facets():
 var _g_last_emit: text = ""
 
 fn _emit(level: i64, line: text):
-    _read_env_once()
     rt_stderr_write(line + "\n")
     if _g_diag_file != "":
-        file_append_text(_g_diag_file, line + "\n")
+        rt_file_append_text(_g_diag_file, line + "\n")
     _g_last_emit = line
     log_dispatch_text(level, subsys_from_scope("diag"), line)
 
@@ -164,13 +149,13 @@ fn dbg_stage(component: text, stage: text):
     _read_env_once()
     if not _g_facet_stage and not _g_facet_watchdog:
         return
-    val now = time_now_monotonic_ms()
+    val now = rt_time_now_monotonic_ms()
     # NOTE: contains_key + index read, not `.get() ?? now` — under native codegen
     # a Dict<_, i64> miss decodes to 0 rather than nil, so `??` never fired and
     # the first stage of every component reported a delta of the whole uptime.
     val last = if _g_stage_last_ms.contains_key(component): _g_stage_last_ms[component] else: now
     val delta = now - last
-    _g_stage_last_ms[component] = now
+    _g_stage_last_ms.set(component, now)
 
     _g_stage_ring.push(StageEntry(component: component, stage: stage, t_ms: now))
     if _g_stage_ring.len() > _RING_CAP:
@@ -223,7 +208,7 @@ fn dbg_deadline(label: text, budget_ms: i64):
     if not dbg_watchdog_on():
         return
     _g_deadline_budget[label] = Deadline.new(budget_ms)
-    _g_deadline_armed_at[label] = time_now_monotonic_ms()
+    _g_deadline_armed_at[label] = rt_time_now_monotonic_ms()
     if not _g_deadline_labels.contains(label):
         _g_deadline_labels.push(label)
 
@@ -255,10 +240,8 @@ fn _breach(label: text, budget_ms: i64, elapsed_ms: i64):
 fn dbg_deadline_check(label: text) -> bool:
     if not dbg_watchdog_on():
         return false
-    # NOTE: contains_key + index read, not `.get() == nil` — under native codegen
-    # a Dict<_, i64> miss decodes to 0, not nil, so an un-armed label fell
-    # through with armed=0 and breached instantly against the monotonic clock.
-    if not _g_deadline_armed_at.contains_key(label):
+    val armed = _g_deadline_armed_at.get(label)
+    if armed == nil:
         return false
     val armed = _g_deadline_armed_at[label]
     # NOTE: index read + contains_key, not .get() — Dict<K, class> .get()
@@ -267,7 +250,7 @@ fn dbg_deadline_check(label: text) -> bool:
     if _g_deadline_budget.contains_key(label):
         val d = _g_deadline_budget[label]
         timeout_ms = d.timeout_ms
-    val elapsed = time_now_monotonic_ms() - armed
+    val elapsed = rt_time_now_monotonic_ms() - armed
     if elapsed > timeout_ms:
         _breach(label, timeout_ms, elapsed)
         return true
@@ -281,15 +264,12 @@ fn _deadline_check_all(now_ms: i64):
     for l in _g_deadline_labels:
         labels.push(l)
     for label in labels:
-        if _g_deadline_armed_at.contains_key(label):
-            val armed = _g_deadline_armed_at[label]
-            var timeout_ms = 0
-            if _g_deadline_budget.contains_key(label):
-                val d = _g_deadline_budget[label]
-                timeout_ms = d.timeout_ms
-            val elapsed = now_ms - armed
-            if elapsed > timeout_ms:
-                _breach(label, timeout_ms, elapsed)
+        val armed = _g_deadline_armed_at.get(label)
+        if armed != nil:
+            val d = _g_deadline_budget.get(label) ?? Deadline.new(0)
+            val elapsed = now_ms - (armed ?? 0)
+            if elapsed > d.timeout_ms:
+                _breach(label, d.timeout_ms, elapsed)
 
 # Test-only introspection.
 fn dbg_deadline_breach_count() -> i64:
@@ -326,53 +306,45 @@ var _g_counter_labels: [text] = []
 fn dbg_time_begin(label: text):
     if not dbg_timers_on():
         return
-    _g_timer_begin[label] = time_now_monotonic_ms()
+    _g_timer_begin[label] = rt_time_now_monotonic_ms()
 
 fn dbg_time_end(label: text):
     if not dbg_timers_on():
         return
-    # NOTE: contains_key + index read, not `.get() == nil` — under native codegen
-    # a Dict<_, i64> miss decodes to 0, not nil, so an unpaired dbg_time_end()
-    # fell through with start=0 and recorded the whole uptime as one sample.
-    if not _g_timer_begin.contains_key(label):
+    val start = _g_timer_begin.get(label)
+    if start == nil:
         return
     val start = _g_timer_begin[label]
-    val elapsed = time_now_monotonic_ms() - start
+    val elapsed = rt_time_now_monotonic_ms() - start
     _g_timer_begin.remove(label)
-    if not _g_timer_stats.contains_key(label):
-        _g_timer_stats[label] = _TimerStat(label: label, count: 1, total_ms: elapsed, max_ms: elapsed)
+    val prev = _g_timer_stats.get(label)
+    if prev == nil:
+        _g_timer_stats.set(label, _TimerStat(label: label, count: 1, total_ms: elapsed, max_ms: elapsed))
         _g_timer_labels.push(label)
     else:
-        val s = _g_timer_stats[label]
+        val s = prev ?? _TimerStat(label: label, count: 0, total_ms: 0, max_ms: 0)
         var new_max = s.max_ms
         if elapsed > new_max:
             new_max = elapsed
-        _g_timer_stats[label] = _TimerStat(label: label, count: s.count + 1, total_ms: s.total_ms + elapsed, max_ms: new_max)
+        _g_timer_stats.set(label, _TimerStat(label: label, count: s.count + 1, total_ms: s.total_ms + elapsed, max_ms: new_max))
 
 fn dbg_count(label: text, delta: i64):
     if not dbg_timers_on():
         return
-    # NOTE: contains_key + index read, not `.get() == nil` — under native codegen
-    # a Dict<_, i64> miss decodes to 0, not nil, so the first-sighting branch
-    # never ran, _g_counter_labels stayed empty and dbg_summary() printed no
-    # counter lines at all.
-    var cur = 0
-    if _g_counters.contains_key(label):
-        cur = _g_counters[label]
-    else:
+    val cur = _g_counters.get(label)
+    if cur == nil:
         _g_counter_labels.push(label)
-    _g_counters[label] = cur + delta
+    _g_counters.set(label, (cur ?? 0) + delta)
 
 fn dbg_timer_stats(label: text) -> DiagTimerStats:
-    if not _g_timer_stats.contains_key(label):
+    val s = _g_timer_stats.get(label)
+    if s == nil:
         return DiagTimerStats(count: 0, total_ms: 0, max_ms: 0)
-    val st = _g_timer_stats[label]
+    val st = s ?? _TimerStat(label: label, count: 0, total_ms: 0, max_ms: 0)
     DiagTimerStats(count: st.count, total_ms: st.total_ms, max_ms: st.max_ms)
 
 fn dbg_counter_value(label: text) -> i64:
-    # contains_key + index, not `.get() ?? 0` — a native Dict<_, i64> miss
-    # decodes to 0 (not nil), so `?? 0` never fires and can't be trusted.
-    if _g_counters.contains_key(label): _g_counters[label] else: 0
+    _g_counters.get(label) ?? 0
 
 fn _sorted_timer_stats() -> [_TimerStat]:
     var stats: [_TimerStat] = []
@@ -415,10 +387,7 @@ fn dbg_summary() -> text:
     for s in _sorted_timer_stats():
         lines.push("{s.label} count={s.count} total={s.total_ms}ms max={s.max_ms}ms")
     for label in _g_counter_labels:
-        var cval = 0
-        if _g_counters.contains_key(label):
-            cval = _g_counters[label]
-        lines.push("counter {label} = {cval}")
+        lines.push("counter {label} = {_g_counters.get(label) ?? 0}")
     lines.join("\n")
 
 fn dbg_summary_dump():

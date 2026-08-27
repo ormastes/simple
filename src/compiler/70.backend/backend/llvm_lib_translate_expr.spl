@@ -16,28 +16,20 @@ extern fn rt_enum_payload(value: Any) -> i64
 extern fn rt_enum_discriminant(value: Any) -> i64
 extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
 extern fn rt_text_eq_any(left: i64, right: i64) -> i64
-@unsafe(reason: "nonnull raw read; LLVM translation allocation and bounds are caller-owned", capabilities: [ffi, raw_ptr])
 extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
+extern fn rt_dict_get_i64_raw(dict: i64, key: i64) -> i64
+extern fn rt_dict_set_i64_raw(dict: i64, key: i64, value: i64) -> bool
 
 # ============================================================================
 # Instruction Translation
 # ============================================================================
 
-fn translate_instruction(
-    ctx: i64,
-    mod_: i64,
-    builder: i64,
-    tm: LlvmLibTypeMapper,
-    inst: MirInst,
-    value_map: {i64: i64},
-    local_types: {i64: i64},
-    local_unsigned: {i64: bool},
-    block_map: {i64: i64},
-    func_map: {text: i64}
-) -> {i64: i64}:
-    var local_value_map: Dict<i64, i64> = value_map
-    val inst_kind = inst.kind
-    val inst_disc = rt_enum_discriminant(inst_kind)
+fn translate_instruction(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
+                         inst: MirInst, value_map: {i64: i64}, local_types: {i64: i64},
+                         block_map: {i64: i64}, func_map: {text: i64}):
+    match inst.kind:
+        case Const(dest, value, ty):
+            translate_const(ctx, mod_, builder, tm, dest, value, ty, value_map, local_types)
 
     # Native bootstrap can treat variant names that collide with in-scope type
     # names as struct patterns. Pre-dispatch the hot affected variants by
@@ -66,31 +58,20 @@ fn translate_instruction(
             local_value_map, local_types, func_map
         )
 
-    match inst_kind:
-        case Const(_, _, _):
-            # Native bootstrap matches the discriminant correctly, but can bind
-            # a multi-field enum arm from the enum header instead of its payload.
-            val payload = rt_enum_payload(inst.kind)
-            val dest: LocalId = rt_tuple_get(payload, 0)
-            local_value_map = translate_const(
-                ctx, mod_, builder, tm, dest.id,
-                rt_tuple_get(payload, 1), rt_tuple_get(payload, 2),
-                local_value_map, local_types
-            )
+        case Move(dest, src):
+            val src_val = get_value(value_map, src.id)
+            value_map[dest.id] = src_val
 
         case Copy(_, _):
             val payload = rt_enum_payload(inst.kind)
             val dest: LocalId = rt_tuple_get(payload, 0)
             val src: LocalId = rt_tuple_get(payload, 1)
             val src_val = get_value(local_value_map, src.id)
-            set_raw_handle(local_value_map, dest.id, src_val)
+            local_value_map[dest.id] = src_val
 
-        case Move(_, _):
-            val payload = rt_enum_payload(inst.kind)
-            val dest: LocalId = rt_tuple_get(payload, 0)
-            val src: LocalId = rt_tuple_get(payload, 1)
+        case Move(dest, src):
             val src_val = get_value(local_value_map, src.id)
-            set_raw_handle(local_value_map, dest.id, src_val)
+            local_value_map[dest.id] = src_val
 
         case BinOp(_, _, _, _):
             val payload = rt_enum_payload(inst.kind)
@@ -107,13 +88,13 @@ fn translate_instruction(
         case Alloc(dest, ty):
             val llvm_ty = tm.map_type(ty)
             val alloca = llvm_build_alloca(builder, llvm_ty, "alloc")
-            set_raw_handle(local_value_map, dest.id, alloca)
+            value_map[dest.id] = alloca
 
         case Load(dest, ptr):
             val ptr_val = translate_operand_llvm(ctx, mod_, builder, tm, ptr, local_value_map, local_types, func_map)
             val dest_ty = get_local_type(local_types, tm, dest.id)
             val load_val = llvm_build_load2(builder, dest_ty, ptr_val, "load")
-            set_raw_handle(local_value_map, dest.id, load_val)
+            value_map[dest.id] = load_val
 
         case Store(ptr, value):
             val ptr_val = translate_operand_llvm(ctx, mod_, builder, tm, ptr, local_value_map, local_types, func_map)
@@ -127,15 +108,15 @@ fn translate_instruction(
                 rt_array_push_i64_raw(idx_vals, translate_operand_llvm(ctx, mod_, builder, tm, idx, local_value_map, local_types, func_map))
             val i8_ty = llvm_int8_type_in_context(ctx)
             val gep = llvm_build_gep2(builder, i8_ty, base_val, idx_vals, "gep")
-            set_raw_handle(local_value_map, dest.id, gep)
+            value_map[dest.id] = gep
 
         case Aggregate(dest, kind, operands):
-            local_value_map = translate_aggregate(ctx, mod_, builder, tm, dest, kind, operands, local_value_map, local_types, func_map)
+            translate_aggregate(ctx, mod_, builder, tm, dest, kind, operands, value_map, local_types, func_map)
 
         case GetField(dest, base, field):
             val base_val = translate_operand_llvm(ctx, mod_, builder, tm, base, local_value_map, local_types, func_map)
             val result = llvm_build_extract_value(builder, base_val, field, "field")
-            set_raw_handle(local_value_map, dest.id, result)
+            value_map[dest.id] = result
 
         case SetField(base, field, value):
             val base_val = translate_operand_llvm(ctx, mod_, builder, tm, base, local_value_map, local_types, func_map)
@@ -143,20 +124,20 @@ fn translate_instruction(
             val result = llvm_build_insert_value(builder, base_val, new_val, field, "setfield")
             # SetField modifies in place — update the base local in value_map
             match base.kind:
-                case Copy(local): set_raw_handle(local_value_map, local.id, result)
-                case Move(local): set_raw_handle(local_value_map, local.id, result)
+                case Copy(local): value_map[local] = result
+                case Move(local): value_map[local] = result
                 case _: ()
 
         case Cast(dest, operand, target):
-            local_value_map = translate_cast(ctx, mod_, builder, tm, dest, operand, target, local_value_map, local_types, local_unsigned, func_map)
+            translate_cast(ctx, builder, tm, dest, operand, target, value_map, local_types, func_map)
 
         case Bitcast(dest, operand, target):
             val op_val = translate_operand_llvm(ctx, mod_, builder, tm, operand, local_value_map, local_types, func_map)
             val target_ty = tm.map_type(target)
             val result = llvm_build_bitcast(builder, op_val, target_ty, "bitcast")
-            set_raw_handle(local_value_map, dest.id, result)
+            value_map[dest.id] = result
 
-        case CheckedBinOp(_, _, _, _):
+        case CheckedBinOp(dest, op, left, right):
             # Treat as unchecked BinOp for bootstrap (overflow traps not needed)
             val payload = rt_enum_payload(inst.kind)
             val dest: LocalId = rt_tuple_get(payload, 0)
@@ -166,57 +147,48 @@ fn translate_instruction(
                 local_value_map, local_types, local_unsigned, func_map
             )
 
-        case PipeForward(_, _, _):
+        case PipeForward(dest, value, func):
             # |> operator: call func(value)
-            val payload = rt_enum_payload(inst.kind)
-            val dest: LocalId = rt_tuple_get(payload, 0)
-            val value: MirOperand = rt_tuple_get(payload, 1)
-            val func: MirOperand = rt_tuple_get(payload, 2)
-            val dest_opt: LocalId? = Some(dest)
-            val call_args: [MirOperand] = [value]
-            local_value_map = translate_call(
-                ctx, mod_, builder, tm, dest_opt as i64, func as i64, call_args as i64,
-                local_value_map, local_types, func_map
-            )
+            translate_call(ctx, mod_, builder, tm, Some(dest), func, [value], value_map, local_types, func_map)
 
-        case Call(_, _, _):
-            val payload = rt_enum_payload(inst.kind)
-            local_value_map = translate_call(
-                ctx, mod_, builder, tm,
-                rt_tuple_get(payload, 0), rt_tuple_get(payload, 1), rt_tuple_get(payload, 2),
-                local_value_map, local_types, func_map
-            )
+        case Call(dest, func, args):
+            translate_call(ctx, mod_, builder, tm, dest, func, args, value_map, local_types, func_map)
 
         case CallIndirect(dest, ptr, args, sig):
-            local_value_map = translate_call_indirect(ctx, mod_, builder, tm, dest, ptr, args, sig, local_value_map, local_types, func_map)
+            translate_call_indirect(ctx, mod_, builder, tm, dest, ptr, args, sig, value_map, local_types, func_map)
 
         case Intrinsic(dest, name, args):
-            local_value_map = translate_intrinsic(ctx, mod_, builder, tm, dest, name, args, local_value_map, local_types, block_map, func_map)
+            translate_intrinsic(ctx, mod_, builder, tm, dest, name, args, value_map, local_types, block_map, func_map)
 
         case Ref(dest, kind, place):
-            val place_val = get_value(local_value_map, place.local.id)
-            set_raw_handle(local_value_map, dest.id, place_val)
+            val place_val = get_value(value_map, place.local.id)
+            value_map[dest.id] = place_val
 
         case DebugValue(_, _): ()
+        case ResultMatchSemantic(_, _, _, _, _, _, _): ()
         case Nop: ()
 
         # Module admission rejects these before translation. Keep explicit
         # local guards so a future direct instruction caller cannot erase one.
-        case DecisionProbe(_, semantic_id, _, _, _, _):
+        case DecisionProbe(_, semantic_id, _, _, _, _, _, _, _, _):
             panic("compile error: unlowered DecisionProbe '{semantic_id}' reached llvm-lib instruction translation")
         case ConditionProbe(_, semantic_id, _, _, _, _, _, _):
             panic("compile error: unlowered ConditionProbe '{semantic_id}' reached llvm-lib instruction translation")
+        case DynamicDecisionProbe(_, semantic_id, _, _, _, _, _, _, _, _):
+            panic("compile error: unlowered DynamicDecisionProbe '{semantic_id}' reached llvm-lib instruction translation")
+        case DynamicConditionProbe(_, semantic_id, _, _, _, _, _, _):
+            panic("compile error: unlowered DynamicConditionProbe '{semantic_id}' reached llvm-lib instruction translation")
 
         # Pipeline operators — partially supported (PipeForward handled above)
         case Compose(dest, _, _):
             print "[llvm-lib] warning: Compose (>>) not yet supported, producing zero"
-            set_raw_handle(local_value_map, dest.id, llvm_const_null(get_local_type(local_types, tm, dest.id)))
+            value_map[dest.id] = llvm_const_null(get_local_type(local_types, tm, dest.id))
         case Parallel(dest, _, _):
             print "[llvm-lib] warning: Parallel (//) not yet supported, producing zero"
-            set_raw_handle(local_value_map, dest.id, llvm_const_null(get_local_type(local_types, tm, dest.id)))
+            value_map[dest.id] = llvm_const_null(get_local_type(local_types, tm, dest.id))
         case LayerConnect(dest, _, _):
             print "[llvm-lib] warning: LayerConnect (~>) not yet supported, producing zero"
-            set_raw_handle(local_value_map, dest.id, llvm_const_null(get_local_type(local_types, tm, dest.id)))
+            value_map[dest.id] = llvm_const_null(get_local_type(local_types, tm, dest.id))
 
         case InlineAsm(_, _, _, _, _, _, _):
             print "[llvm-lib] error: inline assembly not supported by llvm-lib backend"
@@ -224,38 +196,26 @@ fn translate_instruction(
         # Remaining: SIMD, GPU, VHDL, Async — warn instead of silent
         case _:
             print "[llvm-lib] warning: unhandled MIR instruction kind (skipped)"
-    local_value_map
 
 # ============================================================================
 # Constant Translation
 # ============================================================================
 
-fn translate_const(
-    ctx: i64,
-    mod_: i64,
-    builder: i64,
-    tm: LlvmLibTypeMapper,
-    dest_id: i64,
-    raw_value: i64,
-    raw_ty: i64,
-    value_map: {i64: i64},
-    local_types: {i64: i64}
-) -> {i64: i64}:
-    var local_value_map: Dict<i64, i64> = value_map
-    val value: MirConstValue = raw_value
-    val ty: MirType = raw_ty
+fn translate_const(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
+                   dest: LocalId, value: MirConstValue, ty: MirType,
+                   value_map: {i64: i64}, local_types: {i64: i64}):
     val llvm_ty = tm.map_type(ty)
     match value:
         case Int(v):
             val result = llvm_const_int(llvm_ty, v, true)
-            set_raw_handle(local_value_map, dest_id, result)
+            value_map[dest.id] = result
         case Float(v):
             val result = llvm_const_real_of_string(llvm_ty, "{v}")
-            set_raw_handle(local_value_map, dest_id, result)
+            value_map[dest.id] = result
         case Bool(v):
             val bval = if v: 1 else: 0
             val result = llvm_const_int(llvm_ty, bval, false)
-            set_raw_handle(local_value_map, dest_id, result)
+            value_map[dest.id] = result
         case Str(v):
             # Create global string constant
             val str_val = llvm_const_string_in_context(ctx, v, false)
@@ -268,23 +228,22 @@ fn translate_const(
             # GEP to get ptr to first element
             val zero = llvm_const_int(llvm_int64_type_in_context(ctx), 0, false)
             val gep = llvm_build_in_bounds_gep2(builder, str_ty, global, [zero, zero], "str")
-            set_raw_handle(local_value_map, dest_id, gep)
+            value_map[dest.id] = gep
         case Zero:
             if tm.is_void_mir_type(ty):
                 ()
             else:
                 val result = llvm_const_null(llvm_ty)
-                set_raw_handle(local_value_map, dest_id, result)
+                value_map[dest.id] = result
         case Array(_):
             val result = llvm_const_null(llvm_ty)
-            set_raw_handle(local_value_map, dest_id, result)
+            value_map[dest.id] = result
         case Tuple(_):
             val result = llvm_const_null(llvm_ty)
-            set_raw_handle(local_value_map, dest_id, result)
+            value_map[dest.id] = result
         case Struct(_):
             val result = llvm_const_null(llvm_ty)
-            set_raw_handle(local_value_map, dest_id, result)
-    local_value_map
+            value_map[dest.id] = result
 
 # ============================================================================
 # Binary Operation Translation
@@ -334,8 +293,6 @@ fn translate_binop_llvm(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper
     val is_float = is_float_type_ref(ctx, dest_ty)
     val left_ty = get_operand_type_ref(left, local_types, tm)
     val left_is_float = is_float_type_ref(ctx, left_ty)
-    val left_is_unsigned = get_operand_unsigned(left, local_unsigned)
-    val is_unsigned = left_is_unsigned or get_operand_unsigned(right, local_unsigned)
 
     val result = match op:
         case Add:
@@ -349,11 +306,9 @@ fn translate_binop_llvm(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper
             else: llvm_build_nsw_mul(builder, lhs, rhs, "mul")
         case Div:
             if is_float: llvm_build_fdiv(builder, lhs, rhs, "div")
-            elif is_unsigned: llvm_build_udiv(builder, lhs, rhs, "div")
             else: llvm_build_sdiv(builder, lhs, rhs, "div")
         case Rem:
             if is_float: llvm_build_frem(builder, lhs, rhs, "rem")
-            elif is_unsigned: llvm_build_urem(builder, lhs, rhs, "rem")
             else: llvm_build_srem(builder, lhs, rhs, "rem")
         case Pow:
             # Call __simple_pow for integer, llvm.pow for float
@@ -380,16 +335,11 @@ fn translate_binop_llvm(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper
         case BitOr: llvm_build_or(builder, lhs, rhs, "or")
         case BitXor: llvm_build_xor(builder, lhs, rhs, "xor")
         case Shl: llvm_build_shl(builder, lhs, rhs, "shl")
-        case Shr:
-            if left_is_unsigned: llvm_build_lshr(builder, lhs, rhs, "shr")
-            else: llvm_build_ashr(builder, lhs, rhs, "shr")
+        case Shr: llvm_build_ashr(builder, lhs, rhs, "shr")
 
         case Eq:
             if left_is_float:
                 val cmp = llvm_build_fcmp(builder, LLVM_REAL_OEQ, lhs, rhs, "eq")
-                maybe_zext(builder, ctx, cmp, dest_ty)
-            elif llvm_get_type_kind(left_ty) == 12:  # 12=Pointer (was 10=Struct — wrong kind, branch never fired)
-                val cmp = llvm_build_icmp(builder, LLVM_INT_EQ, lhs, rhs, "eq")
                 maybe_zext(builder, ctx, cmp, dest_ty)
             else:
                 # Use rt_native_eq for proper equality of all types (int + string).
@@ -405,9 +355,6 @@ fn translate_binop_llvm(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper
             if left_is_float:
                 val cmp = llvm_build_fcmp(builder, LLVM_REAL_ONE, lhs, rhs, "ne")
                 maybe_zext(builder, ctx, cmp, dest_ty)
-            elif llvm_get_type_kind(left_ty) == 12:  # 12=Pointer (was 10=Struct — wrong kind, branch never fired)
-                val cmp = llvm_build_icmp(builder, LLVM_INT_NE, lhs, rhs, "ne")
-                maybe_zext(builder, ctx, cmp, dest_ty)
             else:
                 val neq_fn = llvm_get_named_function(mod_, "rt_native_neq")
                 if neq_fn != 0:
@@ -418,32 +365,24 @@ fn translate_binop_llvm(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper
         case Lt:
             val cmp = if left_is_float:
                 llvm_build_fcmp(builder, LLVM_REAL_OLT, lhs, rhs, "lt")
-            elif is_unsigned:
-                llvm_build_icmp(builder, LLVM_INT_ULT, lhs, rhs, "lt")
             else:
                 llvm_build_icmp(builder, LLVM_INT_SLT, lhs, rhs, "lt")
             maybe_zext(builder, ctx, cmp, dest_ty)
         case Le:
             val cmp = if left_is_float:
                 llvm_build_fcmp(builder, LLVM_REAL_OLE, lhs, rhs, "le")
-            elif is_unsigned:
-                llvm_build_icmp(builder, LLVM_INT_ULE, lhs, rhs, "le")
             else:
                 llvm_build_icmp(builder, LLVM_INT_SLE, lhs, rhs, "le")
             maybe_zext(builder, ctx, cmp, dest_ty)
         case Gt:
             val cmp = if left_is_float:
                 llvm_build_fcmp(builder, LLVM_REAL_OGT, lhs, rhs, "gt")
-            elif is_unsigned:
-                llvm_build_icmp(builder, LLVM_INT_UGT, lhs, rhs, "gt")
             else:
                 llvm_build_icmp(builder, LLVM_INT_SGT, lhs, rhs, "gt")
             maybe_zext(builder, ctx, cmp, dest_ty)
         case Ge:
             val cmp = if left_is_float:
                 llvm_build_fcmp(builder, LLVM_REAL_OGE, lhs, rhs, "ge")
-            elif is_unsigned:
-                llvm_build_icmp(builder, LLVM_INT_UGE, lhs, rhs, "ge")
             else:
                 llvm_build_icmp(builder, LLVM_INT_SGE, lhs, rhs, "ge")
             maybe_zext(builder, ctx, cmp, dest_ty)
@@ -457,8 +396,7 @@ fn translate_binop_llvm(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper
             print "[llvm-lib] warning: unhandled binary op (MatMul/Broadcast), producing zero"
             llvm_const_null(dest_ty)
 
-    set_raw_handle(local_value_map, dest_id, result)
-    local_value_map
+    value_map[dest.id] = result
 
 fn maybe_zext(builder: i64, ctx: i64, cmp_val: i64, dest_ty: i64) -> i64:
     val i1_ty = llvm_int1_type_in_context(ctx)
@@ -478,7 +416,6 @@ fn translate_unaryop_llvm(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapp
     var local_value_map: Dict<i64, i64> = value_map
     val op_val = translate_operand_llvm(ctx, mod_, builder, tm, operand, value_map, local_types, func_map)
     val dest_ty = get_local_type(local_types, tm, dest.id)
-    val operand_ty = get_operand_type_ref(operand, local_types, tm)
     val is_float = is_float_type_ref(ctx, dest_ty)
 
     val result = match op:
@@ -486,10 +423,7 @@ fn translate_unaryop_llvm(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapp
             if is_float: llvm_build_fneg(builder, op_val, "neg")
             else: llvm_build_neg(builder, op_val, "neg")
         case Not:
-            val zero = if llvm_get_type_kind(operand_ty) == 12:  # 12=Pointer (was 14=Metadata)
-                llvm_const_null(operand_ty)
-            else:
-                llvm_const_int(operand_ty, 0, false)
+            val zero = llvm_const_int(dest_ty, 0, false)
             llvm_build_icmp(builder, LLVM_INT_EQ, op_val, zero, "not")
         case BitNot:
             llvm_build_not(builder, op_val, "bitnot")
@@ -497,8 +431,7 @@ fn translate_unaryop_llvm(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapp
             print "[llvm-lib] warning: unhandled unary op (Transpose), producing zero"
             llvm_const_null(dest_ty)
 
-    set_raw_handle(local_value_map, dest.id, result)
-    local_value_map
+    value_map[dest.id] = result
 
 # ============================================================================
 # Aggregate Translation
@@ -507,21 +440,19 @@ fn translate_unaryop_llvm(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapp
 fn translate_aggregate(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
                        dest: LocalId, kind: AggregateKind, operands: [MirOperand],
                        value_map: {i64: i64}, local_types: {i64: i64},
-                       func_map: {text: i64}) -> {i64: i64}:
-    var local_value_map: Dict<i64, i64> = value_map
+                       func_map: {text: i64}):
     val dest_ty = get_local_type(local_types, tm, dest.id)
     var agg = llvm_get_undef(dest_ty)
     for i in 0..operands.len():
         val elem_val = translate_operand_llvm(ctx, mod_, builder, tm, operands[i], value_map, local_types, func_map)
         agg = llvm_build_insert_value(builder, agg, elem_val, i, "agg")
-    set_raw_handle(local_value_map, dest.id, agg)
-    local_value_map
+    value_map[dest.id] = agg
 
 # ============================================================================
 # Cast Translation
 # ============================================================================
 
-fn translate_cast(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
+fn translate_cast(ctx: i64, builder: i64, tm: LlvmLibTypeMapper,
                   dest: LocalId, operand: MirOperand, target: MirType,
                   value_map: {i64: i64}, local_types: {i64: i64},
                   local_unsigned: {i64: bool},
@@ -529,96 +460,93 @@ fn translate_cast(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
     var local_value_map: Dict<i64, i64> = value_map
     val op_val = translate_operand_llvm(ctx, mod_, builder, tm, operand, value_map, local_types, func_map)
     val target_ty = tm.map_type(target)
-    val source_unsigned = get_operand_unsigned(operand, local_unsigned)
-    set_raw_handle(local_value_map, dest.id, coerce_llvm_cast_value(builder, op_val, target_ty, source_unsigned))
-    local_value_map
+    val src_ty_kind = llvm_get_type_kind(src_ty_ref)
+    val dst_ty_kind = llvm_get_type_kind(target_ty)
+
+    # Type kind constants (from LLVM)
+    # 0=Void, 2=Float, 3=Double, 7=Label, 10=Integer, 11=Function, 12=Struct, 14=Pointer
+    val TK_FLOAT = 2
+    val TK_DOUBLE = 3
+    val TK_INTEGER = 10
+    val TK_POINTER = 14
+
+    val src_is_int = src_ty_kind == TK_INTEGER
+    val src_is_float = src_ty_kind == TK_FLOAT or src_ty_kind == TK_DOUBLE
+    val src_is_ptr = src_ty_kind == TK_POINTER
+    val dst_is_int = dst_ty_kind == TK_INTEGER
+    val dst_is_float = dst_ty_kind == TK_FLOAT or dst_ty_kind == TK_DOUBLE
+    val dst_is_ptr = dst_ty_kind == TK_POINTER
+
+    val result = if src_is_int and dst_is_int:
+        # Int-to-int: sext, trunc, or zext depending on sizes
+        # Use sext for signed widening, trunc for narrowing
+        val src_bits = get_int_type_width(src_ty_ref)
+        val dst_bits = get_int_type_width(target_ty)
+        if src_bits < dst_bits:
+            if src_bits == 1:
+                llvm_build_zext(builder, op_val, target_ty, "cast")
+            else:
+                llvm_build_sext(builder, op_val, target_ty, "cast")
+        elif src_bits > dst_bits:
+            llvm_build_trunc(builder, op_val, target_ty, "cast")
+        else:
+            op_val
+    elif src_is_int and dst_is_float:
+        llvm_build_si_to_fp(builder, op_val, target_ty, "cast")
+    elif src_is_float and dst_is_int:
+        llvm_build_fp_to_si(builder, op_val, target_ty, "cast")
+    elif src_is_float and dst_is_float:
+        val src_bits = if src_ty_kind == TK_FLOAT: 32 else: 64
+        val dst_bits = if dst_ty_kind == TK_FLOAT: 32 else: 64
+        if src_bits < dst_bits:
+            llvm_build_fpext(builder, op_val, target_ty, "cast")
+        elif src_bits > dst_bits:
+            llvm_build_fptrunc(builder, op_val, target_ty, "cast")
+        else:
+            op_val
+    elif src_is_ptr and dst_is_int:
+        llvm_build_ptr_to_int(builder, op_val, target_ty, "cast")
+    elif src_is_int and dst_is_ptr:
+        llvm_build_int_to_ptr(builder, op_val, target_ty, "cast")
+    else:
+        llvm_build_bitcast(builder, op_val, target_ty, "cast")
+
+    value_map[dest.id] = result
+
+fn get_int_type_width(ty: i64) -> i64:
+    llvm_get_int_type_width(ty)
 
 # ============================================================================
 # Call Translation
 # ============================================================================
 
-fn coerce_llvm_value(builder: i64, value: i64, target_ty: i64) -> i64:
-    val source_ty = llvm_type_of(value)
-    if source_ty == target_ty:
-        return value
-
-    val source_kind = llvm_get_type_kind(source_ty)
-    val target_kind = llvm_get_type_kind(target_ty)
-    if source_kind == 8 and target_kind == 8:
-        val source_bits = llvm_get_int_type_width(source_ty)
-        val target_bits = llvm_get_int_type_width(target_ty)
-        if source_bits > target_bits:
-            return llvm_build_trunc(builder, value, target_ty, "coerce")
-        if source_bits == 1:
-            return llvm_build_zext(builder, value, target_ty, "coerce")
-        return llvm_build_sext(builder, value, target_ty, "coerce")
-    if source_kind == 8 and (target_kind == 2 or target_kind == 3):
-        return llvm_build_si_to_fp(builder, value, target_ty, "coerce")
-    if (source_kind == 2 or source_kind == 3) and target_kind == 8:
-        return llvm_build_fp_to_si(builder, value, target_ty, "coerce")
-    if (source_kind == 2 or source_kind == 3) and (target_kind == 2 or target_kind == 3):
-        if source_kind == 2 and target_kind == 3:
-            return llvm_build_fpext(builder, value, target_ty, "coerce")
-        if source_kind == 3 and target_kind == 2:
-            return llvm_build_fptrunc(builder, value, target_ty, "coerce")
-        return value
-    if source_kind == 8 and target_kind == 12:
-        return llvm_build_int_to_ptr(builder, value, target_ty, "coerce")
-    if source_kind == 12 and target_kind == 8:
-        return llvm_build_ptr_to_int(builder, value, target_ty, "coerce")
-    llvm_build_bitcast(builder, value, target_ty, "coerce")
-
-fn coerce_llvm_cast_value(builder: i64, value: i64, target_ty: i64, source_unsigned: bool) -> i64:
-    val source_kind = llvm_get_type_kind(llvm_type_of(value))
-    val target_kind = llvm_get_type_kind(target_ty)
-    if source_unsigned and source_kind == 8 and (target_kind == 2 or target_kind == 3):
-        return llvm_build_ui_to_fp(builder, value, target_ty, "coerce")
-    coerce_llvm_value(builder, value, target_ty)
-
 fn translate_call(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
-                  raw_dest: i64, raw_func: i64, raw_args: i64,
+                  dest: LocalId?, func: MirOperand, args: [MirOperand],
                   value_map: {i64: i64}, local_types: {i64: i64},
-                  func_map: {text: i64}) -> {i64: i64}:
-    var local_value_map: Dict<i64, i64> = value_map
-    var has_dest = false
-    var dest_id = 0
-    if rt_enum_discriminant(raw_dest) == 0xf1987159:  # hash("Some")
-        val dest_local: LocalId = rt_enum_payload(raw_dest)
-        dest_id = dest_local.id
-        has_dest = true
-    val func: MirOperand = raw_func
-    val args: [MirOperand] = raw_args
+                  func_map: {text: i64}):
     # Resolve function
     var func_ref = 0
     var fn_name = ""
-    val func_kind = func.kind
-    if rt_enum_discriminant(func_kind) == 0x0b55abba:  # hash("Const")
-        val const_payload = rt_enum_payload(func_kind)
-        val raw_value = rt_tuple_get(const_payload, 0)
-        if rt_enum_discriminant(raw_value) == 0xd43c7eb8:  # hash("Str")
-            val name: text = rt_enum_payload(raw_value)
-            fn_name = if name == "main": "__simple_main" elif name == "get_args" or name == "get_cli_args" or name == "sys_get_args": "rt_get_args" elif name == "print": "rt_println" else: name
-            func_ref = llvm_get_named_function(mod_, fn_name)
-    else:
-        match func_kind:
-            case Copy(local):
-                func_ref = get_value(value_map, local.id)
-            case Move(local):
-                func_ref = get_value(value_map, local.id)
-            case _: ()
+    match func.kind:
+        case Const(value, type_):
+            match value:
+                case Str(name):
+                    fn_name = if name == "main": "__simple_main" else: name
+                    func_ref = llvm_get_named_function(mod_, fn_name)
+                    if func_ref == 0 and func_map.contains(name):
+                        func_ref = func_map[name]
+                case _: ()
+        case Copy(local):
+            func_ref = get_value(value_map, local)
+        case Move(local):
+            func_ref = get_value(value_map, local)
 
     if func_ref == 0:
-        val callee_desc = if fn_name != "": "'" + fn_name + "'" else: "<indirect>"
-        eprint("[llvm-lib] ERROR: unresolved function call to " + callee_desc + ", skipping instruction — generated code will be broken")
-        return local_value_map
-    val actual_param_count = llvm_count_params(func_ref)
-    if actual_param_count != args.len():
-        eprint("[llvm-lib] ERROR: call arity mismatch for '" + fn_name + "': MIR args=" + args.len().to_text() + " LLVM params=" + actual_param_count.to_text() + ", skipping instruction")
-        return local_value_map
+        eprint("[llvm-lib] ERROR: unresolved function call, skipping instruction — generated code will be broken")
+        return
 
     # Build args
     var arg_vals: [i64] = []
-    var arg_i = 0
     for arg in args:
         var arg_val = translate_operand_llvm(ctx, mod_, builder, tm, arg, value_map, local_types, func_map)
         if arg_val == 0:
@@ -639,15 +567,11 @@ fn translate_call(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
     # Get function type — use LLVMGlobalGetValueType for opaque pointers (LLVM 15+)
     val fn_ty = llvm_global_get_value_type(func_ref)
 
-    # Void-returning calls must be unnamed ("Instruction has a name, but
-    # provides a void value!" fails IR verification).
-    val ret_is_void = llvm_get_type_kind(llvm_get_return_type(fn_ty)) == 0
-    val call_name = if has_dest and not ret_is_void: "call" else: ""
+    val call_name = if dest.?: "call" else: ""
     val call_val = llvm_build_call2(builder, fn_ty, func_ref, arg_vals, call_name)
 
-    if has_dest:
-        set_raw_handle(local_value_map, dest_id, call_val)
-    local_value_map
+    if dest.?:
+        value_map[dest.unwrap().id] = call_val
 
 fn translate_call_indirect(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
                            dest: LocalId?, ptr: MirOperand, args: [MirOperand],
@@ -661,19 +585,15 @@ fn translate_call_indirect(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMap
         return local_value_map
 
     # Build function type from signature
-    val ret_ty = if dest.?:
-        get_local_type(local_types, tm, dest.unwrap().id)
-    else:
-        if sig.return_type == nil: llvm_void_type_in_context(ctx) else: tm.map_type(sig.return_type)
+    val ret_ty = tm.map_type(sig.return_type)
     var param_types: [i64] = []
     for param in sig.params:
         val param_type: MirType = param
-        rt_array_push_i64_raw(param_types, tm.map_type(param_type))
+        param_types.push(tm.map_type(param_type))
     val fn_ty = llvm_function_type(ret_ty, param_types, false)
 
     # Build args
     var arg_vals: [i64] = []
-    var arg_i = 0
     for arg in args:
         var arg_val = translate_operand_llvm(ctx, mod_, builder, tm, arg, value_map, local_types, func_map)
         if arg_val == 0:
@@ -695,30 +615,14 @@ fn translate_call_indirect(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMap
     val call_val = llvm_build_call2(builder, fn_ty, fn_ptr, arg_vals, call_name)
 
     if dest.?:
-        set_raw_handle(local_value_map, dest.unwrap().id, call_val)
-    local_value_map
+        value_map[dest.unwrap().id] = call_val
 
 fn translate_intrinsic(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
                        dest: LocalId?, name: text, args: [MirOperand],
                        value_map: {i64: i64}, local_types: {i64: i64},
-                       block_map: {i64: i64}, func_map: {text: i64}) -> {i64: i64}:
-    var local_value_map: Dict<i64, i64> = value_map
+                       block_map: {i64: i64}, func_map: {text: i64}):
     if name == "__simple_ssa_phi":
-        # bug #135 (opus review Finding 3): this consumer only ever reads
-        # args[0..3] (one then/else pair). var_reassign_ssa.spl can emit an
-        # N-ary phi (more than one incoming pair, e.g. an elif-ladder join),
-        # which this path would silently truncate -- dropping every arm past
-        # the first two with no diagnostic. No caller currently routes an
-        # N-ary plan through the llvm-lib backend, so this is latent; guard
-        # it loudly instead of miscompiling silently if that ever changes.
-        if args.len() > 4:
-            eprint("[llvm-lib] ERROR: __simple_ssa_phi has {args.len()} args (N-ary join); this backend only supports a single then/else pair")
-            return local_value_map
         if dest.? and args.len() >= 4:
-            # NOTE: explicit match, not `if then_block.? and else_block.?:` --
-            # a const block-id operand can legitimately be 0 (the entry block
-            # id); truthiness on the boxed i64? here would falsely report
-            # "malformed" for a phi whose then/else predecessor is block 0.
             val then_block = ssa_phi_const_block_arg(args[0])
             val else_block = ssa_phi_const_block_arg(args[2])
             var matched = false
@@ -743,16 +647,15 @@ fn translate_intrinsic(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
                 eprint("[llvm-lib] ERROR: malformed __simple_ssa_phi intrinsic")
         else:
             eprint("[llvm-lib] ERROR: malformed __simple_ssa_phi intrinsic")
-        return local_value_map
+        return
 
     val intrinsic_name = "__simple_intrinsic_{name}"
     val func_ref = llvm_get_named_function(mod_, intrinsic_name)
     if func_ref == 0:
         eprint("[llvm-lib] ERROR: unresolved intrinsic call, skipping instruction — generated code will be broken")
-        return local_value_map
+        return
 
     var arg_vals: [i64] = []
-    var arg_i = 0
     for arg in args:
         var arg_val = translate_operand_llvm(ctx, mod_, builder, tm, arg, value_map, local_types, func_map)
         if arg_val == 0:
@@ -775,8 +678,7 @@ fn translate_intrinsic(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
     val call_val = llvm_build_call2(builder, fn_ty, func_ref, arg_vals, call_name)
 
     if dest.?:
-        set_raw_handle(local_value_map, dest.unwrap().id, call_val)
-    local_value_map
+        value_map[dest.unwrap().id] = call_val
 
 # ============================================================================
 # Pseudo SSA Phi Translation
@@ -789,6 +691,65 @@ fn ssa_phi_const_block_arg(arg: MirOperand) -> i64?:
                 case Int(v): Some(v)
                 case _: nil
         case _: nil
+
+# ============================================================================
+# Terminator Translation
+# ============================================================================
+
+fn translate_terminator(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
+                        term: MirTerminator,
+                        value_map: {i64: i64}, local_types: {i64: i64},
+                        block_map: {i64: i64}, func_map: {text: i64}):
+    match term:
+        case Ret(value):
+            if value.?:
+                val ret_val = translate_operand(ctx, mod_, builder, tm, value.unwrap(), value_map, local_types, func_map)
+                llvm_build_ret(builder, ret_val)
+            else:
+                llvm_build_ret_void(builder)
+
+        case Goto(target):
+            val dest_bb = block_map[target]
+            llvm_build_br(builder, dest_bb)
+
+        case If(cond, then_, else_):
+            val cond_val = translate_operand(ctx, mod_, builder, tm, cond, value_map, local_types, func_map)
+            val then_bb = block_map[then_]
+            val else_bb = block_map[else_]
+            # Ensure condition is i1
+            val i1_ty = llvm_int1_type_in_context(ctx)
+            val cond_ty = llvm_type_of(cond_val)
+            var final_cond = cond_val
+            if cond_ty != i1_ty:
+                val zero = llvm_const_int(cond_ty, 0, false)
+                final_cond = llvm_build_icmp(builder, LLVM_INT_NE, cond_val, zero, "tobool")
+            llvm_build_cond_br(builder, final_cond, then_bb, else_bb)
+
+        case Switch(value, targets, default):
+            val discr_val = translate_operand(ctx, mod_, builder, tm, value, value_map, local_types, func_map)
+            val default_bb = block_map[default]
+            val switch_inst = llvm_build_switch(builder, discr_val, default_bb, targets.len())
+            for switch_case_raw in targets:
+                val switch_case: SwitchCase = switch_case_raw
+                val case_val = llvm_const_int(tm.native_int_type(), switch_case.value, false)
+                val case_bb = block_map[switch_case.target]
+                llvm_add_case(switch_inst, case_val, case_bb)
+
+        case Unreachable:
+            llvm_build_unreachable(builder)
+
+        case Abort(message):
+            val abort_fn = llvm_get_named_function(mod_, "abort")
+            if abort_fn != 0:
+                val fn_ty = llvm_global_get_value_type(abort_fn)
+                llvm_build_call2(builder, fn_ty, abort_fn, [], "")
+            llvm_build_unreachable(builder)
+
+        case CallTerminator(dest, func, args, normal, unwind):
+            # Translate as regular call + branch to normal successor
+            translate_call(ctx, mod_, builder, tm, dest, func, args, value_map, local_types, func_map)
+            val normal_bb = block_map[normal]
+            llvm_build_br(builder, normal_bb)
 
 # ============================================================================
 # Operand Translation
@@ -816,11 +777,7 @@ fn translate_const_value_llvm(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibType
                          value: MirConstValue, ty: MirType) -> i64:
     val llvm_ty = tm.map_type(ty)
     match value:
-        case Int(v):
-            if v == 0 and llvm_get_type_kind(llvm_ty) == 12:  # 12=Pointer (was 14=Metadata — Int(0)-as-ptr built an invalid ConstInt instead of const_null)
-                llvm_const_null(llvm_ty)
-            else:
-                llvm_const_int(llvm_ty, v, true)
+        case Int(v): llvm_const_int(llvm_ty, v, true)
         case Float(v): llvm_const_real_of_string(llvm_ty, "{v}")
         case Bool(v):
             val bval = if v: 1 else: 0
@@ -856,73 +813,42 @@ fn translate_const_value_llvm(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibType
 # Helpers
 # ============================================================================
 
-fn operand_local_id(operand_kind: MirOperandKind) -> i64:
-    val payload = rt_enum_payload(operand_kind)
-    # Native lowering normally carries LocalId as a tagged heap struct. The
-    # all-zero newtype edge case can remain scalar zero instead.
-    if payload >= 4096 and (payload & 7) == 1:
-        val local: LocalId = payload
-        return local.id
-    payload
-
 fn get_value(value_map: {i64: i64}, local_id: i64) -> i64:
-    val value = get_raw_handle(value_map, local_id)
-    if value == 0:
-        eprint("[llvm-lib] ERROR: read of undefined local _" + local_id.to_text() + " (no def reached value_map) — IR will fail verification")
-    value
-
-fn get_local_type(local_types: {i64: i64}, tm: LlvmLibTypeMapper, local_id: i64) -> i64:
-    val type_ref = get_raw_handle(local_types, local_id)
-    if type_ref != 0:
-        type_ref
+    if value_map.contains(local_id):
+        value_map[local_id]
     else:
         tm.native_int_type()
 
-fn set_raw_handle(map: {i64: i64}, key: i64, value: i64):
-    map[key] = value
-
-fn get_raw_handle(map: {i64: i64}, key: i64) -> i64:
-    if map.contains_key(key):
-        map[key]
+fn get_local_type(local_types: {i64: i64}, tm: LlvmLibTypeMapper, local_id: i64) -> i64:
+    if local_types.contains(local_id):
+        local_types[local_id]
     else:
-        0
+        tm.native_int_type()
+
+fn get_local_type(local_types: {i64: i64}, tm: LlvmLibTypeMapper, local_id: i64) -> i64:
+    if local_types.contains(local_id):
+        local_types[local_id]
+    else:
+        tm.native_int_type()
 
 fn get_operand_value(operand: MirOperand, value_map: {i64: i64}) -> i64:
     match operand.kind:
         case Copy(local): get_value(value_map, local.id)
         case Move(local): get_value(value_map, local.id)
-        case _:
-            # Lane C7 (backend coverage, hardening plan 2026-08-21 sections
-            # 11.3-11.6). `0` here is not a sentinel: it is a NULL LLVMValueRef
-            # handle, which the C API then dereferences. A Const operand -- the
-            # only other MirOperandKind -- reached this arm and produced a null
-            # value silently. Named, greppable refusal instead.
-            panic("E-BACKEND-LLVMLIB-OPERAND-NonLocal: get_operand_value requires a Copy/Move operand; a Const operand must be materialised by translate_operand_llvm first")
+        case _: 0
 
 fn get_operand_type_ref(operand: MirOperand, local_types: {i64: i64}, tm: LlvmLibTypeMapper) -> i64:
     match operand.kind:
         case Copy(local):
-            get_local_type(local_types, tm, local.id)
+            get_local_type(local_types, tm, local)
         case Move(local):
-            get_local_type(local_types, tm, local.id)
+            get_local_type(local_types, tm, local)
         case Const(_, type_):
             tm.map_type(type_)
-
-fn get_operand_unsigned(operand: MirOperand, local_unsigned: {i64: bool}) -> bool:
-    match operand.kind:
-        case Copy(local): (if local_unsigned.contains_key(local.id): local_unsigned[local.id] else: false)
-        case Move(local): (if local_unsigned.contains_key(local.id): local_unsigned[local.id] else: false)
-        case Const(_, type_):
-            match type_.kind:
-                case U8 | U16 | U32 | U64: true
-                case _: false
 
 fn is_float_type_ref(ctx: i64, ty: i64) -> bool:
     val kind = llvm_get_type_kind(ty)
     kind == 2 or kind == 3  # 2=Float, 3=Double
-
-fn is_int_type_ref(ctx: i64, ty: i64) -> bool:
-    llvm_get_type_kind(ty) == 8  # 8=Integer
 
 # ============================================================================
 # Exports

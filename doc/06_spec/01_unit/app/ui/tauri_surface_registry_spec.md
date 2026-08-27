@@ -1,6 +1,30 @@
 # Tauri Surface Registry Specification
 
-> Tests covering app.ui.tauri.surface_registry.
+> <details>
+
+<!-- sdn-diagram:id=tauri_surface_registry_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=tauri_surface_registry_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+tauri_surface_registry_spec -> std
+tauri_surface_registry_spec -> common
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=tauri_surface_registry_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,22 +41,13 @@
 
 #### exposes a Tauri registry helper in the shared-WM Tauri entrypoint
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- exposes a Tauri registry helper in the shared-WM Tauri entrypoint
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("exposes a Tauri registry helper in the shared-WM Tauri entrypoint")
 val source = _source("src/app/ui.tauri/async_app.spl")
 expect(source).to_contain("fn register_tauri_window")
 expect(source).to_contain("UI_SURFACE_KIND_TAURI")
@@ -43,7 +58,8 @@ expect(source).to_contain("reg.bind_with_kind(window_id, surface_id, process_id,
 
 #### binds a Tauri window with the Tauri surface kind
 
-- binds a Tauri window with the Tauri surface kind
+1.  register tauri window
+   - Expected: binding == nil is false
    - Expected: binding.surface_kind equals `UI_SURFACE_KIND_TAURI`
    - Expected: reg.window_id_for_surface("surface-tauri") equals `window-tauri`
 
@@ -51,16 +67,14 @@ expect(source).to_contain("reg.bind_with_kind(window_id, surface_id, process_id,
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("binds a Tauri window with the Tauri surface kind")
 val reg = new_ui_window_surface_registry()
 _register_tauri_window(reg, "surface-tauri", "window-tauri", 77 as u64, "app.tauri", "Tauri")
 val binding = reg.for_surface("surface-tauri")
-expect(binding).to_not_equal(nil)
+expect(binding == nil).to_equal(false)
 expect(binding.surface_kind).to_equal(UI_SURFACE_KIND_TAURI)
 expect(reg.window_id_for_surface("surface-tauri")).to_equal("window-tauri")
 ```
@@ -69,7 +83,8 @@ expect(reg.window_id_for_surface("surface-tauri")).to_equal("window-tauri")
 
 #### replaces prior bindings through the shared one-to-one registry rule
 
-- replaces prior bindings through the shared one-to-one registry rule
+1.  register tauri window
+2.  register tauri window
    - Expected: reg.len() equals `1`
    - Expected: reg.window_id_for_surface("surface-one") equals ``
    - Expected: reg.window_id_for_surface("surface-two") equals `window-tauri`
@@ -78,12 +93,10 @@ expect(reg.window_id_for_surface("surface-tauri")).to_equal("window-tauri")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("replaces prior bindings through the shared one-to-one registry rule")
 val reg = new_ui_window_surface_registry()
 _register_tauri_window(reg, "surface-one", "window-tauri", 77 as u64, "app.tauri", "One")
 _register_tauri_window(reg, "surface-two", "window-tauri", 77 as u64, "app.tauri", "Two")
@@ -101,12 +114,12 @@ expect(reg.window_id_for_surface("surface-two")).to_equal("window-tauri")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/tauri_surface_registry_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering app.ui.tauri.surface_registry.
+Tests covering:
 - app.ui.tauri.surface_registry
 
 ## Scenario Summary
@@ -121,54 +134,3 @@ Tests covering app.ui.tauri.surface_registry.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-APP`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `808ac483b543e4eefc129508ea84cd248c7f3a1ac467eb535612a3fcf86b064c`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `808ac483b543e4eefc129508ea84cd248c7f3a1ac467eb535612a3fcf86b064c`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `808ac483b543e4eefc129508ea84cd248c7f3a1ac467eb535612a3fcf86b064c`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
-
-SSpec documentization score: 90/100
-source: test/01_unit/app/ui/tauri_surface_registry_spec.spl
-mirror: doc/06_spec/01_unit/app/ui/tauri_surface_registry_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=90
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/ui/tauri_surface_registry_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/ui/tauri_surface_registry_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/ui/tauri_surface_registry_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/app/ui/tauri_surface_registry_spec.spl:28:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'exposes a Tauri registry helper in the shared-WM Tauri entrypoint' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui/tauri_surface_registry_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'binds a Tauri window with the Tauri surface kind' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui/tauri_surface_registry_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'replaces prior bindings through the shared one-to-one registry rule' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

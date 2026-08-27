@@ -2,8 +2,7 @@
 
 Date: 2026-05-27
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Status: Original crash resolved 2026-05-29; VFAT/C-FAT proof remains
 environment-gated. VFAT setup diagnosis now reports exact remediation.
 
 ## Summary

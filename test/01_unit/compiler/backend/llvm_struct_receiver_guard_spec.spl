@@ -1,0 +1,191 @@
+"""LLVM contract for checked heap-backed struct field receivers."""
+
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn i64_type() -> MirType:
+    MirType.i64()
+
+fn struct_type() -> MirType:
+    MirType(kind: MirTypeKind.Struct(SymbolId(id: 900)))
+
+fn tuple_type() -> MirType:
+    MirType(kind: MirTypeKind.Tuple([i64_type()]))
+
+fn enum_type() -> MirType:
+    MirType(kind: MirTypeKind.Enum(SymbolId(id: 901)))
+
+fn temp(id: i64, type_: MirType) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: Some("l{id}"), type_: type_, kind: LocalKind.Temp, is_ghost: false)
+
+fn integer(value: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(value), i64_type()))
+
+fn local(id: i64) -> MirOperand:
+    mir_operand_copy(LocalId(id: id))
+
+fn slot_type() -> MirType:
+    MirType.ptr(struct_type(), false)
+
+fn receiver_module() -> MirModule:
+    val struct_value = LocalId(id: 1)
+    val struct_field = LocalId(id: 2)
+    val tuple_value = LocalId(id: 3)
+    val tuple_field = LocalId(id: 4)
+    val enum_value = LocalId(id: 5)
+    val enum_field = LocalId(id: 6)
+    val struct_make = MirInst(
+        kind: MirInstKind.Aggregate(
+            struct_value, AggregateKind.Struct(SymbolId(id: 900)), [integer(7)]), span: nil)
+    val struct_get = MirInst(
+        kind: MirInstKind.GetField(struct_field, local(1), 0), span: nil)
+    val struct_set = MirInst(
+        kind: MirInstKind.SetField(local(1), 0, integer(8)), span: nil)
+    val tuple_make = MirInst(
+        kind: MirInstKind.Aggregate(tuple_value, AggregateKind.Tuple, [integer(9)]), span: nil)
+    val tuple_get = MirInst(
+        kind: MirInstKind.GetField(tuple_field, local(3), 0), span: nil)
+    # Deliberately use a declared Enum receiver in the same IR module. Its
+    # owner-like symbol must never select the rt_struct_alloc guard.
+    val enum_make = MirInst(
+        kind: MirInstKind.Aggregate(
+            enum_value, AggregateKind.Enum(SymbolId(id: 901), 0), [integer(10)]), span: nil)
+    val enum_get = MirInst(
+        kind: MirInstKind.GetField(enum_field, local(5), 0), span: nil)
+    val main = MirFunction(
+        symbol: SymbolId(id: 1),
+        name: "main",
+        signature: MirSignature(params: [], return_type: i64_type(), is_variadic: false),
+        locals: [temp(1, struct_type()), temp(2, i64_type()), temp(3, tuple_type()), temp(4, i64_type()), temp(5, enum_type()), temp(6, i64_type())],
+        blocks: [MirBlock(
+            id: BlockId.entry(), label: Some("entry"),
+            instructions: [struct_make, struct_get, struct_set, tuple_make, tuple_get, enum_make, enum_get],
+            terminator: MirTerminator.Ret(Some(local(2))))],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[main.symbol] = main
+    MirModule(name: "test.llvm.struct_receiver_guard", functions: functions, statics: {}, constants: {}, types: {})
+
+fn static_and_spill_provenance_module() -> MirModule:
+    val static_symbol = SymbolId(id: 77)
+    val scalar_symbol = SymbolId(id: 78)
+    var statics: Dict<SymbolId, MirStatic> = {}
+    # This models a trait/FFI Struct global.  Its pointer storage is not an
+    # rt_struct_alloc receiver and must never reach untag_aggregate_base_ptr.
+    statics[static_symbol] = MirStatic(
+        symbol: static_symbol, name: "trait_global", type_: struct_type(), init: nil,
+        is_mutable: false, is_rt_struct_alloc_registered: false)
+    statics[scalar_symbol] = MirStatic(
+        symbol: scalar_symbol, name: "scalar_global", type_: i64_type(), init: nil,
+        is_mutable: false, is_rt_struct_alloc_registered: false)
+    val fn_ = MirFunction(
+        symbol: SymbolId(id: 2), name: "provenance",
+        signature: MirSignature(params: [], return_type: i64_type(), is_variadic: false),
+        locals: [
+            temp(1, struct_type()), temp(2, struct_type()), temp(3, struct_type()),
+            temp(4, i64_type()), temp(5, slot_type()), temp(6, struct_type()),
+            temp(7, i64_type()), temp(8, struct_type()), temp(9, i64_type()),
+            temp(10, i64_type())],
+        blocks: [MirBlock(
+            id: BlockId.entry(), label: Some("entry"),
+            instructions: [
+                MirInst(kind: MirInstKind.Aggregate(LocalId(id: 1), AggregateKind.Struct(SymbolId(id: 900)), [integer(1)]), span: nil),
+                MirInst(kind: MirInstKind.Copy(LocalId(id: 2), LocalId(id: 1)), span: nil),
+                MirInst(kind: MirInstKind.Move(LocalId(id: 3), LocalId(id: 2)), span: nil),
+                MirInst(kind: MirInstKind.GetField(LocalId(id: 4), local(3), 0), span: nil),
+                MirInst(kind: MirInstKind.Alloc(LocalId(id: 5), struct_type()), span: nil),
+                MirInst(kind: MirInstKind.Store(local(5), local(1)), span: nil),
+                MirInst(kind: MirInstKind.Load(LocalId(id: 6), local(5)), span: nil),
+                MirInst(kind: MirInstKind.GetField(LocalId(id: 7), local(6), 0), span: nil),
+                MirInst(kind: MirInstKind.LoadGlobal(LocalId(id: 8), static_symbol), span: nil),
+                MirInst(kind: MirInstKind.GetField(LocalId(id: 9), local(8), 0), span: nil),
+                MirInst(kind: MirInstKind.LoadGlobal(LocalId(id: 10), scalar_symbol), span: nil)],
+            terminator: MirTerminator.Ret(Some(local(4))))],
+        entry_block: BlockId.entry(), span: Span.empty(), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {},
+        layout_phase: nil, is_kernel: false, gpu_target: "", gpu_backend_order: "",
+        is_export_c: false, export_name: "", has_driver_manifest_attr: false,
+        driver_manifest_attr: nil, has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false)
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[fn_.symbol] = fn_
+    MirModule(name: "test.llvm.static_struct_provenance", functions: functions, statics: statics, constants: {}, types: {})
+
+describe "LLVM struct receiver guard":
+    it "guards only rt_struct_alloc-proven user Struct field access":
+        val translator = MirToLlvm.create("test.llvm.struct_receiver_guard", CodegenTarget.X86_64, nil)
+        val output = translator.translate_module(receiver_module())
+        expect(output).to_contain("declare ptr @rt_struct_alloc(i64)")
+        expect(output).to_contain("declare i8 @rt_struct_receiver_valid(i64, i64, i64)")
+        expect(output).to_contain("call ptr @rt_struct_alloc(i64 8)")
+        expect(output).to_contain("call i8 @rt_struct_receiver_valid(i64")
+        expect(output).to_contain("call void @rt_panic(ptr")
+        expect(output).to_contain("unreachable")
+        expect(output).to_contain("call ptr @rt_alloc(i64 8)")
+        expect(output.contains("rt_struct_receiver_valid(i64 %l3")).to_equal(false)
+        expect(output.contains("rt_struct_receiver_valid(i64 %l5")).to_equal(false)
+
+    it "keeps registered Copy Move and spill receivers guarded while rejecting raw Struct globals":
+        val output = MirToLlvm.create("test.llvm.static_struct_provenance", CodegenTarget.X86_64, nil).translate_module(static_and_spill_provenance_module())
+        expect(output).to_contain("@g_trait_global = global ptr zeroinitializer")
+        expect(output).to_contain("@g_scalar_global = global i64 zeroinitializer")
+        expect(output).to_contain("load ptr, ptr @g_trait_global")
+        expect(output).to_contain("runtime error: unregistered static struct receiver")
+        expect(output).to_contain("call i8 @rt_struct_receiver_valid(i64")
+        expect(output).to_contain("store ptr %l1, ptr %l5")
+        expect(output).to_contain("%l6 = load ptr, ptr %l5")
+
+    it "keeps the source predicate and static imports struct-specific":
+        val aggregate = rt_file_read_text(
+            "src/compiler/70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl") ?? ""
+        val declarations = rt_file_read_text(
+            "src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl") ?? ""
+        val mir_types = rt_file_read_text(
+            "src/compiler/50.mir/mir_types.spl") ?? ""
+        val mir_globals = rt_file_read_text(
+            "src/compiler/50.mir/_MirLowering/module_lowering.spl") ?? ""
+        expect(aggregate).to_contain("registered_struct_receiver_locals[dest_id] = true")
+        expect(aggregate).to_contain("me is_registered_struct_receiver(base: MirOperand) -> bool")
+        expect(aggregate).to_contain("me is_unregistered_static_struct_receiver(base: MirOperand) -> bool")
+        expect(aggregate).to_contain("self.emit_unregistered_static_struct_receiver_panic()")
+        expect(aggregate).to_contain("case Const(_, _): false")
+        expect(mir_types).to_contain("is_rt_struct_alloc_registered: bool")
+        expect(mir_globals).to_contain("is_rt_struct_alloc_registered: false")
+        val codegen = rt_file_read_text(
+            "src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl") ?? ""
+        expect(codegen).to_contain("global_static_unregistered_struct_receivers")
+        expect(codegen).to_contain("alloca_registered_struct_receiver_slots")
+        expect(codegen).to_contain("bootstrap_mir_static_rt_struct_alloc_registered_at")
+        expect(aggregate).to_contain("self.guard_struct_receiver(base, base_as_ptr, field)")
+        expect(aggregate).to_contain("self.guard_struct_receiver(base, set_base_as_ptr, field)")
+        expect(aggregate).to_contain("call ptr @rt_struct_alloc(i64")
+        expect(aggregate).to_contain("call ptr @rt_alloc(i64")
+        expect(declarations).to_contain("declare ptr @rt_alloc(i64)")
+        expect(declarations).to_contain("declare ptr @rt_struct_alloc(i64)")
+        expect(declarations).to_contain("declare i8 @rt_struct_receiver_valid(i64, i64, i64)")
+        expect(declarations).to_contain("self.defined_func_names[\"rt_struct_receiver_valid\"] = true")

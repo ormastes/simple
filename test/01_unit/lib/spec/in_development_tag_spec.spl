@@ -1,0 +1,171 @@
+"""
+## Purpose and audience
+Pins the `@tag:in-development` classification rules that the test runner
+uses to decide whether a work-in-progress spec fails the suite, is counted
+as a skip, or is reported as an unexpected pass.
+## Operator workflow
+Run `bin/simple test test/01_unit/lib/spec/in_development_tag_spec.spl`;
+read the per-scenario verdicts in the `Results:` summary.
+## Compatibility and limitations
+Covers the pure classification/extraction layer in
+`src/lib/nogc_sync_mut/spec/in_development.spl`. The end-to-end runner
+behaviour (a real tagged spec not failing a real sweep) is pinned
+separately by the runner-level spec alongside this one.
+"""
+# @manual: primary
+# doc-path: doc/05_design/app/testing/in_development_tag.md
+
+use std.spec.{step}
+use std.spec.in_development.{
+    IN_DEVELOPMENT_TAG,
+    IN_DEVELOPMENT_SKIP_MARKER,
+    IN_DEVELOPMENT_UNEXPECTED_PASS_MARKER,
+    IN_DEVELOPMENT_SUMMARY_MARKER,
+    spec_tags,
+    source_has_tag,
+    source_is_in_development,
+    in_development_explicitly_targeted,
+    InDevelopmentOutcome,
+    classify_in_development,
+    in_development_skip_line,
+    in_development_unexpected_pass_line,
+    in_development_summary_line
+}
+
+fn outcome_name(o: InDevelopmentOutcome) -> text:
+    match o:
+        case InDevelopmentOutcome.NotInDevelopment: "NotInDevelopment"
+        case InDevelopmentOutcome.ExpectedFailure: "ExpectedFailure"
+        case InDevelopmentOutcome.UnexpectedPass: "UnexpectedPass"
+        case InDevelopmentOutcome.ExplicitRun: "ExplicitRun"
+
+describe "In-development tag: the tag name and its extraction":
+    it "uses the hyphenated in-development spelling that matches the tree convention":
+        step("Verify the canonical tag constant")
+        # evidence(pinned oracle): the tag census showed multi-word tags are
+        # already hyphenated (back-compat, api-individual), so this spelling
+        # is the convention, not a deviation.
+        expect(IN_DEVELOPMENT_TAG).to_equal("in-development")
+
+    it "extracts every @tag: name from a spec source, de-duplicated and in order":
+        step("Extract tags from a header carrying three tags, one repeated")
+        val src = "# @tag:stdlib\n# @tag:in-development\n# body\n# @tag:stdlib\n# @tag:testing\n"
+        val tags = spec_tags(src)
+        expect(tags.len()).to_equal(3)
+        expect(tags[0]).to_equal("stdlib")
+        expect(tags[1]).to_equal("in-development")
+        expect(tags[2]).to_equal("testing")
+
+    it "recognises a tag inside a docstring header, not only a # comment":
+        step("engine_probe.spl puts @tag: inside a triple-quoted header")
+        val src = "\"\"\"\n# Title\n\n@tag:in-development\n\"\"\"\n"
+        expect(source_is_in_development(src)).to_equal(true)
+
+    it "does NOT match a longer tag that merely starts with the tag name":
+        step("Guard against substring matching")
+        # evidence(pinned oracle): `@tag:in-development-notes` is a different
+        # tag; a substring match here would silently neutralise real tests.
+        val src = "# @tag:in-development-notes\n"
+        expect(source_has_tag(src, IN_DEVELOPMENT_TAG)).to_equal(false)
+        expect(source_is_in_development(src)).to_equal(false)
+
+    it "reports an untagged source as not in development":
+        step("A plain spec header carries no in-development tag")
+        expect(source_is_in_development("# @tag:stdlib\n# @tag:api\n")).to_equal(false)
+
+describe "In-development tag (a): a failing in-development test does not fail the suite":
+    it "classifies a tagged failing spec as ExpectedFailure, not a suite failure":
+        step("Classify: tagged, swept (not explicitly targeted), 3 failures")
+        val o = classify_in_development(true, false, 3, 0, false)
+        expect(outcome_name(o)).to_equal("ExpectedFailure")
+
+    it "classifies a tagged spec that crashed or timed out as ExpectedFailure too":
+        step("A WIP spec that dies must not escape through the error channel")
+        # evidence(pinned oracle): errored folds timed_out and a non-empty
+        # error; without this a crashing WIP spec would still redden the suite.
+        val o = classify_in_development(true, false, 0, 0, true)
+        expect(outcome_name(o)).to_equal("ExpectedFailure")
+
+    it "classifies a tagged spec that executed nothing as ExpectedFailure, never a promotion signal":
+        step("Zero passed, zero failed, tagged, swept")
+        val o = classify_in_development(true, false, 0, 0, false)
+        expect(outcome_name(o)).to_equal("ExpectedFailure")
+
+    it "leaves an UNTAGGED failing spec alone so ordinary reds stay red":
+        step("Classify: untagged, 3 failures")
+        val o = classify_in_development(false, false, 3, 0, false)
+        expect(outcome_name(o)).to_equal("NotInDevelopment")
+
+describe "In-development tag (b): the skip is counted and printed, never invisible":
+    it "renders a per-file skip line carrying the marker, the path and the failure count":
+        step("Render the per-file in-development skip line")
+        val line = in_development_skip_line("test/01_unit/wip_spec.spl", 2)
+        expect(line).to_contain(IN_DEVELOPMENT_SKIP_MARKER)
+        expect(line).to_contain("test/01_unit/wip_spec.spl")
+        expect(line).to_contain("2 expected failure(s)")
+
+    it "renders a summary row stating the in-development skip count":
+        step("Render the summary row with skips only")
+        val line = in_development_summary_line(7, 0)
+        expect(line).to_contain(IN_DEVELOPMENT_SUMMARY_MARKER)
+        expect(line).to_contain("7 skipped")
+
+    it "renders the summary row even when the count is zero unexpected passes":
+        step("The row must not silently vanish when only skips exist")
+        expect(in_development_summary_line(1, 0)).to_contain("1 skipped")
+
+describe "In-development tag (c): explicit-path invocation still runs the test honestly":
+    it "classifies an explicitly targeted tagged spec as ExplicitRun, not a skip":
+        step("Classify: tagged, explicitly targeted, 3 failures")
+        val o = classify_in_development(true, true, 3, 0, false)
+        expect(outcome_name(o)).to_equal("ExplicitRun")
+
+    it "treats naming the file itself as explicit targeting":
+        step("bin/simple test test/01_unit/wip_spec.spl")
+        val hit = in_development_explicitly_targeted(
+            "test/01_unit/wip_spec.spl", true, ["test/01_unit/wip_spec.spl"])
+        expect(hit).to_equal(true)
+
+    it "matches an absolute file path against a repo-relative request":
+        step("The runner may hold an absolute path while the CLI got a relative one")
+        val hit = in_development_explicitly_targeted(
+            "/repo/test/01_unit/wip_spec.spl", true, ["test/01_unit/wip_spec.spl"])
+        expect(hit).to_equal(true)
+
+    it "does NOT treat a directory sweep as explicit targeting of the files beneath it":
+        step("bin/simple test test/01_unit is a sweep, not an explicit file run")
+        # evidence(pinned oracle): if a directory counted as explicit, every
+        # sweep would go honest-red and requirement (a) would be defeated.
+        val hit = in_development_explicitly_targeted(
+            "test/01_unit/wip_spec.spl", true, ["test/01_unit"])
+        expect(hit).to_equal(false)
+
+    it "does not treat anything as explicit when path_explicit is false":
+        step("A default whole-tree run names no path at all")
+        val hit = in_development_explicitly_targeted(
+            "test/01_unit/wip_spec.spl", false, ["test/01_unit/wip_spec.spl"])
+        expect(hit).to_equal(false)
+
+describe "In-development tag (d): an unexpectedly passing test is reported distinctly":
+    it "classifies a tagged passing spec as UnexpectedPass, distinct from a plain pass":
+        step("Classify: tagged, swept, 4 passed, 0 failed")
+        val o = classify_in_development(true, false, 0, 4, false)
+        expect(outcome_name(o)).to_equal("UnexpectedPass")
+
+    it "renders an unexpected-pass line with its own marker and the promotion action":
+        step("Render the unexpected-pass line")
+        val line = in_development_unexpected_pass_line("test/01_unit/wip_spec.spl", 4)
+        expect(line).to_contain(IN_DEVELOPMENT_UNEXPECTED_PASS_MARKER)
+        expect(line).to_contain("ready to promote")
+        expect(line).to_contain(IN_DEVELOPMENT_TAG)
+
+    it "uses a marker distinct from the skip marker so the two never conflate":
+        step("The skip line must not be mistakable for an unexpected pass")
+        val skip_line = in_development_skip_line("a_spec.spl", 1)
+        expect(skip_line.contains(IN_DEVELOPMENT_UNEXPECTED_PASS_MARKER)).to_equal(false)
+
+    it "surfaces the unexpected-pass count in the summary row":
+        step("Render the summary row with both counts")
+        val line = in_development_summary_line(7, 2)
+        expect(line).to_contain("7 skipped")
+        expect(line).to_contain("2 UNEXPECTED PASS")

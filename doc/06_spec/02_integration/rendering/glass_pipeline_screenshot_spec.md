@@ -1,6 +1,31 @@
 # Glass Pipeline Screenshot Specification
 
-> Tests covering Glass Pipeline Screenshot Comparison.
+> <details>
+
+<!-- sdn-diagram:id=glass_pipeline_screenshot_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=glass_pipeline_screenshot_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+glass_pipeline_screenshot_spec -> std
+glass_pipeline_screenshot_spec -> os
+glass_pipeline_screenshot_spec -> common
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=glass_pipeline_screenshot_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,20 +44,13 @@
 
 #### glass_dark software vs software_rasterizer produce pixels
 
-- glass_dark software vs software_rasterizer produce pixels
-   - Expected: sw.success is true
-   - Expected: sw.pixels.len() equals `W * H`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("glass_dark software vs software_rasterizer produce pixels")
 val html = generate_glass_test_html("glass_dark")
 val sw = capture_with_backend(html, W, H, "software")
 expect(sw.success).to_equal(true)
@@ -51,20 +69,13 @@ expect(non_black).to_be_greater_than(0)
 
 #### glass_light renders non-empty pixels
 
-- glass_light renders non-empty pixels
-   - Expected: sw.success is true
-   - Expected: sw.pixels.len() equals `W * H`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("glass_light renders non-empty pixels")
 val html = generate_glass_test_html("glass_light")
 val sw = capture_with_backend(html, W, H, "software")
 expect(sw.success).to_equal(true)
@@ -77,18 +88,16 @@ expect(sw.pixels.len()).to_equal(W * H)
 
 #### renders both pipelines for a demo
 
-- renders both pipelines for a demo
+1. print comparison report
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("renders both pipelines for a demo")
 # Use a minimal demo if available
 val demos = list_core_glass_demos()
 if demos.len() > 0:
@@ -111,21 +120,13 @@ if demos.len() > 0:
 
 #### software backend produces same pixels on repeated renders
 
-- software backend produces same pixels on repeated renders
-   - Expected: first.success is true
-   - Expected: second.success is true
-   - Expected: result.match_percentage equals `10000`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("software backend produces same pixels on repeated renders")
 val html = generate_glass_test_html("glass_dark")
 val first = capture_with_backend(html, W, H, "software")
 val second = capture_with_backend(html, W, H, "software")
@@ -140,20 +141,13 @@ expect(result.match_percentage).to_equal(10000)
 
 #### software vs cuda for glass_dark if cuda available
 
-- software vs cuda for glass_dark if cuda available
-   - Expected: sw.success is true
-   - Expected: cuda.success is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("software vs cuda for glass_dark if cuda available")
 val backends = Engine2D.list_backends()
 var has_cuda = false
 for b in backends:
@@ -179,12 +173,12 @@ expect(result.match_percentage).to_be_greater_than(MIN_PCT_GPU - 1)
 | Category | Other |
 | Status | Active |
 | Source | `test/02_integration/rendering/glass_pipeline_screenshot_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Glass Pipeline Screenshot Comparison.
+Tests covering:
 - Glass Pipeline Screenshot Comparison
 
 ## Scenario Summary
@@ -199,51 +193,3 @@ Tests covering Glass Pipeline Screenshot Comparison.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-INTEGRATION`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `f50ebe0cddb87d71eca9d0063c8b869ec4858c8c81c110174fee55e47e9b9589`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `f50ebe0cddb87d71eca9d0063c8b869ec4858c8c81c110174fee55e47e9b9589`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `f50ebe0cddb87d71eca9d0063c8b869ec4858c8c81c110174fee55e47e9b9589`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **91/100**; effective score: **91/100**; blockers: **0**.
-
-SSpec documentization score: 91/100
-source: test/02_integration/rendering/glass_pipeline_screenshot_spec.spl
-mirror: doc/06_spec/02_integration/rendering/glass_pipeline_screenshot_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=90
-  traceability=100 evidence=75 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/rendering/glass_pipeline_screenshot_spec.md:1:1: warning SSDOC-EVD-003 [evidence] (-15): source captures are not rendered as manual evidence
-  why: Retained evidence must be visible or linked from the professional manual.
-  improve: Select a supported evidence display and regenerate.
-doc/06_spec/02_integration/rendering/glass_pipeline_screenshot_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/rendering/glass_pipeline_screenshot_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/02_integration/rendering/glass_pipeline_screenshot_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/02_integration/rendering/glass_pipeline_screenshot_spec.spl:75:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders both pipelines for a demo' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

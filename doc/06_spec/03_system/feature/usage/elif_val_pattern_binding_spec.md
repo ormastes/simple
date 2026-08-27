@@ -2,6 +2,29 @@
 
 > Tests for `elif val`/`elif var` pattern binding in conditional branches. Verifies that pattern matching works correctly in elif positions, matching the existing `if val` support.
 
+<!-- sdn-diagram:id=elif_val_pattern_binding_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=elif_val_pattern_binding_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+elif_val_pattern_binding_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=elif_val_pattern_binding_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 20 | 20 | 0 | 0 |
@@ -21,7 +44,7 @@ Tests for `elif val`/`elif var` pattern binding in conditional branches. Verifie
 | Category | Language |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/elif_val_pattern_binding_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -51,18 +74,13 @@ default()
 
 #### matches elif val when if condition is false
 
-- matches elif val when if condition is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches elif val when if condition is false")
 val x = Some(42)
 var result = ""
 if false:
@@ -76,18 +94,13 @@ expect result == "elif=42"
 
 #### skips elif val when pattern does not match
 
-- skips elif val when pattern does not match
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("skips elif val when pattern does not match")
 var result = "default"
 if false:
     result = "if"
@@ -100,18 +113,13 @@ expect result == "default"
 
 #### binds variable from elif val pattern
 
-- binds variable from elif val pattern
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("binds variable from elif val pattern")
 val data = Some("hello")
 var captured = ""
 if false:
@@ -127,18 +135,13 @@ expect captured == "hello"
 
 #### falls to else when elif val does not match
 
-- falls to else when elif val does not match
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("falls to else when elif val does not match")
 var result = ""
 if false:
     result = "if"
@@ -153,18 +156,13 @@ expect result == "else"
 
 #### does not reach else when elif val matches
 
-- does not reach else when elif val matches
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("does not reach else when elif val matches")
 var result = ""
 if false:
     result = "if"
@@ -181,18 +179,13 @@ expect result == "elif=99"
 
 #### matches first elif val pattern
 
-- matches first elif val pattern
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches first elif val pattern")
 val a = Some(1)
 val b = Some(2)
 var result = ""
@@ -209,18 +202,13 @@ expect result == "first=1"
 
 #### matches second elif val when first does not match
 
-- matches second elif val when first does not match
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches second elif val when first does not match")
 val b = Some(2)
 var result = ""
 if false:
@@ -236,18 +224,13 @@ expect result == "second=2"
 
 #### falls through all elif val when none match
 
-- falls through all elif val when none match
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("falls through all elif val when none match")
 var result = "none"
 if false:
     result = "if"
@@ -264,18 +247,13 @@ expect result == "none"
 
 #### matches regular elif before elif val
 
-- matches regular elif before elif val
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches regular elif before elif val")
 var result = ""
 if false:
     result = "if"
@@ -290,18 +268,13 @@ expect result == "elif-bool"
 
 #### matches elif val after failed regular elif
 
-- matches elif val after failed regular elif
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches elif val after failed regular elif")
 val x = Some(10)
 var result = ""
 if false:
@@ -317,18 +290,13 @@ expect result == "elif-val=10"
 
 #### matches regular elif after failed elif val
 
-- matches regular elif after failed elif val
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches regular elif after failed elif val")
 var result = ""
 if false:
     result = "if"
@@ -343,18 +311,13 @@ expect result == "elif-bool"
 
 #### reaches else after mixed elif failures
 
-- reaches else after mixed elif failures
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("reaches else after mixed elif failures")
 var result = ""
 if false:
     result = "if"
@@ -373,18 +336,13 @@ expect result == "else"
 
 #### matches if val and skips elif val
 
-- matches if val and skips elif val
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches if val and skips elif val")
 var result = ""
 if val Some(n) = Some(1):
     result = "if={n}"
@@ -397,18 +355,13 @@ expect result == "if=1"
 
 #### skips if val and matches elif val
 
-- skips if val and matches elif val
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("skips if val and matches elif val")
 var result = ""
 if val Some(n) = None:
     result = "if"
@@ -421,18 +374,13 @@ expect result == "elif=2"
 
 #### skips both if val and elif val to else
 
-- skips both if val and elif val to else
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("skips both if val and elif val to else")
 var result = ""
 if val Some(n) = None:
     result = "if"
@@ -449,18 +397,13 @@ expect result == "else"
 
 #### matches nested Some in elif val
 
-- matches nested Some in elif val
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches nested Some in elif val")
 val inner = Some(Some(99))
 var result = ""
 if val Some(Some(n)) = None:
@@ -474,18 +417,13 @@ expect result == "nested=99"
 
 #### chains multiple Some patterns
 
-- chains multiple Some patterns
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("chains multiple Some patterns")
 val a = None
 val b = None
 val c = Some(7)
@@ -507,18 +445,18 @@ expect result == "c=7"
 
 #### returns from elif val branch
 
-- returns from elif val branch
+1. fn classify
+2. expect classify
+3. expect classify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns from elif val branch")
 fn classify(opt):
     if val Some(n) = None:
         "none-matched"
@@ -537,18 +475,13 @@ expect classify(None) == "nothing"
 
 #### bindings do not leak to outer scope
 
-- bindings do not leak to outer scope
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("bindings do not leak to outer scope")
 var outer = "unchanged"
 if val Some(n) = None:
     pass
@@ -564,18 +497,13 @@ expect outer == "n=42"
 
 #### returns nil when no branch matches
 
-- returns nil when no branch matches
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns nil when no branch matches")
 var result = "before"
 if false:
     result = "if"
@@ -599,51 +527,3 @@ expect result == "before"
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `49760c0e47172ef38e5b144e83723af204ef8a75d2254cbf48e0d6ac253964eb`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `49760c0e47172ef38e5b144e83723af204ef8a75d2254cbf48e0d6ac253964eb`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `49760c0e47172ef38e5b144e83723af204ef8a75d2254cbf48e0d6ac253964eb`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/elif_val_pattern_binding_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/elif_val_pattern_binding_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/elif_val_pattern_binding_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/elif_val_pattern_binding_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/elif_val_pattern_binding_spec.spl:45:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches elif val when if condition is false' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/elif_val_pattern_binding_spec.spl:56:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'skips elif val when pattern does not match' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/elif_val_pattern_binding_spec.spl:66:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'binds variable from elif val pattern' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

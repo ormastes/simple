@@ -1,0 +1,110 @@
+"""Admitted APK identity is the sole typed-facet parser owner."""
+
+use std.spec.*
+use std.io_runtime.{file_write_bytes, file_delete, dir_create_all}
+use std.common.string_core.{text_to_bytes}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.aspect_pack.{ApkModuleSourceV3, apk_build_pack_v3,
+    APK_CHUNK_CODE, APK_CHUNK_FLAG_NONE}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_key,
+    frontend_parse_cache_enabled, frontend_parse_cache_store,
+    frontend_parse_cache_load}
+use compiler.core.parser.{parser_has_errors}
+use compiler.core.parser_decls.{parser_set_aspect_context, parser_clear_aspect_context}
+use compiler.loader.aspect_pack_index_cache.{pack_index_cache_new_bounded,
+    pack_index_get_digest_extent, pack_index_aspect_source,
+    pack_index_cache_close}
+use compiler.loader.pack_file_snapshot.{pack_snapshot_release}
+use compiler.driver.driver_manifest_parser_context.{driver_parse_manifest_source}
+
+val CONTEXT_DIR: text = "build/test/facet_manifest_parser_context"
+val CONTEXT_PATH: text = "build/test/facet_manifest_parser_context/telemetry.apk"
+
+extern fn rt_env_set(key: text, value: text)
+
+describe "typed facet manifest parser context":
+    it "propagates admitted identity and clears it after exactly one parse":
+        rt_env_set("SIMPLE_FRONTEND_CACHE_SCOPE", "facet-manifest-context-spec")
+        rt_env_set("SIMPLE_FRONTEND_CACHE_DIR", CONTEXT_DIR + "/cache")
+        dir_create_all(CONTEXT_DIR)
+        val source_text = "aspect telemetry:\n" +
+            "    facet interface Readable:\n" +
+            "        fn read(self) -> i64\n"
+        var modules: [ApkModuleSourceV3] = []
+        modules.push(ApkModuleSourceV3(module_id: "telemetry.main",
+            aspect_id: "telemetry", module_abi_hash: "",
+            required_core_public_abi_hash: "",
+            required_core_layout_hash: "", variant_fingerprint: "",
+            cluster_id: "", chunk_kind: APK_CHUNK_CODE,
+            chunk_flags: APK_CHUNK_FLAG_NONE, alignment: 1,
+            payload: text_to_bytes(source_text), aspect_version: 7))
+        val built = apk_build_pack_v3(modules)
+        expect(built.ok).to_equal(true)
+        file_delete(CONTEXT_PATH)
+        _ = file_write_bytes(CONTEXT_PATH, built.bytes)
+        val cache = pack_index_cache_new_bounded(2, 1048576)
+        val admitted = pack_index_get_digest_extent(cache, CONTEXT_PATH,
+            0, -1, "catalog-v7", sha256_u8_hex(built.bytes))
+        expect(admitted.ok).to_equal(true)
+        val source = pack_index_aspect_source(admitted, "telemetry.main",
+            "apk://telemetry.main", source_text).unwrap()
+        expect(source.descriptor_digest).to_equal(sha256_u8_hex(built.bytes))
+        val parsed = driver_parse_manifest_source(source, Logger(level: 0))
+        expect(parser_has_errors()).to_equal(false)
+        expect(parsed.facet_interfaces[0].aspect_id).to_equal("telemetry")
+        expect(parsed.facet_interfaces[0].aspect_version).to_equal(7)
+
+        val digest_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        val digest_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        parser_set_aspect_context("telemetry", 7, digest_a)
+        val cache_key_a = frontend_parse_cache_key(CONTEXT_PATH)
+        expect(frontend_parse_cache_enabled()).to_equal(true)
+        expect(frontend_parse_cache_store(cache_key_a, "warm-flat-pool-a")).to_equal(true)
+        parser_set_aspect_context("telemetry", 7, digest_b)
+        val cache_key_b = frontend_parse_cache_key(CONTEXT_PATH)
+        expect(cache_key_a != "").to_equal(true)
+        expect(cache_key_b != cache_key_a).to_equal(true)
+        expect(frontend_parse_cache_load(cache_key_b)).to_equal("")
+        parser_clear_aspect_context()
+
+        _ = parse_full_frontend(source_text, "unadmitted.spl",
+            "unadmitted", Logger(level: 0))
+        expect(parser_has_errors()).to_equal(true)
+        if admitted.snapshot != nil:
+            _ = pack_snapshot_release(admitted.snapshot!)
+        _ = pack_index_cache_close(cache)
+        file_delete(CONTEXT_PATH)
+
+    it "rejects a lexical owner that disagrees with the admitted manifest":
+        val source_text = "aspect evil:\n" +
+            "    facet interface Readable:\n" +
+            "        fn read(self) -> i64\n"
+        val mismatched = SourceFile(path: "apk://telemetry.main",
+            content: source_text, module_name: "telemetry.main",
+            aspect_id: "telemetry", aspect_version: 7,
+            descriptor_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        _ = driver_parse_manifest_source(mismatched, Logger(level: 0))
+        expect(parser_has_errors()).to_equal(true)
+
+    it "retains authority through streaming, low-memory, and HIR reparse paths":
+        val parsing = read_file(
+            "src/compiler/80.driver/driver_source_pipeline_parsing.spl")
+        val driver_types = read_file("src/compiler/80.driver/driver_types.spl")
+        val hir_lowering = read_file(
+            "src/compiler/80.driver/driver_hir_pipeline_lowering.spl")
+        val hir_passes = read_file(
+            "src/compiler/80.driver/driver_hir_pipeline_passes.spl")
+        expect(parsing).to_contain("source_facet_manifests[source_index]")
+        expect(parsing).to_contain(
+            "facet_manifest: source_facet_manifests[retained_index]")
+        expect(driver_types).to_contain("facet_manifest: source.facet_manifest")
+        expect(hir_lowering).to_contain("facet_manifest: retained_source.facet_manifest")
+        expect(hir_passes).to_contain(
+            "val authority_module_name = hir_module.name")
+        expect(hir_passes).to_contain(
+            "ctx.sources[source_index].module_name == authority_module_name")
+        expect(hir_lowering).to_contain("driver_parse_manifest_source(src, self.ctx.logger)")
+        expect(hir_lowering).not_to_contain("parse_full_frontend(src.content")

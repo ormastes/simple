@@ -1,0 +1,201 @@
+# Cache GC metadata + the access journal (schema gc.metadata, design §18.5/§18.7)
+#
+# Agent C3. Every field here is class GC_METADATA: it drives eviction ranking
+# ONLY. None of it enters any digest, any key, or any trust decision. Changing a
+# value here can change WHAT is evicted; it can never change what a cache hit
+# means.
+#
+# `refcount_approx` is exactly that — approximate. Mark-and-sweep
+# (gc/gc_mark_sweep.spl) is the source of truth and repairs it.
+#
+# ACCESS TIME IS NEVER WRITTEN SYNCHRONOUSLY ON A HIT. A hot hit appends one
+# record to an in-memory journal; the journal is folded into the metadata table
+# in batches (`metadata_journal_flush`). This is a hard requirement of §18.7 —
+# a synchronous metadata rewrite per hit turns a read-only cache hit into a
+# write and destroys hit latency.
+
+# Protection classes, lowest value (evicted first) to highest, from design §18.5.
+# i64 constants rather than an enum: `match` on an enum has no native lowering,
+# and these values are compared inside the eviction sort.
+val GC_CLASS_EXPIRED_TEMP_OR_QUARANTINE: i64 = 0
+val GC_CLASS_ORPHANED_SCHEMA_GENERATION: i64 = 1
+val GC_CLASS_EXPIRED_BRANCH_NAMESPACE: i64 = 2
+val GC_CLASS_UNREFERENCED_DIRTY_WORKTREE: i64 = 3
+val GC_CLASS_OLD_FEATURE_BRANCH: i64 = 4
+val GC_CLASS_OLD_MACHINE_LOCAL: i64 = 5
+val GC_CLASS_OLD_UNPINNED_MAIN: i64 = 6
+val GC_CLASS_RETAINED_MAIN_GENERATION: i64 = 7
+val GC_CLASS_BOOTSTRAP_ROOT: i64 = 8
+val GC_CLASS_RELEASE_PIN: i64 = 9
+val GC_CLASS_ACTIVE_LEASE: i64 = 10
+
+# Everything at or above this class is a PROTECTED ROOT: it is never evicted to
+# meet a size target. Overflow is REPORTED (PinnedOverflow), never resolved by
+# deletion. See gc/gc_admission.spl.
+val GC_FIRST_PROTECTED_CLASS: i64 = 7   # == GC_CLASS_RETAINED_MAIN_GENERATION
+
+fn gc_class_name(cls: i64) -> text:
+    if cls == GC_CLASS_EXPIRED_TEMP_OR_QUARANTINE:
+        return "expired_temporary_or_quarantine"
+    if cls == GC_CLASS_ORPHANED_SCHEMA_GENERATION:
+        return "orphaned_schema_generations"
+    if cls == GC_CLASS_EXPIRED_BRANCH_NAMESPACE:
+        return "expired_branch_namespace"
+    if cls == GC_CLASS_UNREFERENCED_DIRTY_WORKTREE:
+        return "unreferenced_dirty_worktree_actions"
+    if cls == GC_CLASS_OLD_FEATURE_BRANCH:
+        return "old_feature_branch_actions"
+    if cls == GC_CLASS_OLD_MACHINE_LOCAL:
+        return "old_machine_local_actions"
+    if cls == GC_CLASS_OLD_UNPINNED_MAIN:
+        return "old_unpinned_main_actions"
+    if cls == GC_CLASS_RETAINED_MAIN_GENERATION:
+        return "retained_main_generations"
+    if cls == GC_CLASS_BOOTSTRAP_ROOT:
+        return "bootstrap_roots"
+    if cls == GC_CLASS_RELEASE_PIN:
+        return "release_pins"
+    if cls == GC_CLASS_ACTIVE_LEASE:
+        return "active_leases"
+    "unknown_protection_class"
+
+fn gc_class_is_protected(cls: i64) -> bool:
+    cls >= GC_FIRST_PROTECTED_CLASS
+
+# ---------------------------------------------------------------------------
+# CacheMetadata
+# ---------------------------------------------------------------------------
+
+struct CacheMetadata:
+    """Per-entry eviction accounting. GC_METADATA only — never in any digest."""
+    digest: text
+    last_access_time: i64
+    access_count: i64
+    artifact_size_bytes: i64
+    unique_retained_bytes: i64
+    recomputation_cost_ms: i64
+    ttl_deadline: i64                   # 0 = no TTL
+    refcount_approx: i64
+    namespace_protection_class: i64
+    toolchain_relevant: bool
+
+fn cache_metadata_new(digest: text, size_bytes: i64, cls: i64, now: i64) -> CacheMetadata:
+    CacheMetadata(
+        digest: digest,
+        last_access_time: now,
+        access_count: 0,
+        artifact_size_bytes: size_bytes,
+        unique_retained_bytes: size_bytes,
+        recomputation_cost_ms: 0,
+        ttl_deadline: 0,
+        refcount_approx: 0,
+        namespace_protection_class: cls,
+        toolchain_relevant: false,
+    )
+
+fn cache_metadata_ttl_expired(m: CacheMetadata, now: i64) -> bool:
+    if m.ttl_deadline <= 0:
+        return false
+    now >= m.ttl_deadline
+
+# ---------------------------------------------------------------------------
+# Metadata table — a list plus a digest -> index map. The dict holds i64 values
+# only, and is read via contains_key + bracket index (never `.get()`, never
+# `.len()`): both are broken under native codegen for this shape.
+# ---------------------------------------------------------------------------
+
+struct CacheMetadataTable:
+    entries: [CacheMetadata]
+    index_of: {text: i64}
+    count: i64                          # maintained counter; never Dict.len()
+
+fn cache_metadata_table_new() -> CacheMetadataTable:
+    CacheMetadataTable(entries: [], index_of: {}, count: 0)
+
+fn cache_metadata_table_put(table: CacheMetadataTable, m: CacheMetadata) -> CacheMetadataTable:
+    if table.index_of.contains_key(m.digest):
+        val at = table.index_of[m.digest]
+        var updated = table.entries
+        updated[at] = m
+        return CacheMetadataTable(entries: updated, index_of: table.index_of, count: table.count)
+    var appended = table.entries
+    appended = appended.push(m)
+    var idx = table.index_of
+    idx[m.digest] = appended.len() - 1
+    CacheMetadataTable(entries: appended, index_of: idx, count: table.count + 1)
+
+fn cache_metadata_table_has(table: CacheMetadataTable, digest: text) -> bool:
+    table.index_of.contains_key(digest)
+
+fn cache_metadata_table_get(table: CacheMetadataTable, digest: text) -> CacheMetadata?:
+    if not table.index_of.contains_key(digest):
+        return nil
+    table.entries[table.index_of[digest]]
+
+fn cache_metadata_table_total_bytes(table: CacheMetadataTable) -> i64:
+    var total: i64 = 0
+    for e in table.entries:
+        total = total + e.artifact_size_bytes
+    total
+
+# ---------------------------------------------------------------------------
+# Access journal — batched, never a synchronous hot-path metadata write.
+# ---------------------------------------------------------------------------
+
+struct AccessRecord:
+    digest: text
+    at: i64
+
+struct MetadataJournal:
+    records: [AccessRecord]
+    flush_threshold: i64
+    flushes: i64
+
+val GC_JOURNAL_DEFAULT_THRESHOLD: i64 = 256
+
+fn metadata_journal_new(threshold: i64) -> MetadataJournal:
+    var t = threshold
+    if t <= 0:
+        t = GC_JOURNAL_DEFAULT_THRESHOLD
+    MetadataJournal(records: [], flush_threshold: t, flushes: 0)
+
+# Hot path. O(1) append, no file write, no table mutation.
+fn metadata_journal_record(journal: MetadataJournal, digest: text, at: i64) -> MetadataJournal:
+    var recs = journal.records
+    recs = recs.push(AccessRecord(digest: digest, at: at))
+    MetadataJournal(records: recs, flush_threshold: journal.flush_threshold, flushes: journal.flushes)
+
+fn metadata_journal_pending(journal: MetadataJournal) -> i64:
+    journal.records.len()
+
+fn metadata_journal_should_flush(journal: MetadataJournal) -> bool:
+    journal.records.len() >= journal.flush_threshold
+
+# Fold all pending access records into the table. Last write per digest wins for
+# last_access_time; access_count accumulates every record.
+fn metadata_journal_flush(journal: MetadataJournal, table: CacheMetadataTable) -> CacheMetadataTable:
+    var out = table
+    for r in journal.records:
+        if out.index_of.contains_key(r.digest):
+            val at = out.index_of[r.digest]
+            val old = out.entries[at]
+            var newer = old.last_access_time
+            if r.at > newer:
+                newer = r.at
+            val bumped = CacheMetadata(
+                digest: old.digest,
+                last_access_time: newer,
+                access_count: old.access_count + 1,
+                artifact_size_bytes: old.artifact_size_bytes,
+                unique_retained_bytes: old.unique_retained_bytes,
+                recomputation_cost_ms: old.recomputation_cost_ms,
+                ttl_deadline: old.ttl_deadline,
+                refcount_approx: old.refcount_approx,
+                namespace_protection_class: old.namespace_protection_class,
+                toolchain_relevant: old.toolchain_relevant,
+            )
+            out = cache_metadata_table_put(out, bumped)
+    out
+
+fn metadata_journal_cleared(journal: MetadataJournal) -> MetadataJournal:
+    MetadataJournal(records: [], flush_threshold: journal.flush_threshold, flushes: journal.flushes + 1)

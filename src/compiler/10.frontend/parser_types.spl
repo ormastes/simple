@@ -2,7 +2,7 @@
 #
 # This module contains all AST (Abstract Syntax Tree) type definitions.
 # Split into:
-# - parser_types.spl: ParserModule structure (ParserModule, ParserImport, Export, ParserFunction, ParserClass, etc.)
+# - parser_types.spl: Module structure (Module, Import, Export, Function, Class, etc.)
 # - parser_types_expr.spl: Expression-level types (Type, Expr, Pattern, Stmt, operators, ASM)
 # - parser_types_utils.spl: Float parsing utilities
 
@@ -11,35 +11,35 @@ use compiler.frontend.lexer_types.{Token}
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.parser_types_utils.*
 use compiler.common.dependency.visibility.{Visibility}
-use compiler.common.dynamic_identity.closure.{Closure}
-use compiler.frontend.trace_policy.{frontend_compiler_trace_enabled}
+use compiler.common.value_access.{compiler_value_discriminant, compiler_value_payload}
+
+extern fn rt_env_get(key: text) -> text
 
 fn _parser_type_trace_enabled() -> bool:
-    frontend_compiler_trace_enabled()
+    (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
 
-struct ParserModule:
+struct Module:
     """Complete parsed module."""
     name: text
-    imports: [ParserImport]
+    imports: [Import]
     exports: [Export]
     domain_blocks: [DomainBlock]
     functions: Dict<text, ParserFunction>
     # Compact callable signatures built while parser scratch is still scoped.
-    # Streaming ModuleSurface construction consumes these through a
-    # reference-owned ParserModule wrapper, so declaration extraction never
-    # copies executable bodies merely to retain their headers.
+    # Streaming ModuleSurface construction projects this dictionary directly
+    # into its field-sliced owner, so declaration extraction never copies the
+    # whole ParserModule or executable bodies merely to retain their headers.
     function_headers: Dict<text, ParserFunctionHeader> = {}
     function_order: [text]
-    classes: Dict<text, ParserClass>
+    classes: Dict<text, Class>
     actors: Dict<text, ActorDef>
-    actor_order: [text]
-    structs: Dict<text, ParserStruct>
-    enums: Dict<text, ParserEnum>
+    structs: Dict<text, Struct>
+    enums: Dict<text, Enum>
     bitfields: Dict<text, Bitfield>
-    traits: Dict<text, ParserTrait>
+    traits: Dict<text, Trait>
     impls: [Impl]
-    type_aliases: Dict<text, ParserTypeAlias>
-    constants: Dict<text, ParserConst>
+    type_aliases: Dict<text, TypeAlias>
+    constants: Dict<text, Const>
     static_asserts: [StaticAssert]
     aop_advices: [AopAdvice]
     di_bindings: [DiBinding]
@@ -66,15 +66,9 @@ struct ParserModule:
     layer_dag_edges: text
     # FR-DRIVER-0001 NOTE: module-level attributes like @driver(...) /
     # @native_lib(...) are stored on the owning declaration (fn/impl/class),
-    # not on the ParserModule itself. If a future FR needs bare-module attribute
+    # not on the Module itself. If a future FR needs bare-module attribute
     # support, add `attributes: [Attribute]` here and update all
     # `ParserModule(...)` constructor sites across the self-hosted codebase.
-    #
-    # `extend <Enum>:` sections declared in this module, in source order. MUST
-    # stay the LAST field (partial named constructions are filled POSITIONALLY
-    # by the Rust seed), and carries a default so the existing
-    # `ParserModule(...)` sites keep compiling unchanged.
-    extend_enums: [ParserExtendEnum] = []
 
 struct DomainBlock:
     """Raw top-level domain block captured at module scope."""
@@ -83,8 +77,8 @@ struct DomainBlock:
     context: text
     span: Span
 
-struct ParserImport:
-    """ParserImport declaration."""
+struct Import:
+    """Import declaration."""
     module: text
     items: [ImportItem]
     is_lazy: bool
@@ -102,10 +96,10 @@ struct Export:
     items: [text]
     span: Span
 
-struct ParserFunction:
-    """ParserFunction definition."""
+struct Function:
+    """Function definition."""
     name: text
-    type_params: [ParserTypeParam]
+    type_params: [TypeParam]
     params: [Param]
     # # DESUGARED: return_type: Type
     has_return_type: bool
@@ -120,7 +114,7 @@ struct ParserFunction:
     is_const: bool      # 'const fn' - can be evaluated at compile time
     is_kernel: bool     # 'kernel fn' - GPU kernel function
     is_extern: bool     # 'extern fn' - external function (no body)
-    attributes: [Attribute]  # Attribute annotations (Phase 3.3 - TODO ✅)
+    attributes: [Attribute]  # Attribute annotations (Phase 3[3] - TODO ✅)
     # # DESUGARED: doc_comment: text
     has_doc_comment: bool
     doc_comment: text
@@ -152,7 +146,7 @@ fn contract_block_empty() -> ContractBlock:
 
 fn parser_function_new(
     name: text,
-    type_params: [ParserTypeParam],
+    type_params: [TypeParam],
     params: [Param],
     has_return_type: bool,
     return_type: Type,
@@ -171,8 +165,8 @@ fn parser_function_new(
     doc_comment: text,
     contract: ContractBlock,
     span: Span
-) -> ParserFunction:
-    ParserFunction(
+) -> Function:
+    Function(
         name: name,
         type_params: type_params,
         params: params,
@@ -196,7 +190,7 @@ fn parser_function_new(
     )
 
 struct Param:
-    """ParserFunction parameter."""
+    """Function parameter."""
     name: text
     # # DESUGARED: type_: Type
     has_type_: bool
@@ -205,13 +199,6 @@ struct Param:
     has_default: bool
     default: Expr
     span: Span
-    # `mut name: T` marker (native_freefn_mut_param_no_mutate fix). Threaded
-    # from the parser's PARAM_MUTS side table (fn_struct_decls.spl) through
-    # to HirParam so MIR lowering can bind the parameter by-reference instead
-    # of taking the Bug #167 defensive struct-value-copy. Appended at the end
-    # of the struct (not inserted between existing fields) to avoid disturbing
-    # any positional-field assumption elsewhere.
-    is_mutable: bool
 
 struct ParserParamHeader:
     name: text
@@ -273,16 +260,16 @@ struct ParserTypeParam:
     span: Span
 
 struct TraitBound:
-    """ParserTrait bound constraint: T: ParserTrait
+    """Trait bound constraint: T: Trait
 
     Used in:
-    - ParserFunction signatures: fn foo<T: Display>(x: T)
+    - Function signatures: fn foo<T: Display>(x: T)
     - Where clauses: where T: Clone
-    - ParserTrait definitions: trait Ord: Eq
+    - Trait definitions: trait Ord: Eq
     - Impl blocks: impl<T: Clone> Clone for Vec<T>
     """
     type_param: text            # Type parameter name being constrained
-    trait_: Type                # ParserTrait that must be implemented
+    trait_: Type                # Trait that must be implemented
     span: Span
 
 struct Attribute:
@@ -304,12 +291,12 @@ struct Attribute:
     args: [Expr]            # Attribute arguments (may be empty)
     span: Span
 
-struct ParserClass:
-    """ParserClass definition."""
+struct Class:
+    """Class definition."""
     name: text
-    type_params: [ParserTypeParam]
-    fields: [ParserField]
-    methods: Dict<text, ParserFunction>
+    type_params: [TypeParam]
+    fields: [Field]
+    methods: Dict<text, Function>
     visibility: Visibility
     is_public: bool
     # # DESUGARED: doc_comment: text
@@ -317,13 +304,17 @@ struct ParserClass:
     doc_comment: text
     attributes: [Attribute]     # Attributes like @repr, @packed, @align
     span: Span
+    ordered_methods: [ParserFunction] = []
+    # Exact source provenance for `class Name(Base) with Trait, ...`.
+    base_type: Option<Type> = nil
+    implemented_traits: [Type] = []
 
 struct ActorDef:
     """Actor definition - message-based concurrent entity."""
     name: text
-    type_params: [ParserTypeParam]
-    fields: [ParserField]
-    methods: Dict<text, ParserFunction>    # Message handlers
+    type_params: [TypeParam]
+    fields: [Field]
+    methods: Dict<text, Function>    # Message handlers
     visibility: Visibility
     is_public: bool
     # # DESUGARED: doc_comment: text
@@ -331,12 +322,19 @@ struct ActorDef:
     doc_comment: text
     attributes: [Attribute]
     span: Span
+    # Exact source spelling aligned with attributes. Typed Expr children remain
+    # authoritative for semantics; this sidecar preserves decorator presence
+    # and spellings which cannot be reconstructed from the typed tree.
+    attribute_raw_spellings: [text] = []
+    # Canonical source order for message handlers. Dictionary iteration is not
+    # a semantic ordering contract; graph publication consumes this sidecar.
+    ordered_methods: [ParserFunction] = []
 
-struct ParserStruct:
-    """ParserStruct definition."""
+struct Struct:
+    """Struct definition."""
     name: text
-    type_params: [ParserTypeParam]
-    fields: [ParserField]
+    type_params: [TypeParam]
+    fields: [Field]
     visibility: Visibility
     is_public: bool
     # # DESUGARED: doc_comment: text
@@ -344,9 +342,13 @@ struct ParserStruct:
     doc_comment: text
     attributes: [Attribute]     # Attributes like @repr, @packed, @align
     span: Span
+    # Kept for the shared composite grammar; consumers decide whether a base
+    # is legal for the nominal kind rather than losing it in the parser.
+    base_type: Option<Type> = nil
+    implemented_traits: [Type] = []
 
-struct ParserField:
-    """ParserStruct/class field."""
+struct Field:
+    """Struct/class field."""
     name: text
     type_: Type
     # # DESUGARED: default: Expr
@@ -363,10 +365,10 @@ struct ParserField:
     fixed_address: i64
     span: Span
 
-struct ParserEnum:
-    """ParserEnum definition."""
+struct Enum:
+    """Enum definition."""
     name: text
-    type_params: [ParserTypeParam]
+    type_params: [TypeParam]
     variants: [Variant]
     visibility: Visibility
     is_public: bool
@@ -374,71 +376,25 @@ struct ParserEnum:
     has_doc_comment: bool
     doc_comment: text
     span: Span
-    # Raw decorator spellings recorded by the parser, in source order:
-    # "closed", "evolving(repr:u16,unknown:Unknown)". MUST stay the LAST field
-    # (partial named constructions are filled POSITIONALLY by the Rust seed).
-    # See doc/08_tracking/bug/enum_decorators_dropped_before_hir_2026-08-21.md.
-    attributes: [text]
-    # §2 of doc/05_design/compiler/hardening/critical_completeness_design_2026-08-21.md:
-    # a trailing `complete:` / `dyn:` section in the enum body declares that
-    # the constructor universe stays OPEN in that region (an enum with neither
-    # section is closed). New fields MUST stay after `attributes` for the same
-    # positional-construction reason recorded above.
-    complete_open: bool = false
-    dyn_open: bool = false
-
-# §2 of doc/05_design/compiler/hardening/critical_completeness_design_2026-08-21.md:
-#
-#     extend ExprKind:
-#         complete:
-#             async.Await(Expr)
-#         dyn:
-#             ide.LiveProbe(ProbePayload)
-#
-# One ParserExtendEnum is produced per `complete:` / `dyn:` SUBSECTION, so a
-# single `extend` decl with both sections yields two records sharing a target.
-# `Closure` is the shared axis enum from
-# src/compiler/00.common/dynamic_identity/closure.spl -- deliberately imported
-# rather than redeclared, so the frontend and the seal loader agree on one
-# spelling of the state.
-struct ParserExtendEnum:
-    """A `complete:`/`dyn:` extension section of an `extend <Enum>:` decl."""
-    target: text
-    closure: Closure
-    constructors: [ExtendConstructor]
-    span: Span
-
-struct ExtendConstructor:
-    """`provider.Name(payload, ...)` inside an `extend` section."""
-    provider: text
-    name: text
-    payload_types: [Type]
-    span: Span
 
 struct Variant:
-    """ParserEnum variant."""
+    """Enum variant."""
     name: text
     kind: VariantKind
-    # # DESUGARED: discriminant: Expr
-    has_discriminant: bool
-    discriminant: Expr
     span: Span
 
-"""ParserEnum variant kind."""
+"""Enum variant kind."""
 enum VariantKind:
     Unit
     Tuple([Type])
-    Struct([ParserField])
-
-extern fn rt_enum_payload(value: VariantKind) -> i64
-extern fn rt_enum_discriminant(value: VariantKind) -> i64
+    Struct([Field])
 
 fn parser_variant_named_dependencies(variant: Variant) -> [text]:
     """Collect named dependencies using VariantKind's typed owner ABI."""
     val kind = variant.kind
-    val disc = rt_enum_discriminant(kind)
-    if disc == rt_enum_discriminant(VariantKind.Tuple([])):
-        val payload = rt_enum_payload(kind)
+    val disc = compiler_value_discriminant(kind)
+    if disc == compiler_value_discriminant(VariantKind.Tuple([])):
+        val payload = compiler_value_payload(kind)
         if payload == nil: return []
         val types: [Type] = payload
         var names: [text] = []
@@ -446,8 +402,8 @@ fn parser_variant_named_dependencies(variant: Variant) -> [text]:
             for nested in parser_type_named_dependencies(type_):
                 names = names.push(nested)
         return names
-    if disc == rt_enum_discriminant(VariantKind.Struct([])):
-        val payload = rt_enum_payload(kind)
+    if disc == compiler_value_discriminant(VariantKind.Struct([])):
+        val payload = compiler_value_payload(kind)
         if payload == nil: return []
         val fields: [ParserField] = payload
         var names: [text] = []
@@ -502,14 +458,14 @@ struct AssocTypeDecl:
         type Item = i64             # Concrete type assignment
     """
     name: text
-    bounds: [Type]              # ParserTrait bounds (e.g., : Display + Clone)
+    bounds: [Type]              # Trait bounds (e.g., : Display + Clone)
     # # DESUGARED: default: Type
     has_default: bool
     default: Type               # Default type (in trait) or concrete type (in impl)
     span: Span
 
-struct ParserTrait:
-    """ParserTrait definition.
+struct Trait:
+    """Trait definition.
 
     Example:
         trait Display:
@@ -526,10 +482,10 @@ struct ParserTrait:
             fn next() -> Self.Item?
     """
     name: text
-    type_params: [ParserTypeParam]
-    super_traits: [Type]         # ParserTrait: Supertrait bounds (e.g., trait Ord: Eq)
+    type_params: [TypeParam]
+    super_traits: [Type]         # Trait: Supertrait bounds (e.g., trait Ord: Eq)
     where_clause: [TraitBound]   # Where clauses on the trait
-    methods: [ParserFunction]          # Both abstract and default method implementations
+    methods: [Function]          # Both abstract and default method implementations
     assoc_types: [AssocTypeDecl] # Associated type declarations
     visibility: Visibility
     is_public: bool
@@ -546,16 +502,16 @@ struct Impl:
         impl Point:
             fn new(i64, i64) -> Point: ...
 
-        # ParserTrait impl
+        # Trait impl
         # REMOVED: impl Display for Point:
-        # (ParserTrait implementations not supported in Core Simple)
+        # (Trait implementations not supported in Core Simple)
             # fn to_string() -> text: ...
 
         # Generic impl with where clause
         impl<T> Display for Vec<T> where T: Display:
             fn to_string() -> text: ...
 
-        # ParserTrait impl with associated type
+        # Trait impl with associated type
         impl Iterator for Range:
             type Item = i64
             fn next() -> i64?: ...
@@ -571,23 +527,23 @@ struct Impl:
     # # DESUGARED: trait_: Type
     has_trait_: bool
     trait_: Type
-    type_params: [ParserTypeParam]    # Generic parameters (impl<T>)
-    where_clause: [TraitBound]  # Where T: ParserTrait constraints
-    methods: Dict<text, ParserFunction>
+    type_params: [TypeParam]    # Generic parameters (impl<T>)
+    where_clause: [TraitBound]  # Where T: Trait constraints
+    methods: Dict<text, Function>
     assoc_types: [AssocTypeDecl]  # Associated type implementations
     span: Span
 
-struct ParserTypeAlias:
+struct TypeAlias:
     """Type alias."""
     name: text
-    type_params: [ParserTypeParam]
+    type_params: [TypeParam]
     type_: Type
     visibility: Visibility
     is_public: bool
     span: Span
 
-struct ParserConst:
-    """ParserModule-level constant."""
+struct Const:
+    """Module-level constant."""
     name: text
     # # DESUGARED: type_: Type
     has_type_: bool
@@ -637,28 +593,26 @@ struct ArchRule:
     span: Span
 
 struct MockDecl:
-    """Mock declaration: mock Name implements ParserTrait"""
+    """Mock declaration: mock Name implements Trait"""
     name: text
     trait_name: text
     span: Span
 
 fn parser_module_new(
     name: text,
-    imports: [ParserImport],
+    imports: [Import],
     exports: [Export],
     domain_blocks: [DomainBlock],
-    functions: Dict<text, ParserFunction>,
-    function_order: [text],
-    classes: Dict<text, ParserClass>,
+    functions: Dict<text, Function>,
+    classes: Dict<text, Class>,
     actors: Dict<text, ActorDef>,
-    actor_order: [text],
-    structs: Dict<text, ParserStruct>,
-    enums: Dict<text, ParserEnum>,
+    structs: Dict<text, Struct>,
+    enums: Dict<text, Enum>,
     bitfields: Dict<text, Bitfield>,
-    traits: Dict<text, ParserTrait>,
+    traits: Dict<text, Trait>,
     impls: [Impl],
-    type_aliases: Dict<text, ParserTypeAlias>,
-    constants: Dict<text, ParserConst>,
+    type_aliases: Dict<text, TypeAlias>,
+    constants: Dict<text, Const>,
     static_asserts: [StaticAssert],
     aop_advices: [AopAdvice],
     di_bindings: [DiBinding],
@@ -669,16 +623,14 @@ fn parser_module_new(
 ) -> ParserModule:
     if _parser_type_trace_enabled():
         print "[parser_types] parser_module_new name={name}"
-    ParserModule(
+    Module(
         name: name,
         imports: imports,
         exports: exports,
         domain_blocks: domain_blocks,
         functions: functions,
-        function_order: function_order,
         classes: classes,
         actors: actors,
-        actor_order: actor_order,
         structs: structs,
         enums: enums,
         bitfields: bitfields,
@@ -718,12 +670,8 @@ struct Parser:
 # Exports
 # ============================================================================
 
-# ParserModule-level types (defined here)
+# Module-level types (defined here)
 
 # Re-exported from parser_types_expr
-export Type, TypeKind, Expr, ExprKind, CallArg
-export Pattern, PatternKind, Stmt, StmtKind
-export BinOp, UnaryOp, AssignOp
-export Block, MatchArm, CatchClause, Param
 
 # Re-exported from parser_types_utils

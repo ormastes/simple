@@ -1,0 +1,253 @@
+# Deterministic evidence-referenced HWIR PPA optimization planning pipeline.
+#
+# This pipeline composes the existing planning/accounting passes.  It does not
+# claim that an RTL graph was rewritten: `graph_rewrite_complete` remains false
+# until typed transforms and equivalence replay are connected.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.mir.hwir.types.{HwModule, HwCostModel}
+use compiler.mir_opt.hwir_opt.pass_model.{HwirOptPassConfig, HwirOptPassResult}
+use compiler.mir_opt.hwir_opt.width_narrowing.{HwirWidthRange, hwir_width_narrowing_pass}
+use compiler.mir_opt.hwir_opt.structural_simplify.{HwirStructuralStats,
+    hwir_structural_simplify_pass}
+use compiler.mir_opt.hwir_opt.resource_binding.{HwirResourceBindingPlan,
+    hwir_resource_binding_pass}
+use compiler.mir_opt.hwir_opt.fsm_opt.{HwirFsmOptPlan, hwir_fsm_opt_pass}
+use compiler.mir_opt.hwir_opt.memory_inference.{HwirMemoryPattern,
+    hwir_memory_inference_pass}
+use compiler.mir_opt.hwir_opt.dsp_inference.{HwirDspPattern, hwir_dsp_inference_pass}
+
+pub class HwirPpaEvidenceRefs:
+    structural_equivalence_sha256: text
+    retirement_equivalence_sha256: text
+
+    me diagnostic() -> text:
+        if (self.structural_equivalence_sha256 != "" and
+                not ppa_sha256_valid(self.structural_equivalence_sha256)):
+            return "HWIR-E-PPA-EVIDENCE: structural equivalence evidence reference must be SHA-256"
+        if (self.retirement_equivalence_sha256 != "" and
+                not ppa_sha256_valid(self.retirement_equivalence_sha256)):
+            return "HWIR-E-PPA-EVIDENCE: retirement equivalence evidence reference must be SHA-256"
+        ""
+
+pub class HwirPpaPipelineInput:
+    config: HwirOptPassConfig
+    width_ranges: [HwirWidthRange]
+    structural_stats: HwirStructuralStats
+    resource_plan: HwirResourceBindingPlan
+    fsm_plans: [HwirFsmOptPlan]
+    memory_patterns: [HwirMemoryPattern]
+    dsp_patterns: [HwirDspPattern]
+    evidence: HwirPpaEvidenceRefs
+
+pub class HwirPpaPipelineReceipt:
+    success: bool
+    diagnostic: text
+    profile: text
+    pass_results: [HwirOptPassResult]
+    cost_before: HwCostModel
+    cost_after: HwCostModel
+    inserted_pipeline_stages: i32
+    graph_rewrite_complete: bool
+    receipt_sha256: text
+
+fn ppa_sha256_valid(value: text) -> bool:
+    if value.len() != 64: return false
+    val hex = "0123456789abcdef"
+    var index = 0
+    while index < value.len():
+        if not hex.contains(value[index:index + 1]): return false
+        index = index + 1
+    true
+
+fn ppa_input_diagnostic(module: HwModule, input: HwirPpaPipelineInput) -> text:
+    if (module.name == "" or input.config.profile == "" or
+            module.profile != input.config.profile):
+        return "HWIR-E-PPA-INPUT: pipeline requires module and target profile identity"
+    if (module.cost.lut_count < 0 or module.cost.ff_count < 0 or
+            module.cost.dsp_count < 0 or module.cost.bram_count < 0 or
+            module.cost.latency_cycles < 0 or module.cost.fmax_mhz < 0):
+        return "HWIR-E-PPA-COST: input cost counters must be nonnegative"
+    val stats = input.structural_stats
+    if (stats.constant_folds < 0 or stats.dead_signals < 0 or stats.dead_registers < 0 or
+            stats.redundant_muxes < 0 or stats.cse_hits < 0):
+        return "HWIR-E-PPA-STATS: structural statistics must be nonnegative"
+    val resources = input.resource_plan
+    if (resources.multiplier_count < 0 or resources.shared_multiplier_count < 0 or
+            resources.divider_count < 0 or resources.pipeline_stage_count < 0 or
+            resources.shared_multiplier_count > resources.multiplier_count):
+        return "HWIR-E-PPA-RESOURCE: resource plan counts must be nonnegative and bounded"
+    if input.config.resource_binding and resources.profile != input.config.profile:
+        return "HWIR-E-PPA-RESOURCE: enabled resource plan profile must match the pipeline profile"
+    for range in input.width_ranges:
+        if range.node_id == "" or range.original_width < 1 or range.min_value > range.max_value:
+            return "HWIR-E-PPA-RANGE: width ranges require identity, positive width, and ordered bounds"
+    for plan in input.fsm_plans:
+        if (plan.fsm.name == "" or plan.fsm.state_count < 1 or
+                plan.unreachable_states < 0 or
+                plan.unreachable_states >= plan.fsm.state_count or plan.encoding == ""):
+            return "HWIR-E-PPA-FSM: FSM plans require valid state and encoding bounds"
+    for pattern in input.memory_patterns:
+        if (pattern.name == "" or pattern.element_width < 1 or pattern.depth < 1 or
+                pattern.read_ports < 0 or pattern.write_ports < 0 or
+                pattern.read_ports + pattern.write_ports < 1):
+            return "HWIR-E-PPA-MEMORY: memory patterns require positive geometry and a port"
+    for pattern in input.dsp_patterns:
+        if (pattern.node_id == "" or pattern.pattern_kind == "" or
+                pattern.operand_width < 1 or pattern.term_count < 1):
+            return "HWIR-E-PPA-DSP: DSP patterns require identity and positive geometry"
+    ""
+
+fn module_with_cost(module: HwModule, cost: HwCostModel) -> HwModule:
+    HwModule(name: module.name, profile: module.profile,
+        port_count: module.port_count, signal_count: module.signal_count,
+        register_count: module.register_count, memory_count: module.memory_count,
+        comb_op_count: module.comb_op_count,
+        clock_domain_count: module.clock_domain_count,
+        fallback_function: module.fallback_function, cost: cost)
+
+fn append_result(results: [HwirOptPassResult], result: HwirOptPassResult) -> [HwirOptPassResult]:
+    var next: [HwirOptPassResult] = []
+    for item in results: next.push(item)
+    next.push(result)
+    next
+
+fn ppa_receipt_hash(module: HwModule, input: HwirPpaPipelineInput,
+    results: [HwirOptPassResult], cost_after: HwCostModel) -> text:
+    var rows = ["simple-hwir-ppa-pipeline/v1", module.name, module.profile,
+        input.config.profile, module.cost.lut_count.to_text(), module.cost.ff_count.to_text(),
+        module.cost.dsp_count.to_text(), module.cost.bram_count.to_text(),
+        module.cost.latency_cycles.to_text(), cost_after.lut_count.to_text(),
+        cost_after.ff_count.to_text(), cost_after.dsp_count.to_text(),
+        cost_after.bram_count.to_text(), cost_after.latency_cycles.to_text(),
+        input.evidence.structural_equivalence_sha256,
+        input.evidence.retirement_equivalence_sha256]
+    rows.push([module.port_count.to_text(), module.signal_count.to_text(),
+        module.register_count.to_text(), module.memory_count.to_text(),
+        module.comb_op_count.to_text(), module.clock_domain_count.to_text(),
+        module.fallback_function, module.cost.fmax_mhz.to_text(),
+        cost_after.fmax_mhz.to_text()].join("|"))
+    rows.push([input.config.width_narrowing.to_text(),
+        input.config.structural_simplify.to_text(),
+        input.config.resource_binding.to_text(), input.config.fsm_opt.to_text(),
+        input.config.memory_inference.to_text(), input.config.dsp_inference.to_text()].join("|"))
+    var inputs: [text] = []
+    for range in input.width_ranges:
+        inputs.push(["range", range.node_id, range.min_value.to_text(),
+            range.max_value.to_text(), range.original_width.to_text(),
+            range.signed_value.to_text()].join("|"))
+    val stats = input.structural_stats
+    inputs.push(["structural", stats.constant_folds.to_text(), stats.dead_signals.to_text(),
+        stats.dead_registers.to_text(), stats.redundant_muxes.to_text(),
+        stats.cse_hits.to_text()].join("|"))
+    val resources = input.resource_plan
+    inputs.push(["resource", resources.profile, resources.multiplier_count.to_text(),
+        resources.shared_multiplier_count.to_text(), resources.divider_count.to_text(),
+        resources.pipeline_stage_count.to_text()].join("|"))
+    for plan in input.fsm_plans:
+        inputs.push(["fsm", plan.fsm.name, plan.fsm.state_signal,
+            plan.fsm.state_count.to_text(), plan.fsm.encoding, plan.fsm.reset_state,
+            plan.unreachable_states.to_text(), plan.encoding].join("|"))
+    for pattern in input.memory_patterns:
+        inputs.push(["memory", pattern.name, pattern.element_width.to_text(),
+            pattern.depth.to_text(), pattern.read_ports.to_text(),
+            pattern.write_ports.to_text(), pattern.constant_contents.to_text(),
+            pattern.fifo_access.to_text()].join("|"))
+    for pattern in input.dsp_patterns:
+        inputs.push(["dsp", pattern.node_id, pattern.pattern_kind,
+            pattern.operand_width.to_text(), pattern.term_count.to_text(),
+            pattern.prefer_lut.to_text()].join("|"))
+    var input_index = 0
+    while input_index < inputs.len():
+        var next = input_index + 1
+        while next < inputs.len():
+            if inputs[next] < inputs[input_index]:
+                val temporary = inputs[input_index]
+                inputs[input_index] = inputs[next]
+                inputs[next] = temporary
+            next = next + 1
+        input_index = input_index + 1
+    for row in inputs: rows.push(row.len().to_text() + ":" + row)
+    for result in results:
+        rows.push([result.pass_name, result.changed.to_text(),
+            result.removed_nodes.to_text(), result.narrowed_bits.to_text(),
+            result.shared_resources.to_text(),
+            result.inserted_pipeline_stages.to_text(),
+            result.cost_before.lut_count.to_text(), result.cost_before.ff_count.to_text(),
+            result.cost_before.dsp_count.to_text(), result.cost_before.bram_count.to_text(),
+            result.cost_before.latency_cycles.to_text(), result.cost_before.fmax_mhz.to_text(),
+            result.cost_after.lut_count.to_text(), result.cost_after.ff_count.to_text(),
+            result.cost_after.dsp_count.to_text(), result.cost_after.bram_count.to_text(),
+            result.cost_after.latency_cycles.to_text(), result.cost_after.fmax_mhz.to_text()].join("|"))
+    var framed: [text] = []
+    for row in rows: framed.push(row.len().to_text() + ":" + row)
+    sha256_text(framed.join("\n"))
+
+pub fn plan_hwir_ppa_pipeline(module: HwModule,
+    input: HwirPpaPipelineInput) -> HwirPpaPipelineReceipt:
+    val input_error = ppa_input_diagnostic(module, input)
+    if input_error != "":
+        return HwirPpaPipelineReceipt(success: false, diagnostic: input_error,
+            profile: input.config.profile, pass_results: [], cost_before: module.cost,
+            cost_after: module.cost, inserted_pipeline_stages: 0,
+            graph_rewrite_complete: false, receipt_sha256: "")
+    val proof_error = input.evidence.diagnostic()
+    if proof_error != "":
+        return HwirPpaPipelineReceipt(success: false, diagnostic: proof_error,
+            profile: input.config.profile, pass_results: [], cost_before: module.cost,
+            cost_after: module.cost, inserted_pipeline_stages: 0,
+            graph_rewrite_complete: false, receipt_sha256: "")
+    var current = module
+    var results: [HwirOptPassResult] = []
+    if input.config.width_narrowing:
+        val result = hwir_width_narrowing_pass(current, input.width_ranges)
+        results = append_result(results, result); current = module_with_cost(current, result.cost_after)
+    if input.config.structural_simplify:
+        val result = hwir_structural_simplify_pass(current, input.structural_stats)
+        results = append_result(results, result); current = module_with_cost(current, result.cost_after)
+    if input.config.resource_binding:
+        val result = hwir_resource_binding_pass(current, input.resource_plan)
+        results = append_result(results, result); current = module_with_cost(current, result.cost_after)
+    if input.config.fsm_opt:
+        for plan in input.fsm_plans:
+            val result = hwir_fsm_opt_pass(current, plan)
+            results = append_result(results, result); current = module_with_cost(current, result.cost_after)
+    if input.config.memory_inference:
+        val result = hwir_memory_inference_pass(current, input.memory_patterns)
+        results = append_result(results, result); current = module_with_cost(current, result.cost_after)
+    if input.config.dsp_inference:
+        val result = hwir_dsp_inference_pass(current, input.dsp_patterns)
+        results = append_result(results, result); current = module_with_cost(current, result.cost_after)
+    var stages = 0
+    var changed = false
+    var latency_changed = false
+    for result in results:
+        stages = stages + result.inserted_pipeline_stages
+        if result.changed: changed = true
+        if result.cost_before.latency_cycles != result.cost_after.latency_cycles:
+            latency_changed = true
+        if (result.cost_after.lut_count < 0 or result.cost_after.ff_count < 0 or
+                result.cost_after.dsp_count < 0 or result.cost_after.bram_count < 0 or
+                result.cost_after.latency_cycles < 0 or result.cost_after.fmax_mhz < 0):
+            return HwirPpaPipelineReceipt(success: false,
+                diagnostic: "HWIR-E-PPA-COST: optimization planning produced a negative cost",
+                profile: input.config.profile, pass_results: results, cost_before: module.cost,
+                cost_after: result.cost_after, inserted_pipeline_stages: stages,
+                graph_rewrite_complete: false, receipt_sha256: "")
+    if changed and input.evidence.structural_equivalence_sha256 == "":
+        return HwirPpaPipelineReceipt(success: false,
+            diagnostic: "HWIR-E-PPA-EVIDENCE: changed structural plan requires a structural equivalence evidence reference",
+            profile: input.config.profile, pass_results: results, cost_before: module.cost,
+            cost_after: current.cost, inserted_pipeline_stages: stages,
+            graph_rewrite_complete: false, receipt_sha256: "")
+    if ((stages > 0 or latency_changed) and
+            input.evidence.retirement_equivalence_sha256 == ""):
+        return HwirPpaPipelineReceipt(success: false,
+            diagnostic: "HWIR-E-PPA-EVIDENCE: latency-changing plan requires a retirement equivalence evidence reference",
+            profile: input.config.profile, pass_results: results, cost_before: module.cost,
+            cost_after: current.cost, inserted_pipeline_stages: stages,
+            graph_rewrite_complete: false, receipt_sha256: "")
+    HwirPpaPipelineReceipt(success: true, diagnostic: "", profile: input.config.profile,
+        pass_results: results, cost_before: module.cost, cost_after: current.cost,
+        inserted_pipeline_stages: stages, graph_rewrite_complete: false,
+        receipt_sha256: ppa_receipt_hash(module, input, results, current.cost))

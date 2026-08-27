@@ -2,18 +2,19 @@
 
 > This system contract exercises the deterministic symbol ordering used by
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+**Audience:** compiler maintainers reviewing frozen native-capsule identity
+generation and operators qualifying a future self-hosted CLI.
 
-<details>
-<summary>Full Scenario Manual</summary>
+**Executable source:**
+`test/03_system/app/compiler/feature/native_capsule_symbol_sort_spec.spl`
 
-# Native capsule symbol ordering
+## Purpose and claim boundary
 
 This system contract exercises the deterministic symbol ordering used by
 
-## At a Glance
+The Rust seed is prohibited. The admitted pure-Simple Stage 2 compiler used by
+the performance lane supports only `compile` and `native-build`, so it cannot
+certify this SSpec runner or its documentation pipeline.
 
 | Field | Value |
 |-------|-------|
@@ -30,9 +31,12 @@ does not substitute timing thresholds for the retained performance report.
 
 ## Scenarios
 
-### Native capsule symbol sort
+Requirement: REQ-CNSS-001.
 
-#### should order reverse symbols without mutating the caller input
+1. Create a reverse-ordered native-capsule symbol set.
+2. Invoke the production sorter.
+3. Require IDs `0..7` in ascending order.
+4. Require the original input to remain `7..0`.
 
 **Manual warnings:**
 - invalid manual visibility metadata: # @manual_section: Deterministic production ordering (expected show, folded, detail, or skip)
@@ -44,9 +48,11 @@ does not substitute timing thresholds for the retained performance report.
    - Expected: symbol_ids(sorted) equals `[0, 1, 2, 3, 4, 5, 6, 7]`
    - Expected: symbol_ids(input) equals `[7, 6, 5, 4, 3, 2, 1, 0]`
 
+1. Submit IDs `0..5` in canonical order.
+2. Invoke the production sorter.
+3. Require the identical six-element sequence.
 
-<details>
-<summary>Executable SSpec</summary>
+### Should order mixed negative and duplicate identifiers deterministically
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -58,9 +64,60 @@ step("Create a reverse-ordered native capsule symbol set")
 val input = make_symbols([7, 6, 5, 4, 3, 2, 1, 0])
 val sorted = native_capsule_sorted_symbol_ids_v1(input)
 
-step("Require ascending output and unchanged value-semantic input")
-expect(symbol_ids(sorted)).to_equal([0, 1, 2, 3, 4, 5, 6, 7])
-expect(symbol_ids(input)).to_equal([7, 6, 5, 4, 3, 2, 1, 0])
+Requirement: REQ-CNSS-002.
+
+1. Invoke the sorter with no symbols.
+2. Require zero output values.
+
+### Should preserve a singleton identifier exactly
+
+Requirement: REQ-CNSS-002.
+
+1. Invoke the sorter with `SymbolId(41)`.
+2. Require one output whose ID remains `41`.
+
+### Should order a non-power-of-two reverse workload through the partial tail
+
+Requirements: REQ-CNSS-002 and NFR-CNSS-001.
+
+1. Generate 4,097 reverse-ordered IDs.
+2. Invoke the production sorter so the final merge pass has a partial tail.
+3. Audit every output position, exact cardinality, and a positive weighted
+   checksum.
+4. Require audit code `ok`.
+
+## Fail-closed result auditing
+
+### Should accept a complete canonical result with an exact checksum
+
+Requirement: REQ-CNSS-003.
+
+1. Sort eight reverse-ordered IDs.
+2. Audit every position.
+3. Require code `ok`, count `8`, and weighted checksum `204`.
+
+### Should reject a result with missing symbols
+
+Requirement: REQ-CNSS-003.
+
+1. Present three IDs while declaring four expected values.
+2. Require `length-mismatch`, observed count `3`, and checksum `-1`.
+
+### Should reject interior corruption that endpoint checks would miss
+
+Requirement: REQ-CNSS-003.
+
+1. Present `[0, 1, 1, 3]`, retaining the expected endpoints while corrupting
+   the interior.
+2. Require `id-mismatch:2`, count `4`, and checksum `-1`.
+
+## Qualified operator commands
+
+```text
+SIMPLE_NO_STUB_FALLBACK=1 bin/simple test test/03_system/app/compiler/feature/native_capsule_symbol_sort_spec.spl --mode=interpreter
+SIMPLE_NO_STUB_FALLBACK=1 bin/simple test test/03_system/app/compiler/feature/native_capsule_symbol_sort_spec.spl --mode=native
+bin/simple spipe-docgen test/03_system/app/compiler/feature/native_capsule_symbol_sort_spec.spl --output doc/06_spec --no-index
+bin/simple sspec-maintain scan test/03_system/app/compiler/feature/native_capsule_symbol_sort_spec.spl --baseline
 ```
 
 </details>

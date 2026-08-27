@@ -15,7 +15,6 @@ extern fn rt_utf8_count_codepoints(bytes: [i64]) -> i64
 extern fn rt_utf8_validate(bytes: [i64]) -> bool
 extern fn rt_utf8_find_invalid(bytes: [i64]) -> i64
 extern fn rt_text_count_codepoints(s: text) -> i64
-extern fn rt_bytes_to_text(bytes: [u8]) -> text  # raw-byte-copy primitive; see std.common.string_core for why this (not bytes_to_string / rt_char_from_code) was chosen
 
 use std.encoding.simd_text_ffi.{
     rt_text_count_codepoints_cached,
@@ -85,8 +84,6 @@ fn utf8_decode_one(bytes: [i64], offset: i64) -> [i64]:
 
     if seq_len == 2:
         val b1 = bytes[offset + 1]
-        if b1 < 0 or b1 > 255:
-            return [0xFFFD, 1]
         if (b1 & 0xC0) != 0x80:
             return [0xFFFD, 1]
         val cp = ((b0 & 0x1F) << 6) | (b1 & 0x3F)
@@ -98,8 +95,6 @@ fn utf8_decode_one(bytes: [i64], offset: i64) -> [i64]:
     if seq_len == 3:
         val b1 = bytes[offset + 1]
         val b2 = bytes[offset + 2]
-        if b1 < 0 or b1 > 255 or b2 < 0 or b2 > 255:
-            return [0xFFFD, 1]
         if (b1 & 0xC0) != 0x80 or (b2 & 0xC0) != 0x80:
             return [0xFFFD, 1]
         val cp = ((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F)
@@ -112,8 +107,6 @@ fn utf8_decode_one(bytes: [i64], offset: i64) -> [i64]:
     val b1 = bytes[offset + 1]
     val b2 = bytes[offset + 2]
     val b3 = bytes[offset + 3]
-    if b1 < 0 or b1 > 255 or b2 < 0 or b2 > 255 or b3 < 0 or b3 > 255:
-        return [0xFFFD, 1]
     if (b1 & 0xC0) != 0x80 or (b2 & 0xC0) != 0x80 or (b3 & 0xC0) != 0x80:
         return [0xFFFD, 1]
     val cp = ((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F)
@@ -163,8 +156,6 @@ fn utf8_encode_one(codepoint: i64) -> [i64]:
 
 fn utf8_codepoint_byte_len(codepoint: i64) -> i64:
     """Return how many UTF-8 bytes a codepoint requires."""
-    if codepoint < 0:
-        return 3
     if codepoint < 0x80:
         return 1
     if codepoint < 0x800:
@@ -207,9 +198,11 @@ fn utf8_decode_all(bytes: [i64]) -> [i64]:
     while i < bytes.len():
         val decoded = utf8_decode_one(bytes, i)
         result.push(decoded[0])
-        # i is in bounds, so utf8_decode_one's contract always consumes at
-        # least one byte (valid sequence or one-byte replacement recovery).
-        i = i + decoded[1]
+        val consumed = decoded[1]
+        if consumed <= 0:
+            i = i + 1  # safety: always advance
+        else:
+            i = i + consumed
     result
 
 # ============================================================================
@@ -262,7 +255,7 @@ fn text_is_ascii(s: text) -> bool:
 fn text_is_valid_utf8(s: text) -> bool:
     """Return true if string is valid UTF-8.
     SIMD-accelerated. Fast path if ASCII flag is cached."""
-    unsafe(capabilities: [ffi]): rt_text_validate_utf8(s)
+    rt_text_validate_utf8(s)
 
 fn text_without_last_codepoint(s: text) -> text:
     """Remove one trailing UTF-8 scalar without producing invalid text.
@@ -275,8 +268,10 @@ fn text_without_last_codepoint(s: text) -> text:
     while cursor < bytes.len():
         last_start = cursor
         val decoded = utf8_decode_one(bytes, cursor)
-        # cursor is in bounds and validated text cannot produce zero progress.
-        cursor = cursor + decoded[1]
+        val consumed = decoded[1]
+        if consumed <= 0:
+            return s
+        cursor = cursor + consumed
     s[0:last_start]
 
 fn text_truncate_bytes(s: text, max_bytes: i64) -> text:
@@ -338,42 +333,26 @@ fn char_from_codepoint(cp: i64) -> text:
     """Convert a Unicode codepoint to a single-character text string.
     Invalid codepoints (surrogates, or above U+10FFFF) yield U+FFFD, matching
     utf8_encode_one's replacement-character policy elsewhere in this file."""
-    # `cp >= 0` guard: char_from_code(negative) delegates back here, so a bare
-    # `cp < 128` would recurse forever on negative input.
-    if cp >= 0 and cp < 128:
+    if cp < 128:
         return char_from_code(cp)
-    # Bug: this used to assemble the codepoint's UTF-8 bytes and route each
-    # individual byte back through char_from_code(byte), but every
-    # continuation/lead byte of a multi-byte UTF-8 sequence is itself >= 0x80
-    # and not valid UTF-8 in isolation, so char_from_code(byte) returned
-    # U+FFFD per byte instead of the intended character (e.g.
-    # char_from_codepoint(0x4E2D) produced three replacement characters
-    # instead of "中"). Fix: hand the whole encoded byte array to
-    # rt_bytes_to_text in one call instead of decoding it one (invalid, in
-    # isolation) byte at a time. utf8_encode_one already replaces invalid
-    # codepoints (surrogates, > U+10FFFF) with the U+FFFD byte sequence, so
-    # the array handed to rt_bytes_to_text is always well-formed UTF-8.
+    # For non-ASCII, encode to UTF-8 bytes and create string
     val bytes = utf8_encode_one(cp)
-    var byte_arr: [u8] = []
+    # Runtime will handle byte-to-string via built-in
+    var result = ""
     var i: i64 = 0
     while i < bytes.len():
-        byte_arr.push(bytes[i] as u8)
+        result = result + char_from_code(bytes[i])
         i = i + 1
-    rt_bytes_to_text(byte_arr)
+    result
 
 fn char_from_code(code: i64) -> text:
-    """Convert a Unicode scalar value to a single-character text string.
-
-    Same contract as `std.string_core.char_from_code` for every valid scalar
-    0..0x10FFFF (byte-for-byte identical UTF-8). Under the flat function
-    namespace whichever definition loads last wins, so this one must NOT
-    disagree: it used to return U+FFFD for every code >= 128, which turned
-    `char_from_code(0xA2)` into `\uFFFD` whenever this module was loaded
-    (doc/08_tracking/bug/llm_caret_tui_input_utf8_cursor_counts_bytes_2026-08-25.md).
-    Invalid input (negative, surrogates, > U+10FFFF) yields U+FFFD, matching
-    utf8_encode_one; string_core returns "" for those."""
+    """Convert a byte value (0-255) to a single-byte text character.
+    Uses runtime built-in."""
+    # Delegates to the built-in method
     if code >= 0 and code <= 127:
         # ASCII range — use string literal table for common chars
         val table = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\x0b\x0c\r\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~\x7f"
         return table[code:code+1]
-    char_from_codepoint(code)
+    # For 128-255, these are raw bytes (not valid UTF-8 by themselves)
+    # Return replacement character
+    "\uFFFD"

@@ -184,12 +184,8 @@ pub fn lz4_decompress(input: ByteSpan, expected_len: i64) -> ByteSpan:
                         cont = false
 
         # --- Copy literal bytes (stop if we reach expected_len) ---
-        if pos + lit_len > input.len():
-            return ByteSpan.empty()
         var li = 0
         while li < lit_len and out.len() < expected_len:
-            if pos >= input.len():
-                return ByteSpan.empty()
             out.push(input.get(pos))
             pos = pos + 1
             li = li + 1
@@ -200,31 +196,23 @@ pub fn lz4_decompress(input: ByteSpan, expected_len: i64) -> ByteSpan:
 
         # --- Check if done (final sequence has no match) ---
         if out.len() >= expected_len:
-            if mat_nib != 0:
-                return ByteSpan.empty()
             break
         if pos >= input.len():
-            return ByteSpan.empty()
+            break
 
         # --- Read 2-byte LE offset ---
-        if pos + 2 > input.len():
-            return ByteSpan.empty()
         val off_lo = input.get(pos).to_i64()
         pos = pos + 1
         val off_hi = input.get(pos).to_i64()
         pos = pos + 1
         val distance = off_lo | (off_hi << 8)
-        if distance <= 0 or distance > out.len():
-            return ByteSpan.empty()
 
         # --- Decode match length (base 4, plus nibble, plus 255-continuation) ---
         var match_len = mat_nib + 4
-        var truncated_match_len = false
         if mat_nib == 15:
             var cont2 = true
             while cont2:
                 if pos >= input.len():
-                    truncated_match_len = true
                     cont2 = false
                 else:
                     val extra2 = input.get(pos).to_i64()
@@ -232,10 +220,6 @@ pub fn lz4_decompress(input: ByteSpan, expected_len: i64) -> ByteSpan:
                     match_len = match_len + extra2
                     if extra2 < 255:
                         cont2 = false
-        if truncated_match_len:
-            return ByteSpan.empty()
-        if out.len() + match_len > expected_len:
-            return ByteSpan.empty()
 
         # --- Copy match (byte-by-byte, handles overlap correctly) ---
         var mi = 0
@@ -247,8 +231,4 @@ pub fn lz4_decompress(input: ByteSpan, expected_len: i64) -> ByteSpan:
             out.push(mb)
             mi = mi + 1
 
-    if out.len() != expected_len:
-        return ByteSpan.empty()
-    if pos != input.len():
-        return ByteSpan.empty()
     ByteSpan.new(out)

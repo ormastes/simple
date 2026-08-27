@@ -1,0 +1,45 @@
+#!/bin/sh
+# Source contract for bounded, linear entry-closure set construction.
+set -eu
+
+root=${DRIVER_CLOSURE_ROOT:-.}
+loading="$root/src/compiler/80.driver/driver_source_loading.spl"
+pipeline="$root/src/compiler/80.driver/driver_source_pipeline_loading.spl"
+
+[ -f "$loading" ] || { echo "error=missing_driver_source_loading"; exit 1; }
+[ -f "$pipeline" ] || { echo "error=missing_driver_source_pipeline_loading"; exit 1; }
+
+# A Dict passed through an add helper has value semantics in compiled Simple and
+# copies the growing set on every insertion. Any reintroduction is a quadratic
+# source-closure latency and transient-memory regression.
+if grep -F '_driver_text_bucket_set_add' "$loading" "$pipeline" >/dev/null; then
+    echo "error=value_copy_set_add_reintroduced"
+    exit 1
+fi
+
+for mutation in \
+    'seen[key] = true' \
+    'seen_sources[source_key] = true' \
+    'closure_loaded_mods[loaded_module_name] = true' \
+    'closure_seen_mods[closure_mp] = true' \
+    'closure_queued_paths[closure_physical_key] = true'; do
+    grep -F "$mutation" "$loading" "$pipeline" >/dev/null || {
+        echo "error=missing_direct_indexed_mutation pattern=$mutation"
+        exit 1
+    }
+done
+
+for bound in \
+    DRIVER_CLOSURE_MAX_SOURCE_BYTES \
+    DRIVER_CLOSURE_MAX_IMPORTS_PER_SOURCE \
+    DRIVER_CLOSURE_MAX_PHYSICAL_SOURCES; do
+    uses=$(grep -c "$bound" "$pipeline")
+    [ "$uses" -ge 2 ] || { echo "error=unenforced_bound name=$bound uses=$uses"; exit 1; }
+done
+
+grep -F 'return (self.ctx, false)' "$pipeline" >/dev/null || {
+    echo "error=closure_limits_do_not_fail_closed"
+    exit 1
+}
+
+echo "STATUS: PASS driver-entry-closure-set-mutation direct_indexed=true bounded=true"

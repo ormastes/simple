@@ -1,0 +1,310 @@
+# Destination-HIR direct lambda binding/IIFE lowering. Capture snapshots are
+# MIR-owned scalar LocalIds; no HirExpr/HirParam aggregate crosses the boundary.
+use compiler.hir.hir_lowering.hir_destination_registry_reader.*
+use compiler.hir.hir_lowering.hir_destination_graph.*
+use compiler.mir._MirLowering.hir_destination_receipt.*
+use compiler.mir._MirLowering.hir_destination_types.*
+use compiler.mir.mir_data.*
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_instructions.{MirOperand, MirOperandKind}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_types.{LocalId, MirType, MirTypeKind, MirConstValue, MirSignature}
+use compiler.semantics.rt_hal_tag.{rt_hal_compilation_requires_finalize}
+use compiler.mir.mir_rt_hal_boundary.{inject_rt_hal_worker_complete}
+
+impl MirLowering:
+    fn destination_capture_slot_supported(type_: MirType) -> bool:
+        match type_.kind:
+            case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64
+                    | MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64
+                    | MirTypeKind.Bool | MirTypeKind.Char | MirTypeKind.F32 | MirTypeKind.F64
+                    | MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _): true
+            case _: false
+
+    me encode_destination_capture_slot(value: LocalId, type_: MirType) -> LocalId:
+        var b = self.builder
+        val encoded = match type_.kind:
+            case MirTypeKind.F64:
+                b.emit_bitcast(mir_operand_copy(value), MirType.i64())
+            case MirTypeKind.F32:
+                val bits = b.emit_bitcast(mir_operand_copy(value),
+                    MirType(kind: MirTypeKind.U32))
+                b.emit_cast(mir_operand_copy(bits), MirType.i64())
+            case MirTypeKind.I64:
+                b.emit_cast(mir_operand_copy(value), MirType.i64())
+            case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64 | MirTypeKind.Bool | MirTypeKind.Char | MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _):
+                b.emit_cast(mir_operand_copy(value), MirType.i64())
+            case _:
+                value
+        self.builder = b
+        encoded
+
+    me decode_destination_capture_slot(value: LocalId, type_: MirType) -> LocalId:
+        var b = self.builder
+        val decoded = match type_.kind:
+            case MirTypeKind.F64:
+                b.emit_bitcast(mir_operand_copy(value), MirType.f64())
+            case MirTypeKind.F32:
+                val bits = b.emit_cast(mir_operand_copy(value),
+                    MirType(kind: MirTypeKind.U32))
+                b.emit_bitcast(mir_operand_copy(bits), MirType.f32())
+            case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64 | MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64 | MirTypeKind.Bool | MirTypeKind.Char | MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _):
+                b.emit_cast(mir_operand_copy(value), type_)
+            case _:
+                value
+        self.builder = b
+        decoded
+
+    me lower_destination_lambda_value(r: MirDestinationFunctionReceipt,
+            lambda_row: i64, result_type: MirType) -> LocalId:
+        val params = hdr_expr_range(r.slot, r.generation, lambda_row, false)
+        val param_subtype = hdr_range_subtype(r.slot, r.generation, params)
+        val param_count = hdr_range_length(r.slot, r.generation, params)
+        val captures = hdr_expr_range(r.slot, r.generation, lambda_row, true)
+        val capture_subtype = hdr_range_subtype(r.slot, r.generation, captures)
+        val capture_count = hdr_range_length(r.slot, r.generation, captures)
+        var capture_types: [MirType] = []
+        var capture_sources: [LocalId] = []
+        var capture_scan = 0
+        while capture_scan < capture_count:
+            val capture = hdr_range_value(r.slot, r.generation, captures,
+                capture_subtype, capture_scan)
+            val live = self.find_local(hdr_aux_i64(r.slot, r.generation, capture, 0))
+            if live.id < 0:
+                self.error_fatal("E-MIR-DESTINATION-LAMBDA: standalone capture has no live binding", nil)
+                return LocalId(id: -1)
+            val capture_type = self.local_mir_type_of(live)
+            if capture_type == nil:
+                self.error_fatal("E-MIR-DESTINATION-LAMBDA: capture has no authoritative MIR type for closure-slot encoding", nil)
+                return LocalId(id: -1)
+            capture_sources.push(live)
+            capture_types.push(capture_type ?? MirType.i64())
+            capture_scan = capture_scan + 1
+        for capture_type in capture_types:
+            if not self.destination_capture_slot_supported(capture_type):
+                self.error_fatal("E-MIR-DESTINATION-LAMBDA: capture type has no exact closure-slot ABI", nil)
+                return LocalId(id: -1)
+        var signature_params: [MirType] = []
+        if capture_count > 0: signature_params.push(MirType.i64())
+        var offset = 0
+        while offset < param_count:
+            val param = hdr_range_value(r.slot, r.generation, params, param_subtype, offset)
+            signature_params.push(self.destination_checked_type(r,
+                hdr_aux_i64(r.slot, r.generation, param, 1),
+                "lambda parameter"))
+            offset = offset + 1
+        val body_return_type = match result_type.kind:
+            case MirTypeKind.FuncPtr(call_signature): call_signature.return_type
+            case _: MirType.i64()
+        val signature = MirSignature(params: signature_params,
+            return_type: body_return_type, is_variadic: false)
+        val identity = r.module_index * 1000003 + r.function_row * 4099 + lambda_row
+        val name = "__destination_lambda_" + r.module_index.to_text() + "_" +
+            r.function_row.to_text() + "_" + lambda_row.to_text()
+        val symbol = SymbolId(id: 1200000000 + identity % 800000000)
+        var lw = MirLowering.new_for_target(self.symbols, self.target_context)
+        lw.configure_mcdc_mode(self.mcdc_mode, self.mcdc_owner_bytes,
+            self.mcdc_global_bytes, self.mcdc_include_csv, self.mcdc_exclude_csv,
+            self.mcdc_dynamic_dormant)
+        lw.current_function_names = self.current_function_names
+        lw.current_function_symbols = self.current_function_symbols
+        # Destination lambdas resolve enum payload authority directly from the
+        # frozen scalar declaration indexes. Do not copy legacy enum or HirType
+        # maps across the synthesized-function boundary.
+        lw.canonical_type_symbols = self.canonical_type_symbols
+        lw.next_canonical_type_symbol = self.next_canonical_type_symbol
+        lw.global_symbol_ids = self.global_symbol_ids
+        lw.global_statics_by_id = self.global_statics_by_id
+        lw.global_constants_by_id = self.global_constants_by_id
+        var lb = lw.builder
+        lb.begin_function(symbol, name, signature,
+            mir_destination_span(r, hdr_expr_span(r.slot, r.generation, lambda_row)))
+        lw.builder = lb
+        val arg_start = lw.builder.locals.len() - signature_params.len()
+        if capture_count > 0:
+            val env = LocalId(id: arg_start)
+            offset = 0
+            while offset < capture_count:
+                val capture = hdr_range_value(r.slot, r.generation, captures,
+                    capture_subtype, offset)
+                val get_capture = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_closure_get_capture"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                        params: [MirType.i64(), MirType.i64()],
+                        return_type: MirType.i64(), is_variadic: false)))))
+                lb = lw.builder
+                val loaded = lb.emit_call(get_capture,
+                    [mir_operand_copy(env), mir_operand_const_int(offset)], MirType.i64())
+                lw.builder = lb
+                val decoded = lw.decode_destination_capture_slot(
+                    loaded ?? LocalId(id: -1), capture_types[offset])
+                lw.bind_local(hdr_aux_i64(r.slot, r.generation, capture, 0),
+                    decoded)
+                offset = offset + 1
+        offset = 0
+        while offset < param_count:
+            val param = hdr_range_value(r.slot, r.generation, params, param_subtype, offset)
+            lw.bind_local(hdr_aux_i64(r.slot, r.generation, param, 0),
+                LocalId(id: arg_start + (if capture_count > 0: 1 else: 0) + offset))
+            offset = offset + 1
+        val body = lw.mir_destination_lower_expr_row(r,
+            hdr_expr_i64(r.slot, r.generation, lambda_row, 0), Some(body_return_type))
+        lb = lw.builder
+        if not lb.current_block_has_explicit_terminator():
+            lb.terminate_return(Some(mir_operand_copy(body)))
+        var lifted = lb.end_function()
+        if lw.errors.len() > 0:
+            for lowering_error in lw.errors: self.errors.push(lowering_error)
+            return LocalId(id: -1)
+        if rt_hal_compilation_requires_finalize():
+            lifted = inject_rt_hal_worker_complete(lifted)
+        self.canonical_type_symbols = lw.canonical_type_symbols
+        self.next_canonical_type_symbol = lw.next_canonical_type_symbol
+        var host = self.builder
+        var publish = true
+        for existing in host.module.functions.values():
+            if existing.symbol.id == symbol.id:
+                if existing.name != name:
+                    self.error_fatal("E-MIR-DESTINATION-LAMBDA: deterministic synthesized symbol collision", nil)
+                    return LocalId(id: -1)
+                publish = false
+        for existing in self.destination_pending_lambda_functions:
+            if existing.symbol.id == symbol.id:
+                if existing.name != name:
+                    self.error_fatal("E-MIR-DESTINATION-LAMBDA: deterministic pending symbol collision", nil)
+                    return LocalId(id: -1)
+                publish = false
+        if publish: self.destination_pending_lambda_functions.push(lifted)
+        val function_operand = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str(name), MirType(kind: MirTypeKind.FuncPtr(signature))))
+        if capture_count == 0:
+            val local = host.emit_cast(function_operand, result_type)
+            self.builder = host
+            return local
+        val closure_new = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_closure_new"), MirType(kind: MirTypeKind.FuncPtr(
+                MirSignature(params: [MirType.i64(), MirType.i64()],
+                    return_type: MirType.i64(), is_variadic: false)))))
+        # rt_closure_new stores a pointer-sized address in its raw i64 slot.
+        # Make the FuncPtr -> integer conversion explicit so LLVM emits
+        # ptrtoint and other backends receive the same address bits.
+        val function_slot = host.emit_cast(function_operand, MirType.i64())
+        val closure = host.emit_call(closure_new,
+            [mir_operand_copy(function_slot), mir_operand_const_int(capture_count)],
+            MirType.i64())
+        self.builder = host
+        val closure_local = closure ?? LocalId(id: -1)
+        offset = 0
+        while offset < capture_count:
+            val encoded = self.encode_destination_capture_slot(
+                capture_sources[offset], capture_types[offset])
+            val closure_set = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_closure_set_capture"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                    params: [MirType.i64(), MirType.i64(), MirType.i64()],
+                    return_type: MirType.i64(), is_variadic: false)))))
+            host = self.builder
+            host.emit_call(closure_set, [mir_operand_copy(closure_local),
+                mir_operand_const_int(offset), mir_operand_copy(encoded)], MirType.i64())
+            self.builder = host
+            offset = offset + 1
+        host = self.builder
+        val typed_closure = host.emit_cast(mir_operand_copy(closure_local), result_type)
+        self.builder = host
+        typed_closure
+    fn destination_lambda_binding_slot(symbol: i64) -> i64:
+        var offset = self.destination_lambda_symbols.len() - 1
+        while offset >= 0:
+            if self.destination_lambda_symbols[offset] == symbol: return offset
+            offset = offset - 1
+        -1
+
+    me register_destination_lambda_binding(r: MirDestinationFunctionReceipt,
+            symbol: i64, lambda_row: i64, declared_type: MirType) -> LocalId:
+        val capture_start = self.destination_lambda_capture_symbols.len()
+        val captures = hdr_expr_range(r.slot, r.generation, lambda_row, true)
+        val subtype = hdr_range_subtype(r.slot, r.generation, captures)
+        val count = hdr_range_length(r.slot, r.generation, captures)
+        var offset = 0
+        while offset < count:
+            val capture = hdr_range_value(r.slot, r.generation, captures, subtype, offset)
+            val capture_symbol = hdr_aux_i64(r.slot, r.generation, capture, 0)
+            val live = self.find_local(capture_symbol)
+            if live.id < 0:
+                self.error_fatal("E-MIR-DESTINATION-LAMBDA: capture has no live binding", nil)
+                return LocalId(id: -1)
+            var b = self.builder
+            val frozen = b.new_temp(self.local_mir_type_of(live) ?? MirType.i64())
+            b.emit_copy(frozen, live)
+            self.builder = b
+            self.destination_lambda_capture_symbols.push(capture_symbol)
+            self.destination_lambda_capture_locals.push(frozen)
+            offset = offset + 1
+        self.destination_lambda_symbols.push(symbol)
+        self.destination_lambda_rows.push(lambda_row)
+        self.destination_lambda_capture_starts.push(capture_start)
+        self.destination_lambda_capture_counts.push(count)
+        var b = self.builder
+        val marker = b.new_local(nil, declared_type, LocalKind.Var)
+        b.emit_const(marker, MirConstValue.Zero, declared_type)
+        self.builder = b
+        marker
+
+    me lower_destination_lambda_call(r: MirDestinationFunctionReceipt,
+            lambda_row: i64, binding_slot: i64, args_handle: i64,
+            expected_type: MirType) -> LocalId:
+        var arguments: [LocalId] = []
+        val args_subtype = hdr_range_subtype(r.slot, r.generation, args_handle)
+        val args_count = hdr_range_length(r.slot, r.generation, args_handle)
+        var offset = 0
+        while offset < args_count:
+            val arg = hdr_range_value(r.slot, r.generation, args_handle,
+                args_subtype, offset)
+            arguments.push(self.mir_destination_lower_expr_row(r,
+                hdr_aux_i64(r.slot, r.generation, arg, 0), nil))
+            offset = offset + 1
+        val saved_ids = self.local_symbol_ids
+        val saved_values = self.local_symbol_values
+        val saved_slots = self.local_symbol_index_slots
+        if binding_slot >= 0:
+            val capture_start = self.destination_lambda_capture_starts[binding_slot]
+            val capture_count = self.destination_lambda_capture_counts[binding_slot]
+            offset = 0
+            while offset < capture_count:
+                self.bind_local(self.destination_lambda_capture_symbols[capture_start + offset],
+                    self.destination_lambda_capture_locals[capture_start + offset])
+                offset = offset + 1
+        val params = hdr_expr_range(r.slot, r.generation, lambda_row, false)
+        val params_subtype = hdr_range_subtype(r.slot, r.generation, params)
+        val params_count = hdr_range_length(r.slot, r.generation, params)
+        if params_count != arguments.len():
+            self.error_fatal("E-MIR-DESTINATION-LAMBDA: direct call arity mismatch", nil)
+            return LocalId(id: -1)
+        offset = 0
+        while offset < params_count:
+            val param = hdr_range_value(r.slot, r.generation, params,
+                params_subtype, offset)
+            self.bind_local(hdr_aux_i64(r.slot, r.generation, param, 0), arguments[offset])
+            offset = offset + 1
+        val result = self.mir_destination_lower_expr_row(r,
+            hdr_expr_i64(r.slot, r.generation, lambda_row, 0), Some(expected_type))
+        self.local_symbol_ids = saved_ids
+        self.local_symbol_values = saved_values
+        self.local_symbol_index_slots = saved_slots
+        result
+
+    me try_destination_lambda_call(r: MirDestinationFunctionReceipt,
+            call_row: i64, expected_type: MirType) -> LocalId?:
+        val callee_row = hdr_expr_i64(r.slot, r.generation, call_row, 0)
+        val callee_shape = hdr_expr_shape(r.slot, r.generation, callee_row)
+        var lambda_row = -1
+        var binding_slot = -1
+        if callee_shape == HD_EXPR_LAMBDA:
+            lambda_row = callee_row
+        elif callee_shape == HD_EXPR_VAR or callee_shape == HD_EXPR_NAMED_VAR:
+            binding_slot = self.destination_lambda_binding_slot(
+                hdr_expr_i64(r.slot, r.generation, callee_row, 0))
+            if binding_slot >= 0: lambda_row = self.destination_lambda_rows[binding_slot]
+        if lambda_row < 0: return nil
+        Some(self.lower_destination_lambda_call(r, lambda_row, binding_slot,
+            hdr_expr_range(r.slot, r.generation, call_row, false), expected_type))

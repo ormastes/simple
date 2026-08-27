@@ -1,0 +1,688 @@
+# Source AST statement/block lowering directly into the process-owned HIR
+# destination registry. Only scalar owner indices cross this module boundary.
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.parser_types.*
+use compiler.frontend.parser_types_expr.*
+use compiler.hir.hir_types.{HirType, SymbolKind, ScopeKind}
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.hir_destination_graph.*
+use compiler.hir.hir_lowering.hir_destination_registry_writer.*
+use compiler.hir.hir_lowering._Expressions.destination_asm_custom.*
+use compiler.hir.hir_lowering._Expressions.destination_statement_destructure.*
+use compiler.hir.hir_lowering._Expressions.destination_types_patterns.*
+use compiler.hir.hir_lowering._Expressions.expression_support.{hir_expr_kind_disc}
+
+extern fn rt_enum_discriminant(value: StmtKind) -> i64
+
+const DEST_AST_STMT_EXPR_TAG: i64 = 4119164143
+const DEST_AST_STMT_VAL_TAG: i64 = 2118877809
+const DEST_AST_STMT_VAR_TAG: i64 = 3589492574
+const DEST_AST_STMT_SHARED_VAL_TAG: i64 = 1045008618
+const DEST_AST_STMT_SHARED_VAR_TAG: i64 = 3801833487
+const DEST_AST_STMT_ASSIGN_TAG: i64 = 3431341068
+const DEST_AST_STMT_FOR_TAG: i64 = 325766680
+const DEST_AST_STMT_WHILE_TAG: i64 = 2053753080
+const DEST_AST_STMT_LOOP_TAG: i64 = 4143720263
+const DEST_AST_STMT_BREAK_TAG: i64 = 1889469896
+const DEST_AST_STMT_CONTINUE_TAG: i64 = 2071241546
+const DEST_AST_STMT_RETURN_TAG: i64 = 2311302677
+const DEST_AST_STMT_YIELD_TAG: i64 = 1443468469
+const DEST_AST_STMT_THROW_TAG: i64 = 5348086
+const DEST_AST_STMT_WITH_TAG: i64 = 8262782
+const DEST_AST_STMT_ASM_ASSERT_TAG: i64 = 4280943961
+const DEST_AST_STMT_GPU_LAUNCH_TAG: i64 = 3636881138
+const DEST_AST_EXPR_ASSIGN_TAG: i64 = 3431341068
+const DEST_AST_EXPR_RETURN_TAG: i64 = 2311302677
+const DEST_AST_EXPR_STRING_TAG: i64 = 324251421
+
+impl HirLowering:
+    fn destination_reserve_stmt(span: Span) -> i64:
+        hdw_reserve_stmt(self.destination_slot, self.destination_generation,
+            span.start, span.end, span.line, span.col, span.file, span.length)
+
+    fn destination_reserve_expr(span: Span) -> i64:
+        hdw_reserve_expr(self.destination_slot, self.destination_generation,
+            span.start, span.end, span.line, span.col, span.file, span.length)
+
+    fn destination_infer_type(span: Span) -> i64:
+        val row = hdw_reserve_type(self.destination_slot, self.destination_generation,
+            span.start, span.end, span.line, span.col, span.file, span.length)
+        if row < 0: return -1
+        if not hdw_type_infer(self.destination_slot, self.destination_generation, row, 0, 0): return -1
+        row
+
+    fn destination_nil_expr(span: Span) -> i64:
+        val row = self.destination_reserve_expr(span)
+        if row < 0: return -1
+        if not hdw_nil(self.destination_slot, self.destination_generation, row): return -1
+        row
+
+    fn destination_reserve_block_row(span: Span) -> i64:
+        hdw_reserve_block(self.destination_slot, self.destination_generation,
+            span.start, span.end, span.line, span.col, span.file, span.length)
+
+    fn destination_reserve_aux(span: Span) -> i64:
+        hdw_reserve_aux(self.destination_slot, self.destination_generation,
+            span.start, span.end, span.line, span.col, span.file, span.length)
+
+    fn destination_assign_shape(op: AssignOp?) -> i64:
+        # Destination wire encoding, deliberately independent of HirAssignOp
+        # enum ordinals: 0 is plain `=`, 1..5 are Add..Mod compound forms.
+        if not op.?: return 0
+        match op ?? AssignOp.Add:
+            case AssignOp.Add: 1
+            case AssignOp.Sub: 2
+            case AssignOp.Mul: 3
+            case AssignOp.Div: 4
+            case AssignOp.Mod: 5
+
+    fn destination_publish_expr_stmt(stmt_row: i64, expr_row: i64) -> i64:
+        if expr_row < 0: return -1
+        if not hdw_stmt_expr(self.destination_slot, self.destination_generation, stmt_row, expr_row): return -1
+        stmt_row
+
+    fn destination_expr_range(values: [Expr]) -> i64:
+        val range = hdw_reserve_range(self.destination_slot,
+            self.destination_generation, HD_RANGE_EXPR, HD_AUX_RANGE_NONE,
+            values.len())
+        if range < 0: return -1
+        var i = 0
+        while i < values.len():
+            val child = self.destination_lower_expr(values[i])
+            if child < 0 or not hdw_set_range_at(self.destination_slot,
+                    self.destination_generation, range, HD_AUX_RANGE_NONE,
+                    i, child): return -1
+            i = i + 1
+        if not hdw_publish_range(self.destination_slot,
+                self.destination_generation, range, HD_RANGE_EXPR,
+                HD_AUX_RANGE_NONE): return -1
+        range
+
+    # Source-only counterpart of td_init_callee_name. It avoids constructing
+    # a transient HirExpr merely to recover the direct callee name used by the
+    # optional-container return registry.
+    fn destination_init_callee_name(init: Expr) -> text:
+        match init.kind:
+            case ExprKind.Call(callee, _):
+                match callee.kind:
+                    case ExprKind.Ident(name): return name
+                    case _: return ""
+            case _: return ""
+
+    fn destination_strip_discarded_string_interps(s: Stmt) -> Stmt:
+        val kind: StmtKind = s.kind
+        if rt_enum_discriminant(kind) != DEST_AST_STMT_EXPR_TAG: return s
+        match kind:
+            case StmtKind.Expr(expr):
+                val expr_kind: ExprKind = expr.kind
+                if hir_expr_kind_disc(expr_kind) != DEST_AST_EXPR_STRING_TAG:
+                    return s
+                match expr_kind:
+                    case ExprKind.StringLit(value, interps):
+                        if interps.?:
+                            return Stmt(kind: StmtKind.Expr(Expr(
+                                kind: ExprKind.StringLit(value, nil), span: expr.span)), span: s.span)
+                    case _: ()
+            case _: ()
+        s
+
+    # Recursive statement entry. The statement row is reserved before any
+    # descendant; descendants publish before this parent row.
+    me destination_lower_stmt(s: Stmt) -> i64:
+        val stmt_row = self.destination_reserve_stmt(s.span)
+        if stmt_row < 0: return -1
+        # Stage4 cannot safely dispatch a payload-bearing statement enum with
+        # one wide match. Read the stable scalar tag once, then extract only
+        # the single payload shape selected by that tag.
+        val kind: StmtKind = s.kind
+        val disc = rt_enum_discriminant(kind)
+        if disc == DEST_AST_STMT_EXPR_TAG:
+            match kind:
+                case StmtKind.Expr(expr):
+                    match expr.kind:
+                        case ExprKind.Assign(target, op, value):
+                            if not op.?:
+                                match target.kind:
+                                    case ExprKind.TupleLit(targets):
+                                        return self.destination_lower_tuple_assign_stmt(
+                                            stmt_row, targets, value, s.span)
+                                    case _: ()
+                            val target_row = self.destination_lower_expr(target)
+                            if target_row < 0: return -1
+                            val value_row = self.destination_lower_expr(value)
+                            if value_row < 0: return -1
+                            if not hdw_stmt_assign(self.destination_slot, self.destination_generation,
+                                stmt_row, target_row, self.destination_assign_shape(op), value_row): return -1
+                            return stmt_row
+                        case _:
+                            return self.destination_publish_expr_stmt(stmt_row,
+                                self.destination_lower_expr(expr))
+                case _: return -1
+        if disc == DEST_AST_STMT_VAL_TAG:
+            match kind:
+                case StmtKind.Val(name, type_, init):
+                    if name.len() > 1 and name[0:1] == "(":
+                        return self.destination_lower_tuple_binding_stmt(
+                            stmt_row, name, init, false, s.span)
+                    var has_annotation = false
+                    if val parser_type = type_:
+                        has_annotation = not parser_type_kind_is_infer(parser_type.kind)
+                    val inferred_payload: HirType? = if has_annotation:
+                        nil
+                    else:
+                        val callee_name = self.destination_init_callee_name(init)
+                        if callee_name != "" and self.fn_optional_container_returns.has(callee_name):
+                            Some(self.fn_optional_container_returns[callee_name])
+                        else:
+                            nil
+                    var type_row = -1
+                    if has_annotation:
+                        if val parser_type = type_:
+                            type_row = self.destination_lower_type(parser_type)
+                    elif val payload_type = inferred_payload:
+                        type_row = self.destination_lower_hir_type(payload_type)
+                    else:
+                        type_row = self.destination_infer_type(s.span)
+                    if type_row < 0: return -1
+                    val init_row = self.destination_lower_expr(init)
+                    if init_row < 0: return -1
+                    # Destination type_row is canonical. The legacy lookup
+                    # table retains only the scalar identity; never construct
+                    # a value-returning HirType on this graph route.
+                    val symbol = self.symbols.define(name, SymbolKind.Variable, nil,
+                        s.span, Visibility.Private, false, nil)
+                    if not self.destination_publish_local_symbol(symbol.id,
+                            name, true, type_row, SymbolKind.Variable, false,
+                            s.span): return -1
+                    if not hdw_stmt_let(self.destination_slot, self.destination_generation,
+                        stmt_row, symbol.id, type_row, init_row): return -1
+                    return stmt_row
+                case _: return -1
+        if disc == DEST_AST_STMT_VAR_TAG:
+            match kind:
+                case StmtKind.Var(name, type_, init):
+                    if name.len() > 1 and name[0:1] == "(":
+                        if val tuple_init = init:
+                            return self.destination_lower_tuple_binding_stmt(
+                                stmt_row, name, tuple_init, true, s.span)
+                        self.error("tuple destructure `var` requires an initializer", s.span)
+                        return -1
+                    var has_annotation = false
+                    if val parser_type = type_:
+                        has_annotation = not parser_type_kind_is_infer(parser_type.kind)
+                    var inferred_payload: HirType? = nil
+                    if not has_annotation:
+                        if val source_init = init:
+                            val callee_name = self.destination_init_callee_name(source_init)
+                            if callee_name != "" and self.fn_optional_container_returns.has(callee_name):
+                                inferred_payload = self.fn_optional_container_returns[callee_name]
+                    var type_row = -1
+                    if has_annotation:
+                        if val parser_type = type_:
+                            type_row = self.destination_lower_type(parser_type)
+                    elif val payload_type = inferred_payload:
+                        type_row = self.destination_lower_hir_type(payload_type)
+                    else:
+                        type_row = self.destination_infer_type(s.span)
+                    if type_row < 0: return -1
+                    val init_row = if val source_init = init:
+                        self.destination_lower_expr(source_init)
+                    else:
+                        self.destination_nil_expr(s.span)
+                    if init_row < 0: return -1
+                    val symbol = self.symbols.define(name, SymbolKind.Variable, nil,
+                        s.span, Visibility.Private, true, nil)
+                    if not self.destination_publish_local_symbol(symbol.id,
+                            name, true, type_row, SymbolKind.Variable, true,
+                            s.span): return -1
+                    if not hdw_stmt_let(self.destination_slot, self.destination_generation,
+                        stmt_row, symbol.id, type_row, init_row): return -1
+                    return stmt_row
+                case _: return -1
+        if disc == DEST_AST_STMT_SHARED_VAL_TAG:
+            match kind:
+                case StmtKind.SharedVal(name, type_, init):
+                    val type_row = self.destination_lower_type(type_)
+                    if type_row < 0: return -1
+                    var has_init = false
+                    var init_row = -1
+                    if val source_init = init:
+                        has_init = true
+                        init_row = self.destination_lower_expr(source_init)
+                    if has_init and init_row < 0: return -1
+                    val symbol = self.symbols.define(name, SymbolKind.Variable,
+                        nil, s.span, Visibility.Private, false, nil)
+                    if not self.destination_publish_local_symbol(symbol.id,
+                            name, true, type_row, SymbolKind.Variable, false,
+                            s.span): return -1
+                    if not hdw_stmt_shared_val(self.destination_slot,
+                            self.destination_generation, stmt_row, symbol.id,
+                            type_row, has_init, init_row): return -1
+                    return stmt_row
+                case _: return -1
+        if disc == DEST_AST_STMT_SHARED_VAR_TAG:
+            match kind:
+                case StmtKind.SharedVar(name, type_, init):
+                    val type_row = self.destination_lower_type(type_)
+                    if type_row < 0: return -1
+                    var has_init = false
+                    var init_row = -1
+                    if val source_init = init:
+                        has_init = true
+                        init_row = self.destination_lower_expr(source_init)
+                    if has_init and init_row < 0: return -1
+                    val symbol = self.symbols.define(name, SymbolKind.Variable,
+                        nil, s.span, Visibility.Private, true, nil)
+                    if not self.destination_publish_local_symbol(symbol.id,
+                            name, true, type_row, SymbolKind.Variable, true,
+                            s.span): return -1
+                    if not hdw_stmt_shared_var(self.destination_slot,
+                            self.destination_generation, stmt_row, symbol.id,
+                            type_row, has_init, init_row): return -1
+                    return stmt_row
+                case _: return -1
+        if disc == DEST_AST_STMT_ASSIGN_TAG:
+            match kind:
+                case StmtKind.Assign(target, op, value):
+                    if not op.?:
+                        match target.kind:
+                            case ExprKind.TupleLit(targets):
+                                return self.destination_lower_tuple_assign_stmt(
+                                    stmt_row, targets, value, s.span)
+                            case _: ()
+                    val target_row = self.destination_lower_expr(target)
+                    if target_row < 0: return -1
+                    val value_row = self.destination_lower_expr(value)
+                    if value_row < 0: return -1
+                    if not hdw_stmt_assign(self.destination_slot, self.destination_generation,
+                        stmt_row, target_row, self.destination_assign_shape(op), value_row): return -1
+                    return stmt_row
+                case _: return -1
+        if disc == DEST_AST_STMT_FOR_TAG:
+            match kind:
+                case StmtKind.For(name, iter, body):
+                    val expr_row = self.destination_reserve_expr(s.span)
+                    if expr_row < 0: return -1
+                    val iter_row = self.destination_lower_expr(iter)
+                    if iter_row < 0: return -1
+                    if name.len() >= 2 and name[0:1] == "(" and name[name.len() - 1:name.len()] == ")":
+                        val tuple_expr_row = self.destination_lower_for_tuple_expr(
+                            expr_row, name, iter_row, body, s.span)
+                        if tuple_expr_row < 0: return -1
+                        return self.destination_publish_expr_stmt(stmt_row, tuple_expr_row)
+                    self.symbols.push_scope(ScopeKind.Loop)
+                    self.loop_depth = self.loop_depth + 1
+                    val symbol = self.symbols.define(name, SymbolKind.Variable, nil,
+                        s.span, Visibility.Private, false, nil)
+                    if not self.destination_publish_local_symbol(symbol.id,
+                            name, false, -1, SymbolKind.Variable, false,
+                            s.span):
+                        self.loop_depth = self.loop_depth - 1
+                        self.symbols.pop_scope()
+                        return -1
+                    val body_row = self.destination_lower_block(body, true)
+                    self.loop_depth = self.loop_depth - 1
+                    self.symbols.pop_scope()
+                    if body_row < 0: return -1
+                    if not hdw_for(self.destination_slot, self.destination_generation,
+                        expr_row, symbol.id, iter_row, body_row, false, ""): return -1
+                    return self.destination_publish_expr_stmt(stmt_row, expr_row)
+                case _: return -1
+        if disc == DEST_AST_STMT_WHILE_TAG:
+            match kind:
+                case StmtKind.While(cond, body):
+                    val expr_row = self.destination_reserve_expr(s.span)
+                    if expr_row < 0: return -1
+                    val cond_row = self.destination_lower_expr(cond)
+                    if cond_row < 0: return -1
+                    self.loop_depth = self.loop_depth + 1
+                    val body_row = self.destination_lower_block(body, true)
+                    self.loop_depth = self.loop_depth - 1
+                    if body_row < 0: return -1
+                    if not hdw_while(self.destination_slot, self.destination_generation,
+                        expr_row, cond_row, body_row, false, ""): return -1
+                    return self.destination_publish_expr_stmt(stmt_row, expr_row)
+                case _: return -1
+        if disc == DEST_AST_STMT_LOOP_TAG:
+            match kind:
+                case StmtKind.Loop(body):
+                    val expr_row = self.destination_reserve_expr(s.span)
+                    if expr_row < 0: return -1
+                    self.loop_depth = self.loop_depth + 1
+                    val body_row = self.destination_lower_block(body, true)
+                    self.loop_depth = self.loop_depth - 1
+                    if body_row < 0: return -1
+                    if not hdw_loop(self.destination_slot, self.destination_generation,
+                        expr_row, body_row, false, ""): return -1
+                    return self.destination_publish_expr_stmt(stmt_row, expr_row)
+                case _: return -1
+        if disc == DEST_AST_STMT_BREAK_TAG:
+            match kind:
+                case StmtKind.Break(label):
+                    val expr_row = self.destination_reserve_expr(s.span)
+                    if expr_row < 0: return -1
+                    var label_text = ""
+                    if val source_label = label:
+                        label_text = source_label
+                    if not hdw_break(self.destination_slot, self.destination_generation,
+                        expr_row, label_text, false, -1): return -1
+                    return self.destination_publish_expr_stmt(stmt_row, expr_row)
+                case _: return -1
+        if disc == DEST_AST_STMT_CONTINUE_TAG:
+            match kind:
+                case StmtKind.Continue(label):
+                    val expr_row = self.destination_reserve_expr(s.span)
+                    if expr_row < 0: return -1
+                    var has_label = false
+                    var label_text = ""
+                    if val source_label = label:
+                        has_label = true
+                        label_text = source_label
+                    if not hdw_continue(self.destination_slot, self.destination_generation,
+                        expr_row, has_label, label_text): return -1
+                    return self.destination_publish_expr_stmt(stmt_row, expr_row)
+                case _: return -1
+        if disc == DEST_AST_STMT_RETURN_TAG:
+            match kind:
+                case StmtKind.Return(value):
+                    val expr_row = self.destination_reserve_expr(s.span)
+                    if expr_row < 0: return -1
+                    var has_value = false
+                    var value_row = -1
+                    if val source_value = value:
+                        value_row = self.destination_lower_expr(source_value)
+                        if value_row < 0: return -1
+                        has_value = true
+                    if not hdw_return_rich(self.destination_slot, self.destination_generation,
+                        expr_row, has_value, value_row): return -1
+                    return self.destination_publish_expr_stmt(stmt_row, expr_row)
+                case _: return -1
+        if disc == DEST_AST_STMT_YIELD_TAG:
+            match kind:
+                case StmtKind.Yield(value):
+                    val expr_row = self.destination_reserve_expr(s.span)
+                    if expr_row < 0: return -1
+                    var has_value = false
+                    var value_row = -1
+                    if val source_value = value:
+                        value_row = self.destination_lower_expr(source_value)
+                        if value_row < 0: return -1
+                        has_value = true
+                    if not hdw_yield(self.destination_slot, self.destination_generation,
+                        expr_row, has_value, value_row): return -1
+                    return self.destination_publish_expr_stmt(stmt_row, expr_row)
+                case _: return -1
+        if disc == DEST_AST_STMT_THROW_TAG:
+            match kind:
+                case StmtKind.Throw(value):
+                    val expr_row = self.destination_reserve_expr(s.span)
+                    if expr_row < 0: return -1
+                    val value_row = self.destination_lower_expr(value)
+                    if value_row < 0: return -1
+                    if not hdw_single_expr(self.destination_slot, self.destination_generation,
+                        expr_row, HD_EXPR_THROW, value_row): return -1
+                    return self.destination_publish_expr_stmt(stmt_row, expr_row)
+                case _: return -1
+        if disc == DEST_AST_STMT_WITH_TAG:
+            match kind:
+                case StmtKind.With(items, body):
+                    val expr_row = self.destination_reserve_expr(s.span)
+                    if expr_row < 0: return -1
+                    val item_count = items.len()
+                    val item_range = hdw_reserve_range(self.destination_slot, self.destination_generation,
+                        HD_RANGE_AUX, HD_AUX_RANGE_WITH_ITEM, item_count)
+                    if item_range < 0: return -1
+                    self.symbols.push_scope(ScopeKind.Block)
+                    var wi = 0
+                    while wi < item_count:
+                        val item = items[wi]
+                        val item_row = self.destination_reserve_aux(item.span)
+                        if item_row < 0: self.symbols.pop_scope(); return -1
+                        val context_row = self.destination_lower_expr(item.context_expr)
+                        if context_row < 0: self.symbols.pop_scope(); return -1
+                        var target_id = -1
+                        if item.has_target:
+                            target_id = self.symbols.define(item.target, SymbolKind.Variable, nil,
+                                item.span, Visibility.Private, false, nil).id
+                            if not self.destination_publish_local_symbol(
+                                    target_id, item.target, false, -1,
+                                    SymbolKind.Variable, false,
+                                    item.span): self.symbols.pop_scope(); return -1
+                        if not hdw_with_item(self.destination_slot, self.destination_generation,
+                            item_row, context_row, item.has_target, target_id): self.symbols.pop_scope(); return -1
+                        if not hdw_set_range_at(self.destination_slot, self.destination_generation,
+                            item_range, HD_AUX_RANGE_WITH_ITEM, wi, item_row): self.symbols.pop_scope(); return -1
+                        wi = wi + 1
+                    if not hdw_publish_range(self.destination_slot, self.destination_generation,
+                        item_range, HD_RANGE_AUX, HD_AUX_RANGE_WITH_ITEM): self.symbols.pop_scope(); return -1
+                    val body_row = self.destination_lower_block(body, true)
+                    self.symbols.pop_scope()
+                    if body_row < 0: return -1
+                    if not hdw_with(self.destination_slot, self.destination_generation,
+                        expr_row, item_range, item_count, body_row): return -1
+                    return self.destination_publish_expr_stmt(stmt_row, expr_row)
+                case _: return -1
+        if disc == DEST_AST_STMT_ASM_ASSERT_TAG:
+            match kind:
+                case StmtKind.AsmAssert(spec):
+                    val spec_row = self.destination_lower_asm_spec(spec)
+                    if spec_row < 0: return -1
+                    if not hdw_stmt_asm_assert(self.destination_slot, self.destination_generation,
+                        stmt_row, spec_row): return -1
+                    return stmt_row
+                case _: return -1
+        if disc == DEST_AST_STMT_GPU_LAUNCH_TAG:
+            match kind:
+                case StmtKind.GpuLaunch(config, body):
+                    # Validate fixed launch arity before reserving or lowering
+                    # children so malformed input cannot allocate partial
+                    # ranges that are immediately rolled back.
+                    if (config.grid.len() < 1 or config.grid.len() > 3 or
+                        config.block.len() < 1 or config.block.len() > 3):
+                        self.error(
+                            "GPU launch grid/block dimensions must each contain 1..3 expressions",
+                            config.span)
+                        return -1
+                    val grid_range = self.destination_expr_range(config.grid)
+                    if grid_range < 0: return -1
+                    val block_range = self.destination_expr_range(config.block)
+                    if block_range < 0: return -1
+                    val body_row = self.destination_lower_block(body, false)
+                    if body_row < 0: return -1
+                    val config_span = hdw_reserve_span(self.destination_slot,
+                        self.destination_generation, config.span.start,
+                        config.span.end, config.span.line, config.span.col,
+                        config.span.file, config.span.length)
+                    if config_span < 0 or not hdw_stmt_gpu_launch(
+                            self.destination_slot, self.destination_generation,
+                            stmt_row, grid_range, config.grid.len(), block_range,
+                            config.block.len(), body_row, config_span): return -1
+                    return stmt_row
+                case _: return -1
+        self.error("unknown statement discriminator in destination lowering", s.span)
+        -1
+
+    fn destination_expr_is_block_value(expr: Expr) -> bool:
+        val disc = hir_expr_kind_disc(expr.kind)
+        disc != DEST_AST_EXPR_ASSIGN_TAG and disc != DEST_AST_EXPR_RETURN_TAG
+
+    fn destination_stmt_is_block_value(s: Stmt) -> bool:
+        val disc = rt_enum_discriminant(s.kind)
+        if disc == DEST_AST_STMT_EXPR_TAG:
+            match s.kind:
+                case StmtKind.Expr(expr): return self.destination_expr_is_block_value(expr)
+                case _: return false
+        disc == DEST_AST_STMT_FOR_TAG or disc == DEST_AST_STMT_WHILE_TAG or
+            disc == DEST_AST_STMT_LOOP_TAG or disc == DEST_AST_STMT_WITH_TAG
+
+    # Lower the canonical expression payload of a final Expr-producing source
+    # statement without first materializing/publishing a HirStmt wrapper.
+    fn destination_lower_stmt_block_value(s: Stmt) -> i64:
+        val kind: StmtKind = s.kind
+        val disc = rt_enum_discriminant(kind)
+        if disc == DEST_AST_STMT_EXPR_TAG:
+            match kind:
+                case StmtKind.Expr(expr): return self.destination_lower_expr(expr)
+                case _: return -1
+        if disc == DEST_AST_STMT_FOR_TAG:
+            match kind:
+                case StmtKind.For(name, iter, body):
+                    val expr_row = self.destination_reserve_expr(s.span)
+                    if expr_row < 0: return -1
+                    val iter_row = self.destination_lower_expr(iter)
+                    if iter_row < 0: return -1
+                    if name.len() >= 2 and name[0:1] == "(" and name[name.len() - 1:name.len()] == ")":
+                        return self.destination_lower_for_tuple_expr(expr_row, name, iter_row, body, s.span)
+                    self.symbols.push_scope(ScopeKind.Loop)
+                    self.loop_depth = self.loop_depth + 1
+                    val symbol = self.symbols.define(name, SymbolKind.Variable, nil,
+                        s.span, Visibility.Private, false, nil)
+                    if not self.destination_publish_local_symbol(symbol.id,
+                            name, false, -1, SymbolKind.Variable, false,
+                            s.span):
+                        self.loop_depth = self.loop_depth - 1
+                        self.symbols.pop_scope()
+                        return -1
+                    val body_row = self.destination_lower_block(body, true)
+                    self.loop_depth = self.loop_depth - 1
+                    self.symbols.pop_scope()
+                    if body_row < 0: return -1
+                    if not hdw_for(self.destination_slot, self.destination_generation,
+                        expr_row, symbol.id, iter_row, body_row, false, ""): return -1
+                    return expr_row
+                case _: return -1
+        if disc == DEST_AST_STMT_WHILE_TAG:
+            match kind:
+                case StmtKind.While(cond, body):
+                    val expr_row = self.destination_reserve_expr(s.span)
+                    if expr_row < 0: return -1
+                    val cond_row = self.destination_lower_expr(cond)
+                    if cond_row < 0: return -1
+                    self.loop_depth = self.loop_depth + 1
+                    val body_row = self.destination_lower_block(body, true)
+                    self.loop_depth = self.loop_depth - 1
+                    if body_row < 0: return -1
+                    if not hdw_while(self.destination_slot, self.destination_generation,
+                        expr_row, cond_row, body_row, false, ""): return -1
+                    return expr_row
+                case _: return -1
+        if disc == DEST_AST_STMT_LOOP_TAG:
+            match kind:
+                case StmtKind.Loop(body):
+                    val expr_row = self.destination_reserve_expr(s.span)
+                    if expr_row < 0: return -1
+                    self.loop_depth = self.loop_depth + 1
+                    val body_row = self.destination_lower_block(body, true)
+                    self.loop_depth = self.loop_depth - 1
+                    if body_row < 0: return -1
+                    if not hdw_loop(self.destination_slot, self.destination_generation,
+                        expr_row, body_row, false, ""): return -1
+                    return expr_row
+                case _: return -1
+        if disc == DEST_AST_STMT_WITH_TAG:
+            match kind:
+                case StmtKind.With(items, body):
+                    val expr_row = self.destination_reserve_expr(s.span)
+                    if expr_row < 0: return -1
+                    val item_count = items.len()
+                    val item_range = hdw_reserve_range(self.destination_slot,
+                        self.destination_generation, HD_RANGE_AUX,
+                        HD_AUX_RANGE_WITH_ITEM, item_count)
+                    if item_range < 0: return -1
+                    self.symbols.push_scope(ScopeKind.Block)
+                    var wi = 0
+                    while wi < item_count:
+                        val item = items[wi]
+                        val item_row = self.destination_reserve_aux(item.span)
+                        if item_row < 0: self.symbols.pop_scope(); return -1
+                        val context_row = self.destination_lower_expr(item.context_expr)
+                        if context_row < 0: self.symbols.pop_scope(); return -1
+                        var target_id = -1
+                        if item.has_target:
+                            target_id = self.symbols.define(item.target, SymbolKind.Variable,
+                                nil, item.span, Visibility.Private, false, nil).id
+                            if not self.destination_publish_local_symbol(
+                                    target_id, item.target, false, -1,
+                                    SymbolKind.Variable, false,
+                                    item.span): self.symbols.pop_scope(); return -1
+                        if not hdw_with_item(self.destination_slot, self.destination_generation,
+                            item_row, context_row, item.has_target, target_id): self.symbols.pop_scope(); return -1
+                        if not hdw_set_range_at(self.destination_slot, self.destination_generation,
+                            item_range, HD_AUX_RANGE_WITH_ITEM, wi, item_row): self.symbols.pop_scope(); return -1
+                        wi = wi + 1
+                    if not hdw_publish_range(self.destination_slot, self.destination_generation,
+                        item_range, HD_RANGE_AUX, HD_AUX_RANGE_WITH_ITEM): self.symbols.pop_scope(); return -1
+                    val body_row = self.destination_lower_block(body, true)
+                    self.symbols.pop_scope()
+                    if body_row < 0: return -1
+                    if not hdw_with(self.destination_slot, self.destination_generation,
+                        expr_row, item_range, item_count, body_row): return -1
+                    return expr_row
+                case _: return -1
+        -1
+
+    # Scalar continuation for a caller-rooted block/capability reservation.
+    # The capability range must already be published. The statement range is
+    # reserved before descent and all children publish before the block row.
+    me destination_lower_block_with_cap_range(b: Block, value_position: bool,
+                                               block_row: i64, cap_range: i64,
+                                               cap_count: i64) -> i64:
+        val source_count = b.stmts.len()
+        var has_value = false
+        if value_position and source_count > 0:
+            has_value = self.destination_stmt_is_block_value(b.stmts[source_count - 1])
+        val stmt_count = if has_value: source_count - 1 else: source_count
+        val stmt_range = hdw_reserve_range(self.destination_slot, self.destination_generation,
+            HD_RANGE_STMT, HD_AUX_RANGE_NONE, stmt_count)
+        if stmt_range < 0: return -1
+        self.symbols.push_scope(ScopeKind.Block)
+        var si = 0
+        while si < stmt_count:
+            val source_stmt = self.destination_strip_discarded_string_interps(b.stmts[si])
+            val child = self.destination_lower_stmt(source_stmt)
+            if child < 0: self.symbols.pop_scope(); return -1
+            if not hdw_set_range_at(self.destination_slot, self.destination_generation,
+                stmt_range, HD_AUX_RANGE_NONE, si, child): self.symbols.pop_scope(); return -1
+            si = si + 1
+        if not hdw_publish_range(self.destination_slot, self.destination_generation,
+            stmt_range, HD_RANGE_STMT, HD_AUX_RANGE_NONE): self.symbols.pop_scope(); return -1
+        var value_row = -1
+        if has_value:
+            value_row = self.destination_lower_stmt_block_value(b.stmts[source_count - 1])
+            if value_row < 0: self.symbols.pop_scope(); return -1
+        self.symbols.pop_scope()
+        if not hdw_finalize_block(self.destination_slot, self.destination_generation,
+            block_row, stmt_range, stmt_count, has_value, value_row, cap_range, cap_count): return -1
+        block_row
+
+    # Ordinary block entry has no declared unsafe capabilities. It reserves
+    # and publishes the canonical empty range without constructing `[]`.
+    me destination_lower_block(b: Block, value_position: bool) -> i64:
+        val block_row = self.destination_reserve_block_row(b.span)
+        if block_row < 0: return -1
+        val cap_range = hdw_reserve_range(self.destination_slot, self.destination_generation,
+            HD_RANGE_AUX, HD_AUX_RANGE_TEXT, 0)
+        if cap_range < 0: return -1
+        if not hdw_publish_range(self.destination_slot, self.destination_generation,
+            cap_range, HD_RANGE_AUX, HD_AUX_RANGE_TEXT): return -1
+        self.destination_lower_block_with_cap_range(b, value_position,
+            block_row, cap_range, 0)
+
+    # Caller boundary: one checkpoint and one durable recovery decision.
+    me lower_hir_block_into_destination(b: Block, value_position: bool) -> i64:
+        val checkpoint = hdw_checkpoint(self.destination_slot, self.destination_generation)
+        if checkpoint < 0: return -1
+        val block_row = self.destination_lower_block(b, value_position)
+        if block_row >= 0:
+            if hdw_commit_checkpoint(self.destination_slot,
+                    self.destination_generation, checkpoint): return block_row
+            hdw_recover(self.destination_slot, self.destination_generation,
+                checkpoint, "E-HIR-DEST-BLOCK-COMMIT")
+            self.error("E-HIR-DEST-BLOCK-COMMIT: destination block checkpoint commit failed", b.span)
+            return -1
+        hdw_recover(self.destination_slot, self.destination_generation, checkpoint,
+            "destination statement/block lowering failed")
+        -1
+
+export HirLowering

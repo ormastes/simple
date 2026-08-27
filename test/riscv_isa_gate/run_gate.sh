@@ -4,9 +4,24 @@
 # Don't exit on first error - we want to run all tests
 # set -e
 
-GATE_DIR="/home/ormastes/dev/pub/simple/test/riscv_isa_gate"
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+REPO_ROOT=${RISCV_ISA_GATE_REPO_ROOT:-$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd -P)}
+GATE_DIR=${RISCV_ISA_GATE_DIR:-"$REPO_ROOT/test/riscv_isa_gate"}
 PAYLOADS_DIR="$GATE_DIR/payloads"
-GHDL_WORK_DIR="/home/ormastes/dev/pub/simple/build/vhdl/rv32"
+GHDL_WORK_DIR=${RISCV_ISA_GATE_BUILD_DIR:-"$REPO_ROOT/build/vhdl/rv32"}
+
+case "$GATE_DIR" in
+  /*) ;;
+  *) GATE_DIR="$REPO_ROOT/$GATE_DIR" ;;
+esac
+case "$GHDL_WORK_DIR" in
+  /*) ;;
+  *) GHDL_WORK_DIR="$REPO_ROOT/$GHDL_WORK_DIR" ;;
+esac
+PAYLOADS_DIR="$GATE_DIR/payloads"
+
+[ -d "$GATE_DIR" ] || { echo "ERROR: RISC-V ISA gate directory not found: $GATE_DIR" >&2; exit 2; }
+[ -d "$GHDL_WORK_DIR" ] || { echo "ERROR: RISC-V ISA build directory not found: $GHDL_WORK_DIR" >&2; exit 2; }
 
 # Hand-written test set covering proven-bug areas
 TESTS=(
@@ -30,10 +45,6 @@ mkdir -p "$PAYLOADS_DIR"
 # Use tb_gate testbench - samples UART bytes for pass/fail
 cd "$GHDL_WORK_DIR"
 TESTBENCH="tb_gate"
-
-# tb_gate.vhd lives in the gate dir, not the GHDL work dir, so `ghdl -a` below
-# never found it and the runner failed as shipped. Copy it in first.
-cp "$GATE_DIR/tb_gate.vhd" "$GHDL_WORK_DIR/tb_gate.vhd"
 
 # Compile testbench if not already done
 if ! ghdl -r --std=08 $TESTBENCH --help > /dev/null 2>&1; then

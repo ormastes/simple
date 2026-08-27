@@ -1,0 +1,58 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_scalar_decode_dispatch_owner.{
+    strict_riscv_scalar_decoded_uop_skid}
+use compiler.mir.hwir.riscv_scalar_decoder.{strict_riscv_scalar_decoder_hwir}
+use compiler.mir.hwir.riscv_scalar_decoded_uop_interface.{
+    strict_hw_scalar_decoded_uop_interface}
+use compiler.backend.backend.hwir_to_vhdl.{render_strict_sequential_hwir}
+use lib.hardware.riscv_common.isa.scalar_database.{riscv_scalar_decoder_plan}
+
+describe "registered scalar decode dispatch owner":
+    it "freezes the exact RV32 and RV64 decoder-plan channel":
+        for product in [(CoreConfig.rv32(), "rv32i"),
+                (CoreConfig.rv64_zicsr_zifencei(), "rv64i_zicsr_zifencei")]:
+            val plan = riscv_scalar_decoder_plan(product[1]).unwrap()
+            val decoder = strict_riscv_scalar_decoder_hwir(
+                "decode_dispatch_decoder_" + product[0].xlen.to_text(),
+                product[0], plan).unwrap()
+            val descriptor = strict_hw_scalar_decoded_uop_interface(
+                product[0], plan, decoder).unwrap()
+            val owner = strict_riscv_scalar_decoded_uop_skid(
+                "decode_dispatch_" + product[0].xlen.to_text(), plan,
+                decoder, descriptor).unwrap()
+            expect(owner.diagnostic()).to_equal("")
+            expect(owner.ports.map(_.name)).to_contain("decoded_row_index")
+            expect(owner.ports.map(_.name)).to_contain("provider_event_id")
+            expect(owner.ports.map(_.name)).to_contain("illegal_valid")
+            expect(owner.origins[0].source_name).to_contain(plan.structural_sha256())
+            expect(owner.structural_sha256().len()).to_equal(64)
+
+    it "holds one atomic payload and applies conservative backpressure":
+        val config = CoreConfig.rv32(); val plan = riscv_scalar_decoder_plan("rv32i").unwrap()
+        val decoder = strict_riscv_scalar_decoder_hwir(
+            "decode_dispatch_protocol_decoder", config, plan).unwrap()
+        val descriptor = strict_hw_scalar_decoded_uop_interface(config, plan, decoder).unwrap()
+        val owner = strict_riscv_scalar_decoded_uop_skid("decode_dispatch_protocol",
+            plan, decoder, descriptor).unwrap()
+        expect(owner.plan.rules.map(_.name)).to_equal(["consume", "capture"])
+        expect(owner.plan.outputs.any(_.result == "upstream_ready")).to_be(true)
+        expect(owner.plan.outputs.any(_.result == "uop_valid")).to_be(true)
+        expect(owner.plan.outputs.any(_.result == "illegal_valid")).to_be(true)
+        expect(owner.plan.registers.any(_.name == "canonical_instruction_reg")).to_be(true)
+        expect(owner.plan.registers.any(_.name == "rs1_value_reg")).to_be(true)
+        expect(owner.plan.registers.any(_.name == "decode_event_id_reg")).to_be(true)
+
+    it "emits typed sequential VHDL and rejects a mismatched plan":
+        val config = CoreConfig.rv32(); val plan = riscv_scalar_decoder_plan("rv32i").unwrap()
+        val decoder = strict_riscv_scalar_decoder_hwir(
+            "decode_dispatch_emit_decoder", config, plan).unwrap()
+        val descriptor = strict_hw_scalar_decoded_uop_interface(config, plan, decoder).unwrap()
+        val owner = strict_riscv_scalar_decoded_uop_skid("decode_dispatch_emit",
+            plan, decoder, descriptor).unwrap()
+        val emitted = render_strict_sequential_hwir(owner, "hwir-gen2-scalar-decode-dispatch-v1")
+        expect(emitted.is_success()).to_be(true)
+        expect(emitted.vhdl).to_contain("illegal_value <= '1' when decoded_valid_reg = zero1")
+        expect(emitted.vhdl).to_contain("elsif full_reg = '0' and upstream_valid = '1' then")
+        expect(strict_riscv_scalar_decoded_uop_skid("decode_dispatch_bad",
+            riscv_scalar_decoder_plan("rv64i").unwrap(), decoder, descriptor).is_err()).to_be(true)

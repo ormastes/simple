@@ -297,16 +297,12 @@ pub(package) class AuthenticatedFsExecUserServiceV1:
             return Err(-13)
         var index: i64 = 0
         while index < self.slots.len():
-            if self.slots[index].state ==
-                    AuthenticatedFsExecUserSlotStateV1.Armed and
-                self.slots[index].caller == caller and
-                self.slots[index].canonical_path == launch.path and
-                self.slots[index].recipe == recipe:
+            val slot_matches = self.slots[index].state == AuthenticatedFsExecUserSlotStateV1.Armed and self.slots[index].caller == caller and self.slots[index].canonical_path == launch.path and self.slots[index].recipe == recipe
+            if slot_matches:
                 # Reserve before crossing into architecture handoff. A panic,
                 # partial handoff, or indeterminate cleanup leaves this slot
                 # Consuming, so the retained token cannot be replayed.
-                self.slots[index].state =
-                    AuthenticatedFsExecUserSlotStateV1.Consuming
+                self.slots[index].state = AuthenticatedFsExecUserSlotStateV1.Consuming
                 return Ok(AuthenticatedFsExecUserReservationV1(
                     slot_index: index,
                     generation: self.slots[index].generation,
@@ -358,10 +354,8 @@ pub(package) class AuthenticatedFsExecUserServiceV1:
 # epoch handle and arms an admitted slot. The broker never retains MountTable or
 # DriverInstance state.
 # Userland can neither call these owner surfaces nor obtain the retained token.
-var g_authenticated_fs_exec_user_service_v1:
-    AuthenticatedFsExecUserServiceV1? = nil
-var g_authenticated_fs_exec_user_vfs_owner_v1:
-    VfsMountTableOwnerHandleV1? = nil
+var g_authenticated_fs_exec_user_service_v1: AuthenticatedFsExecUserServiceV1? = nil
+var g_authenticated_fs_exec_user_vfs_owner_v1: VfsMountTableOwnerHandleV1? = nil
 val g_authenticated_fs_exec_user_mutex_v1: i64 = mutex_raw_create()
 var g_authenticated_fs_exec_user_quarantined_v1 = false
 
@@ -868,7 +862,8 @@ pub(package) fn authenticated_fs_exec_remote_submit_v1(
 
 @cfg(x86_64)
 use os.kernel.loader.x86_64_fs_exec_spawn.{
-    x86_64_fs_exec_spawn_authenticated_with_launch_v1
+    x86_64_fs_exec_spawn_authenticated_with_launch_v1,
+    x86_64_fs_exec_adopt_authenticated_async_with_launch_v1
 }
 @cfg(arm64)
 use os.kernel.loader.arm64_fs_exec_spawn.{
@@ -902,6 +897,13 @@ pub(package) struct AuthenticatedFsExecSubmissionV1:
 pub(package) struct AuthenticatedFsExecSubmissionResultV1:
     exit_code: i64
     evidence: SchedulerExecutionEvidenceTokenV1?
+    cleanup_indeterminate: bool
+    scheduler: Scheduler
+
+@cfg(x86_64)
+pub struct AuthenticatedFsExecAsyncSpawnResultV1:
+    """Persistent scheduler publication from one authenticated submission."""
+    pid: i64
     cleanup_indeterminate: bool
     scheduler: Scheduler
 
@@ -1164,6 +1166,110 @@ fn _retire_failed_submission_v1(
         exit_code: result.exit_code, evidence: result.evidence,
         cleanup_indeterminate: failed and not retired,
         scheduler: result.scheduler)
+
+@cfg(x86_64)
+pub(package) fn authenticated_fs_exec_spawn_async_v1(
+    scheduler: Scheduler,
+    mut table: MountTable,
+    submission: AuthenticatedFsExecSubmissionV1,
+    caller_caps: CapabilitySet,
+    path: text,
+    argv: [text]
+) -> AuthenticatedFsExecAsyncSpawnResultV1:
+    """Consume sealed artifact authority and retain the adopted x86 task.
+
+    Successful adoption consumes the registry token, binds the verified image,
+    launch arguments and attenuated capabilities to the scheduler-owned TCB,
+    and returns its stable PID.  It deliberately does not perform the blocking
+    architecture handoff, exit, reap, or execution-evidence delivery used by
+    `authenticated_fs_exec_submit_v1`.
+    """
+    val prepared = x86_64_fs_exec_adopt_authenticated_async_with_launch_v1(
+        scheduler, table, submission.authorities, submission.token,
+        submission.consumer, submission.entry_point, submission.caller,
+        caller_caps, path, argv, [], submission.recipe)
+    if prepared.pid > 0:
+        return AuthenticatedFsExecAsyncSpawnResultV1(
+            pid: prepared.pid, cleanup_indeterminate: false,
+            scheduler: prepared.scheduler)
+    # A policy/launch rejection can occur before token consumption. Retire the
+    # still-live authority exactly as the synchronous submission path does;
+    # AuthorityTokenInvalid means scheduler adoption already consumed it.
+    val retired = match executable_loader_revoke(
+        table, submission.authorities, submission.token):
+        case Ok(_): true
+        case Err(ExecutableLoaderAdmissionErrorV1.AuthorityTokenInvalid): true
+        case Err(_): false
+    AuthenticatedFsExecAsyncSpawnResultV1(
+        pid: prepared.pid, cleanup_indeterminate: not retired,
+        scheduler: prepared.scheduler)
+
+@cfg(x86_64)
+pub fn authenticated_fs_exec_spawn_installed_async_v1(
+    scheduler: Scheduler,
+    caller: i64,
+    caller_caps: CapabilitySet,
+    canonical_path: text,
+    argv: [text],
+    recipe: i64
+) -> AuthenticatedFsExecAsyncSpawnResultV1:
+    """Open, authenticate, adopt, and retain one installed x86 executable.
+
+    This is the kernel-facing filesystem API suitable for a desktop launcher.
+    It obtains both mutable owners internally: the canonical VFS epoch lease
+    and the loader authority registry. Callers provide launch intent and their
+    bounded capability pouch, never artifact bytes or authority metadata.
+    """
+    val authority_result = executable_authority_loader_owner()
+    if authority_result.is_err():
+        return AuthenticatedFsExecAsyncSpawnResultV1(
+            pid: -5, cleanup_indeterminate: false, scheduler: scheduler)
+    val authorities = authority_result.unwrap()
+    if not _authenticated_fs_exec_user_lock_v1():
+        return AuthenticatedFsExecAsyncSpawnResultV1(
+            pid: -5, cleanup_indeterminate: false, scheduler: scheduler)
+    if not g_authenticated_fs_exec_user_vfs_owner_v1.?:
+        val released = _authenticated_fs_exec_user_unlock_v1()
+        return AuthenticatedFsExecAsyncSpawnResultV1(
+            pid: if released: -13 else: -5,
+            cleanup_indeterminate: not released, scheduler: scheduler)
+    val lease_opt = vfs_state_mount_table_lease_begin_v1(
+        g_authenticated_fs_exec_user_vfs_owner_v1.unwrap())
+    if not lease_opt.?:
+        val released = _authenticated_fs_exec_user_unlock_v1()
+        return AuthenticatedFsExecAsyncSpawnResultV1(
+            pid: if released: -16 else: -5,
+            cleanup_indeterminate: not released, scheduler: scheduler)
+    var lease = lease_opt.unwrap()
+    val prepared = authenticated_fs_exec_prepare_installed_artifact_online_v1(
+        lease.table, authorities, caller, canonical_path, recipe)
+    if prepared.is_err():
+        val restored = vfs_state_mount_table_lease_restore_v1(lease)
+        if not restored: g_authenticated_fs_exec_user_quarantined_v1 = true
+        val released = _authenticated_fs_exec_user_unlock_v1()
+        return AuthenticatedFsExecAsyncSpawnResultV1(
+            pid: if restored and released: prepared.unwrap_err() else: -5,
+            cleanup_indeterminate: not restored or not released,
+            scheduler: scheduler)
+    val submission = prepared.unwrap()
+    if not _authenticated_fs_exec_user_unlock_v1():
+        val revoked = executable_loader_revoke(
+            lease.table, authorities, submission.token).is_ok()
+        val restored = vfs_state_mount_table_lease_restore_v1(lease)
+        return AuthenticatedFsExecAsyncSpawnResultV1(
+            pid: -5, cleanup_indeterminate: not revoked or not restored,
+            scheduler: scheduler)
+    val spawned = authenticated_fs_exec_spawn_async_v1(
+        scheduler, lease.table, submission, caller_caps,
+        canonical_path, argv)
+    val restored = vfs_state_mount_table_lease_restore_v1(lease)
+    if not restored: _authenticated_fs_exec_user_quarantine_synchronized_v1()
+    AuthenticatedFsExecAsyncSpawnResultV1(
+        # Publication already linearized. Never hide the live scheduler task's
+        # identity merely because restoring the VFS owner became indeterminate.
+        pid: spawned.pid,
+        cleanup_indeterminate: spawned.cleanup_indeterminate or not restored,
+        scheduler: spawned.scheduler)
 
 @cfg(x86_64)
 pub(package) fn authenticated_fs_exec_submit_v1(

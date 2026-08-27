@@ -42,7 +42,7 @@ fn test_parse(
     val ctx = blockcontext_test(payload)
 
     # Parse
-    val result = block_def.parse_payload(payload, ctx)
+    val result = block_def_parse_payload(block_def, payload, ctx)
 
     # Check result
     match result:
@@ -75,7 +75,7 @@ fn test_parse_error(
     val block_def = get_block_or_panic(block_kind)
     val ctx = blockcontext_test(payload)
 
-    val result = block_def.parse_payload(payload, ctx)
+    val result = block_def_parse_payload(block_def, payload, ctx)
 
     match result:
         case Ok(_):
@@ -108,18 +108,18 @@ fn test_validate(
     val block_def = get_block_or_panic(block_kind)
     val ctx = BlockContext.test("")
 
-    val errors = block_def.validate(value, ctx)
+    val errors = block_def_validate(block_def, value, ctx)
 
     # Check error count
-    if errors.len() != expected_errors.len():
+    if errors_len(errors) != expected_errors_len(expected_errors):
         panic("Validation error count mismatch:\nExpected: {expected_errors.len()}\nGot: {errors.len()}")
 
     # Check each error message
-    for i in 0..expected_errors.len():
+    for i in 0..expected_errors_len(expected_errors):
         val expected_substr = expected_errors[i]
         val actual_msg = errors[i].message
 
-        if not actual_msg.contains(expected_substr):
+        if not actual_msg_contains(actual_msg, expected_substr):
             panic("Validation error {i} mismatch:\nExpected substring: {expected_substr}\nGot: {actual_msg}")
 
 fn test_const_eval(
@@ -145,7 +145,7 @@ fn test_const_eval(
     """
     val block_def = get_block_or_panic(block_kind)
 
-    val result = block_def.eval_const(value)
+    val result = block_def_eval_const(block_def, value)
 
     match result:
         case const_val:
@@ -169,7 +169,7 @@ fn test_no_const_eval(
     """
     val block_def = get_block_or_panic(block_kind)
 
-    val result = block_def.eval_const(value)
+    val result = block_def_eval_const(block_def, value)
 
     if has_result:
         panic("Expected no const eval, but got: {const_value_to_string(result_value)}")
@@ -194,7 +194,7 @@ fn mock_block(
     Example:
     ```simple
     val mock = mock_block("test", \text:
-        Ok(BlockValue.Raw(text))
+        Ok(blockvalue_Raw(text))
     )
 
     with_block(mock, \:
@@ -257,7 +257,7 @@ fn assert_parse_succeeds(block_kind: text, payload: text) -> BlockValue:
     val block_def = get_block_or_panic(block_kind)
     val ctx = blockcontext_test(payload)
 
-    match block_def.parse_payload(payload, ctx):
+    match block_def_parse_payload(block_def, payload, ctx):
         case Ok(value): value
         case Err(error): panic("Parse failed: {error.message}")
 
@@ -277,7 +277,7 @@ fn assert_parse_fails(block_kind: text, payload: text) -> BlockError:
     val block_def = get_block_or_panic(block_kind)
     val ctx = blockcontext_test(payload)
 
-    match block_def.parse_payload(payload, ctx):
+    match block_def_parse_payload(block_def, payload, ctx):
         case Ok(_): panic("Expected parse to fail, but it succeeded")
         case Err(error): error
 
@@ -332,9 +332,9 @@ fn assert_validation_passes(block_kind: text, value: BlockValue):
     val block_def = get_block_or_panic(block_kind)
     val ctx = BlockContext.test("")
 
-    val errors = block_def.validate(value, ctx)
+    val errors = block_def_validate(block_def, value, ctx)
 
-    if errors.len() > 0:
+    if errors_len(errors) > 0:
         val messages = errors.map(_.message).join("\n")
         panic("Expected validation to pass, but got errors:\n{messages}")
 
@@ -351,9 +351,9 @@ fn assert_validation_fails(block_kind: text, value: BlockValue):
     val block_def = get_block_or_panic(block_kind)
     val ctx = BlockContext.test("")
 
-    val errors = block_def.validate(value, ctx)
+    val errors = block_def_validate(block_def, value, ctx)
 
-    if errors.len() == 0:
+    if errors_len(errors) == 0:
         panic("Expected validation to fail, but it passed")
 
 # ============================================================================
@@ -402,28 +402,28 @@ fn deep_equal(a, b) -> bool:
     if type_a == "float":
         # Float equality with small epsilon
         val diff = if a > b: a - b else: b - a
-        return diff < 0.0001
+        return diff < 0[0001]
 
     if type_a == "nil":
         return true
 
     # Array type
     if type_a == "array":
-        if a.len() != b.len():
+        if a_len(a) != b_len(b):
             return false
-        for i in 0..(a.len()):
+        for i in 0..(a_len(a)):
             if not deep_equal(a[i], b[i]):
                 return false
         return true
 
     # Dict type
     if type_a == "dict":
-        val keys_a = a.keys()
-        val keys_b = b.keys()
-        if keys_a.len() != keys_b.len():
+        val keys_a = a_keys(a)
+        val keys_b = b_keys(b)
+        if keys_a_len(keys_a) != keys_b_len(keys_b):
             return false
         for key in keys_a:
-            if not b.contains_key(key):
+            if not b_contains_key(b, key):
                 return false
             if not deep_equal(a[key], b[key]):
                 return false
@@ -449,34 +449,34 @@ fn const_values_equal(a: ConstValue, b: ConstValue) -> bool:
         case (Float(x), Float(y)): x == y  # Note: float equality is approximate
         case (String(x), String(y)): x == y
         case (Array(xs), Array(ys)):
-            if xs.len() != ys.len():
+            if xs_len(xs) != ys_len(ys):
                 false
             else:
                 var eq = true
                 var i = 0
-                while i < xs.len() and eq:
+                while i < xs_len(xs) and eq:
                     eq = const_values_equal(xs[i], ys[i])
                     i = i + 1
                 eq
         case (Tuple(xs), Tuple(ys)):
-            if xs.len() != ys.len():
+            if xs_len(xs) != ys_len(ys):
                 false
             else:
                 var eq = true
                 var i = 0
-                while i < xs.len() and eq:
+                while i < xs_len(xs) and eq:
                     eq = const_values_equal(xs[i], ys[i])
                     i = i + 1
                 eq
         case (Struct(name_a, fields_a), Struct(name_b, fields_b)):
             if name_a != name_b:
                 false
-            elif fields_a.len() != fields_b.len():
+            elif fields_a_len(fields_a) != fields_b_len(fields_b):
                 false
             else:
                 var eq = true
                 var i = 0
-                while i < fields_a.len() and eq:
+                while i < fields_a_len(fields_a) and eq:
                     val fa = fields_a[i]
                     val fb = fields_b[i]
                     eq = fa[0] == fb[0] and const_values_equal(fa[1], fb[1])

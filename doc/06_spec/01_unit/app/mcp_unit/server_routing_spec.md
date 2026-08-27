@@ -1,6 +1,29 @@
 # Server Routing Specification
 
-> Tests covering Server Method Routing, Core Protocol Methods, Resource Methods, Tool Methods, Prompt Methods, Unknown Methods, Method Category Checks.
+> <details>
+
+<!-- sdn-diagram:id=server_routing_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=server_routing_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+server_routing_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=server_routing_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,19 +42,13 @@
 
 #### routes initialize method
 
-- routes initialize method
-   - Expected: method equals `initialize`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("routes initialize method")
 val req = jo2(jp("method", js("initialize")), jp("id", "1"))
 val method = extract_json_string(req, "method")
 expect(method).to_equal("initialize")
@@ -41,19 +58,13 @@ expect(method).to_equal("initialize")
 
 #### routes initialized notification
 
-- routes initialized notification
-   - Expected: method equals `initialized`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("routes initialized notification")
 val req = jo1(jp("method", js("initialized")))
 val method = extract_json_string(req, "method")
 expect(method).to_equal("initialized")
@@ -63,19 +74,13 @@ expect(method).to_equal("initialized")
 
 #### routes ping method
 
-- routes ping method
-   - Expected: method equals `ping`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("routes ping method")
 val req = jo2(jp("method", js("ping")), jp("id", "2"))
 val method = extract_json_string(req, "method")
 expect(method).to_equal("ping")
@@ -85,19 +90,13 @@ expect(method).to_equal("ping")
 
 #### routes shutdown method
 
-- routes shutdown method
-   - Expected: method equals `shutdown`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("routes shutdown method")
 val req = jo2(jp("method", js("shutdown")), jp("id", "3"))
 val method = extract_json_string(req, "method")
 expect(method).to_equal("shutdown")
@@ -109,19 +108,13 @@ expect(method).to_equal("shutdown")
 
 #### routes resources/list
 
-- routes resources/list
-   - Expected: method equals `resources/list`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("routes resources/list")
 val req = jo2(jp("method", js("resources/list")), jp("id", "4"))
 val method = extract_json_string(req, "method")
 expect(method).to_equal("resources/list")
@@ -131,19 +124,13 @@ expect(method).to_equal("resources/list")
 
 #### routes resources/read
 
-- routes resources/read
-   - Expected: method equals `resources/read`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("routes resources/read")
 val req = jo2(jp("method", js("resources/read")), jp("id", "5"))
 val method = extract_json_string(req, "method")
 expect(method).to_equal("resources/read")
@@ -155,19 +142,13 @@ expect(method).to_equal("resources/read")
 
 #### routes tools/list
 
-- routes tools/list
-   - Expected: method equals `tools/list`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("routes tools/list")
 val req = jo2(jp("method", js("tools/list")), jp("id", "6"))
 val method = extract_json_string(req, "method")
 expect(method).to_equal("tools/list")
@@ -177,19 +158,13 @@ expect(method).to_equal("tools/list")
 
 #### routes tools/call
 
-- routes tools/call
-   - Expected: method equals `tools/call`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("routes tools/call")
 val req = jo2(jp("method", js("tools/call")), jp("id", "7"))
 val method = extract_json_string(req, "method")
 expect(method).to_equal("tools/call")
@@ -201,19 +176,13 @@ expect(method).to_equal("tools/call")
 
 #### routes prompts/list
 
-- routes prompts/list
-   - Expected: method equals `prompts/list`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("routes prompts/list")
 val req = jo2(jp("method", js("prompts/list")), jp("id", "8"))
 val method = extract_json_string(req, "method")
 expect(method).to_equal("prompts/list")
@@ -223,19 +192,13 @@ expect(method).to_equal("prompts/list")
 
 #### routes prompts/get
 
-- routes prompts/get
-   - Expected: method equals `prompts/get`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("routes prompts/get")
 val req = jo2(jp("method", js("prompts/get")), jp("id", "9"))
 val method = extract_json_string(req, "method")
 expect(method).to_equal("prompts/get")
@@ -247,19 +210,13 @@ expect(method).to_equal("prompts/get")
 
 #### handles unknown method
 
-- handles unknown method
-   - Expected: is_known is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles unknown method")
 val method = "unknown/method"
 val is_known = method == "initialize" or method == "ping" or method == "shutdown"
 expect(is_known).to_equal(false)
@@ -271,19 +228,13 @@ expect(is_known).to_equal(false)
 
 #### identifies resource methods
 
-- identifies resource methods
-   - Expected: is_resource is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("identifies resource methods")
 val method = "resources/list"
 val is_resource = method.starts_with("resources/")
 expect(is_resource).to_equal(true)
@@ -293,19 +244,13 @@ expect(is_resource).to_equal(true)
 
 #### identifies tool methods
 
-- identifies tool methods
-   - Expected: is_tool is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("identifies tool methods")
 val method = "tools/call"
 val is_tool = method.starts_with("tools/")
 expect(is_tool).to_equal(true)
@@ -315,19 +260,13 @@ expect(is_tool).to_equal(true)
 
 #### identifies prompt methods
 
-- identifies prompt methods
-   - Expected: is_prompt is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("identifies prompt methods")
 val method = "prompts/get"
 val is_prompt = method.starts_with("prompts/")
 expect(is_prompt).to_equal(true)
@@ -342,12 +281,12 @@ expect(is_prompt).to_equal(true)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/mcp_unit/server_routing_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Server Method Routing, Core Protocol Methods, Resource Methods, Tool Methods, Prompt Methods, Unknown Methods, Method Category Checks.
+Tests covering:
 - Server Method Routing
 - Core Protocol Methods
 - Resource Methods
@@ -368,51 +307,3 @@ Tests covering Server Method Routing, Core Protocol Methods, Resource Methods, T
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `75c5b033dfc2fb7f5236e2597290a899e4e8a2d073d5d929985caf8fdbcd0271`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `75c5b033dfc2fb7f5236e2597290a899e4e8a2d073d5d929985caf8fdbcd0271`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `75c5b033dfc2fb7f5236e2597290a899e4e8a2d073d5d929985caf8fdbcd0271`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/mcp_unit/server_routing_spec.spl
-mirror: doc/06_spec/01_unit/app/mcp_unit/server_routing_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/mcp_unit/server_routing_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/mcp_unit/server_routing_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/mcp_unit/server_routing_spec.spl:17:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'routes initialize method' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/mcp_unit/server_routing_spec.spl:24:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'routes initialized notification' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/mcp_unit/server_routing_spec.spl:31:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'routes ping method' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -19,9 +19,40 @@
 
 ## Server flow
 
-- HTTP scenario: boot, send `GET /health` and `GET /`, assert status/body.
-- DB scenario: use the same boot HTTP listener, send three `POST /db` requests,
-  and require create, insert, and the selected known value in one boot.
+- The dedicated launcher reads `/SYS/APPS/WEBSRV.SMF` and
+  `/SYS/APPS/DBSRV.SMF` from the mounted filesystem and registers both images
+  in one live kernel `Scheduler`. It must not call the blocking
+  `x86_64_fs_exec_spawn_scheduler_owned` path twice: the first non-terminating
+  server would prevent the second launch.
+- Each server receives its exact single-worker `--simpleos` argv plus the same
+  boot nonce. The scheduler owns distinct positive task IDs, address spaces,
+  capabilities, and lifecycle records before either task enters ring 3.
+- The launcher installs that scheduler in the x86 trap runtime and dispatches
+  the first runnable task. Timer/syscall returns, rather than a synchronous
+  kernel call stack, select the other runnable server.
+- HTTP scenario: send two different `POST /render` payloads, assert status,
+  `image/png`, valid PNG bytes, and different response bytes.
+- DB scenario: send PostgreSQL v3 StartupMessage, SimpleQuery, and Terminate;
+  restart the guest and prove a committed value survives.
+
+### Launcher admission boundary
+
+`SIMPLEOS_FS_SERVER_LAUNCHER_V1` is evidence only when a dedicated kernel
+entry closure implements the scheduler-owned flow above. A marker embedded in
+an otherwise unrelated kernel, two sequential blocking fs-exec calls, or web
+and DB code linked into the kernel are rejected substitutes. Until the
+dedicated entry and producer exist, the QEMU filesystem-launch scenario is
+RED even if the server artifacts themselves cross-link successfully.
+
+Before scheduler mutation, the launcher passes one immutable admission record
+containing the two canonical filesystem paths, pinned artifact versions,
+declared SHA-256 digests, FAT image identity/digest, launch nonce, exact
+single-worker argument profiles, and runtime profile
+`simpleos-single-worker-v1`. Ring 0 recomputes SHA-256 over both actual byte
+arrays with the kernel-owned pure-Simple implementation and rejects a mismatch.
+ELF admission additionally requires a nonempty executable PT_LOAD containing
+the entry point. A host receipt without this byte-level kernel check is not an
+execution grant.
 
 ## Error handling
 
@@ -51,36 +82,3 @@ evidence: even a structurally consistent forged candidate cannot authorize
 guest execution. Only the external evidence-service owner may combine its
 authenticated handle with a loader-owned consume-once token and commit a ledger
 result.
-
-## Wave 4 implementation detail (2026-08-21)
-
-1. The boot filesystem owner constructs one mutable `Fat32Filesystem`, mounts
-   it, then publishes that same value and device into VFS. FAT submodules do not
-   retain a second mount object.
-2. NVMe boot discovery yields one bounded lease. DMA allocation and positioned
-   filesystem I/O consume that lease through their dedicated owners; VFS
-   dispatch/write code remains backend-neutral and checks generation and range
-   before mutation.
-3. Media builders stage `SERVERS.ELF` plus canonical manifest/signature/key-id
-   sidecars. The architecture entry asks its authenticated-media policy for an
-   execute binding, passes loader-issued authority into the ISA spawn adapter,
-   waits, and collects. Missing, stale, wrong-target, unsigned, or path-only
-   inputs fail before task publication.
-4. RV64 reads ELF and program headers by FAT ranges, validates every range and
-   load aggregate, allocates mapped pages from a bounded arena, and restores the
-   arena checkpoint on any error. Writable-executable segments and cyclic or
-   overlong chains reject. The legacy entry is deliberately non-executable.
-5. The `simpleos_tool` builders select `src/app/simpleos_tool/main.spl`, an
-   explicit target/sysroot, Simple core archive, and no-stub native build. The
-   builder must carry the adjacent canonical admission receipt; target ELF and
-   build-stamp checks are construction evidence only.
-6. LLVM media provisioning accepts only target `ET_EXEC` files without a host
-   interpreter and digest-matches them to a passing build receipt. It emits
-   `execution_claim=false`; the hello-world QEMU runner must independently
-   prove `/usr/bin/clang` compile, `/usr/bin/ld.lld` link, filesystem output,
-   execution, and exact stdout.
-
-Focused shell/C contract tests cover the FAT mount-value owner, architecture
-runtime symbol uniqueness and size bounds, authenticated server entry
-selection, RV64 streamed-loader rejection rules, and core-archive tool
-resolution. These checks are not substitutes for live QEMU receipts.

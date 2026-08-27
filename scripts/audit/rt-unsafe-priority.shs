@@ -1,10 +1,10 @@
 #!/bin/sh
-# Rank owned rt_* migration debt by exact declaring module and symbol.
+# Rank direct, owned rt_* migration debt by exact declaring module and symbol.
 #
-# The token estimate is intentionally textual, not lexical: it can count a
-# token in strings or docstrings, does not resolve calls, and is never proof of
-# reachability, ABI safety, ownership, provider identity, signature, or
-# admission.  It only provides a stable review-order hint for narrow work.
+# This is a source-only lexical estimate.  It neither resolves calls nor proves
+# an ABI, nullability, ownership, provider artifact, signature, or admission.
+# Its purpose is to make the next *reviewed* narrow migration visible without
+# applying a broad source rewrite.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -23,18 +23,22 @@ test "$actual_header" = "$(printf '%b' "$expected_header")" || {
     exit 2
 }
 
-# Fixture users can pass the same file list as the inventory. Normal operation
-# scans production modules only, so test fixture text does not alter the queue.
+# Fixture users can pass the same exact file list as the inventory.  Normal
+# operation scans production Simple modules only, keeping test call volume from
+# distorting runtime migration order.
 if [ -n "${SFFI_SOURCE_FILE_LIST:-}" ]; then
     while IFS= read -r source_file; do
-        case "$source_file" in *.spl) printf '%s\0' "$source_file" ;; esac
+        case "$source_file" in
+            *.spl) printf '%s\0' "$source_file" ;;
+        esac
     done <"$SFFI_SOURCE_FILE_LIST" >"$work/files.bin"
 else
     find "$scan_root/src" -type f -name '*.spl' ! -path '*/vendor/*' -print0 >"$work/files.bin"
 fi
 
-# Strip line comments only. Deliberately retain strings/docstrings so callers
-# cannot mistake this fast linear scan for a language-aware call counter.
+# Count only lexical call expressions, never declarations.  The output key is
+# deliberately module+symbol rather than symbol alone: duplicate declarations
+# must be migrated and reviewed independently.
 export RT_UNSAFE_PRIORITY_ROOT=$scan_root
 xargs -0 -r -n 200 perl -0ne '
     my $file = $ARGV;
@@ -45,24 +49,29 @@ xargs -0 -r -n 200 perl -0ne '
     for my $line (split /\n/, $_, -1) {
         $line =~ s/#.*$//;
         next if $line =~ /^\s*(?:pub\s+)?(?:unsafe\s+)?extern\s+fn\s+/;
-        while ($line =~ /\b(rt_[A-Za-z0-9_]+)\s*\(/g) { print "$file\t$1\n"; }
+        while ($line =~ /\b(rt_[A-Za-z0-9_]+)\s*\(/g) {
+            print "$file\t$1\n";
+        }
     }
 ' <"$work/files.bin" | LC_ALL=C sort | uniq -c |
-awk 'BEGIN { OFS="\t" } { print $2, $3, $1 }' >"$work/textual-tokens.tsv"
+awk 'BEGIN { OFS="\t" } { print $2, $3, $1 }' >"$work/direct-calls.tsv"
 
 {
-    printf 'module\tsymbol\tdeclaration_file\tdeclaration_line\ttextual_rt_token_estimate\tunsafe_tag\tcontract\tprovider_language\tstate\tpriority\n'
+    printf 'module\tsymbol\tdeclaration_file\tdeclaration_line\tdirect_raw_call_estimate\tunsafe_tag\tcontract\tprovider_language\tstate\tpriority\n'
     awk -F '\t' 'BEGIN { OFS="\t" }
-        NR == FNR { tokens[$1 SUBSEP $2]=$3; next }
+        NR == FNR { calls[$1 SUBSEP $2]=$3; next }
         FNR == 1 { next }
         $1 ~ /^rt_/ && ($8 == "missing" || $9 == "missing") {
-            module=$6; sub(/\.spl$/, "", module)
-            n=tokens[module SUBSEP $1] + 0
-            if ($8 == "missing" && $9 == "missing") priority="P0_tag_and_contract"
-            else priority="P1_exact_contract"
+            module=$6
+            sub(/\.spl$/, "", module)
+            n=calls[module SUBSEP $1] + 0
+            if (n > 0 && $8 == "missing" && $9 == "missing") priority="P0_direct_tag_and_contract"
+            else if (n > 0) priority="P1_direct_exact_contract"
+            else if ($8 == "missing" && $9 == "missing") priority="P2_declaration_tag_and_contract"
+            else priority="P3_declaration_exact_contract"
             print module, $1, $6, $7, n, $8, $9, $3, $12, priority
         }
-    ' "$work/textual-tokens.tsv" "$work/contracts.tsv" |
+    ' "$work/direct-calls.tsv" "$work/contracts.tsv" |
         LC_ALL=C sort -t "$(printf '\t')" -k5,5nr -k1,1 -k2,2 -k4,4n
 } >"$work/priority.tsv"
 
@@ -77,4 +86,4 @@ else
 fi
 
 count=$(awk 'END { print (NR > 0 ? NR - 1 : 0) }' "$work/priority.tsv")
-echo "rt unsafe priority: rows=$count source_only=true textual_estimate=true admission=absent" >&2
+echo "rt unsafe priority: rows=$count source_only=true admission=absent" >&2

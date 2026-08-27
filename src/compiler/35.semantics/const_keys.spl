@@ -256,8 +256,7 @@ fn edit_distance(s1: text, s2: text) -> i64:
             val delete_cost = prev_row[j] + 1
             val replace_cost = prev_row[j - 1] + cost
 
-            val min_ab = if insert_cost < delete_cost: insert_cost else: delete_cost
-            val min_cost = if min_ab < replace_cost: min_ab else: replace_cost
+            val min_cost = insert_cost.min(delete_cost).min(replace_cost)
 
             curr_row = curr_row.push(min_cost)
 
@@ -316,38 +315,37 @@ class TemplateChecker:
 
     me check_with_call(template_var: text, provided_keys: [text], location: text) -> Result<(), ConstKeyError>:
         """Check a .with{} call."""
-        # NOTE: native dict `.get()` returns a corrupt payload on a hit; use
-        # contains_key + indexed read. See doc/07_guide/language/dict_native_pitfalls.md
-        if not self.templates.contains_key(template_var):
-            # Unknown template variable
-            self.warnings = self.warnings.push(
-                "Unknown template variable '{template_var}' at {location}"
-            )
-            return Ok(())
-
-        val analysis = self.templates[template_var]
-        if analysis.can_validate():
-            val schema = match analysis.schema:
-                case Some(value):
-                    value
-                case nil:
+        match self.templates.get(template_var):
+            case Some(analysis):
+                if analysis.can_validate():
+                    val schema = match analysis.schema:
+                        case Some(value):
+                            value
+                        case nil:
+                            self.warnings = self.warnings.push(
+                                "Cannot validate template keys at compile time (dynamic template)"
+                            )
+                            return Ok(())
+                    val validator = ConstKeyValidator(schema: schema)
+                    match validator.validate(provided_keys):
+                        case Ok(_):
+                            Ok(())
+                        case Err(e):
+                            self.errors = self.errors.push(e)
+                            Err(e)
+                else:
+                    # Dynamic template - can't validate statically
                     self.warnings = self.warnings.push(
                         "Cannot validate template keys at compile time (dynamic template)"
                     )
-                    return Ok(())
-            val validator = ConstKeyValidator(schema: schema)
-            match validator.validate(provided_keys):
-                case Ok(_):
                     Ok(())
-                case Err(e):
-                    self.errors = self.errors.push(e)
-                    Err(e)
-        else:
-            # Dynamic template - can't validate statically
-            self.warnings = self.warnings.push(
-                "Cannot validate template keys at compile time (dynamic template)"
-            )
-            Ok(())
+
+            case nil:
+                # Unknown template variable
+                self.warnings = self.warnings.push(
+                    "Unknown template variable '{template_var}' at {location}"
+                )
+                Ok(())
 
     fn get_errors() -> [ConstKeyError]:
         self.errors
@@ -389,22 +387,15 @@ impl TemplateInstance:
 
         for key in self.schema.keys:
             val placeholder = "{" + key.name + "}"
-            # contains_key + index read, never `.get()`.
-            # See doc/07_guide/language/dict_native_pitfalls.md
-            val value = if self.values.contains_key(key.name):
-                self.values[key.name]
-            else:
-                if key.is_optional:
-                    key.default_value ?? ""
-                else:
-                    ""  # Should not happen if validated
+            val value = match self.values.get(key.name):
+                case Some(v): v
+                case nil:
+                    if key.is_optional:
+                        key.default_value ?? ""
+                    else:
+                        ""  # Should not happen if validated
 
             result = result.replace(placeholder, value)
-            if key.is_optional:
-                # The template literally contains "{name?=default}"; replace
-                # that optional form too so defaults actually take effect.
-                val opt_placeholder = "{" + key.name + "?=" + (key.default_value ?? "") + "}"
-                result = result.replace(opt_placeholder, value)
 
         result
 

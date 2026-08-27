@@ -26,19 +26,88 @@ use std.gc_async_mut.cuda.{
     CUDA_SUCCESS, cuda_memcpy_dtoh, cuda_memcpy_htod
 }
 use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
+use std.gc_async_mut.gpu_ffi.{cuda_device_identity}
 use std.nogc_sync_mut.ptr.raw.{
     raw_alloc, raw_free, raw_read_i32, raw_write_i64,
     raw_write_u32s_checksum
 }
+use std.nogc_sync_mut.io.time_ops.{time_now_nanos}
 
 val WEB_CUDA_LAYOUT_BLOCK_SIZE: i64 = 256
 val WEB_CUDA_LAYOUT_INPUT_WORDS: i64 = 13
 val WEB_CUDA_LAYOUT_OUTPUT_WORDS: i64 = 5
 val WEB_CUDA_LAYOUT_OVERFLOW_WORDS: i64 = 7
 val WEB_CUDA_LAYOUT_ARG_BYTES: i64 = 40
+val WEB_CUDA_LAYOUT_MAX_STORAGE_BYTES: i64 = 256 * 1024 * 1024
+
+class CudaLayoutStorage:
+    device_storage: i64
+    device_capacity: i64
+    host_storage: i64
+    host_capacity: i64
+
+    static fn create() -> CudaLayoutStorage:
+        CudaLayoutStorage(
+            device_storage: 0, device_capacity: 0,
+            host_storage: 0, host_capacity: 0)
+
+    me ensure(session: CudaSession,
+              device_bytes: i64,
+              host_bytes: i64) -> text:
+        val need_device = self.device_storage <= 0 or
+            self.device_capacity < device_bytes
+        val need_host = self.host_storage == 0 or
+            self.host_capacity < host_bytes
+        if not need_device and not need_host:
+            return ""
+        val next_device = if need_device:
+            session.alloc(device_bytes)
+        else:
+            self.device_storage
+        val next_host = if need_host:
+            raw_alloc(host_bytes)
+        else:
+            self.host_storage
+        if next_device <= 0 or next_host == 0:
+            if need_device and next_device > 0:
+                session.free(next_device)
+            if need_host and next_host != 0:
+                raw_free(next_host, host_bytes)
+            return "cuda-layout-allocation-failed"
+        if need_device:
+            if self.device_storage > 0:
+                session.free(self.device_storage)
+            self.device_storage = next_device
+            self.device_capacity = device_bytes
+        if need_host:
+            if self.host_storage != 0:
+                raw_free(self.host_storage, self.host_capacity)
+            self.host_storage = next_host
+            self.host_capacity = host_bytes
+        ""
+
+    me release(session: CudaSession):
+        if self.device_storage > 0:
+            session.free(self.device_storage)
+        if self.host_storage != 0:
+            raw_free(self.host_storage, self.host_capacity)
+        self.device_storage = 0
+        self.device_capacity = 0
+        self.host_storage = 0
+        self.host_capacity = 0
 
 class CudaLayoutExecutionPort:
     oracle_boxes: [LayoutBox]
+    session: CudaSession
+    storage: CudaLayoutStorage
+    retain_session: bool
+
+    me set_oracle_boxes(oracle_boxes: [LayoutBox]):
+        self.oracle_boxes = oracle_boxes
+
+    me shutdown():
+        self.storage.release(self.session)
+        self.session.shutdown()
 
 fn _web_cuda_layout_ptx() -> text:
     ".version 7.0\n.target sm_52\n.address_size 64\n\n.visible .entry web_layout_fixed_children(\n    .param .u64 input,\n    .param .u64 tracks,\n    .param .u64 output,\n    .param .u32 count\n) {\n    .reg .pred %p<8>;\n    .reg .b32 %r<32>;\n    .reg .b64 %rd<12>;\n    mov.u32 %r0, %ctaid.x;\n    mov.u32 %r1, %ntid.x;\n    mov.u32 %r2, %tid.x;\n    mad.lo.u32 %r3, %r0, %r1, %r2;\n    ld.param.u32 %r4, [count];\n    setp.ge.u32 %p0, %r3, %r4;\n    @%p0 bra done;\n    ld.param.u64 %rd0, [input];\n    ld.param.u64 %rd1, [tracks];\n    ld.param.u64 %rd2, [output];\n    mul.wide.u32 %rd3, %r3, 52;\n    add.u64 %rd4, %rd0, %rd3;\n    ld.global.u32 %r5, [%rd4];\n    ld.global.u32 %r6, [%rd4+4];\n    ld.global.u32 %r7, [%rd4+8];\n    ld.global.u32 %r8, [%rd4+12];\n    ld.global.u32 %r9, [%rd4+16];\n    mov.u32 %r20, 0;\n    mov.u32 %r21, 0;\n    mov.u32 %r22, %r8;\n    mov.u32 %r23, %r9;\n    setp.eq.u32 %p1, %r6, 0;\n    @%p1 bra store;\n    setp.eq.u32 %p2, %r7, 4;\n    @%p2 bra grid;\n    mov.u32 %r10, 0;\nsibling_loop:\n    setp.ge.u32 %p3, %r10, %r3;\n    @%p3 bra store;\n    mul.wide.u32 %rd5, %r10, 52;\n    add.u64 %rd6, %rd0, %rd5;\n    ld.global.u32 %r11, [%rd6+4];\n    setp.ne.u32 %p4, %r11, %r6;\n    @%p4 bra sibling_next;\n    setp.eq.u32 %p5, %r7, 2;\n    @%p5 bra sibling_row;\n    ld.global.u32 %r12, [%rd6+16];\n    add.u32 %r21, %r21, %r12;\n    bra sibling_next;\nsibling_row:\n    ld.global.u32 %r12, [%rd6+12];\n    add.u32 %r20, %r20, %r12;\nsibling_next:\n    add.u32 %r10, %r10, 1;\n    bra sibling_loop;\ngrid:\n    ld.global.u32 %r13, [%rd4+20];\n    ld.global.u32 %r14, [%rd4+28];\n    ld.global.u32 %r15, [%rd4+36];\n    ld.global.u32 %r16, [%rd4+40];\n    ld.global.u32 %r17, [%rd4+44];\n    ld.global.u32 %r18, [%rd4+48];\n    mov.u32 %r22, 0;\n    mov.u32 %r23, 0;\n    mov.u32 %r10, 0;\ngrid_x_before:\n    setp.ge.u32 %p3, %r10, %r15;\n    @%p3 bra grid_x_span_start;\n    add.u32 %r19, %r13, %r10;\n    mul.wide.u32 %rd7, %r19, 4;\n    add.u64 %rd8, %rd1, %rd7;\n    ld.global.u32 %r24, [%rd8];\n    add.u32 %r20, %r20, %r24;\n    add.u32 %r10, %r10, 1;\n    bra grid_x_before;\ngrid_x_span_start:\n    mov.u32 %r10, 0;\ngrid_x_span:\n    setp.ge.u32 %p3, %r10, %r16;\n    @%p3 bra grid_y_before_start;\n    add.u32 %r19, %r13, %r15;\n    add.u32 %r19, %r19, %r10;\n    mul.wide.u32 %rd7, %r19, 4;\n    add.u64 %rd8, %rd1, %rd7;\n    ld.global.u32 %r24, [%rd8];\n    add.u32 %r22, %r22, %r24;\n    add.u32 %r10, %r10, 1;\n    bra grid_x_span;\ngrid_y_before_start:\n    mov.u32 %r10, 0;\ngrid_y_before:\n    setp.ge.u32 %p3, %r10, %r17;\n    @%p3 bra grid_y_span_start;\n    add.u32 %r19, %r14, %r10;\n    mul.wide.u32 %rd7, %r19, 4;\n    add.u64 %rd8, %rd1, %rd7;\n    ld.global.u32 %r24, [%rd8];\n    add.u32 %r21, %r21, %r24;\n    add.u32 %r10, %r10, 1;\n    bra grid_y_before;\ngrid_y_span_start:\n    mov.u32 %r10, 0;\ngrid_y_span:\n    setp.ge.u32 %p3, %r10, %r18;\n    @%p3 bra store;\n    add.u32 %r19, %r14, %r17;\n    add.u32 %r19, %r19, %r10;\n    mul.wide.u32 %rd7, %r19, 4;\n    add.u64 %rd8, %rd1, %rd7;\n    ld.global.u32 %r24, [%rd8];\n    add.u32 %r23, %r23, %r24;\n    add.u32 %r10, %r10, 1;\n    bra grid_y_span;\nstore:\n    mul.wide.u32 %rd9, %r3, 20;\n    add.u64 %rd10, %rd2, %rd9;\n    st.global.u32 [%rd10], %r5;\n    st.global.u32 [%rd10+4], %r20;\n    st.global.u32 [%rd10+8], %r21;\n    st.global.u32 [%rd10+12], %r22;\n    st.global.u32 [%rd10+16], %r23;\ndone:\n    ret;\n}\n"
@@ -230,12 +299,7 @@ fn _web_cuda_layout_admission_fault(
                         direct_children = direct_children + 1
                 if direct_children != node.semantics.child_count:
                     return "cuda-layout-child-count-mismatch"
-                # A childless grid root is a fixed leaf: the kernel's root
-                # path (parent_id == 0) stores its fixed box directly and
-                # never reads grid tracks, so track validation only applies
-                # when the root actually places children.
-                if (profile == "grid" and node.semantics.child_count > 0 and
-                    not _web_cuda_layout_grid_root_supported(request, node)):
+                if profile == "grid" and not _web_cuda_layout_grid_root_supported(request, node):
                     return "cuda-layout-fixed-grid-required"
             else:
                 val parent = _web_cuda_layout_node_for(request, node.parent_id)
@@ -262,6 +326,8 @@ fn _web_cuda_layout_oracle_for(
 fn _web_cuda_layout_boxes_equal(
     actual: [LayoutBox], oracle_boxes: [LayoutBox]
 ) -> bool:
+    if actual.len() != oracle_boxes.len():
+        return false
     for box in actual:
         val oracle = _web_cuda_layout_oracle_for(oracle_boxes, box.id)
         if (
@@ -272,6 +338,36 @@ fn _web_cuda_layout_boxes_equal(
             return false
     true
 
+fn _web_cuda_layout_box_value(value: i64) -> i64:
+    if value >= 0: value + 1 else: -value + 1
+
+fn _web_cuda_layout_checksum(boxes: [LayoutBox]) -> i64:
+    var checksum: i64 = 1
+    var index: i64 = 0
+    for box in boxes:
+        val weight = index * 5 + 1
+        checksum = checksum + weight * _web_cuda_layout_box_value(box.id)
+        checksum = checksum + (weight + 1) * _web_cuda_layout_box_value(box.x)
+        checksum = checksum + (weight + 2) * _web_cuda_layout_box_value(box.y)
+        checksum = checksum + (weight + 3) * _web_cuda_layout_box_value(box.width)
+        checksum = checksum + (weight + 4) * _web_cuda_layout_box_value(box.height)
+        index = index + 1
+    checksum
+
+fn _web_cuda_layout_mismatch_count(actual: [LayoutBox], oracle_boxes: [LayoutBox]) -> i64:
+    if actual.len() != oracle_boxes.len():
+        return if actual.len() > oracle_boxes.len(): actual.len().to_i64() else: oracle_boxes.len().to_i64()
+    var mismatches: i64 = 0
+    var index: i64 = 0
+    while index < actual.len().to_i64():
+        val left = actual[index]
+        val right = oracle_boxes[index]
+        if (left.id != right.id or left.x != right.x or left.y != right.y or
+            left.width != right.width or left.height != right.height):
+            mismatches = mismatches + 1
+        index = index + 1
+    mismatches
+
 fn _web_cuda_layout_result(
     candidate: text,
     boxes: [LayoutBox],
@@ -280,11 +376,21 @@ fn _web_cuda_layout_result(
     readback: bool,
     verified: bool,
     fault: text,
-    device_overflows: [LayoutOverflow] = []
+    device_overflows: [LayoutOverflow] = [],
+    backend_handle: i64 = 0,
+    device_identity: i64 = 0,
+    expected_checksum: i64 = 0,
+    actual_checksum: i64 = 0,
+    mismatch_count: i64 = 0,
+    device_time_us: i64 = 0,
+    device_allocation_count: i64 = 0,
+    host_allocation_count: i64 = 0,
+    transfer_bytes: i64 = 0,
+    device_storage_bytes: i64 = 0,
+    host_storage_bytes: i64 = 0
 ) -> LayoutIterationResult:
     var fragments: [LayoutFragment] = []
     var overflows: [LayoutOverflow] = []
-    var no_line_boxes: [LayoutLineBox] = []
     if fault == "":
         for box in boxes:
             fragments.push(layout_fragment(
@@ -294,7 +400,7 @@ fn _web_cuda_layout_result(
     LayoutIterationResult(
         boxes: boxes,
         fragments: fragments,
-        line_boxes: no_line_boxes,
+        line_boxes: [] as [LayoutLineBox],
         overflows: overflows,
         proof: LayoutExecutionProof(
             candidate_backend: candidate,
@@ -304,39 +410,22 @@ fn _web_cuda_layout_result(
             synchronized: synchronized,
             device_readback: readback,
             oracle_verified: verified,
+            backend_handle: backend_handle,
+            device_identity: device_identity,
+            readback_source: if readback: "device_readback" else: "unavailable",
+            expected_checksum: expected_checksum,
+            actual_checksum: actual_checksum,
+            mismatch_count: mismatch_count,
+            device_time_us: device_time_us,
+            device_allocation_count: device_allocation_count,
+            host_allocation_count: host_allocation_count,
+            transfer_bytes: transfer_bytes,
+            device_storage_bytes: device_storage_bytes,
+            host_storage_bytes: host_storage_bytes,
             reason: fault
         ),
         fault: fault
     )
-
-fn _web_cuda_layout_cleanup(
-    session: CudaSession,
-    device_input: i64,
-    device_tracks: i64,
-    device_output: i64,
-    device_overflow: i64,
-    host_input: i64,
-    host_tracks: i64,
-    host_output: i64,
-    host_overflow: i64,
-    values_ptr: i64,
-    args_ptr: i64,
-    input_bytes: i64,
-    track_bytes: i64,
-    output_bytes: i64,
-    overflow_bytes: i64
-):
-    if device_input > 0: session.free(device_input)
-    if device_tracks > 0: session.free(device_tracks)
-    if device_output > 0: session.free(device_output)
-    if device_overflow > 0: session.free(device_overflow)
-    if host_input != 0: raw_free(host_input, input_bytes)
-    if host_tracks != 0: raw_free(host_tracks, track_bytes)
-    if host_output != 0: raw_free(host_output, output_bytes)
-    if host_overflow != 0: raw_free(host_overflow, overflow_bytes)
-    if values_ptr != 0: raw_free(values_ptr, WEB_CUDA_LAYOUT_ARG_BYTES)
-    if args_ptr != 0: raw_free(args_ptr, WEB_CUDA_LAYOUT_ARG_BYTES)
-    session.shutdown()
 
 impl LayoutExecutionPort for CudaLayoutExecutionPort:
     fn backend_name() -> text:
@@ -392,42 +481,69 @@ impl LayoutExecutionPort for CudaLayoutExecutionPort:
         val track_bytes = packed_tracks.len().to_i64() * 4
         val output_bytes = count * WEB_CUDA_LAYOUT_OUTPUT_WORDS * 4
         val overflow_bytes = count * WEB_CUDA_LAYOUT_OVERFLOW_WORDS * 4
-        var session = CudaSession.create()
-        if session.init() != CUDA_SUCCESS or session.activate() != CUDA_SUCCESS:
+        if (count <= 0 or input_bytes <= 0 or track_bytes <= 0 or
+            output_bytes <= 0 or overflow_bytes <= 0 or
+            input_bytes > WEB_CUDA_LAYOUT_MAX_STORAGE_BYTES or
+            track_bytes > WEB_CUDA_LAYOUT_MAX_STORAGE_BYTES or
+            output_bytes > WEB_CUDA_LAYOUT_MAX_STORAGE_BYTES or
+            overflow_bytes > WEB_CUDA_LAYOUT_MAX_STORAGE_BYTES or
+            input_bytes + track_bytes + output_bytes + overflow_bytes >
+                WEB_CUDA_LAYOUT_MAX_STORAGE_BYTES):
+            return _web_cuda_layout_result(
+                request.candidate_backend, [], false, false, false, false,
+                "cuda-layout-batch-too-large")
+        var session = if self.retain_session:
+            self.session
+        else:
+            CudaSession.create()
+        if (not session.is_valid() and session.init() != CUDA_SUCCESS) or
+                session.activate() != CUDA_SUCCESS:
+            # Cached device pointers belong to the old context. Clear both
+            # arenas before shutdown so a later re-init cannot reuse them.
+            self.storage.release(session)
             session.shutdown()
             return _web_cuda_layout_result(
                 request.candidate_backend, [], false, false, false, false,
                 "cuda-layout-init-failed"
             )
-        if session.load_module(_web_cuda_layout_ptx() + _web_cuda_layout_artifact_ptx()) <= 0:
+        if session.module_cache == 0 and
+                session.load_module(
+                    _web_cuda_layout_ptx() + _web_cuda_layout_artifact_ptx()) <= 0:
+            self.storage.release(session)
             session.shutdown()
             return _web_cuda_layout_result(
                 request.candidate_backend, [], false, false, false, false,
                 "cuda-layout-module-load-failed"
             )
-        val device_input = session.alloc(input_bytes)
-        val device_tracks = session.alloc(track_bytes)
-        val device_output = session.alloc(output_bytes)
-        val device_overflow = session.alloc(overflow_bytes)
-        val host_input = raw_alloc(input_bytes)
-        val host_tracks = raw_alloc(track_bytes)
-        val host_output = raw_alloc(output_bytes)
-        val host_overflow = raw_alloc(overflow_bytes)
-        val values_ptr = raw_alloc(WEB_CUDA_LAYOUT_ARG_BYTES)
-        val args_ptr = raw_alloc(WEB_CUDA_LAYOUT_ARG_BYTES)
-        if (
-            device_input <= 0 or device_tracks <= 0 or device_output <= 0 or device_overflow <= 0 or
-            host_input == 0 or host_tracks == 0 or host_output == 0 or host_overflow == 0 or
-            values_ptr == 0 or args_ptr == 0
-        ):
-            _web_cuda_layout_cleanup(
-                session, device_input, device_tracks, device_output, device_overflow,
-                host_input, host_tracks, host_output, host_overflow, values_ptr, args_ptr,
-                input_bytes, track_bytes, output_bytes, overflow_bytes
-            )
+        val device_storage_bytes = input_bytes + track_bytes + output_bytes + overflow_bytes
+        val argument_offset = ((device_storage_bytes + 7) / 8) * 8
+        val host_storage_bytes = argument_offset + WEB_CUDA_LAYOUT_ARG_BYTES * 2
+        val prior_device_storage = self.storage.device_storage
+        val prior_host_storage = self.storage.host_storage
+        val storage_reason = self.storage.ensure(
+            session, device_storage_bytes, host_storage_bytes)
+        val device_storage = self.storage.device_storage
+        val host_storage = self.storage.host_storage
+        val device_allocation_count = if device_storage != prior_device_storage: 1 else: 0
+        val host_allocation_count = if host_storage != prior_host_storage: 1 else: 0
+        val device_input = if device_storage > 0: device_storage else: 0
+        val device_tracks = if device_storage > 0: device_storage + input_bytes else: 0
+        val device_output = if device_storage > 0: device_tracks + track_bytes else: 0
+        val device_overflow = if device_storage > 0: device_output + output_bytes else: 0
+        val host_input = if host_storage != 0: host_storage else: 0
+        val host_tracks = if host_storage != 0: host_storage + input_bytes else: 0
+        val host_output = if host_storage != 0: host_tracks + track_bytes else: 0
+        val host_overflow = if host_storage != 0: host_output + output_bytes else: 0
+        val values_ptr = if host_storage != 0: host_storage + argument_offset else: 0
+        val args_ptr = if host_storage != 0: values_ptr + WEB_CUDA_LAYOUT_ARG_BYTES else: 0
+        if storage_reason != "" or device_storage <= 0 or host_storage == 0:
+            if not self.retain_session:
+                self.storage.release(session)
+                session.shutdown()
             return _web_cuda_layout_result(
                 request.candidate_backend, [], false, false, false, false,
-                "cuda-layout-allocation-failed"
+                if storage_reason != "": storage_reason else:
+                    "cuda-layout-allocation-failed"
             )
         raw_write_u32s_checksum(host_input, packed, packed.len().to_i64())
         raw_write_u32s_checksum(
@@ -447,6 +563,7 @@ impl LayoutExecutionPort for CudaLayoutExecutionPort:
         raw_write_i64(args_ptr, 8, values_ptr + 8)
         raw_write_i64(args_ptr, 16, values_ptr + 16)
         raw_write_i64(args_ptr, 24, values_ptr + 24)
+        val device_started = time_now_nanos()
         val geometry_submitted = uploaded and session.launch_kernel_args(
             "web_layout_fixed_children",
             (count + WEB_CUDA_LAYOUT_BLOCK_SIZE - 1) /
@@ -477,6 +594,7 @@ impl LayoutExecutionPort for CudaLayoutExecutionPort:
         val readback = (synchronized and
             cuda_memcpy_dtoh(host_output, device_output, output_bytes) == CUDA_SUCCESS and
             cuda_memcpy_dtoh(host_overflow, device_overflow, overflow_bytes) == CUDA_SUCCESS)
+        val device_finished = time_now_nanos()
         var boxes: [LayoutBox] = []
         var overflows: [LayoutOverflow] = []
         if readback:
@@ -504,14 +622,17 @@ impl LayoutExecutionPort for CudaLayoutExecutionPort:
                     raw_read_i32(host_overflow, overflow_offset + 24) as i64
                 ))
                 index = index + 1
-        val verified = readback and _web_cuda_layout_boxes_equal(
-            boxes, self.oracle_boxes
-        )
-        _web_cuda_layout_cleanup(
-            session, device_input, device_tracks, device_output, device_overflow,
-            host_input, host_tracks, host_output, host_overflow, values_ptr, args_ptr,
-            input_bytes, track_bytes, output_bytes, overflow_bytes
-        )
+        val mismatch_count = _web_cuda_layout_mismatch_count(boxes, self.oracle_boxes)
+        val expected_checksum = _web_cuda_layout_checksum(self.oracle_boxes)
+        val actual_checksum = _web_cuda_layout_checksum(boxes)
+        val identity = if readback: cuda_device_identity(session.device) else: 0
+        val handle = if readback and session.ctx > 0: session.ctx + 1 else: 0
+        val device_time_us = if device_finished > device_started:
+            (device_finished - device_started + 999) / 1000
+        else:
+            0
+        val verified = (readback and mismatch_count == 0 and
+            expected_checksum == actual_checksum and identity > 0 and handle > 0)
         val fault = if not uploaded:
             "cuda-layout-upload-failed"
         elif not submitted:
@@ -524,14 +645,44 @@ impl LayoutExecutionPort for CudaLayoutExecutionPort:
             "cuda-layout-oracle-mismatch"
         else:
             ""
+        if self.retain_session and (
+            not uploaded or not submitted or not synchronized or not readback
+        ):
+            # A failed transfer/launch/sync invalidates warm-path assumptions.
+            # Reset now so the next request can initialize cleanly instead of
+            # requiring an extra failed call to clear a quarantined context.
+            self.storage.release(session)
+            session.shutdown()
+        elif not self.retain_session:
+            self.storage.release(session)
+            session.shutdown()
         _web_cuda_layout_result(
             request.candidate_backend, boxes, submitted, synchronized,
-            readback, verified, fault, overflows
+            readback, verified, fault, overflows,
+            handle, identity, expected_checksum, actual_checksum,
+            mismatch_count, device_time_us,
+            device_allocation_count, host_allocation_count,
+            input_bytes + track_bytes + output_bytes + overflow_bytes,
+            device_storage_bytes, host_storage_bytes
         )
 
 fn web_cuda_layout_execution_port(
     oracle_boxes: [LayoutBox]
 ) -> CudaLayoutExecutionPort:
-    CudaLayoutExecutionPort(oracle_boxes: oracle_boxes)
+    CudaLayoutExecutionPort(
+        oracle_boxes: oracle_boxes,
+        session: CudaSession.create(),
+        storage: CudaLayoutStorage.create(),
+        retain_session: false)
+
+fn web_cuda_cached_layout_execution_port(
+    oracle_boxes: [LayoutBox]
+) -> CudaLayoutExecutionPort:
+    CudaLayoutExecutionPort(
+        oracle_boxes: oracle_boxes,
+        session: CudaSession.create(),
+        storage: CudaLayoutStorage.create(),
+        retain_session: true)
 
 export CudaLayoutExecutionPort, web_cuda_layout_execution_port
+export web_cuda_cached_layout_execution_port

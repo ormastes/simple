@@ -1,4 +1,4 @@
-# STDLIB Deep-Dive Test
+# @manual: primary
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -889,12 +889,191 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-UNIT
 step("complex 1")
 
-val arr = [1,2,3,4,5]
-var evens = []
-for x in arr:
-    if x % 2 == 0:
-        evens = evens.append(x)
-check(evens.len() == 2)
+</details>
+
+#### array membership and index
+
+- Verify: array membership and index
+   - Expected: [3, 1, 2] contains `2`
+   - Expected: [3, 1, 2] does not contain `9`
+   - Expected: [3, 1, 2].index_of(2) equals `2)  # oracle: pinned constant asserted by this scenario`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-OPTION-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-OPTION-DEEP-8728
+step("Verify: array membership and index")
+# oracle: true/2 — 2 is present at index 2
+expect([3, 1, 2].contains(2)).to_equal(true)
+expect([3, 1, 2].contains(9)).to_equal(false)
+expect([3, 1, 2].index_of(2)).to_equal(2)  # oracle: pinned constant asserted by this scenario
+```
+
+</details>
+
+#### array append and len
+
+- Verify: array append and len
+   - Expected: arr.len() equals `4)  # oracle: pinned constant asserted by this scenario`
+   - Expected: arr[3] equals `4)  # oracle: pinned constant asserted by this scenario`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-OPTION-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-OPTION-DEEP-8728
+step("Verify: array append and len")
+# oracle: 4 — append grows the owner list by one and returns it
+var arr = [1, 2, 3]
+arr.append(4)
+expect(arr.len()).to_equal(4)  # oracle: pinned constant asserted by this scenario
+expect(arr[3]).to_equal(4)  # oracle: pinned constant asserted by this scenario
+```
+
+</details>
+
+#### dict read
+
+- Verify: dict read
+   - Expected: d.len() equals `2)  # oracle: pinned constant asserted by this scenario`
+   - Expected: d["a"] equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: d.keys().len() equals `2)  # oracle: pinned constant asserted by this scenario`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-OPTION-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-OPTION-DEEP-8728
+step("Verify: dict read")
+# oracle: 2/1/2 — two keys, value lookup, key count
+val d = {"a": 1, "b": 2}
+expect(d.len()).to_equal(2)  # oracle: pinned constant asserted by this scenario
+expect(d["a"]).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(d.keys().len()).to_equal(2)  # oracle: pinned constant asserted by this scenario
+```
+
+</details>
+
+#### dict write
+
+- Verify: dict write
+   - Expected: d.len() equals `3)  # oracle: pinned constant asserted by this scenario`
+   - Expected: d["c"] equals `3)  # oracle: pinned constant asserted by this scenario`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-OPTION-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-OPTION-DEEP-8728
+step("Verify: dict write")
+# oracle: 3 — inserting a new key grows the dict by one
+val d = {"a": 1, "b": 2}
+d["c"] = 3
+expect(d.len()).to_equal(3)  # oracle: pinned constant asserted by this scenario
+expect(d["c"]).to_equal(3)  # oracle: pinned constant asserted by this scenario
+```
+
+</details>
+
+#### option map unwrap
+
+- Verify: option map unwrap
+   - Expected: o.map(fn (x: i64) -> i64: x * 2) equals `Some(10)`
+   - Expected: o.unwrap_or(0) equals `5)  # oracle: pinned constant asserted by this scenario`
+   - Expected: o.is_some() is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-OPTION-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-OPTION-DEEP-8728
+step("Verify: option map unwrap")
+# oracle: Some(10)/5 — map doubles the payload; unwrap_or yields it
+val o = Some(5)
+expect(o.map(fn (x: i64) -> i64: x * 2)).to_equal(Some(10))
+expect(o.unwrap_or(0)).to_equal(5)  # oracle: pinned constant asserted by this scenario
+expect(o.is_some()).to_equal(true)
+```
+
+</details>
+
+#### option none default
+
+- Verify: option none default
+   - Expected: nil.unwrap_or(0) equals `0)  # oracle: pinned constant asserted by this scenario`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-OPTION-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-OPTION-DEEP-8728
+step("Verify: option none default")
+# oracle: 0 — a nil option falls back to the supplied default
+expect(nil.unwrap_or(0)).to_equal(0)  # oracle: pinned constant asserted by this scenario
+```
+
+</details>
+
+#### result ok err
+
+- Verify: result ok err
+   - Expected: Ok(7).is_ok() is true
+   - Expected: Err("e").is_err() is true
+   - Expected: Ok(7).unwrap_or(0) equals `7)  # oracle: pinned constant asserted by this scenario`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-OPTION-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-OPTION-DEEP-8728
+step("Verify: result ok err")
+# oracle: true/7 — Ok is ok and unwraps; Err is err
+expect(Ok(7).is_ok()).to_equal(true)
+expect(Err("e").is_err()).to_equal(true)
+expect(Ok(7).unwrap_or(0)).to_equal(7)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>

@@ -2,67 +2,8 @@
 
 **Date:** 2026-07-20
 **Severity:** high (production source code, not a test-only issue)
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+**Status:** open — root-caused and patched 2026-08-01, fix NOT YET COMPILED
 **Found by:** whole-suite `test/unit/` triage campaign, `lib/skia` cluster
-
-## Update 2026-08-01 — root cause, scope, and a worse sibling defect
-
-**Seed-only.** The pure-Simple interpreter ALREADY implements `.at()` correctly
-(`_EvalOps/call_method_eval.spl:833` in `eval_array_method`, flat encoding,
-supported explicitly at `eval.spl:911-921`). The failing message is the Rust
-seed's wording, so the gap is in the bootstrap engine only. Root cause: the
-array-method dispatch in
-`src/compiler_rust/compiler/src/interpreter_method/collections.rs` has
-`get`/`has`/`contains`/... but no `"at"` arm, so it falls through to the
-not-found error. Text `.at` is handled separately at
-`interpreter_method/string.rs:368`.
-
-> **Dead-code audit 2026-08-01 — the "seed-only" verdict SURVIVES, but the
-> citation that supported it was half dead code.** This paragraph originally
-> also cited `interpreter/eval_methods.spl:296`. That file was a DEAD
-> duplicate: all four of its functions (`eval_method_call`,
-> `eval_method_with_args`, `eval_array_method`, `eval_text_method`) were
-> shadowed by package-local `_EvalOps` copies, proven by sabotage in both
-> directions, and it was deleted in `f97dfbbb8ee`. **Re-derived against the
-> live file:** `_EvalOps/call_method_eval.spl` `eval_array_method` really does
-> carry the `at` arm (bounds-checked `0 <= i < len`, element-as-`Some`,
-> `val_make_nil()` as `None`) — and it is a strict superset of the dead copy
-> (it additionally has `map`/`filter`/`flat_map`/`any`). So "the pure-Simple
-> interpreter already implements `.at()` correctly" **still holds**, the
-> seed-only framing is intact, and the held patch is still the right patch.
-> Caveat: this covers **array** `.at()` only. The live *text* method table
-> (`_EvalOps/access_literal_assign_eval.spl`) has **no `at` arm at all**, in
-> neither the dead nor the live copy — `text.at(i)` in the pure-Simple
-> interpreter falls through to `eval_set_error`. The seed handles that case at
-> `interpreter_method/string.rs:368`, so on text `.at` the two engines diverge
-> in the *opposite* direction from the array case. See
-> `doc/08_tracking/bug/2026-08-01_interpreter_eval_text_method_duplicate_live_subset.md`.
-
-**There are TWO defects, and the second is worse than the reported one.** Under
-the JIT, `[99,111,108].at(1)` does not error — it SILENTLY MATCHES `None`,
-with `SIMPLE_JIT_STRICT=1` set. A caller gets a plausible empty result instead
-of a diagnostic. The 4-line dispatch arm fixes the interpreter path only; the
-JIT silent-`None` is NOT covered and remains open.
-
-**The encoding is forced, not a design choice.** Measured in the seed
-interpreter: an enum `Option` matches (`Some(42)` -> `ENUM-SOME 42`), while the
-flat encoding does not — `match bytes.get(1): Some(v)/None:` leaves the
-sentinel untouched and falls through EVERY arm. So the arm must build
-`Value::some`/`Value::none` (`value_impl.rs:729/738`).
-
-**Call-site survey re-measured** (vendor excluded, `Type.at(` static
-constructors separated out): **218 sites expect `Option`, 0 expect a bare `T`**,
-plus 137 static constructors and 36 unclear (comments, JS strings, `Ray.at`).
-An earlier "~253 Option / ~8 bare" figure quoted during triage was wrong.
-Design risk is therefore zero: `.at()` on an array today either errors or
-always returns `None`, so no working caller depends on current behaviour.
-
-**Not landed.** With/without numbers need a Rust seed rebuild, and the box has
-been saturated (load 77-85 on 32 cores, another session holding the shared
-110G target dir). Patch held at `scratchpad/at_option_seed.patch` pending a
-build. Per pure-Simple-first this is bootstrap-only value — the shipping
-interpreter is already correct.
 
 ## Symptom
 

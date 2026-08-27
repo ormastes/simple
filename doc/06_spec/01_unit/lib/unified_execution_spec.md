@@ -1,6 +1,29 @@
 # Unified Execution Specification
 
-> Tests covering Debug Adapter Layer, Execution Configuration, Test Executor, QEMU Test Session, QEMU Multi-Test Runner, Unified Execution Integration.
+> 1. check
+
+<!-- sdn-diagram:id=unified_execution_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=unified_execution_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+unified_execution_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=unified_execution_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,22 +40,18 @@
 
 #### creates local adapter from config
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- creates local adapter from config
+1. check
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates local adapter from config")
 val config = AdapterConfig.local()
 check(config.kind == "local")
 check(config.target == "local")
@@ -43,18 +62,18 @@ check(not config.is_remote())
 
 #### local adapter has correct capabilities
 
-- local adapter has correct capabilities
+1. check
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("local adapter has correct capabilities")
 val caps = AdapterCapabilities.local()
 check(caps.can_stop)
 check(caps.can_break)
@@ -65,18 +84,18 @@ check(caps.can_run_single_step)
 
 #### creates GDB MI adapter from config
 
-- creates GDB MI adapter from config
+1. check
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates GDB MI adapter from config")
 val config = AdapterConfig.qemu_riscv32()
 check(config.kind == "qemu-riscv32")
 check(config.port == 3333)
@@ -87,18 +106,18 @@ check(config.is_remote())
 
 #### GDB adapter has correct capabilities
 
-- GDB adapter has correct capabilities
+1. check
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("GDB adapter has correct capabilities")
 val caps = AdapterCapabilities.remote()
 check(caps.can_stop)
 check(caps.can_break)
@@ -111,18 +130,17 @@ check(not caps.can_run_single_step)
 
 #### creates local execution config
 
-- creates local execution config
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates local execution config")
 val config = parse_target("local")
 check(config.kind == "local")
 check(config.auto_reset)
@@ -132,18 +150,17 @@ check(config.auto_reset)
 
 #### creates QEMU RISC-V 32 config
 
-- creates QEMU RISC-V 32 config
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates QEMU RISC-V 32 config")
 val config = parse_target("riscv32-qemu")
 check(config.kind == "qemu-riscv32")
 check(config.port == 3333)
@@ -153,18 +170,17 @@ check(config.port == 3333)
 
 #### creates QEMU x86_64 config
 
-- creates QEMU x86_64 config
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates QEMU x86_64 config")
 val config = parse_target("x86_64-qemu")
 check(config.kind == "qemu-x86_64")
 check(config.port == 4444)
@@ -174,18 +190,17 @@ check(config.port == 4444)
 
 #### parses local target string
 
-- parses local target string
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses local target string")
 val config = parse_target("local")
 check(config.target == "local")
 check(not config.is_remote())
@@ -195,18 +210,17 @@ check(not config.is_remote())
 
 #### parses riscv32-qemu target string
 
-- parses riscv32-qemu target string
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses riscv32-qemu target string")
 val config = parse_target("riscv32-qemu")
 check(config.target == "riscv32-qemu")
 check(config.is_remote())
@@ -216,18 +230,18 @@ check(config.is_remote())
 
 #### parses custom target with port
 
-- parses custom target with port
+1. check
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses custom target with port")
 val config = AdapterConfig.custom("board:5555", 5555)
 check(config.kind == "custom")
 check(config.target == "board:5555")
@@ -240,18 +254,18 @@ check(config.port == 5555)
 
 #### creates executor for local target
 
-- creates executor for local target
+1. check
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates executor for local target")
 val executor = TestExecutor.create(AdapterConfig.local())
 check(executor.mode == "local")
 check(not executor.uses_remote_transport())
@@ -262,18 +276,18 @@ check(executor.capabilities.can_run_single_step)
 
 #### creates executor for QEMU target
 
-- creates executor for QEMU target
+1. check
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates executor for QEMU target")
 val executor = TestExecutor.create(AdapterConfig.qemu_riscv32())
 check(executor.mode == "remote")
 check(executor.uses_remote_transport())
@@ -286,18 +300,18 @@ check(executor.capabilities.can_stop)
 
 #### creates test session
 
-- creates test session
+1. check
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates test session")
 val session = QemuTestSession.create(3333, true)
 check(session.gdb_port == 3333)
 check(session.auto_reset)
@@ -308,18 +322,16 @@ check(not session.running)
 
 #### configures session with custom GDB port
 
-- configures session with custom GDB port
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("configures session with custom GDB port")
 val session = QemuTestSession.create(4901, true)
 check(session.gdb_port == 4901)
 ```
@@ -328,18 +340,16 @@ check(session.gdb_port == 4901)
 
 #### configures session with auto-reset disabled
 
-- configures session with auto-reset disabled
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("configures session with auto-reset disabled")
 val session = QemuTestSession.create(4902, false)
 check(not session.auto_reset)
 ```
@@ -348,18 +358,19 @@ check(not session.auto_reset)
 
 #### starts and stops QEMU session
 
-- starts and stops QEMU session
+1. session start
+2. check
+3. session stop
+4. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("starts and stops QEMU session")
 val session = QemuTestSession.create(4903, true)
 session.start()
 check(session.running)
@@ -373,18 +384,17 @@ check(not session.running)
 
 #### creates multi-test runner
 
-- creates multi-test runner
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates multi-test runner")
 val session = QemuTestSession.create(5000, true)
 val runner = QemuMultiTestRunner.create(session)
 check(runner.tests.len() == 0)
@@ -395,18 +405,20 @@ check(runner.session.gdb_port == 5000)
 
 #### adds tests to runner
 
-- adds tests to runner
+1. runner add test
+2. runner add test
+3. check
+4. check
+5. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("adds tests to runner")
 val session = QemuTestSession.create(5001, true)
 val runner = QemuMultiTestRunner.create(session)
 runner.add_test("boot")
@@ -420,18 +432,19 @@ check(runner.tests[1] == "smoke")
 
 #### runs multiple tests with single QEMU instance
 
-- runs multiple tests with single QEMU instance
+1. runner add test
+2. runner add test
+3. check
+4. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("runs multiple tests with single QEMU instance")
 val session = QemuTestSession.create(5002, true)
 val runner = QemuMultiTestRunner.create(session)
 runner.add_test("first")
@@ -446,18 +459,17 @@ check(runner.session.gdb_port == 5002)
 
 #### transparent execution - local
 
-- transparent execution - local
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("transparent execution - local")
 val executor = TestExecutor.create(parse_target("local"))
 check(executor.mode == "local")
 check(executor.config.target == "local")
@@ -467,18 +479,17 @@ check(executor.config.target == "local")
 
 #### transparent execution - remote QEMU
 
-- transparent execution - remote QEMU
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("transparent execution - remote QEMU")
 val executor = TestExecutor.create(parse_target("riscv32-qemu"))
 check(executor.mode == "remote")
 check(executor.config.target == "riscv32-qemu")
@@ -493,12 +504,12 @@ check(executor.config.target == "riscv32-qemu")
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/unified_execution_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Debug Adapter Layer, Execution Configuration, Test Executor, QEMU Test Session, QEMU Multi-Test Runner, Unified Execution Integration.
+Tests covering:
 - Debug Adapter Layer
 - Execution Configuration
 - Test Executor
@@ -518,51 +529,3 @@ Tests covering Debug Adapter Layer, Execution Configuration, Test Executor, QEMU
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `e76e9fe05c52947610c64d4d6e1f683579d17a50162f8b262d5e7ef9dc55849d`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `e76e9fe05c52947610c64d4d6e1f683579d17a50162f8b262d5e7ef9dc55849d`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `e76e9fe05c52947610c64d4d6e1f683579d17a50162f8b262d5e7ef9dc55849d`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/lib/unified_execution_spec.spl
-mirror: doc/06_spec/01_unit/lib/unified_execution_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/unified_execution_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/unified_execution_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/unified_execution_spec.spl:101:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates local adapter from config' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/unified_execution_spec.spl:109:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'local adapter has correct capabilities' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/unified_execution_spec.spl:117:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates GDB MI adapter from config' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

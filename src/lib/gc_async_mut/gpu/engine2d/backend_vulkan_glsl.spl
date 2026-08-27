@@ -577,11 +577,10 @@ void main() {
 """
 
 fn _glsl_blit() -> text:
-    """Image copy/src-over kernel.
+    """Blit (image copy) kernel.
 
     Framebuffer at binding 0, source pixels at binding 1.
-    Push constants: x, y, destination w/h, fb_w/fb_h, clip x/y/w/h,
-                    clip enabled, opacity milli, composite mode, source w/h
+    Push constants: x, y, w, h, fb_w, fb_h (int)
     Dispatch: 2D, ceil(w/16) x ceil(h/16) workgroups
     """
     r"""#version 450
@@ -602,15 +601,6 @@ layout(push_constant) uniform PushConstants {
     int rh;
     int fb_w;
     int fb_h;
-    int clip_x;
-    int clip_y;
-    int clip_w;
-    int clip_h;
-    int clip_enabled;
-    int opacity_milli;
-    int composite_mode;
-    int src_w;
-    int src_h;
 } pc;
 
 void main() {
@@ -622,32 +612,9 @@ void main() {
     int py = pc.ry + ly;
 
     if (px < 0 || px >= pc.fb_w || py < 0 || py >= pc.fb_h) return;
-    if (pc.clip_enabled != 0 &&
-        (px < pc.clip_x || px >= pc.clip_x + pc.clip_w ||
-         py < pc.clip_y || py >= pc.clip_y + pc.clip_h)) return;
 
-    int sx = (lx * pc.src_w) / pc.rw;
-    int sy = (ly * pc.src_h) / pc.rh;
-    uint src_idx = uint(sy) * uint(pc.src_w) + uint(sx);
+    uint src_idx = uint(ly) * uint(pc.rw) + uint(lx);
     uint dst_idx = uint(py) * uint(pc.fb_w) + uint(px);
-    uint s = src.data[src_idx];
-    if (pc.composite_mode == 0) {
-        fb.data[dst_idx] = s;
-        return;
-    }
-
-    uint sa = ((s >> 24u) * uint(pc.opacity_milli)) / 1000u;
-    if (sa == 0u) return;
-    if (sa == 255u) {
-        fb.data[dst_idx] = s;
-        return;
-    }
-    uint d = fb.data[dst_idx];
-    uint inv = 255u - sa;
-    uint out_a = sa + ((d >> 24u) * inv) / 255u;
-    uint out_r = ((((s >> 16u) & 255u) * sa) + (((d >> 16u) & 255u) * inv)) / 255u;
-    uint out_g = ((((s >> 8u) & 255u) * sa) + (((d >> 8u) & 255u) * inv)) / 255u;
-    uint out_b = (((s & 255u) * sa) + ((d & 255u) * inv)) / 255u;
-    fb.data[dst_idx] = (out_a << 24u) | (out_r << 16u) | (out_g << 8u) | out_b;
+    fb.data[dst_idx] = src.data[src_idx];
 }
 """

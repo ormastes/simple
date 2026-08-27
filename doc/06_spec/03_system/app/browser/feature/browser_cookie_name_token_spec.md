@@ -13,7 +13,13 @@
 
 Network and script cookie writes share one RFC token-name admission policy.
 
-## At a Glance
+        step("Attempt the same malformed cookie from script")
+        val script_verdict = cookies.store_from_script(
+            malformed, origin, now
+        )
+        expect(script_verdict.accepted).to_be(false)
+        expect(script_verdict.reason).to_equal("invalid-name")
+        expect(cookies.count()).to_equal(1)
 
 | Field | Value |
 |-------|-------|

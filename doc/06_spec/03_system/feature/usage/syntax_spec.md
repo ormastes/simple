@@ -2,6 +2,29 @@
 
 > Comprehensive tests for Simple's syntax, including literals, string interpolation, operators, and indentation-based parsing.
 
+<!-- sdn-diagram:id=syntax_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=syntax_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+syntax_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=syntax_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 15 | 15 | 0 | 0 |
@@ -21,7 +44,7 @@ Comprehensive tests for Simple's syntax, including literals, string interpolatio
 | Category | Language Features |
 | Status | Stable |
 | Source | `test/03_system/feature/usage/syntax_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -43,22 +66,17 @@ Simple uses Python-like indentation with type annotations and explicit execution
 
 #### syntax overview - if/else
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- syntax overview - if/else
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("syntax overview - if/else")
 # An if/else example with indentation
 val x = 1
 if x > 0:
@@ -71,18 +89,16 @@ else:
 
 #### syntax overview - iteration
 
-- syntax overview - iteration
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("syntax overview - iteration")
 # Iterating with a trailing block
 val list = [1, 2, 3]
 check(true)
@@ -92,18 +108,16 @@ check(true)
 
 #### literals - integer formats
 
-- literals - integer formats
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("literals - integer formats")
 val count = 1_000_000
 val color = 0xFF5733
 val mask = 0x0000_FFFF
@@ -116,18 +130,16 @@ check(true)
 
 #### literals - floating point
 
-- literals - floating point
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("literals - floating point")
 val pi = 3.14159
 check(true)
 ```
@@ -136,7 +148,25 @@ check(true)
 
 #### literals - typed suffixes
 
-- literals - typed suffixes
+1. check
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# Typed suffixes for clarity
+check(true)
+```
+
+</details>
+
+#### string literals - interpolation
+
+1. check
 
 
 <details>
@@ -146,28 +176,6 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("literals - typed suffixes")
-# Typed suffixes for clarity
-check(true)
-```
-
-</details>
-
-#### string literals - interpolation
-
-- string literals - interpolation
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-SYSTEM
-step("string literals - interpolation")
 val name = "world"
 val count = 42
 val msg = "Hello, {name}! Count is {count + 1}"
@@ -178,18 +186,16 @@ check(true)
 
 #### string literals - raw strings
 
-- string literals - raw strings
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("string literals - raw strings")
 val regex = '[a-z]+\d{2,3}'
 val path = 'C:\Users\name'
 check(true)
@@ -199,18 +205,16 @@ check(true)
 
 #### string literals - basic interpolation
 
-- string literals - basic interpolation
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("string literals - basic interpolation")
 val name = "world"
 val msg = "Hello, {name}!"
 check(true)
@@ -220,18 +224,16 @@ check(true)
 
 #### functional update syntax - arrays
 
-- functional update syntax - arrays
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("functional update syntax - arrays")
 var data = [1, 2, 3]
 check(true)
 ```
@@ -240,18 +242,16 @@ check(true)
 
 #### functional update syntax - basic
 
-- functional update syntax - basic
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("functional update syntax - basic")
 check(true)
 ```
 
@@ -259,18 +259,16 @@ check(true)
 
 #### functional update syntax - lists
 
-- functional update syntax - lists
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("functional update syntax - lists")
 var list = [1, 2, 3]
 check(true)
 ```
@@ -279,18 +277,16 @@ check(true)
 
 #### functional update syntax - pattern 1
 
-- functional update syntax - pattern 1
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("functional update syntax - pattern 1")
 check(true)
 ```
 
@@ -298,18 +294,16 @@ check(true)
 
 #### functional update syntax - pattern 2
 
-- functional update syntax - pattern 2
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("functional update syntax - pattern 2")
 check(true)
 ```
 
@@ -317,18 +311,16 @@ check(true)
 
 #### parsing design rationale - simplicity
 
-- parsing design rationale - simplicity
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parsing design rationale - simplicity")
 check(true)
 ```
 
@@ -336,18 +328,16 @@ check(true)
 
 #### parsing design rationale - lambdas
 
-- parsing design rationale - lambdas
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parsing design rationale - lambdas")
 val double = \x: x * 2
 check(true)
 ```
@@ -366,51 +356,3 @@ check(true)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `ffd473483357bc9bde0c3254aa7c6d6bf053c23ef1d7d5dde8135b8e1fb34cb8`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `ffd473483357bc9bde0c3254aa7c6d6bf053c23ef1d7d5dde8135b8e1fb34cb8`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `ffd473483357bc9bde0c3254aa7c6d6bf053c23ef1d7d5dde8135b8e1fb34cb8`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/syntax_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/syntax_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/syntax_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/syntax_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/syntax_spec.spl:41:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'syntax overview - if/else' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/syntax_spec.spl:51:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'syntax overview - iteration' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/syntax_spec.spl:58:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'literals - integer formats' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

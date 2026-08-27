@@ -40,7 +40,7 @@ class PossibleInstantiation:
     type_args: text
     mangled_name: text
 
-class JitInstantiatorRecord:
+class InstantiationRecord:
     id: i32
     template_name: text
     type_args: text
@@ -53,7 +53,7 @@ class JitInstantiatorRecord:
 
 class LoadedMetadata:
     possible: [PossibleInstantiation]
-    instantiations: [JitInstantiatorRecord]
+    instantiations: [InstantiationRecord]
 
 class MappedRecord:
     owner_id: text
@@ -64,19 +64,41 @@ struct JitCacheRecord:
     address: i64
     owner: text
 
-var _g_records: Dict<text, MappedRecord> = {}
+var _g_symbols: [text] = []
+var _g_owners: [text] = []
+var _g_addresses: [i64] = []
 
 fn _global_set(symbol: text, owner_id: text, address: i64):
-    _g_records[symbol] = MappedRecord(owner_id: owner_id, address: address)
+    var idx = -1
+    for i in 0.._g_symbols.len():
+        if _g_symbols[i] == symbol:
+            idx = i
+    if idx >= 0:
+        _g_owners[idx] = owner_id
+        _g_addresses[idx] = address
+    else:
+        _g_symbols.push(symbol)
+        _g_owners.push(owner_id)
+        _g_addresses.push(address)
 
-fn _global_get(symbol: text) -> MappedRecord?:
-    if _g_records.has(symbol):
-        return Some(_g_records[symbol])
+fn _global_get(symbol: text):
+    for i in 0.._g_symbols.len():
+        if _g_symbols[i] == symbol:
+            return Some(MappedRecord(owner_id: _g_owners[i], address: _g_addresses[i]))
     nil
 
 fn _global_remove(symbol: text):
-    if _g_records.has(symbol):
-        _g_records = _g_records.remove(symbol)
+    var keep_s: [text] = []
+    var keep_o: [text] = []
+    var keep_a: [i64] = []
+    for i in 0.._g_symbols.len():
+        if _g_symbols[i] != symbol:
+            keep_s.push(_g_symbols[i])
+            keep_o.push(_g_owners[i])
+            keep_a.push(_g_addresses[i])
+    _g_symbols = keep_s
+    _g_owners = keep_o
+    _g_addresses = keep_a
 
 fn _jit_key_list_contains(keys: [text], key: text) -> bool:
     for item in keys:
@@ -84,6 +106,12 @@ fn _jit_key_list_contains(keys: [text], key: text) -> bool:
             return true
     false
 
+fn _jit_remove_text(values: [text], target: text) -> [text]:
+    var kept: [text] = []
+    for value in values:
+        if value != target:
+            kept.push(value)
+    kept
 
 class JitExecMapper:
     records: Dict
@@ -105,21 +133,24 @@ class JitExecMapper:
             self.owners.push(owner_id)
             self.addresses.push(address)
 
-    fn lookup(symbol: text) -> MappedRecord?:
+    fn lookup(symbol: text):
         val g = _global_get(symbol)
         if g.?:
             return g
 
-        # After a process-global miss, `set_record` keeps `records` in lockstep
-        # with the compatibility arrays. Consult the dictionary before those
-        # arrays so this local fallback remains expected O(1). Process-global
-        # steady-state hits already return above; keep the arrays only for
-        # legacy manually-constructed mappers whose state predates `records`.
+        # `set_record` keeps `records` in lockstep with the compatibility
+        # arrays.  Consult it first on the steady-state resolver path so a
+        # resolved symbol remains expected O(1), rather than scanning every
+        # previously mapped symbol before taking the same dictionary answer.
+        # Keep the arrays as a fallback for legacy manually-constructed
+        # mappers whose compatibility state predates `records`.
         if self.records.has(symbol):
             return Some(self.records[symbol])
         for i in 0..self.symbols.len():
             if self.symbols[i] == symbol:
                 return Some(MappedRecord(owner_id: self.owners[i], address: self.addresses[i]))
+        if self.records.has(symbol):
+            return Some(self.records[symbol])
         nil
 
     fn get_record(symbol: text):
@@ -134,13 +165,13 @@ class JitMapper:
 
 class JitInstantiator:
     config: JitInstantiatorConfig
-    jit_cache: Dict<text, JitCacheRecord>
+    jit_cache: Dict
     jit_semantic_keys: Dict<text, [text]>
     smf_semantic_keys: Dict<text, [text]>
     exec_mapper: JitExecMapper
     jit_mapper: JitMapper
     loaded_metadata: Dict<text, LoadedMetadata>
-    in_progress: [text]
+    in_progress: Set<text>
     depth: i64
     compile_count: i64
 
@@ -153,16 +184,16 @@ class JitInstantiator:
             exec_mapper: JitExecMapper(records: {}, symbols: [], owners: [], addresses: []),
             jit_mapper: JitMapper(),
             loaded_metadata: {},
-            in_progress: [],
+            in_progress: {},
             depth: 0,
             compile_count: 0
         )
 
     fn stats() -> JitStats:
         JitStats(
-            cached_count: self.jit_cache.keys().len() as i64,
+            cached_count: self.jit_cache.len() as i64,
             compile_count: self.compile_count,
-            loaded_smf_count: self.loaded_metadata.keys().len() as i64
+            loaded_smf_count: self.loaded_metadata.len() as i64
         )
 
     me load_smf_metadata(path: text) -> Result<(), text>:
@@ -175,9 +206,15 @@ class JitInstantiator:
     fn can_jit_instantiate(symbol: text) -> bool:
         if not self.config.enabled:
             return false
-        self.find_possible(symbol).?
+        # Aggregate optional comparisons and `.?` can preserve the wrapped
+        # tuple in bootstrap mode. Branch on presence and return scalar bools.
+        val possible = self.find_possible(symbol)
+        if val found = possible:
+            true
+        else:
+            false
 
-    fn find_possible(symbol: text) -> (text, PossibleInstantiation)?:
+    fn find_possible(symbol: text):
         for path in self.loaded_metadata.keys():
             val metadata = self.loaded_metadata[path]
             for entry in metadata.possible:
@@ -199,9 +236,8 @@ class JitInstantiator:
         var owner = "__jit__"
         val rec = self.exec_mapper.lookup(name)
         if val mapped_record = rec:
-            if mapped_record != nil:
-                owner = mapped_record.owner_id
-        self.jit_cache[name] = JitCacheRecord(code: code, address: addr, owner: owner)
+            owner = mapped_record.owner_id
+        self.jit_cache[name] = {"code": code, "address": addr, "owner": owner}
 
     me set_smf_semantic_keys(path: text, keys: [text]):
         self.smf_semantic_keys[path] = keys
@@ -238,20 +274,6 @@ class JitInstantiator:
         self.exec_mapper.owners = kept_owners
         self.exec_mapper.addresses = kept_addrs
 
-    me _drop_in_progress(value: text):
-        """Drop `value` from in_progress by rebuilding into a fresh, unaliased
-        list — never a helper that takes and returns the field, which keeps the
-        old Arc live across the call and deep-copies it (COW-alias class,
-        doc/08_tracking/bug/value_semantics_cow_alias_perf_class_2026-08-21.md).
-        """
-        var kept: [text] = []
-        var index = 0
-        while index < self.in_progress.len():
-            if self.in_progress[index] != value:
-                kept.push(self.in_progress[index])
-            index = index + 1
-        self.in_progress = kept
-
     me try_jit_instantiate(name: text) -> JitInstantiationResult:
         if not self.config.enabled:
             return JitInstantiationResult.NotFound(symbol: name)
@@ -259,8 +281,8 @@ class JitInstantiator:
             return JitInstantiationResult.CompilationError(message: "Maximum JIT depth exceeded: {self.config.max_depth}")
         if self.jit_cache.has(name):
             val rec = self.jit_cache[name]
-            val code = rec.code
-            val addr = rec.address
+            val code = rec["code"]
+            val addr = rec["address"]
             return JitInstantiationResult.Success(code: code, symbol: name, address: Some(addr))
         if self.in_progress.contains(name):
             return JitInstantiationResult.CircularDependency(cycle: [name])
@@ -274,7 +296,7 @@ class JitInstantiator:
             case nil: return JitInstantiationResult.NotFound(symbol: name)
 
         self.depth = self.depth + 1
-        self.in_progress = self.in_progress.push(name)
+        self.in_progress = self.in_progress.insert(name)
 
         val compiled = _fake_compile_bytes(entry)
         val address = _next_fake_address(self.exec_mapper, compiled.len() as i64)
@@ -284,7 +306,11 @@ class JitInstantiator:
             path
         _global_set(name, owner_id, address)
         self.exec_mapper.set_record(name, owner_id, address)
-        self.jit_cache[name] = JitCacheRecord(code: compiled, address: address, owner: owner_id)
+        self.jit_cache[name] = {
+            "code": compiled,
+            "address": address,
+            "owner": owner_id
+        }
         if self.smf_semantic_keys.has(path):
             self.jit_semantic_keys[name] = self.smf_semantic_keys[path]
         self.compile_count = self.compile_count + 1
@@ -294,11 +320,11 @@ class JitInstantiator:
             match update_result:
                 case Ok(_): ()
                 case Err(update_error):
-                    self._drop_in_progress(name)
+                    self.in_progress = _jit_remove_text(self.in_progress, name)
                     self.depth = self.depth - 1
                     return JitInstantiationResult.UpdateFailed(symbol: name, error: update_error)
 
-        self._drop_in_progress(name)
+        self.in_progress = _jit_remove_text(self.in_progress, name)
         self.depth = self.depth - 1
         JitInstantiationResult.Success(code: compiled, symbol: name, address: Some(address))
 
@@ -313,7 +339,7 @@ class JitInstantiator:
                 remaining.push(possible_entry)
 
         val next_id = metadata.instantiations.len() as i32
-        val inst = JitInstantiatorRecord(
+        val inst = InstantiationRecord(
             id: next_id,
             template_name: entry.template_name,
             type_args: entry.type_args,
@@ -345,12 +371,12 @@ class JitSymbolResolver:
     me set_jit_cache_for_test(symbol: text, code: [u8], address: i64):
         self.jit.set_cache_for_test(symbol, code, address)
 
-    me resolve(symbol: text) -> i64?:
+    me resolve(symbol: text):
         if self.symbols.has(symbol):
             return Some(self.symbols[symbol])
         if self.jit.jit_cache.has(symbol):
             val rec = self.jit.jit_cache[symbol]
-            val addr = rec.address
+            val addr = rec["address"]
             self.symbols[symbol] = addr
             return Some(addr)
 
@@ -410,7 +436,7 @@ fn _metadata_from_text(content: text) -> LoadedMetadata:
         return LoadedMetadata(possible: [], instantiations: [])
 
     var possible: [PossibleInstantiation] = []
-    var instantiations: [JitInstantiatorRecord] = []
+    var instantiations: [InstantiationRecord] = []
     for raw_line in content.split("\n"):
         val line = raw_line.trim()
         if line == "":
@@ -425,7 +451,7 @@ fn _metadata_from_text(content: text) -> LoadedMetadata:
                 mangled_name: parts[3]
             ))
         elif parts[0] == "I" and parts.len() >= 9:
-            instantiations.push(JitInstantiatorRecord(
+            instantiations.push(InstantiationRecord(
                 id: _parse_i32(parts[1]),
                 template_name: parts[2],
                 type_args: parts[3],
@@ -442,16 +468,11 @@ fn _parse_i32(input: text) -> i32:
     input.to_i64() as i32
 
 fn _fake_compile_bytes(entry: PossibleInstantiation) -> [u8]:
-    # Concatenation intentionally normalizes raw literal-backed fields to the
-    # managed text representation before byte_at. Avoid materializing a second
-    # full byte array: stream the normalized buffer directly into the result.
-    val framed = entry.template_name + ":" + entry.type_args + ":" + entry.mangled_name
-    val framed_len = framed.len()
     var out: [u8] = []
-    var index: i64 = 0
-    while index < framed_len:
-        out.push(framed.byte_at(index) as u8)
-        index = index + 1
+    for ch in (entry.template_name + ":" + entry.type_args + ":" + entry.mangled_name).bytes():
+        out.push(ch)
+    if out.len() == 0:
+        return [195]
     out.push(195)
     out
 

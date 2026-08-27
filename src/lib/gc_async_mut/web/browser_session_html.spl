@@ -10,7 +10,6 @@
 # - expand_stylesheet_text / extract_css_import_sources / strip_css_imports
 # - extract_css_import_href / trim_css_import_url / insert_stylesheet_sources
 
-use common.web.html_escape.{html_escape_core}
 use common.string_builder.{StringBuilder}
 use std.gc_async_mut.web.browser_session.{
     BrowserStylesheetSource, BrowserStylesheetExpansion, BrowserScriptBlock,
@@ -27,15 +26,15 @@ use std.common.gpu.simpleos_host_gpu_protocol.{
     SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES
 }
 
-use std.common.string_core.{text_to_bytes}
+extern fn rt_text_to_bytes(value: text) -> [u8]
 
 fn _find_ascii_case_insensitive(
     haystack: text, lowercase_needle: text, start: i64
 ) -> i64:
     if start < 0 or start > haystack.len() or lowercase_needle.len() == 0:
         return -1
-    val haystack_bytes = text_to_bytes(haystack)
-    val needle_bytes = text_to_bytes(lowercase_needle)
+    val haystack_bytes = rt_text_to_bytes(haystack)
+    val needle_bytes = rt_text_to_bytes(lowercase_needle)
     var index = start
     val last = haystack_bytes.len() - needle_bytes.len()
     while index <= last:
@@ -58,25 +57,23 @@ fn _find_ascii_case_insensitive(
     -1
 
 fn extract_title_text(html: text) -> text:
-    val start = _find_ascii_case_insensitive(html, "<title>", 0)
+    val start = find_text(html, "<title>", 0)
     if start < 0:
         return ""
     val content_start = start + 7
-    val end = _find_ascii_case_insensitive(html, "</title>", content_start)
+    val end = find_text(html, "</title>", content_start)
     if end < 0:
         return ""
     html[content_start:end].trim()
 
 fn extract_body_inner_html(html: text) -> text:
-    val body_open = _find_ascii_case_insensitive(html, "<body", 0)
+    val body_open = find_text(html, "<body", 0)
     if body_open < 0:
         return ""
     val open_end = find_text(html, ">", body_open)
     if open_end < 0:
         return ""
-    val body_close = _find_ascii_case_insensitive(
-        html, "</body>", open_end + 1
-    )
+    val body_close = find_text(html, "</body>", open_end + 1)
     if body_close < 0:
         return html[open_end + 1:html.len()]
     html[open_end + 1:body_close]
@@ -90,8 +87,6 @@ fn html_to_text(html: text) -> text:
     var in_tag = false
     var tag_buf = ""
     var hidden_text_tag = ""
-    var closed_details = false
-    var details_in_summary = false
     var ruby_text_tag = ""
     var ruby_annotation_text = ""
     var edit_text_tag = ""
@@ -110,14 +105,6 @@ fn html_to_text(html: text) -> text:
             if hidden_text_tag != "":
                 if closing and tag_name == hidden_text_tag:
                     hidden_text_tag = ""
-            else if closed_details:
-                if not closing and tag_name == "summary":
-                    details_in_summary = true
-                else if closing and tag_name == "summary":
-                    details_in_summary = false
-                else if closing and tag_name == "details":
-                    closed_details = false
-                    details_in_summary = false
             else if ruby_text_tag != "":
                 if closing and tag_name == "rt":
                     val annotation = ruby_annotation_text.trim()
@@ -145,13 +132,6 @@ fn html_to_text(html: text) -> text:
             else if not closing and (tag_name == "ins" or tag_name == "del"):
                 edit_text_tag = tag_name
                 edit_text_value = ""
-            else if not closing and tag_name == "details":
-                if not has_tag_attr(tag_buf, "open"):
-                    closed_details = true
-                    details_in_summary = false
-            else if not closing and tag_name == "dialog":
-                if not has_tag_attr(tag_buf, "open"):
-                    hidden_text_tag = "dialog"
             else if not closing and html_tag_hides_text(tag_name):
                 hidden_text_tag = tag_name
             else if not closing and html_tag_breaks_before(tag_name):
@@ -203,8 +183,6 @@ fn html_to_text(html: text) -> text:
             tag_buf = tag_buf + ch
         else if hidden_text_tag != "":
             pass
-        else if closed_details and not details_in_summary:
-            pass
         else if ruby_text_tag == "rt":
             ruby_annotation_text = ruby_annotation_text + ch
         else if edit_text_tag != "":
@@ -245,7 +223,23 @@ fn html_section_text_block_tag(tag_name: text) -> bool:
     tag_name == "h1" or tag_name == "h2" or tag_name == "h3" or tag_name == "h4" or tag_name == "h5" or tag_name == "h6" or tag_name == "hgroup" or tag_name == "address"
 
 fn escape_html_text(text_value: text) -> text:
-    html_escape_core(text_value)
+    val sb = StringBuilder.new()
+    var i = 0
+    val text_len = text_value.len()
+    while i < text_len:
+        val ch = text_value.slice(i, i + 1)
+        if ch == "&":
+            sb.push("&amp;")
+        else if ch == "<":
+            sb.push("&lt;")
+        else if ch == ">":
+            sb.push("&gt;")
+        else if ch == "\"":
+            sb.push("&quot;")
+        else:
+            sb.push(ch)
+        i = i + 1
+    sb.to_text()
 
 fn escape_js_string(value: text) -> text:
     var out = ""
@@ -298,9 +292,7 @@ fn _guest_runtime_probe_url(url: text) -> bool:
 fn _extract_simple_js_assignment(script: text, prefix: text) -> Option<text>:
     if not script.contains(prefix):
         return nil
-    # index_of returns a plain i64 (-1 == not found), not an Option.
-    val start_idx = script.index_of(prefix)
-    if start_idx >= 0:
+    if val Some(start_idx) = script.index_of(prefix):
         val value_start = start_idx + prefix.len()
         if value_start >= script.len():
             return nil
@@ -308,8 +300,7 @@ fn _extract_simple_js_assignment(script: text, prefix: text) -> Option<text>:
         if quote != "'" and quote != "\"":
             return nil
         val rest = script.substring(value_start + 1, script.len())
-        val rel_end = rest.index_of(quote)
-        if rel_end >= 0:
+        if val Some(rel_end) = rest.index_of(quote):
             return Some(rest.substring(0, rel_end))
     nil
 
@@ -345,265 +336,79 @@ fn has_tag_attr(tag_content: text, attr_name: text) -> bool:
         lower.contains(padded + "=") or
         lower.ends_with(padded)
 
-val BROWSER_MAX_META_CSP_POLICIES: i32 = 64
-val BROWSER_MAX_META_CSP_BYTES: i64 = 4096
-
-class BrowserDocumentResourcePlan:
-    script_blocks: [BrowserScriptBlock]
-    style_sources: [BrowserStylesheetSource]
-    image_sources: [BrowserImageSource]
-    warnings: [text]
-    final_csp_policy: text
-
-fn _browser_html_tag_end(html: text, start: i64) -> i64:
-    var quote = ""
-    var pos = start
-    while pos < html.len():
-        val ch = html.slice(pos, pos + 1)
-        if quote != "":
-            if ch == quote:
-                quote = ""
-        elif ch == "\"" or ch == "'":
-            quote = ch
-        elif ch == ">":
-            return pos
-        pos = pos + 1
-    -1
-
-fn _browser_policy_append(existing: text, addition: text) -> text:
-    if addition == "":
-        return existing
-    if existing == "":
-        return addition
-    existing + "\n" + addition
-
-fn _browser_plan_append_image(
-    images: [BrowserImageSource], authored: text, document_url: text,
-    source_offset: i64, csp_policy: text
-) -> [BrowserImageSource]:
-    var out = images
-    if (
-        authored == "" or
-        authored.len() > SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES or
-        out.len() >= BROWSER_MAX_IMAGE_RESOURCES
-    ):
-        return out
-    val resolved = collapse_url_dot_segments(
-        resolve_relative_url(document_url, authored)
-    )
-    if resolved.len() > SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES:
-        return out
-    out.push(
-        BrowserImageSource.create(
-            authored, resolved
-        ).with_policy(source_offset, csp_policy)
-    )
-    out
-
-fn browser_document_resource_plan(
-    html: text, document_url: text, header_policy: text
-) -> BrowserDocumentResourcePlan:
-    var scripts: [BrowserScriptBlock] = []
-    var styles: [BrowserStylesheetSource] = []
-    var images: [BrowserImageSource] = []
-    var warnings: [text] = []
-    var policy = header_policy
-    var meta_policy_count = 0
-    var meta_fail_closed = false
-    var head_active = true
-    var template_depth = 0
-    var template_depth_overflow = false
-    val lower = html.lower()
-    var pos = 0
+fn extract_stylesheet_sources(html: text) -> [BrowserStylesheetSource]:
+    val source_count = stylesheet_source_count(html)
+    if source_count == 0:
+        return []
+    var sources: [BrowserStylesheetSource] = [BrowserStylesheetSource.inline(""); source_count]
+    var write_idx = 0
+    var style_pos = 0
     val html_len = html.len()
-    while pos < html_len:
-        val start = find_text(lower, "<", pos)
+    while style_pos < html_len:
+        val start = find_text(html, "<style", style_pos)
         if start < 0:
             break
-        val prefix_end = if start + 4 < html_len:
-            start + 4
-        else:
-            html_len
-        if lower.slice(start, prefix_end) == "<!--":
-            val comment_end = find_text(lower, "-->", start + 4)
-            if comment_end < 0:
-                break
-            pos = comment_end + 3
-            continue
-        val tag_end = _browser_html_tag_end(html, start + 1)
+        val tag_end = find_text(html, ">", start)
         if tag_end < 0:
             break
-        val tag_content = html.slice(start, tag_end + 1)
-        val tag_name = html_tag_name(
-            html.slice(start + 1, tag_end)
-        )
-        val closing = html_tag_is_closing(
-            html.slice(start + 1, tag_end)
-        )
-        if closing:
-            val was_in_template = (
-                template_depth > 0 or template_depth_overflow
-            )
-            if tag_name == "template" and template_depth > 0:
-                template_depth = template_depth - 1
-            if was_in_template:
-                pos = tag_end + 1
-                continue
-            if tag_name == "head":
-                head_active = false
-            pos = tag_end + 1
-            continue
-        if tag_name == "template":
-            if template_depth < 512:
-                template_depth = template_depth + 1
-            else:
-                # Fail closed: an over-depth inert subtree cannot reactivate.
-                template_depth_overflow = true
-            pos = tag_end + 1
-            continue
-        if template_depth > 0 or template_depth_overflow:
-            # Raw-text bodies may contain tag-shaped strings. Skip to their
-            # exact closing token while the containing template is inert.
-            if tag_name == "style" or tag_name == "script":
-                val raw_close = find_text(
-                    lower, "</{tag_name}>", tag_end + 1
-                )
-                if raw_close < 0:
-                    break
-                pos = raw_close + tag_name.len() + 3
-            else:
-                pos = tag_end + 1
-            continue
-        if tag_name == "body":
-            head_active = false
-        if (
-            tag_name == "meta" and head_active and
-            extract_attr_value(tag_content, "http-equiv").trim().lower() ==
-                "content-security-policy"
-        ):
-            val raw_policy = extract_attr_value(tag_content, "content")
-            if raw_policy.len() > BROWSER_MAX_META_CSP_BYTES:
-                if not meta_fail_closed:
-                    policy = _browser_policy_append(
-                        policy, "default-src 'none'"
-                    )
-                    warnings.push(
-                        "meta CSP exceeds 4096-byte limit; following resources blocked"
-                    )
-                    meta_fail_closed = true
-            elif meta_policy_count >= BROWSER_MAX_META_CSP_POLICIES:
-                if not meta_fail_closed:
-                    policy = _browser_policy_append(
-                        policy, "default-src 'none'"
-                    )
-                    warnings.push(
-                        "meta CSP policy limit reached; following resources blocked"
-                    )
-                    meta_fail_closed = true
-            else:
-                val admitted = browser_meta_content_security_policy(raw_policy)
-                policy = _browser_policy_append(policy, admitted)
-                meta_policy_count = meta_policy_count + 1
-            pos = tag_end + 1
-            continue
-        if tag_name == "style":
-            val close = find_text(lower, "</style>", tag_end + 1)
-            if close < 0:
-                break
-            val content = html[tag_end + 1:close].trim()
-            if (
-                content != "" and
-                styles.len() < BROWSER_MAX_DOCUMENT_SUBRESOURCES
-            ):
-                styles.push(
-                    BrowserStylesheetSource.inline(content).with_policy(
-                        start, policy
-                    )
-                )
-            pos = close + 8
-            continue
-        if tag_name == "script":
-            val close = find_text(lower, "</script>", tag_end + 1)
-            if close < 0:
-                break
-            if scripts.len() < BROWSER_MAX_DOCUMENT_SUBRESOURCES:
-                val src_value = extract_attr_value(tag_content, "src")
-                val script_type = extract_attr_value(
-                    tag_content, "type"
-                ).lower()
-                val is_async = has_tag_attr(tag_content, "async")
-                val is_defer = has_tag_attr(tag_content, "defer")
-                if src_value != "":
-                    scripts.push(BrowserScriptBlock.with_attrs(
-                        "external", "", src_value, script_type,
-                        is_async, is_defer
-                    ).with_policy(start, policy))
-                else:
-                    val content = html[tag_end + 1:close]
-                    if content.trim() != "":
-                        scripts.push(BrowserScriptBlock.with_attrs(
-                            "inline", content, "", script_type,
-                            is_async, is_defer
-                        ).with_policy(start, policy))
-            pos = close + 9
-            continue
-        if tag_name == "link":
-            val rel_value = extract_attr_value(tag_content, "rel").lower()
-            val href_value = extract_attr_value(tag_content, "href")
-            if (
-                href_value != "" and rel_contains_stylesheet(rel_value) and
-                styles.len() < BROWSER_MAX_DOCUMENT_SUBRESOURCES
-            ):
-                styles.push(
-                    BrowserStylesheetSource.external(href_value).with_policy(
-                        start, policy
-                    )
-                )
-        if tag_name == "img" or tag_name == "video":
-            val image_attr = if tag_name == "video": "poster" else: "src"
-            val authored = extract_attr_value(
-                tag_content, image_attr
-            ).trim()
-            if authored.len() > SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES:
-                warnings.push(
-                    "image URI limit reached; image ignored"
-                )
-            elif authored != "" and images.len() >= BROWSER_MAX_IMAGE_RESOURCES:
-                warnings.push(
-                    "image resource limit reached; additional images ignored"
-                )
-            images = _browser_plan_append_image(
-                images, authored, document_url, start, policy
-            )
-        val inline_style = extract_attr_value(tag_content, "style")
-        if inline_style != "":
-            for authored in _css_background_image_urls(inline_style):
-                if images.len() >= BROWSER_MAX_IMAGE_RESOURCES:
-                    warnings.push(
-                        "image resource limit reached; additional images ignored"
-                    )
-                    break
-                images = _browser_plan_append_image(
-                    images, authored, document_url, start, policy
-                )
-        pos = tag_end + 1
-    BrowserDocumentResourcePlan(
-        script_blocks: scripts,
-        style_sources: styles,
-        image_sources: images,
-        warnings: warnings,
-        final_csp_policy: policy
-    )
+        val close = find_text(html, "</style>", tag_end + 1)
+        if close < 0:
+            break
+        val content = html[tag_end + 1:close].trim()
+        if content != "":
+            sources[write_idx] = BrowserStylesheetSource.inline(content)
+            write_idx = write_idx + 1
+        style_pos = close + 8
+    var link_pos = 0
+    while link_pos < html_len:
+        val start = find_text(html, "<link", link_pos)
+        if start < 0:
+            break
+        val tag_end = find_text(html, ">", start)
+        if tag_end < 0:
+            break
+        val tag_content = html[start:tag_end + 1]
+        val rel_value = extract_attr_value(tag_content, "rel").lower()
+        val href_value = extract_attr_value(tag_content, "href")
+        if href_value != "" and rel_contains_stylesheet(rel_value):
+            sources[write_idx] = BrowserStylesheetSource.external(href_value)
+            write_idx = write_idx + 1
+        link_pos = tag_end + 1
+    sources
 
-pub fn browser_document_csp_policy(
-    html: text, document_url: text, header_policy: text
-) -> text:
-    browser_document_resource_plan(
-        html, document_url, header_policy
-    ).final_csp_policy
-
-fn extract_stylesheet_sources(html: text) -> [BrowserStylesheetSource]:
-    browser_document_resource_plan(html, "", "").style_sources
+fn stylesheet_source_count(html: text) -> i32:
+    var count = 0
+    var style_pos = 0
+    val html_len = html.len()
+    while style_pos < html_len:
+        val start = find_text(html, "<style", style_pos)
+        if start < 0:
+            break
+        val tag_end = find_text(html, ">", start)
+        if tag_end < 0:
+            break
+        val close = find_text(html, "</style>", tag_end + 1)
+        if close < 0:
+            break
+        val content = html[tag_end + 1:close].trim()
+        if content != "":
+            count = count + 1
+        style_pos = close + 8
+    var link_pos = 0
+    while link_pos < html_len:
+        val start = find_text(html, "<link", link_pos)
+        if start < 0:
+            break
+        val tag_end = find_text(html, ">", start)
+        if tag_end < 0:
+            break
+        val tag_content = html[start:tag_end + 1]
+        val rel_value = extract_attr_value(tag_content, "rel").lower()
+        val href_value = extract_attr_value(tag_content, "href")
+        if href_value != "" and rel_contains_stylesheet(rel_value):
+            count = count + 1
+        link_pos = tag_end + 1
+    count
 
 fn rel_contains_stylesheet(rel_value: text) -> bool:
     for part in rel_value.split(" "):
@@ -623,7 +428,7 @@ fn _css_background_url_safe(url: text) -> bool:
         url.contains("{") or url.contains("}")
     ):
         return false
-    for byte in text_to_bytes(url):
+    for byte in rt_text_to_bytes(url):
         if byte < 32u8 or byte == 127u8:
             return false
     true
@@ -993,7 +798,7 @@ fn extract_css_import_sources(base_url: text, css_text: text) -> [BrowserStylesh
     var write_idx = 0
     var pos = 0
     val css_len = css_text.len()
-    while pos < css_len and write_idx < source_count:
+    while pos < css_len:
         val at = find_text(css_text, "@import", pos)
         if at < 0:
             return sources
@@ -1003,7 +808,7 @@ fn extract_css_import_sources(base_url: text, css_text: text) -> [BrowserStylesh
         val stmt = css_text.slice(at, semi + 1)
         val href = extract_css_import_href(stmt)
         if href != "":
-            sources[write_idx] = BrowserStylesheetSource.external(collapse_url_dot_segments(resolve_relative_url(base_url, href)))
+            sources[write_idx] = BrowserStylesheetSource.external(resolve_relative_url(base_url, href))
             write_idx = write_idx + 1
         pos = semi + 1
     sources
@@ -1023,8 +828,6 @@ fn css_import_source_count(css_text: text) -> i32:
         val href = extract_css_import_href(stmt)
         if href != "":
             count = count + 1
-            if count >= BROWSER_MAX_DOCUMENT_SUBRESOURCES:
-                return count
         pos = semi + 1
     count
 
@@ -1070,11 +873,7 @@ fn trim_css_import_url(value: text) -> text:
     trimmed
 
 fn insert_stylesheet_sources(existing: [BrowserStylesheetSource], index: i32, additions: [BrowserStylesheetSource]) -> [BrowserStylesheetSource]:
-    val remaining = BROWSER_MAX_DOCUMENT_SUBRESOURCES - existing.len()
-    val additions_count = if additions.len() < remaining:
-        additions.len()
-    else:
-        if remaining > 0: remaining else: 0
+    val additions_count = additions.len()
     if additions_count == 0:
         return existing
     val existing_count = existing.len()

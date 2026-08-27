@@ -1,0 +1,135 @@
+# Remote quota + TTL, wired to C3's GC config.
+#
+# Each shared namespace gets its OWN accounted budget. That isolation is what
+# makes the optional trusted-branch-CI namespace safe to enable: branch traffic
+# cannot evict main content by filling a shared pool, because it is never
+# accounted against main's budget.
+#
+# Admission uses C3's `gc_admit` verbatim rather than reimplementing watermark
+# logic. The three outcomes map straight through:
+#
+#   GC_ADMIT_ACCEPT          -> write
+#   GC_ADMIT_GC_THEN_ACCEPT  -> write, and signal the GC lane to run
+#   GC_ADMIT_REJECT          -> skip the write (NEVER fail the build)
+
+use compiler.driver.cache.metadata.gc_config.{
+    GcLimits, GcRetention, gc_limits_default, gc_retention_default, gc_admit,
+    GC_ADMIT_ACCEPT, GC_ADMIT_GC_THEN_ACCEPT, GC_ADMIT_REJECT,
+    gc_admission_name, GC_SECONDS_PER_DAY
+}
+
+# ============================================================================
+# Per-tier budget
+# ============================================================================
+
+# `tier` is one of "main" | "branch" | "cas".
+struct GatewayTierQuota:
+    tier: text
+    limits: GcLimits
+    used_bytes: i64
+    ttl_seconds: i64            # 0 == never expires (main, cas)
+
+struct GatewayQuota:
+    tiers: [GatewayTierQuota]
+    retention: GcRetention
+    fs_free_bytes: i64
+    fs_total_bytes: i64
+    gc_requested: bool         # set when any tier crossed the high watermark
+
+# Main is the largest budget and never expires. Branch is a fraction of it and
+# carries the C3 branch TTL. CAS is shared content, sized between the two.
+fn gateway_quota_default(main_max_bytes: i64, branch_max_bytes: i64, cas_max_bytes: i64, fs_free_bytes: i64, fs_total_bytes: i64) -> GatewayQuota:
+    val retention = gc_retention_default()
+    var tiers: [GatewayTierQuota] = []
+    tiers.push(GatewayTierQuota(tier: "main", limits: gc_limits_default(main_max_bytes), used_bytes: 0, ttl_seconds: 0))
+    tiers.push(GatewayTierQuota(tier: "branch", limits: gc_limits_default(branch_max_bytes), used_bytes: 0, ttl_seconds: retention.branch_ttl_seconds))
+    tiers.push(GatewayTierQuota(tier: "cas", limits: gc_limits_default(cas_max_bytes), used_bytes: 0, ttl_seconds: 0))
+    GatewayQuota(tiers: tiers, retention: retention, fs_free_bytes: fs_free_bytes, fs_total_bytes: fs_total_bytes, gc_requested: false)
+
+fn gateway_quota_tier_index(quota: GatewayQuota, tier: text) -> i64:
+    var i: i64 = 0
+    while i < quota.tiers.len():
+        if quota.tiers[i].tier == tier:
+            return i
+        i = i + 1
+    -1
+
+fn gateway_quota_used(quota: GatewayQuota, tier: text) -> i64:
+    val idx = gateway_quota_tier_index(quota, tier)
+    if idx < 0:
+        return 0
+    quota.tiers[idx].used_bytes
+
+# TTL for a tier, in seconds. 0 means "does not expire".
+fn gateway_quota_expiry_for(quota: GatewayQuota, tier: text, now: i64) -> i64:
+    val idx = gateway_quota_tier_index(quota, tier)
+    if idx < 0:
+        return 0
+    val ttl = quota.tiers[idx].ttl_seconds
+    if ttl <= 0:
+        return 0
+    now + ttl
+
+# ============================================================================
+# Admission
+# ============================================================================
+
+struct GatewayQuotaDecision:
+    accepted: bool
+    run_gc: bool
+    reason: text
+    quota: GatewayQuota
+
+fn gateway_quota_admit(quota: GatewayQuota, tier: text, incoming_bytes: i64, now: i64) -> GatewayQuotaDecision:
+    val idx = gateway_quota_tier_index(quota, tier)
+    if idx < 0:
+        # An unbudgeted tier is not an error path a build can be failed on; it
+        # is simply not cached remotely.
+        return GatewayQuotaDecision(accepted: false, run_gc: false, reason: "no remote budget configured for tier " + tier, quota: quota)
+    val t = quota.tiers[idx]
+    val code = gc_admit(t.limits, t.used_bytes, incoming_bytes, quota.fs_free_bytes, quota.fs_total_bytes)
+    if code == GC_ADMIT_REJECT:
+        return GatewayQuotaDecision(
+            accepted: false,
+            run_gc: true,
+            reason: "remote quota exhausted for tier " + tier + " (" + gc_admission_name(code) + ")",
+            quota: quota
+        )
+    var updated = quota
+    if code == GC_ADMIT_GC_THEN_ACCEPT:
+        updated = GatewayQuota(tiers: quota.tiers, retention: quota.retention, fs_free_bytes: quota.fs_free_bytes, fs_total_bytes: quota.fs_total_bytes, gc_requested: true)
+    GatewayQuotaDecision(accepted: true, run_gc: code == GC_ADMIT_GC_THEN_ACCEPT, reason: "", quota: updated)
+
+# Called only after the write actually landed.
+fn gateway_quota_record(quota: GatewayQuota, tier: text, bytes: i64, now: i64) -> GatewayQuota:
+    val idx = gateway_quota_tier_index(quota, tier)
+    if idx < 0:
+        return quota
+    var tiers: [GatewayTierQuota] = []
+    var i: i64 = 0
+    while i < quota.tiers.len():
+        val t = quota.tiers[i]
+        if i == idx:
+            tiers.push(GatewayTierQuota(tier: t.tier, limits: t.limits, used_bytes: t.used_bytes + bytes, ttl_seconds: t.ttl_seconds))
+        else:
+            tiers.push(t)
+        i = i + 1
+    GatewayQuota(tiers: tiers, retention: quota.retention, fs_free_bytes: quota.fs_free_bytes - bytes, fs_total_bytes: quota.fs_total_bytes, gc_requested: quota.gc_requested)
+
+# ============================================================================
+# Admin rendering
+# ============================================================================
+
+fn gateway_quota_report(quota: GatewayQuota) -> [text]:
+    var lines: [text] = []
+    var i: i64 = 0
+    while i < quota.tiers.len():
+        val t = quota.tiers[i]
+        var ttl = "never"
+        if t.ttl_seconds > 0:
+            ttl = (t.ttl_seconds / GC_SECONDS_PER_DAY).to_text() + "d"
+        lines.push("tier " + t.tier + ": used=" + t.used_bytes.to_text() + " max=" + t.limits.max_bytes.to_text() + " ttl=" + ttl)
+        i = i + 1
+    if quota.gc_requested:
+        lines.push("gc: requested (high watermark crossed)")
+    lines

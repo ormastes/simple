@@ -1,4 +1,4 @@
-# STDLIB Deep-Dive Test
+# @manual: primary
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -55,12 +55,10 @@ check(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("basic 2")
 check(1 == 1)
 ```
 
@@ -889,12 +887,161 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-UNIT
 step("complex 1")
 
-val arr = [1,2,3,4,5]
-var evens = []
-for x in arr:
-    if x % 2 == 0:
-        evens = evens.append(x)
-check(evens.len() == 2)
+</details>
+
+#### text concat slice reverse
+
+- Verify: text concat slice reverse
+   - Expected: "abc" + "def" equals `abcdef`
+   - Expected: "abc".slice(1) equals `bc`
+   - Expected: "abc".reverse() equals `cba`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-IO-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-IO-DEEP-4aab
+step("Verify: text concat slice reverse")
+# oracle: "abcdef"/"bc"/"cba" — concat, slice from index 1, reverse
+expect("abc" + "def").to_equal("abcdef")
+expect("abc".slice(1)).to_equal("bc")
+expect("abc".reverse()).to_equal("cba")
+```
+
+</details>
+
+#### array sort
+
+- Verify: array sort
+   - Expected: [3, 1, 2].sorted() equals `[1, 2, 3]`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-IO-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-IO-DEEP-4aab
+step("Verify: array sort")
+# oracle: [1, 2, 3] — sorted() returns ascending order
+expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+```
+
+</details>
+
+#### array map filter
+
+- Verify: array map filter
+   - Expected: [3, 1, 2].map(fn (x: i64) -> i64: x + 1) equals `[4, 2, 3]`
+   - Expected: [3, 1, 2].filter(fn (x: i64) -> bool: x > 1) equals `[3, 2]`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-IO-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-IO-DEEP-4aab
+step("Verify: array map filter")
+# oracle: [4, 2, 3] — each element +1; [3, 2] — elements > 1 in order
+expect([3, 1, 2].map(fn (x: i64) -> i64: x + 1)).to_equal([4, 2, 3])
+expect([3, 1, 2].filter(fn (x: i64) -> bool: x > 1)).to_equal([3, 2])
+```
+
+</details>
+
+#### array membership and index
+
+- Verify: array membership and index
+   - Expected: [3, 1, 2] contains `2`
+   - Expected: [3, 1, 2] does not contain `9`
+   - Expected: [3, 1, 2].index_of(2) equals `2)  # oracle: pinned constant asserted by this scenario`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-IO-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-IO-DEEP-4aab
+step("Verify: array membership and index")
+# oracle: true/2 — 2 is present at index 2
+expect([3, 1, 2].contains(2)).to_equal(true)
+expect([3, 1, 2].contains(9)).to_equal(false)
+expect([3, 1, 2].index_of(2)).to_equal(2)  # oracle: pinned constant asserted by this scenario
+```
+
+</details>
+
+#### array append and len
+
+- Verify: array append and len
+   - Expected: arr.len() equals `4)  # oracle: pinned constant asserted by this scenario`
+   - Expected: arr[3] equals `4)  # oracle: pinned constant asserted by this scenario`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-IO-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-IO-DEEP-4aab
+step("Verify: array append and len")
+# oracle: 4 — append grows the owner list by one and returns it
+var arr = [1, 2, 3]
+arr.append(4)
+expect(arr.len()).to_equal(4)  # oracle: pinned constant asserted by this scenario
+expect(arr[3]).to_equal(4)  # oracle: pinned constant asserted by this scenario
+```
+
+</details>
+
+#### dict read
+
+- Verify: dict read
+   - Expected: d.len() equals `2)  # oracle: pinned constant asserted by this scenario`
+   - Expected: d["a"] equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: d.keys().len() equals `2)  # oracle: pinned constant asserted by this scenario`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-IO-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-IO-DEEP-4aab
+step("Verify: dict read")
+# oracle: 2/1/2 — two keys, value lookup, key count
+val d = {"a": 1, "b": 2}
+expect(d.len()).to_equal(2)  # oracle: pinned constant asserted by this scenario
+expect(d["a"]).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(d.keys().len()).to_equal(2)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>

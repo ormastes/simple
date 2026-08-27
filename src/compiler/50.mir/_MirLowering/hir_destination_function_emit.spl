@@ -1,0 +1,179 @@
+# Direct frozen destination-function lowering. Signature and body are read by
+# scalar row index; no HIR aggregate crosses this module boundary.
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.hir.hir_lowering.hir_destination_registry_reader.*
+use compiler.hir.hir_lowering.hir_destination_graph.*
+use compiler.mir.mir_instructions.{MirFunction, mir_operand_copy}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirSignature, LocalId}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.hir_destination_receipt.*
+use compiler.mir._MirLowering.hir_destination_types.*
+use compiler.mir._MirLowering.hir_destination_preflight.*
+use compiler.mir._MirLowering.hir_destination_expr_memo.*
+use compiler.mir.mir_rt_hal_boundary.{inject_rt_hal_boundary,
+    rt_hal_env_executor_provenance_reset}
+
+fn mir_destination_flag_set(flags: i64, bit: i64) -> bool:
+    flags % (bit * 2) >= bit
+
+fn mir_destination_function_span(r: MirDestinationFunctionReceipt, row: i64) -> Span:
+    Span(start: hdr_span_start(r.slot, r.generation, row),
+        end: hdr_span_end(r.slot, r.generation, row),
+        line: hdr_span_line(r.slot, r.generation, row),
+        col: hdr_span_col(r.slot, r.generation, row),
+        file: hdr_span_file(r.slot, r.generation, row),
+        length: hdr_span_length(r.slot, r.generation, row))
+
+impl MirLowering:
+    me lower_destination_function(r: MirDestinationFunctionReceipt) -> MirFunction?:
+        if not mir_destination_receipt_still_active(r): return nil
+        if not self.destination_preflight.validate_function_graph(r): return nil
+        rt_hal_env_executor_provenance_reset()
+        self.reset_function_local_tracking()
+        val error_start = self.errors.len()
+        val function_row = r.function_row
+        self.destination_expr_memo.reset_for_function(function_row,
+            self.destination_preflight.reachable_expr_row_limit)
+        val flags = hdr_function_flags(r.slot, r.generation, function_row)
+        # Extern declarations have no MIR body. They remain accounted for by
+        # the module transaction and are released only with the other tokens.
+        if flags % (HD_FUNC_EXTERN * 2) >= HD_FUNC_EXTERN: return nil
+        val span = mir_destination_function_span(r,
+            hdr_function_span(r.slot, r.generation, function_row))
+        val params_handle = hdr_function_params(r.slot, r.generation, function_row)
+        val param_count = hdr_range_length(r.slot, r.generation, params_handle)
+        if param_count < 0: return nil
+        var params: [MirType] = []
+        var offset = 0
+        while offset < param_count:
+            val aux = hdr_function_param(r.slot, r.generation, function_row, offset)
+            val type_row = hdr_aux_i64(r.slot, r.generation, aux, 1)
+            val checked_param = mir_destination_lower_type_scalar_checked(
+                r.slot, r.generation, type_row)
+            if not checked_param.?:
+                self.error_fatal("E-MIR-DESTINATION-ABI: parameter " +
+                    offset.to_text() + " has no lossless MIR type", Some(span))
+                return nil
+            params.push(checked_param ?? MirType.unit())
+            offset = offset + 1
+        val checked_return = mir_destination_lower_type_scalar_checked(
+            r.slot, r.generation,
+            hdr_function_return_type(r.slot, r.generation, function_row))
+        if not checked_return.?:
+            self.error_fatal("E-MIR-DESTINATION-ABI: return position has no lossless MIR type",
+                Some(span))
+            return nil
+        val return_type = checked_return ?? MirType.unit()
+        # Destination lowering reads attribute rows after body emission for
+        # result metadata, but provenance admission must be active while the
+        # body calls are lowered. Do a scalar-only prepass here; it carries no
+        # HIR aggregate and cannot choose a source-path authority.
+        val pre_metadata = hdr_function_metadata(r.slot, r.generation, function_row)
+        val pre_metadata_count = hdr_range_length(r.slot, r.generation, pre_metadata)
+        var pre_attr_flags = 0
+        var pre_compare_c = false
+        var pre_compare_rust = false
+        var pre_index = 0
+        while pre_index < pre_metadata_count:
+            val pre_aux = hdr_function_metadata_row(r.slot, r.generation,
+                function_row, pre_index)
+            if hdr_aux_shape(r.slot, r.generation, pre_aux) == HD_AUX_FUNCTION_ATTR:
+                pre_attr_flags = hdr_aux_i64(r.slot, r.generation, pre_aux, 0)
+                pre_compare_c = mir_destination_flag_set(pre_attr_flags,
+                    HD_ATTR_RT_COMPARE_C)
+                pre_compare_rust = mir_destination_flag_set(pre_attr_flags,
+                    HD_ATTR_RT_COMPARE_RUST)
+            pre_index = pre_index + 1
+        self.rt_hal_foreign_boundary_active =
+            mir_destination_flag_set(pre_attr_flags, HD_ATTR_RT_HAL) and
+            (pre_compare_c or pre_compare_rust)
+        val signature = MirSignature(params: params, return_type: return_type,
+            is_variadic: false)
+        val symbol = SymbolId(id: hdr_function_symbol(r.slot, r.generation, function_row))
+        val name = hdr_function_name(r.slot, r.generation, function_row) + ""
+        var builder = self.builder
+        builder.begin_function(symbol, name, signature, span)
+        self.builder = builder
+
+        # Bind signature locals in the same order the builder created them.
+        val local_offset = self.builder.locals.len() - param_count
+        offset = 0
+        while offset < param_count:
+            val aux = hdr_function_param(r.slot, r.generation, function_row, offset)
+            val param_symbol = hdr_aux_i64(r.slot, r.generation, aux, 0)
+            self.bind_local(param_symbol, LocalId(id: local_offset + offset))
+            offset = offset + 1
+
+        val result = self.lower_destination_root_block(r, return_type)
+        builder = self.builder
+        if not builder.current_block_has_explicit_terminator():
+            if return_type.kind == MirTypeKind.Unit:
+                builder.terminate_return(nil)
+            elif result.?:
+                val local = result ?? LocalId(id: -1)
+                builder.terminate_return(Some(mir_operand_copy(local)))
+            else:
+                # Preserve diagnostics and reject module commit; do not invent
+                # a zero/nil value for a non-unit ABI result.
+                self.error_fatal("E-MIR-DESTINATION-RETURN: missing return in non-unit function '" + name + "'", Some(span))
+                builder.terminate_unreachable()
+        self.builder = builder
+        var finish = self.builder
+        var result_function = finish.end_function()
+        self.builder = finish
+        self.rt_hal_foreign_boundary_active = false
+        val metadata = hdr_function_metadata(r.slot, r.generation, function_row)
+        val metadata_count = hdr_range_length(r.slot, r.generation, metadata)
+        var attr_flags = 0
+        var compare_c = false
+        var compare_rust = false
+        offset = 0
+        while offset < metadata_count:
+            val aux = hdr_function_metadata_row(r.slot, r.generation,
+                function_row, offset)
+            val metadata_shape = hdr_aux_shape(r.slot, r.generation, aux)
+            if metadata_shape == HD_AUX_FUNCTION_ATTR:
+                attr_flags = hdr_aux_i64(r.slot, r.generation, aux, 0)
+                result_function.has_fast_math = mir_destination_flag_set(
+                    attr_flags, HD_ATTR_FAST_MATH)
+                result_function.unroll_factor = hdr_aux_i64(r.slot,
+                    r.generation, aux, 3)
+                result_function.pipeline_ii = hdr_aux_i64(r.slot,
+                    r.generation, aux, 4)
+                result_function.memory_banks = hdr_aux_i64(r.slot,
+                    r.generation, aux, 5)
+                compare_c = mir_destination_flag_set(attr_flags,
+                    HD_ATTR_RT_COMPARE_C)
+                compare_rust = mir_destination_flag_set(attr_flags,
+                    HD_ATTR_RT_COMPARE_RUST)
+            elif metadata_shape == HD_AUX_GPU:
+                result_function.is_kernel = true
+                result_function.gpu_target = hdr_aux_text(r.slot,
+                    r.generation, aux, 0)
+                result_function.gpu_backend_order = hdr_aux_text(r.slot,
+                    r.generation, aux, 1)
+            elif metadata_shape == HD_AUX_EXPORT_ATTR:
+                result_function.is_export_c = hdr_aux_bool(r.slot,
+                    r.generation, aux, 0)
+                result_function.export_name = hdr_aux_text(r.slot,
+                    r.generation, aux, 0)
+            offset = offset + 1
+        if (mir_destination_flag_set(attr_flags, HD_ATTR_RT_HAL) and
+            (compare_c or compare_rust)):
+            val operation_id = span.file + "::" + name
+            result_function = inject_rt_hal_boundary(result_function,
+                operation_id, compare_c, compare_rust)
+        if self.errors.len() == error_start:
+            var publish_builder = self.builder
+            var publish_module = publish_builder.module
+            var publish_functions = publish_module.functions
+            for lifted in self.destination_pending_lambda_functions:
+                publish_functions[lifted.symbol] = lifted
+            publish_module.functions = publish_functions
+            publish_builder.module = publish_module
+            self.builder = publish_builder
+        self.destination_pending_lambda_functions = []
+        result_function
+
+export mir_destination_function_span, mir_destination_flag_set

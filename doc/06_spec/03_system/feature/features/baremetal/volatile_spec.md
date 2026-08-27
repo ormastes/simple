@@ -2,6 +2,29 @@
 
 > Volatile access ensures memory reads and writes are not optimized away.
 
+<!-- sdn-diagram:id=volatile_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=volatile_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+volatile_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=volatile_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 29 | 29 | 0 | 0 |
@@ -21,7 +44,7 @@ Volatile access ensures memory reads and writes are not optimized away.
 | Category | Language / Bare-Metal |
 | Status | In Progress |
 | Source | `test/03_system/feature/features/baremetal/volatile_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Volatile access ensures memory reads and writes are not optimized away.
@@ -31,24 +54,25 @@ without relying on unsupported `@volatile` syntax.
 ## Scenarios
 
 ### Volatile Variables
+_Individual volatile variable declarations._
 
 #### Volatile at Fixed Address
 _Memory-mapped registers at fixed addresses._
 
 #### declares volatile variable at address
 
-- declares volatile variable at address
+1. check
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("declares volatile variable at address")
 val cell = VolatileCell.new(0x1000, 17)
 check(cell.address == 0x1000)
 check(cell.read() == 17)
@@ -59,18 +83,19 @@ check(cell.reads == 1)
 
 #### declares multiple registers
 
-- declares multiple registers
+1. check
+2. check
+3. check
+4. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("declares multiple registers")
 val status = VolatileCell.new(0x2000, 1)
 val control = VolatileCell.new(0x2001, 0)
 val _ = status.write(3)
@@ -88,18 +113,18 @@ _Volatile variables in local scope._
 
 #### prevents read optimization
 
-- prevents read optimization
+1. check
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("prevents read optimization")
 val cell = VolatileCell.new(0x3000, 9)
 check(cell.read() == 9)
 check(cell.read() == 9)
@@ -110,18 +135,17 @@ check(cell.reads == 2)
 
 #### prevents write optimization
 
-- prevents write optimization
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("prevents write optimization")
 val cell = VolatileCell.new(0x3001, 1)
 val _ = cell.write(2)
 val _ = cell.write(3)
@@ -139,18 +163,18 @@ _All fields behave like volatile registers._
 
 #### declares volatile register block
 
-- declares volatile register block
+1. check
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("declares volatile register block")
 val block = VolatileRegisterBlock.new(0x4000)
 check(block.status.address == 0x4000)
 check(block.control.address == 0x4001)
@@ -161,18 +185,17 @@ check(block.data.address == 0x4002)
 
 #### maps volatile struct to address
 
-- maps volatile struct to address
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("maps volatile struct to address")
 val block = VolatileRegisterBlock.new(0x5000)
 check(block.status.address == 0x5000)
 check(block.data.read() == 255)
@@ -185,18 +208,17 @@ _Struct with volatile and nonvolatile fields._
 
 #### overrides struct volatile with nonvolatile
 
-- overrides struct volatile with nonvolatile
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("overrides struct volatile with nonvolatile")
 val block = VolatileRegisterBlock.new(0x6000)
 block.cached = 11
 check(block.cached == 11)
@@ -207,18 +229,17 @@ check(block.status.reads == 0)
 
 #### marks specific fields volatile
 
-- marks specific fields volatile
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("marks specific fields volatile")
 val block = VolatileRegisterBlock.new(0x6000)
 val _ = block.status.write(7)
 val _ = block.control.write(8)
@@ -236,18 +257,18 @@ _Volatile reads must always fetch from memory._
 
 #### prevents dead load elimination
 
-- prevents dead load elimination
+1. cell read
+2. cell read
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("prevents dead load elimination")
 val cell = VolatileCell.new(0x7000, 5)
 cell.read()
 cell.read()
@@ -258,18 +279,17 @@ check(cell.reads == 2)
 
 #### prevents common subexpression elimination
 
-- prevents common subexpression elimination
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("prevents common subexpression elimination")
 val cell = VolatileCell.new(0x7001, 5)
 val a = cell.read()
 val b = cell.read()
@@ -284,18 +304,17 @@ _Volatile writes must always commit to memory._
 
 #### prevents dead store elimination
 
-- prevents dead store elimination
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("prevents dead store elimination")
 val cell = VolatileCell.new(0x7002, 1)
 val _ = cell.write(2)
 val _ = cell.write(3)
@@ -307,18 +326,19 @@ check(cell.writes == 2)
 
 #### preserves write order
 
-- preserves write order
+1. tracker full barrier
+2. tracker store barrier
+3. tracker load barrier
+4. check log
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("preserves write order")
 val tracker = BarrierTracker.new()
 tracker.full_barrier()
 tracker.store_barrier()
@@ -333,18 +353,16 @@ _Volatile accesses maintain program order._
 
 #### prevents reordering across volatile
 
-- prevents reordering across volatile
+1. check log
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("prevents reordering across volatile")
 val tracker = BarrierTracker.new()
 val _ = tracker.compiler_barrier()
 val _ = tracker.full_barrier()
@@ -361,18 +379,16 @@ _Explicit memory ordering barriers._
 
 #### uses mfence for full barrier
 
-- uses mfence for full barrier
+1. check log
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses mfence for full barrier")
 val tracker = BarrierTracker.new()
 val _ = tracker.full_barrier()
 check_log(tracker.events, ["mfence"])
@@ -384,18 +400,16 @@ check_log(tracker.events, ["mfence"])
 
 #### uses lfence for load barrier
 
-- uses lfence for load barrier
+1. check log
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses lfence for load barrier")
 val tracker = BarrierTracker.new()
 val _ = tracker.load_barrier()
 check_log(tracker.events, ["lfence"])
@@ -407,18 +421,16 @@ check_log(tracker.events, ["lfence"])
 
 #### uses sfence for store barrier
 
-- uses sfence for store barrier
+1. check log
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses sfence for store barrier")
 val tracker = BarrierTracker.new()
 val _ = tracker.store_barrier()
 check_log(tracker.events, ["sfence"])
@@ -430,18 +442,16 @@ check_log(tracker.events, ["sfence"])
 
 #### prevents compiler reordering
 
-- prevents compiler reordering
+1. check log
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("prevents compiler reordering")
 val tracker = BarrierTracker.new()
 val _ = tracker.compiler_barrier()
 check_log(tracker.events, ["compiler"])
@@ -456,18 +466,16 @@ _Low-level volatile access functions._
 
 #### reads byte from address
 
-- reads byte from address
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("reads byte from address")
 val port = VolatilePort.new()
 check(port.read_byte(0x10) == 0x10)
 ```
@@ -476,18 +484,16 @@ check(port.read_byte(0x10) == 0x10)
 
 #### reads word from address
 
-- reads word from address
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("reads word from address")
 val port = VolatilePort.new()
 check(port.read_word(0x20) == 0x20)
 ```
@@ -496,18 +502,16 @@ check(port.read_word(0x20) == 0x20)
 
 #### reads dword from address
 
-- reads dword from address
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("reads dword from address")
 val port = VolatilePort.new()
 check(port.read_dword(0x30) == 0x30)
 ```
@@ -516,18 +520,16 @@ check(port.read_dword(0x30) == 0x30)
 
 #### reads qword from address
 
-- reads qword from address
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("reads qword from address")
 val port = VolatilePort.new()
 check(port.read_qword(0x40) == 0x40)
 ```
@@ -538,18 +540,17 @@ check(port.read_qword(0x40) == 0x40)
 
 #### writes byte to address
 
-- writes byte to address
+1. check
+2. check log
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("writes byte to address")
 val port = VolatilePort.new()
 val _ = port.write_byte(0x10, 1)
 check(port.last_value == 0x11)
@@ -560,18 +561,17 @@ check_log(port.events, ["write_byte"])
 
 #### writes word to address
 
-- writes word to address
+1. check
+2. check log
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("writes word to address")
 val port = VolatilePort.new()
 val _ = port.write_word(0x20, 2)
 check(port.last_value == 0x22)
@@ -582,18 +582,17 @@ check_log(port.events, ["write_word"])
 
 #### writes dword to address
 
-- writes dword to address
+1. check
+2. check log
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("writes dword to address")
 val port = VolatilePort.new()
 val _ = port.write_dword(0x30, 3)
 check(port.last_value == 0x33)
@@ -604,18 +603,17 @@ check_log(port.events, ["write_dword"])
 
 #### writes qword to address
 
-- writes qword to address
+1. check
+2. check log
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("writes qword to address")
 val port = VolatilePort.new()
 val _ = port.write_qword(0x40, 4)
 check(port.last_value == 0x44)
@@ -632,18 +630,16 @@ _Polling hardware status registers._
 
 #### polls until ready
 
-- polls until ready
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("polls until ready")
 val status = VolatileCell.new(0x8000, 0)
 val _ = status.write(1)
 check(status.read() == 1)
@@ -656,18 +652,17 @@ _Shared memory with DMA controller._
 
 #### reads DMA-written buffer
 
-- reads DMA-written buffer
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("reads DMA-written buffer")
 val dma = VolatileCell.new(0x8100, 12)
 check(dma.read() == 12)
 check(dma.reads == 1)
@@ -680,18 +675,16 @@ _Shared variables between ISR and main._
 
 #### reads ISR-modified variable
 
-- reads ISR-modified variable
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("reads ISR-modified variable")
 val shared = VolatileCell.new(0x8200, 5)
 val _ = shared.write(9)
 check(shared.read() == 9)
@@ -704,18 +697,16 @@ _Registers requiring specific access sequences._
 
 #### unlocks flash with sequence
 
-- unlocks flash with sequence
+1. check log
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("unlocks flash with sequence")
 val tracker = BarrierTracker.new()
 val _ = tracker.store_barrier()
 val _ = tracker.full_barrier()
@@ -737,51 +728,3 @@ check_log(tracker.events, ["sfence", "mfence", "compiler"])
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `627f00959698a1c5b9abbf53f67b707b18c3d0411ae0420e7c5611e5e39b7b41`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `627f00959698a1c5b9abbf53f67b707b18c3d0411ae0420e7c5611e5e39b7b41`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `627f00959698a1c5b9abbf53f67b707b18c3d0411ae0420e7c5611e5e39b7b41`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/features/baremetal/volatile_spec.spl
-mirror: doc/06_spec/03_system/feature/features/baremetal/volatile_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/features/baremetal/volatile_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/features/baremetal/volatile_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, evidence, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/features/baremetal/volatile_spec.spl:125:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'declares volatile variable at address' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/features/baremetal/volatile_spec.spl:133:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'declares multiple registers' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/features/baremetal/volatile_spec.spl:148:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'prevents read optimization' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

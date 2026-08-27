@@ -16,7 +16,7 @@
 #     val converted = transcode(bytes, Encoding.Utf16LE, Encoding.Utf8)
 
 use std.common.encoding.utf8.{
-    utf8_decode_all, utf8_encode_all, text_from_codepoints
+    utf8_encode_one, utf8_decode_all, utf8_encode_all, utf8_is_valid
 }
 use std.common.encoding.utf16.{
     utf16_encode_all, utf16_decode_all,
@@ -109,7 +109,7 @@ fn decode(bytes: [i64], enc: Encoding) -> text:
     """Decode a byte array from the specified encoding to text (UTF-8)."""
     match enc:
         Encoding.Utf8:
-            codec_bytes_to_text(bytes)
+            bytes_to_text(bytes)
         Encoding.Ascii:
             decode_ascii(bytes)
         Encoding.Latin1:
@@ -157,24 +157,15 @@ fn decode_to_codepoints(bytes: [i64], enc: Encoding) -> [i64]:
             var cps: [i64] = []
             var i: i64 = 0
             while i < bytes.len():
-                val b = bytes[i]
-                if b < 0 or b > 255:
-                    cps.push(0x3F)
-                elif b < 128:
-                    cps.push(b)
-                else:
-                    cps.push(0x3F)
+                val b = bytes[i] & 0x7F
+                cps.push(b)
                 i = i + 1
             cps
         Encoding.Latin1:
             var cps: [i64] = []
             var i: i64 = 0
             while i < bytes.len():
-                val b = bytes[i]
-                if b < 0 or b > 255:
-                    cps.push(0x3F)
-                else:
-                    cps.push(b)
+                cps.push(bytes[i] & 0xFF)
                 i = i + 1
             cps
         Encoding.Utf16LE:
@@ -197,7 +188,7 @@ fn encode_from_codepoints(cps: [i64], enc: Encoding) -> [i64]:
             var result: [i64] = []
             var i: i64 = 0
             while i < cps.len():
-                if cps[i] >= 0 and cps[i] < 128:
+                if cps[i] < 128:
                     result.push(cps[i])
                 else:
                     result.push(0x3F)  # '?' for non-ASCII
@@ -207,7 +198,7 @@ fn encode_from_codepoints(cps: [i64], enc: Encoding) -> [i64]:
             var result: [i64] = []
             var i: i64 = 0
             while i < cps.len():
-                if cps[i] >= 0 and cps[i] < 256:
+                if cps[i] < 256:
                     result.push(cps[i])
                 else:
                     result.push(0x3F)  # '?' for out of range
@@ -230,13 +221,13 @@ fn encode_from_codepoints(cps: [i64], enc: Encoding) -> [i64]:
 
 fn encode_ascii(s: text) -> [i64]:
     """Encode text to ASCII bytes. Non-ASCII chars become '?'."""
-    val cps = text_to_codepoints(s)
+    val bytes = s.bytes()
     var result: [i64] = []
     var i: i64 = 0
-    while i < cps.len():
-        val cp = cps[i]
-        if cp >= 0 and cp < 128:
-            result.push(cp)
+    while i < bytes.len():
+        val b = bytes[i]
+        if b < 128:
+            result.push(b)
         else:
             result.push(0x3F)  # '?'
         i = i + 1
@@ -247,10 +238,8 @@ fn decode_ascii(bytes: [i64]) -> text:
     var parts: [text] = []
     var i: i64 = 0
     while i < bytes.len():
-        val b = bytes[i]
-        if b < 0 or b > 255:
-            parts.push("?")
-        elif b < 128:
+        val b = bytes[i] & 0xFF
+        if b < 128:
             parts.push(char_from_code_fast(b))
         else:
             parts.push("?")
@@ -280,11 +269,7 @@ fn decode_latin1(bytes: [i64]) -> text:
     var cps: [i64] = []
     var i: i64 = 0
     while i < bytes.len():
-        val b = bytes[i]
-        if b < 0 or b > 255:
-            cps.push(0x3F)
-        else:
-            cps.push(b)
+        cps.push(bytes[i] & 0xFF)
         i = i + 1
     codepoints_to_text(cps)
 
@@ -298,17 +283,34 @@ fn text_to_codepoints(s: text) -> [i64]:
     utf8_decode_all(bytes)
 
 fn codepoints_to_text(cps: [i64]) -> text:
-    """Convert Unicode codepoints to validated UTF-8 text."""
-    text_from_codepoints(cps)
+    """Convert array of Unicode codepoints to text."""
+    var parts: [text] = []
+    var i: i64 = 0
+    while i < cps.len():
+        val cp = cps[i]
+        if cp >= 0 and cp < 128:
+            parts.push(char_from_code_fast(cp))
+        else:
+            # Encode codepoint as UTF-8 bytes and build string
+            val encoded = utf8_encode_one(cp)
+            var byte_parts: [text] = []
+            var j: i64 = 0
+            while j < encoded.len():
+                byte_parts.push(char_from_code_fast(encoded[j]))
+                j = j + 1
+            parts.push(byte_parts.join(""))
+        i = i + 1
+    parts.join("")
 
-fn codec_bytes_to_text(bytes: [i64]) -> text:
-    """Decode UTF-8 bytes with replacement into validated UTF-8 text."""
+fn bytes_to_text(bytes: [i64]) -> text:
+    """Convert UTF-8 byte array to text string."""
+    var parts: [text] = []
     var i: i64 = 0
     while i < bytes.len():
         if bytes[i] < 0 or bytes[i] > 255:
             return ""
         i = i + 1
-    text_from_codepoints(utf8_decode_all(bytes))
+    parts.join("")
 
 fn char_from_code_fast(code: i64) -> text:
     """Fast byte-to-char for 0-255 range. Uses lookup table for ASCII."""

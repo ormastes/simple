@@ -1,411 +1,435 @@
 #!/bin/sh
-# Standalone origin-health watchdog. NOT a pre-push guard.
+# watch-origin-tree-health.shs — standalone WATCHDOG (not a pre-push guard).
 #
-# ---------------------------------------------------------------------------
-# WHY THIS EXISTS
-# ---------------------------------------------------------------------------
-# `main` has been wiped to a near-empty tree four times. The five/seven pre-push
-# guards in scripts/check/ exist to block exactly that, and on paper they do.
-# But doc/08_tracking/bug/fourth_tree_wipe_6f86ff32a7d_guard_not_enforced_2026-08-11.md
-# found the failure mode the guards structurally cannot cover: a stale
-# `core.hooksPath` plus a non-executable hook file silently downgraded EVERY
-# guard to advisory for a real push. Nothing errored. Nothing was skipped
-# loudly. The wipe reached origin and was found by luck.
+# Detects a wiped or structurally-corrupt origin/main and makes it LOUD, on a
+# timer, independent of any push happening. Motivation: this repo suffered
+# FOUR whole-tree wipes (2026-08-01 x2, 2313821fd77, and 6f86ff32a7d which cut
+# origin/main from 113,030 files to 3 under a "docs(todo)" title on
+# 2026-08-11). Every one was found by luck, minutes-to-hours later, by
+# whoever happened to look. The existing pre-push guards
+# (check-tree-size-push.shs and siblings) are ADVISORY for the plumbing
+# `git push <sha>:refs/heads/main` landing pattern this repo mandates — a
+# plumbing push never fires a git pre-push hook, so a guard that only runs as
+# a hook never ran for any of the four incidents. This script does not fix
+# that; it is an independent, pull-based safety net that does not depend on
+# the pusher running anything at all.
 #
-# Detection of a wipe must therefore NOT depend on the pusher's hooks having
-# run. This watchdog is that independent path. It differs in KIND from the
-# guards:
+# THIS IS NOT AN EIGHTH PRE-PUSH GUARD. It never runs on push, never blocks a
+# push, and never mutates refs. It is a periodic FETCH + READ-ONLY INSPECTION
+# of whatever is at origin/main right now (or an explicit --rev), so
+# detection does not depend on the pusher's local guards having run, and does
+# not depend on anyone remembering to look.
 #
-#   * it never runs on push, and can never block one;
-#   * it never mutates a ref, never writes to the object store beyond a
-#     read-only fetch, and never checks anything out;
-#   * it inspects whatever tip is ACTUALLY at origin right now, no matter how
-#     it got there or which hooks did or did not fire;
-#   * on a bad tip it PRINTS the restore recipe and never runs it.
+# SOURCE OF TRUTH FOR THRESHOLDS: scripts/check/check-tree-size-push.shs
+# (CFG_ABS_MIN / CFG_ABS_MAX / CFG_SRC_MIN / CFG_SRC_MAX, and the
+# src/runtime >= 150 canary in its CFG_PATHS). This file mirrors those
+# constants rather than sourcing the other script, because the other script
+# is a `set -e` push-time gate with its own selftest/trap/argv handling not
+# meant to be imported; --check-thresholds-agree (also run inside --selftest)
+# greps the sibling file's literal values and fails loudly the moment the two
+# drift apart, which is the failure mode a silent duplicate risks.
 #
-# ---------------------------------------------------------------------------
-# THRESHOLDS
-# ---------------------------------------------------------------------------
-# scripts/check/check-tree-size-push.shs is the SOURCE OF TRUTH for every
-# threshold below. This file duplicates the literals so it can run standalone,
-# and --selftest cross-checks the two files' literal values so they cannot
-# drift apart silently. If you change a number, change it there first.
-#
-# ---------------------------------------------------------------------------
-# VERDICT CONVENTION (last line of stdout, same as the pre-push guards)
-# ---------------------------------------------------------------------------
-#   PASS  — <n> invariant(s) checked, origin/main healthy (<files> files)  exit 0
-#   FAIL  — ...                                                            exit 1
-#   ERROR — nothing was checked                                            exit 2
-#
-# A run that checked 0 invariants is ERROR, never a pass. Absence of a tool
-# (git) is ERROR, never a pass.
-#
-# USAGE
-#   sh scripts/check/watch-origin-tree-health.shs --once
-#   sh scripts/check/watch-origin-tree-health.shs --once --rev <sha>   # no fetch
-#   sh scripts/check/watch-origin-tree-health.shs --watch [interval_s]  # default 300
+# USAGE:
+#   sh scripts/check/watch-origin-tree-health.shs --once [--rev <sha-or-ref>]
+#   sh scripts/check/watch-origin-tree-health.shs --watch [interval_seconds]
 #   sh scripts/check/watch-origin-tree-health.shs --selftest
 #
-# ENV: WATCH_REMOTE / WATCH_BRANCH override what is fetched. When origin's
-# HTTPS token is dead (see .claude/rules/vcs.md) the fetch fails and this
-# reports ERROR, never a pass; run it against the SSH URL instead:
-#   GIT_SSH_COMMAND="ssh -o BatchMode=yes -i ~/.ssh/id_ed25519_this_mac" \
-#     WATCH_REMOTE=git@github.com:ormastes/simple.git sh scripts/check/watch-origin-tree-health.shs --once
-
+# VERDICT (last line of stdout on every exit path):
+#   PASS  — "PASS — <n> invariant(s) checked, origin/main healthy (<files> files)"   exit 0
+#   FAIL  — "FAIL — ..."                                                             exit 1
+#   ERROR — "ERROR — nothing was checked"                                            exit 2
+#
+# STATE FILE (--watch only): $STATE_FILE (default
+# build/watch-origin-tree-health.state) holds the last verdict word so repeat
+# alerts are suppressed and only STATE CHANGES are reported loudly; the log
+# file it writes to ($LOG_FILE, default build/watch-origin-tree-health.log)
+# is truncated to the last $LOG_MAX_LINES (default 5000) lines each cycle so
+# it cannot grow unbounded.
 set -u
 
-SELF_DIR=$(dirname "$0")
-SIZE_GUARD="$SELF_DIR/check-tree-size-push.shs"
+SELF=watch-origin-tree-health
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd) || REPO_ROOT=.
 
-# --- thresholds (mirror of check-tree-size-push.shs; cross-checked by selftest)
+GREP=grep
+[ -x /usr/bin/grep ] && GREP=/usr/bin/grep
+
+SIBLING="$REPO_ROOT/scripts/check/check-tree-size-push.shs"
+
+# --- mirrored thresholds — see header comment; kept honest by
+#     check_thresholds_agree() below, run at the top of --selftest. --------
 CFG_ABS_MIN=90000
 CFG_ABS_MAX=150000
 CFG_SRC_MIN=13
 CFG_SRC_MAX=25
-CFG_PATHS='src/runtime:150 src/os:1200 src/lib:5000 src/compiler:1200 src/app:2000 scripts:500 doc:1000'
+CFG_RUNTIME_MIN=150
 
-REMOTE=${WATCH_REMOTE:-origin}
-BRANCH=${WATCH_BRANCH:-main}
+STATE_FILE=${STATE_FILE:-"$REPO_ROOT/build/watch-origin-tree-health.state"}
+LOG_FILE=${LOG_FILE:-"$REPO_ROOT/build/watch-origin-tree-health.log"}
+LOG_MAX_LINES=${LOG_MAX_LINES:-5000}
+LAST_GOOD_FILE=${LAST_GOOD_FILE:-"$REPO_ROOT/build/watch-origin-tree-health.last_good"}
 
-EV_CHECKED=0
-EV_FAILS=''
+TMPROOT=""
+cleanup() { [ -n "$TMPROOT" ] && rm -rf "$TMPROOT"; }
+trap cleanup EXIT INT TERM
 
-note() { printf '%s\n' "$*"; }
-
-verdict_error() {
-    note "ERROR — nothing was checked${1:+: $1}"
+die_error() {
+    echo "$SELF: ERROR — $*" >&2
+    echo "$SELF: ERROR — nothing was checked"
     exit 2
 }
 
 # ---------------------------------------------------------------------------
-# evaluate_invariants
-#
-# Pure decision function over already-measured numbers, so --selftest can drive
-# it with synthetic values without needing a 109k-file fixture repository.
-#
-#   $1 total files
-#   $2 src/ entry count
-#   $3 duplicate-path count
-#   $4.. list of "path:floor:actual" triples
-#
-# Sets EV_CHECKED (number of invariants actually evaluated) and EV_FAILS.
+# check_thresholds_agree — greps the sibling guard's literal CFG_* values and
+# fails loudly if they no longer match what we mirror above.
 # ---------------------------------------------------------------------------
-evaluate_invariants() {
-    ev_total=$1
-    ev_src=$2
-    ev_dups=$3
-    shift 3
-
-    EV_CHECKED=0
-    EV_FAILS=''
-
-    # 1. absolute file-count band
-    case "$ev_total" in
-        ''|*[!0-9]*) ;;
-        *)
-            EV_CHECKED=$((EV_CHECKED + 1))
-            if [ "$ev_total" -lt "$CFG_ABS_MIN" ]; then
-                EV_FAILS="$EV_FAILS
-  file count $ev_total is below the absolute floor $CFG_ABS_MIN (tree wipe)"
-            elif [ "$ev_total" -gt "$CFG_ABS_MAX" ]; then
-                EV_FAILS="$EV_FAILS
-  file count $ev_total is above the absolute ceiling $CFG_ABS_MAX (tree corruption)"
-            fi
-            ;;
-    esac
-
-    # 2. duplicate recursive paths
-    case "$ev_dups" in
-        ''|*[!0-9]*) ;;
-        *)
-            EV_CHECKED=$((EV_CHECKED + 1))
-            if [ "$ev_dups" -gt 0 ]; then
-                EV_FAILS="$EV_FAILS
-  $ev_dups duplicate path(s) in the recursive listing (a tree entry appears twice)"
-            fi
-            ;;
-    esac
-
-    # 3. src/ entry band
-    case "$ev_src" in
-        ''|*[!0-9]*) ;;
-        *)
-            EV_CHECKED=$((EV_CHECKED + 1))
-            if [ "$ev_src" -lt "$CFG_SRC_MIN" ] || [ "$ev_src" -gt "$CFG_SRC_MAX" ]; then
-                EV_FAILS="$EV_FAILS
-  src/ has $ev_src entries, outside the band $CFG_SRC_MIN..$CFG_SRC_MAX"
-            fi
-            ;;
-    esac
-
-    # 4. load-bearing path floors
-    for triple in "$@"; do
-        [ -n "$triple" ] || continue
-        tp_path=${triple%%:*}
-        tp_rest=${triple#*:}
-        tp_floor=${tp_rest%%:*}
-        tp_actual=${tp_rest#*:}
-        case "$tp_actual" in
-            ''|*[!0-9]*) continue ;;
-        esac
-        EV_CHECKED=$((EV_CHECKED + 1))
-        if [ "$tp_actual" -lt "$tp_floor" ]; then
-            EV_FAILS="$EV_FAILS
-  $tp_path holds $tp_actual file(s), below the floor $tp_floor"
+check_thresholds_agree() {
+    [ -f "$SIBLING" ] || { echo "$SELF: WARN — sibling guard $SIBLING not found, cannot cross-check thresholds" >&2; return 0; }
+    ct_ok=1
+    for ct_pair in "CFG_ABS_MIN=$CFG_ABS_MIN" "CFG_ABS_MAX=$CFG_ABS_MAX" \
+                   "CFG_SRC_MIN=$CFG_SRC_MIN" "CFG_SRC_MAX=$CFG_SRC_MAX"; do
+        ct_name=${ct_pair%%=*}
+        if ! "$GREP" -q "^${ct_name}=${ct_pair#*=}" "$SIBLING"; then
+            echo "$SELF: THRESHOLD DRIFT: $ct_pair does not match $SIBLING" >&2
+            ct_ok=0
         fi
     done
-}
-
-print_restore_recipe() {
-    bad=$1
-    note ''
-    note '--- RESTORE RECIPE (printed only; this script never runs it) ---------'
-    note '# 1. Find the last healthy ancestor and confirm its file count by hand:'
-    note "#      git rev-list --max-count=20 $bad | while read c; do \\"
-    note '#        printf "%s %s\n" "$c" "$(git ls-tree -r --name-only $c | wc -l)"; done'
-    note '# 2. Build a tree from that healthy commit in a TEMP index (never the'
-    note '#    shared working copy):'
-    note '#      export GIT_INDEX_FILE=$(mktemp)'
-    note '#      git read-tree <HEALTHY>'
-    note '#      TREE=$(git write-tree)'
-    note "# 3. Fast-forward: a new commit whose PARENT is the bad tip $bad,"
-    note '#    so history is preserved and nothing is force-pushed:'
-    note "#      NEW=\$(git commit-tree \$TREE -p $bad -m 'fix(repo): restore tree wiped at $bad')"
-    note '# 4. Re-verify BEFORE pushing, then push non-forced:'
-    note "#      git ls-tree -r --name-only \$NEW | wc -l   # must be >= $CFG_ABS_MIN"
-    note "#      sh scripts/check/check-tree-size-push.shs $bad..\$NEW"
-    note "#      git push git@github.com:ormastes/simple.git \$NEW:refs/heads/$BRANCH"
-    note '----------------------------------------------------------------------'
-    note ''
+    if ! "$GREP" -q "src/runtime:${CFG_RUNTIME_MIN}" "$SIBLING"; then
+        echo "$SELF: THRESHOLD DRIFT: src/runtime canary $CFG_RUNTIME_MIN does not match $SIBLING CFG_PATHS" >&2
+        ct_ok=0
+    fi
+    [ "$ct_ok" -eq 1 ]
 }
 
 # ---------------------------------------------------------------------------
-# selftest — FATAL, runs before every scan
+# inspect_tip <repo> <rev> — sets TIP_SHA, TIP_FILES, TIP_SRCN, TIP_DUPS.
+# Returns 0 on success, 1 if git failed (never a clean result).
 # ---------------------------------------------------------------------------
-st_fail=0
-st_ran=0
-st_case() {
-    st_name=$1; st_want=$2; st_got=$3
-    st_ran=$((st_ran + 1))
-    if [ "$st_want" = "$st_got" ]; then
-        note "  selftest ok   : $st_name"
-    else
-        note "  selftest FAIL : $st_name (want '$st_want', got '$st_got')"
-        st_fail=$((st_fail + 1))
-    fi
-}
-
-# Pull a literal `NAME=value` assignment out of the size guard, for the
-# cross-check. Returns the empty string if absent (which is itself a failure).
-guard_literal() {
-    sed -n "s|^$1=||p" "$SIZE_GUARD" 2>/dev/null | head -1 | sed -e 's|#.*||' -e 's|[[:space:]]*$||'
-}
-
-run_selftest() {
-    note 'watch-origin-tree-health: selftest'
-
-    # --- 1..5: threshold cross-check against the source of truth -------------
-    if [ ! -f "$SIZE_GUARD" ]; then
-        note "  selftest FAIL : source-of-truth guard missing at $SIZE_GUARD"
-        note 'FAIL — selftest failed (1 of 1)'
-        exit 1
-    fi
-    st_case 'CFG_ABS_MIN matches check-tree-size-push.shs' "$CFG_ABS_MIN" "$(guard_literal CFG_ABS_MIN)"
-    st_case 'CFG_ABS_MAX matches check-tree-size-push.shs' "$CFG_ABS_MAX" "$(guard_literal CFG_ABS_MAX)"
-    st_case 'CFG_SRC_MIN matches check-tree-size-push.shs' "$CFG_SRC_MIN" "$(guard_literal CFG_SRC_MIN)"
-    st_case 'CFG_SRC_MAX matches check-tree-size-push.shs' "$CFG_SRC_MAX" "$(guard_literal CFG_SRC_MAX)"
-    st_case 'CFG_PATHS matches check-tree-size-push.shs' "'$CFG_PATHS'" "$(guard_literal CFG_PATHS)"
-
-    # --- 6: healthy tree must PASS -------------------------------------------
-    evaluate_invariants 109557 15 0 'src/runtime:150:185' 'src/os:1200:1622' 'src/lib:5000:7456'
-    st_case 'healthy numbers -> no failures' '' "$EV_FAILS"
-    st_case 'healthy numbers -> 6 invariants checked' '6' "$EV_CHECKED"
-
-    # --- 7: the real wipe (118c636ead8: 109,375 -> 4) must FAIL --------------
-    evaluate_invariants 4 0 0 'src/runtime:150:0'
-    st_case 'wipe to 4 files -> fails' 'yes' "$([ -n "$EV_FAILS" ] && echo yes || echo no)"
-
-    # --- 8: the duplicate-entry corruption must FAIL -------------------------
-    # 109,815 files — HIGHER than healthy — with src/ at 9 and src/runtime at 0.
-    evaluate_invariants 109815 9 272 'src/runtime:150:0'
-    st_case 'duplicate-entry corruption -> fails' 'yes' "$([ -n "$EV_FAILS" ] && echo yes || echo no)"
-
-    # --- 9: each signal must fire ALONE (no masking) --------------------------
-    evaluate_invariants 109557 9 0 'src/runtime:150:185'
-    st_case 'src/ entry band fires alone' 'yes' "$([ -n "$EV_FAILS" ] && echo yes || echo no)"
-    evaluate_invariants 109557 15 0 'src/runtime:150:0'
-    st_case 'src/runtime canary fires alone' 'yes' "$([ -n "$EV_FAILS" ] && echo yes || echo no)"
-    evaluate_invariants 109557 15 1 'src/runtime:150:185'
-    st_case 'duplicate-path check fires alone' 'yes' "$([ -n "$EV_FAILS" ] && echo yes || echo no)"
-
-    # --- 10: a run that measured nothing must be non-vacuous-detectable -------
-    evaluate_invariants '' '' '' ''
-    st_case 'unmeasurable tree -> 0 invariants (caller must ERROR)' '0' "$EV_CHECKED"
-
-    # --- 11: git must exist; absence of the tool is ERROR, never a pass -------
-    command -v git >/dev/null 2>&1
-    st_case 'git is available' '0' "$?"
-
-    if [ "$st_ran" -eq 0 ]; then
-        note 'ERROR — nothing was checked (selftest ran 0 cases)'
-        exit 2
-    fi
-    if [ "$st_fail" -ne 0 ]; then
-        note "FAIL — selftest failed ($st_fail of $st_ran)"
-        exit 1
-    fi
-    note "  selftest: $st_ran/$st_ran cases ok"
-    note ''
-}
-
-# ---------------------------------------------------------------------------
-# measure + verdict for one revision
-# ---------------------------------------------------------------------------
-check_rev() {
-    rev=$1
-
-    total=$(git ls-tree -r --name-only "$rev" 2>/dev/null | wc -l | tr -d ' ')
-    rc=$?
-    if [ "$rc" -ne 0 ] || [ -z "$total" ] || [ "$total" -eq 0 ] 2>/dev/null; then
-        verdict_error "could not list the tree at $rev"
-    fi
-
-    src_entries=$(git ls-tree --name-only "$rev:src" 2>/dev/null | wc -l | tr -d ' ')
-    dups=$(git ls-tree -r --name-only "$rev" 2>/dev/null | sort | uniq -d | wc -l | tr -d ' ')
-
-    triples=''
-    for spec in $CFG_PATHS; do
-        p=${spec%%:*}
-        floor=${spec#*:}
-        actual=$(git ls-tree -r --name-only "$rev" -- "$p" 2>/dev/null | wc -l | tr -d ' ')
-        triples="$triples $p:$floor:$actual"
-    done
-
-    # shellcheck disable=SC2086
-    evaluate_invariants "$total" "$src_entries" "$dups" $triples
-
-    if [ "$EV_CHECKED" -eq 0 ]; then
-        verdict_error "measured 0 invariants at $rev"
-    fi
-
-    note "$REMOTE/$BRANCH tip     : $rev"
-    note "  total files      : $total   (band $CFG_ABS_MIN..$CFG_ABS_MAX)"
-    note "  src/ entries     : $src_entries   (band $CFG_SRC_MIN..$CFG_SRC_MAX)"
-    note "  duplicate paths  : $dups"
-    for t in $triples; do
-        note "  ${t%%:*} -> ${t##*:} (floor $(x=${t#*:}; echo "${x%%:*}"))"
-    done
-
-    if [ -n "$EV_FAILS" ]; then
-        note ''
-        note 'Violations:'
-        note "$EV_FAILS"
-        print_restore_recipe "$rev"
-        note "FAIL — $EV_CHECKED invariant(s) checked, $REMOTE/$BRANCH is UNHEALTHY at $rev ($total files)"
+inspect_tip() {
+    it_repo=$1
+    it_rev=$2
+    TIP_SHA=$(git -C "$it_repo" rev-parse "$it_rev" 2>"$TMPROOT/rp.err")
+    it_st=$?
+    if [ "$it_st" -ne 0 ] || [ -z "$TIP_SHA" ]; then
+        cat "$TMPROOT/rp.err" >&2 2>/dev/null
         return 1
     fi
 
-    note "PASS — $EV_CHECKED invariant(s) checked, $REMOTE/$BRANCH healthy ($total files)"
+    git -C "$it_repo" ls-tree -r --name-only "$TIP_SHA" >"$TMPROOT/ls.out" 2>"$TMPROOT/ls.err"
+    it_st=$?
+    if [ "$it_st" -ne 0 ]; then
+        cat "$TMPROOT/ls.err" >&2 2>/dev/null
+        return 1
+    fi
+    TIP_FILES=$(wc -l <"$TMPROOT/ls.out" | tr -d ' ')
+
+    git -C "$it_repo" ls-tree -r -t --name-only "$TIP_SHA" >"$TMPROOT/lst.out" 2>/dev/null || return 1
+    sort "$TMPROOT/lst.out" >"$TMPROOT/sorted.out" || return 1
+    uniq -d "$TMPROOT/sorted.out" >"$TMPROOT/dup.out" || return 1
+    TIP_DUPS=$(wc -l <"$TMPROOT/dup.out" | tr -d ' ')
+    TIP_DUPLIST=$(head -n 5 "$TMPROOT/dup.out")
+
+    git -C "$it_repo" ls-tree --name-only "$TIP_SHA" -- src >"$TMPROOT/se.out" 2>/dev/null || return 1
+    if [ ! -s "$TMPROOT/se.out" ]; then
+        TIP_SRCN=-1
+    else
+        git -C "$it_repo" ls-tree --name-only "$TIP_SHA:src" >"$TMPROOT/se.out" 2>/dev/null || return 1
+        TIP_SRCN=$(wc -l <"$TMPROOT/se.out" | tr -d ' ')
+    fi
+
+    git -C "$it_repo" ls-tree -r --name-only "$TIP_SHA" -- src/runtime >"$TMPROOT/rt.out" 2>/dev/null || return 1
+    TIP_RUNTIME=$(wc -l <"$TMPROOT/rt.out" | tr -d ' ')
     return 0
 }
 
-resolve_tip() {
-    # Read-only fetch. Never mutates a local ref, never checks anything out.
-    git fetch --quiet "$REMOTE" "$BRANCH" >/dev/null 2>&1
-    fr=$?
-    if [ "$fr" -ne 0 ]; then
-        return 1
+# ---------------------------------------------------------------------------
+# evaluate_tip <repo> <rev> — prints reasons on stderr, returns 0/1/2 like the
+# sibling guard's evaluate_commit. Sets EV_N (invariants checked).
+# ---------------------------------------------------------------------------
+evaluate_tip() {
+    inspect_tip "$1" "$2" || return 2
+    ev_bad=0
+    EV_N=4
+
+    if [ "$TIP_FILES" -lt "$CFG_ABS_MIN" ] || [ "$TIP_FILES" -gt "$CFG_ABS_MAX" ]; then
+        echo "  - TREE SIZE OUT OF BAND: $TIP_FILES file(s); expected ${CFG_ABS_MIN}..${CFG_ABS_MAX}" >&2
+        ev_bad=1
     fi
-    git rev-parse FETCH_HEAD 2>/dev/null
+    if [ "$TIP_DUPS" -ne 0 ]; then
+        echo "  - DUPLICATE TREE ENTRIES: $TIP_DUPS duplicated path(s)" >&2
+        ev_bad=1
+    fi
+    if [ "$TIP_SRCN" -lt 0 ]; then
+        echo "  - src/ IS ABSENT from the tree entirely" >&2
+        ev_bad=1
+    elif [ "$TIP_SRCN" -lt "$CFG_SRC_MIN" ] || [ "$TIP_SRCN" -gt "$CFG_SRC_MAX" ]; then
+        echo "  - src/ ENTRY COUNT OUT OF BAND: $TIP_SRCN entries, band is ${CFG_SRC_MIN}..${CFG_SRC_MAX}" >&2
+        ev_bad=1
+    fi
+    if [ "$TIP_RUNTIME" -lt "$CFG_RUNTIME_MIN" ]; then
+        echo "  - LOAD-BEARING CANARY EMPTY/SHORT: src/runtime has $TIP_RUNTIME file(s), needs >= $CFG_RUNTIME_MIN" >&2
+        ev_bad=1
+    fi
+    return "$ev_bad"
 }
 
-# ---------------------------------------------------------------------------
-# main
-# ---------------------------------------------------------------------------
-MODE=''
-REV=''
+print_restore_recipe() {
+    pr_repo=$1
+    pr_bad_sha=$2
+    pr_good_sha=$3
+    cat >&2 <<EOF
+
+  RESTORE RECIPE (review before running — this watchdog never auto-restores):
+    BAD=$pr_bad_sha
+    GOOD=$pr_good_sha
+    PARENT=\$(git -C "$pr_repo" rev-parse "\$BAD^")   # verify this equals \$GOOD
+    IDX=\$(mktemp)
+    GIT_INDEX_FILE="\$IDX" git -C "$pr_repo" read-tree "\$GOOD"
+    # re-apply any files \$BAD legitimately changed on top of \$GOOD here, e.g.:
+    #   GIT_INDEX_FILE="\$IDX" git -C "$pr_repo" update-index --add <path>...
+    TREE=\$(GIT_INDEX_FILE="\$IDX" git -C "$pr_repo" write-tree)
+    FIX=\$(git -C "$pr_repo" commit-tree "\$TREE" -p "\$BAD" -m "fix: restore tree wiped by \$BAD")
+    GIT_SSH_COMMAND="ssh -o BatchMode=yes -i ~/.ssh/id_ed25519_this_mac" \\
+      git -C "$pr_repo" push git@github.com:ormastes/simple.git "\$FIX":refs/heads/main
+EOF
+}
+
+# ===========================================================================
+# --once / --watch driver
+# ===========================================================================
+run_once() {
+    ro_repo=$1
+    ro_rev=$2
+    ro_fetch=$3   # 1 = fetch first, 0 = inspect ro_rev as-is (used for --rev on an explicit sha)
+
+    if [ "$ro_fetch" -eq 1 ]; then
+        git -C "$ro_repo" fetch --quiet origin main 2>"$TMPROOT/fetch.err"
+        if [ $? -ne 0 ]; then
+            echo "$SELF: fetch of origin main failed:" >&2
+            cat "$TMPROOT/fetch.err" >&2 2>/dev/null
+            echo "ERROR — nothing was checked"
+            return 2
+        fi
+    fi
+
+    # NOTE: must NOT be `x=$(evaluate_tip ...)` — command substitution runs in
+    # a subshell, so TIP_SHA/TIP_FILES/etc set inside evaluate_tip would never
+    # propagate back here. Redirect stderr to a file instead and run inline.
+    evaluate_tip "$ro_repo" "$ro_rev" >/dev/null 2>"$TMPROOT/reasons.out"
+    ro_rc=$?
+    ro_reasons=$(cat "$TMPROOT/reasons.out")
+
+    if [ "$ro_rc" -eq 2 ]; then
+        echo "$SELF: could not inspect $ro_rev:" >&2
+        printf '%s\n' "$ro_reasons" >&2
+        echo "ERROR — nothing was checked"
+        return 2
+    fi
+
+    if [ "$ro_rc" -eq 0 ]; then
+        echo "PASS — $EV_N invariant(s) checked, origin/main healthy ($TIP_FILES files)"
+        return 0
+    fi
+
+    echo "$SELF: origin/main tip $TIP_SHA FAILED health checks:" >&2
+    printf '%s\n' "$ro_reasons" >&2
+    if [ -f "$LAST_GOOD_FILE" ]; then
+        ro_good=$(cat "$LAST_GOOD_FILE")
+    else
+        ro_good="<unknown — no prior PASS recorded by this watcher>"
+    fi
+    echo "" >&2
+    echo "  ====================================================================" >&2
+    echo "  == ORIGIN/MAIN TREE WIPE OR CORRUPTION DETECTED                    ==" >&2
+    echo "  ====================================================================" >&2
+    echo "  bad tip:        $TIP_SHA ($TIP_FILES files)" >&2
+    echo "  last-known-good: $ro_good" >&2
+    print_restore_recipe "$ro_repo" "$TIP_SHA" "$ro_good"
+    echo "FAIL — $EV_N invariant(s) checked, tip $TIP_SHA ($TIP_FILES files)"
+    return 1
+}
+
+do_watch() {
+    dw_repo=$1
+    dw_interval=$2
+    mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null
+    dw_prev=""
+    [ -f "$STATE_FILE" ] && dw_prev=$(cat "$STATE_FILE")
+    dw_stop=0
+    trap 'dw_stop=1' INT TERM
+
+    while [ "$dw_stop" -eq 0 ]; do
+        dw_out=$(run_once "$dw_repo" origin/main 1 2>&1)
+        dw_rc=$?
+        dw_word=PASS
+        [ "$dw_rc" -eq 1 ] && dw_word=FAIL
+        [ "$dw_rc" -eq 2 ] && dw_word=ERROR
+
+        {
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $dw_word"
+            printf '%s\n' "$dw_out"
+        } >>"$LOG_FILE"
+        tail -n "$LOG_MAX_LINES" "$LOG_FILE" >"$LOG_FILE.trim" 2>/dev/null && mv "$LOG_FILE.trim" "$LOG_FILE"
+
+        if [ "$dw_word" != "$dw_prev" ]; then
+            echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] STATE CHANGE: $dw_prev -> $dw_word"
+            printf '%s\n' "$dw_out"
+        fi
+        if [ "$dw_word" = PASS ]; then
+            git -C "$dw_repo" rev-parse origin/main >"$LAST_GOOD_FILE" 2>/dev/null
+        fi
+        echo "$dw_word" >"$STATE_FILE"
+        dw_prev=$dw_word
+
+        [ "$dw_stop" -eq 1 ] && break
+        dw_slept=0
+        while [ "$dw_slept" -lt "$dw_interval" ] && [ "$dw_stop" -eq 0 ]; do
+            sleep 1
+            dw_slept=$(( dw_slept + 1 ))
+        done
+    done
+
+    echo "$SELF: received stop signal, final verdict:"
+    printf '%s\n' "$dw_out"
+    [ "$dw_word" = PASS ] && exit 0
+    [ "$dw_word" = FAIL ] && exit 1
+    exit 2
+}
+
+# ===========================================================================
+# SELFTEST — 4 fixtures, fatal.
+# ===========================================================================
+st_env() {
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY \
+        -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_COMMON_DIR \
+        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+        GIT_AUTHOR_NAME=selftest GIT_AUTHOR_EMAIL=selftest@local \
+        GIT_COMMITTER_NAME=selftest GIT_COMMITTER_EMAIL=selftest@local \
+        GIT_AUTHOR_DATE='@0 +0000' GIT_COMMITTER_DATE='@0 +0000' \
+        ${ST_INDEX:+GIT_INDEX_FILE="$ST_INDEX"} git "$@"
+}
+st_git() { st_g_repo=$1; shift; st_env -C "$st_g_repo" "$@"; }
+
+st_mktree() {
+    # st_mktree <repo> <files-per-dir> <dir>... -> echoes commit sha
+    # Batched via `update-index --index-info` (one process for all entries)
+    # instead of one `update-index` call per file — the per-file form takes
+    # minutes at fixture sizes needed to clear a 90,000-file absolute floor.
+    st_repo=$1; st_n=$2; shift 2
+    st_idx="$TMPROOT/st.index.$$"
+    rm -f "$st_idx"
+    st_blob=$(printf 'x\n' | st_git "$st_repo" hash-object -w --stdin) || return 1
+    st_info="$TMPROOT/st.info.$$"
+    : >"$st_info"
+    for st_d in "$@"; do
+        st_i=0
+        while [ "$st_i" -lt "$st_n" ]; do
+            printf '100644 %s\t%s/f%s.txt\n' "$st_blob" "$st_d" "$st_i" >>"$st_info"
+            st_i=$(( st_i + 1 ))
+        done
+    done
+    ST_INDEX="$st_idx" st_git "$st_repo" update-index --index-info <"$st_info" || return 1
+    st_tree=$(ST_INDEX="$st_idx" st_git "$st_repo" write-tree) || return 1
+    st_git "$st_repo" commit-tree "$st_tree" -m fixture </dev/null
+}
+
+selftest() {
+    TMPROOT=$(mktemp -d) || die_error "mktemp failed"
+    st_dir="$TMPROOT/repo"
+    mkdir -p "$st_dir"
+    st_git "$st_dir" init -q . || die_error "selftest: git init failed"
+
+    st_fail=0
+
+    # threshold-agreement check runs first, fatal on its own
+    if ! check_thresholds_agree; then
+        echo "$SELF: SELFTEST FAILED — mirrored thresholds drifted from $SIBLING" >&2
+        st_fail=1
+    fi
+
+    # fixture 1: healthy — 100k files across src/runtime(200)+src/os(200)+src/lib(200)... and 15 src/ entries
+    st_srcdirs="runtime os lib std app compiler i18n a b c d e f g"  # 15 entries
+    # shellcheck disable=SC2086
+    st_healthy=$(st_mktree "$st_dir" 6500 $(printf 'src/%s ' $st_srcdirs)) || { echo "fixture build failed" >&2; st_fail=1; }
+    evaluate_tip "$st_dir" "$st_healthy" >/tmp/.wo_h_out 2>&1
+    st_rc=$?
+    echo "--- fixture: healthy-tip (expect PASS/rc0) ---"
+    cat /tmp/.wo_h_out; echo "rc=$st_rc files=$TIP_FILES"
+    [ "$st_rc" -eq 0 ] || { echo "FAIL: expected rc0" >&2; st_fail=1; }
+
+    # fixture 2: wiped — 3 files (mirrors the real incident)
+    st_wiped=$(st_mktree "$st_dir" 1 a b c) || { echo "fixture build failed" >&2; st_fail=1; }
+    evaluate_tip "$st_dir" "$st_wiped" >/tmp/.wo_w_out 2>&1
+    st_rc=$?
+    echo "--- fixture: wiped-tip 3 files (expect FAIL naming file count, rc1) ---"
+    cat /tmp/.wo_w_out; echo "rc=$st_rc files=$TIP_FILES"
+    [ "$st_rc" -eq 1 ] && "$GREP" -q "$TIP_FILES file(s)" /tmp/.wo_w_out || { echo "FAIL: expected rc1 naming file count" >&2; st_fail=1; }
+
+    # fixture 3: src/ missing entirely (no src/ at all) — large enough to clear
+    # the absolute floor via non-src top-level dirs, so ONLY src/-absence fires
+    st_srcless=$(st_mktree "$st_dir" 95000 topdirA) || { echo "fixture build failed" >&2; st_fail=1; }
+    evaluate_tip "$st_dir" "$st_srcless" >/tmp/.wo_s_out 2>&1
+    st_rc=$?
+    echo "--- fixture: src-absent-tip (expect FAIL on src/ absence, rc1) ---"
+    cat /tmp/.wo_s_out; echo "rc=$st_rc files=$TIP_FILES srcn=$TIP_SRCN"
+    [ "$st_rc" -eq 1 ] && "$GREP" -q "src/ IS ABSENT" /tmp/.wo_s_out || { echo "FAIL: expected src/ absence" >&2; st_fail=1; }
+
+    # fixture 4: unreachable/empty remote -> ERROR, never PASS
+    st_bogus="$TMPROOT/does-not-exist"
+    evaluate_tip "$st_bogus" "HEAD" >/tmp/.wo_e_out 2>&1
+    st_rc=$?
+    echo "--- fixture: unreachable-repo (expect rc2, ERROR) ---"
+    cat /tmp/.wo_e_out; echo "rc=$st_rc"
+    [ "$st_rc" -eq 2 ] || { echo "FAIL: expected rc2 (could-not-determine)" >&2; st_fail=1; }
+
+    cleanup
+    TMPROOT=""
+    if [ "$st_fail" -ne 0 ]; then
+        echo "$SELF: SELFTEST FAILED"
+        echo "ERROR — nothing was checked"
+        exit 2
+    fi
+    echo "$SELF: SELFTEST PASSED (4 fixtures + threshold-agreement)"
+}
+
+# ===========================================================================
+# argv
+# ===========================================================================
+MODE=""
+REV="origin/main"
 INTERVAL=300
+DO_FETCH=1
+i_selftest_only=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --selftest) MODE=selftest ;;
-        --once)     MODE=once ;;
-        --watch)
-            MODE=watch
-            case "${2:-}" in
-                ''|-*) ;;
-                *) INTERVAL=$2; shift ;;
-            esac
-            ;;
-        --rev)
-            REV=${2:-}
-            [ -n "$REV" ] || verdict_error '--rev needs an argument'
-            shift
-            ;;
-        -h|--help)
-            sed -n '46,53p' "$0"
-            exit 0
-            ;;
-        *) verdict_error "unknown argument '$1'" ;;
+        --once) MODE=once ;;
+        --watch) MODE=watch ;;
+        --selftest) i_selftest_only=1 ;;
+        --rev) shift; REV=$1; DO_FETCH=0 ;;
+        [0-9]*) INTERVAL=$1 ;;
+        *) die_error "unknown argument: $1" ;;
     esac
     shift
 done
 
-[ -n "$MODE" ] || MODE=once
+selftest
 
-command -v git >/dev/null 2>&1
-have_git=$?
-if [ "$have_git" -ne 0 ]; then
-    verdict_error 'git is not available (absence of a tool is ERROR, never a pass)'
-fi
-
-run_selftest
-[ "$MODE" = selftest ] && exit 0
-
-git rev-parse --git-dir >/dev/null 2>&1
-in_repo=$?
-if [ "$in_repo" -ne 0 ]; then
-    verdict_error 'not inside a git repository (run from the repo root of a real clone)'
+if [ "$i_selftest_only" -eq 1 ]; then
+    exit 0
 fi
 
 case "$MODE" in
     once)
-        if [ -n "$REV" ]; then
-            tip=$(git rev-parse --verify "$REV^{commit}" 2>/dev/null)
-            [ -n "$tip" ] || verdict_error "could not resolve --rev '$REV'"
-        else
-            tip=$(resolve_tip)
-            [ -n "$tip" ] || verdict_error "could not fetch $REMOTE/$BRANCH"
-        fi
-        check_rev "$tip"
-        exit $?
+        TMPROOT=$(mktemp -d) || die_error "mktemp failed"
+        run_once "$REPO_ROOT" "$REV" "$DO_FETCH"
+        rc=$?
+        exit "$rc"
         ;;
     watch)
-        case "$INTERVAL" in
-            ''|*[!0-9]*) verdict_error "bad --watch interval '$INTERVAL'" ;;
-        esac
-        note "watching $REMOTE/$BRANCH every ${INTERVAL}s; alerting on state CHANGE only"
-        last_state=''
-        last_tip=''
-        while :; do
-            tip=$(resolve_tip)
-            if [ -z "$tip" ]; then
-                state=ERROR
-            else
-                out=$(check_rev "$tip" 2>&1)
-                rc=$?
-                if [ "$rc" -eq 0 ]; then state=PASS; else state=FAIL; fi
-            fi
-            if [ "$state" != "$last_state" ] || [ "$tip" != "$last_tip" ] && [ "$state" != PASS ]; then
-                note "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] state=$state tip=${tip:-<unresolved>}"
-                [ "$state" = PASS ] || note "${out:-could not fetch $REMOTE/$BRANCH}"
-                last_state=$state
-            fi
-            last_tip=$tip
-            sleep "$INTERVAL"
-        done
+        TMPROOT=$(mktemp -d) || die_error "mktemp failed"
+        do_watch "$REPO_ROOT" "$INTERVAL"
+        ;;
+    *)
+        die_error "usage: $SELF (--once [--rev <sha>] | --watch [interval_seconds] | --selftest)"
         ;;
 esac
-
-verdict_error 'no mode selected'

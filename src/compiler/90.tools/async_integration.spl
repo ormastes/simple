@@ -14,6 +14,8 @@
 
 use compiler.mir.mir_data.*
 use compiler.hir.hir_types.*
+use compiler.mir.mir_types.{MirType}
+use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
 
 # ============================================================================
 # Async Type Mapping
@@ -70,7 +72,7 @@ struct AsyncInstInfo:
     result_type: text       # Result type for codegen
     is_suspend_point: bool  # Whether this is a suspension point
 
-fn get_async_inst_info(inst: MirInstKind) -> has_AsyncInstInfo?:
+fn get_async_inst_info(inst: MirInstKind) -> has_AsyncInstInfo:
     """Get async info for a MIR instruction.
 
     Returns nil for non-async instructions.
@@ -100,10 +102,10 @@ fn get_async_inst_info(inst: MirInstKind) -> has_AsyncInstInfo?:
                 result_type: "task_handle",
                 is_suspend_point: false
             )
-        case Send(_, _):
+        case Send(_, _, _):
             AsyncInstInfo(
                 runtime_fn: "Actor.send",
-                result_type: "unit",
+                result_type: "actor_send_status",
                 is_suspend_point: false
             )
         case Receive(_, _):
@@ -186,9 +188,9 @@ fn generate_state_machine_stub(info: AsyncFunctionInfo) -> AsyncStateMachine:
 
     # Add suspended state for each suspension point
     for i in 0..info.suspension_points:
-        states = states.push(AsyncState.Suspended(point: i))
+        states = states_push(states, AsyncState.Suspended(point: i))
 
-    states = states.push(AsyncState.Complete)
+    states = states_push(states, AsyncState.Complete)
 
     AsyncStateMachine(
         function_name: info.name,
@@ -213,7 +215,7 @@ struct AwaitTransform:
     result_local: LocalId
     state_index: i64
 
-fn create_await_transform(inst: MirInst, state_idx: i64) -> has_AwaitTransform?:
+fn create_await_transform(inst: MirInst, state_idx: i64) -> has_AwaitTransform:
     """Create transformation info for an Await instruction."""
     match inst.kind:
         case Await(dest, promise):
@@ -247,7 +249,7 @@ struct YieldTransform:
     value_operand: MirOperand
     state_index: i64
 
-fn create_yield_transform(inst: MirInst, state_idx: i64) -> has_YieldTransform?:
+fn create_yield_transform(inst: MirInst, state_idx: i64) -> has_YieldTransform:
     """Create transformation info for a Yield instruction."""
     match inst.kind:
         case Yield(value):
@@ -299,19 +301,18 @@ class AsyncIntegration:
         for _for_item_2 in self.analyzed_functions:
             val name = _for_item_2[0]
             val _unused_1 = _for_item_2[1]
-            names = names.push(name)
+            names = names_push(names, name)
         names
 
     fn is_async_function(name: text) -> bool:
         """Check if function is async."""
-        self.analyzed_functions.has(name)
+        self.analyzed_functions_contains_key(analyzed_functions, name)
 
     fn get_suspension_point_count(name: text) -> i64:
         """Get suspension point count for a function."""
-        if self.analyzed_functions.has(name):
-            self.analyzed_functions[name].suspension_points
-        else:
-            0
+        match self.analyzed_functions_get(analyzed_functions, name):
+            case info: info.suspension_points
+            case nil: 0
 
 # ============================================================================
 # Pipeline Integration

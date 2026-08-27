@@ -68,35 +68,27 @@ fn engine2d_operation_lane(operation: text) -> text:
         return ENGINE2D_BACKEND_LANE_PROCESSING
     if operation == "font_offload" or operation == "font" or operation == "text_blit":
         return ENGINE2D_BACKEND_LANE_PROCESSING
-    if operation == "vector_font" or operation == "vector_glyph" or operation == "glyph_raster" or operation == "glyph_blit":
-        return ENGINE2D_BACKEND_LANE_PROCESSING
-    if operation == "bitmap_font" or operation == "bitmap_glyph" or operation == "bitmap_glyph_raster" or operation == "glyph_bitmap_raster":
-        return ENGINE2D_BACKEND_LANE_PROCESSING
     ENGINE2D_BACKEND_LANE_COMBINED
 
 fn engine2d_backend_lane_drawing_preference_order() -> [text]:
-    """Automatic drawing-lane probe order; explicit-native surfaces opt in separately."""
-    ["metal", "cuda", "rocm", "qualcomm", "vulkan", "directx", "opencl", "opengl", "intel", "webgpu", "cpu_simd", "software", "cpu"]
+    ["metal", "cuda", "rocm", "vulkan", "directx", "opencl", "webgpu", "cpu_simd", "software", "cpu"]
 
 fn engine2d_backend_lane_full_preference_order() -> [text]:
-    """User-visible preference order including explicit platform-native surfaces."""
-    ["baremetal", "virtio_gpu", "metal", "cuda", "rocm", "qualcomm", "vulkan", "directx", "opencl", "opengl", "intel", "webgpu", "cpu_simd", "software", "cpu"]
+    ["metal", "cuda", "rocm", "vulkan", "directx", "opencl", "opengl", "webgpu", "cpu_simd", "software", "cpu"]
 
 fn engine2d_backend_lane_preference_summary() -> text:
-    """Stable backend order summary for lane diagnostics and startup reports."""
-    "explicit native (baremetal/virtio_gpu) > metal > cuda > rocm/hip > qualcomm > vulkan > directx > opencl > opengl > intel > webgpu > cpu_simd > software > cpu"
+    engine2d_backend_lane_full_preference_order().join(",")
 
 fn _engine2d_backend_canonical_name(name: text) -> text:
-    val normalized = name.trim().lower()
-    if normalized == "hip" or normalized == "amd" or normalized == "amd_hip" or normalized == "amd-hip":
+    if name == "hip":
         return "rocm"
-    if normalized == "amd_rocm" or normalized == "amd-rocm":
+    if name == "amd":
         return "rocm"
-    if normalized == "d3d11" or normalized == "d3d12" or normalized == "dx11" or normalized == "dx12":
+    if name == "d3d12":
         return "directx"
-    if normalized == "":
+    if name == "":
         return "software"
-    normalized
+    name
 
 fn _engine2d_backend_priority(name: text) -> i32:
     val canonical = _engine2d_backend_canonical_name(name)
@@ -124,12 +116,20 @@ fn engine2d_backend_lane_preferred_candidate(candidates: [text], include_explici
 fn engine2d_font_offload_backend_order() -> [text]:
     ["metal", "cuda", "rocm", "qualcomm", "vulkan", "directx", "opencl", "opengl", "intel", "webgpu", "cpu_simd", "software", "cpu"]
 
+# MIRROR DIVERGENCE (nogc vs gc): the gc copy scores font-offload candidates via
+# the shared `helpers_availability` (backend_canonical_priority), which tiers
+# qualcomm/intel. This nogc copy has no helpers_availability module and reuses the
+# local full_preference_order (no qualcomm/intel), so those two backends are
+# dropped from font-offload selection here. Operation-lane tier routing is fully
+# reconciled above; the backend-priority basis is not (needs shared
+# helpers_availability in nogc). Tracked in
+# doc/08_tracking/bug/nogc_engine2d_backend_lane_missing_helpers_availability_2026-07-06.md
 fn engine2d_backend_lane_preferred_font_offload_candidate(candidates: [text]) -> text:
     val order = engine2d_font_offload_backend_order()
     var best_backend = ""
     var best_priority = order.len()
     for candidate in candidates:
-        val canonical = _engine2d_backend_canonical_name(candidate)
+        val canonical = backend_canonical_name(candidate)
         var priority: i64 = 0
         for backend in order:
             if backend == canonical:
@@ -153,21 +153,23 @@ fn _engine2d_host_gpu_is_batch_operation(operation: text) -> bool:
         return true
     if operation == "dirty_tile_batch" or operation == "resource_batch" or operation == "animation_batch":
         return true
-    if operation == "glyph_batch" or operation == "image_batch":
-        return true
-    # Stage A GPU-offloaded hit query (D6, unified_2d_event_panel_offload
-    # 2026-07-30): one coarse round-trip, never per-widget, mutates no host
-    # semantic state -- explicitly admitted (kept in sync with the
-    # gc_async_mut copy of this function).
-    if operation == "hit_query":
+    if operation == "hit_test_batch" or operation == "glyph_batch" or operation == "image_batch":
         return true
     false
+
+fn _engine2d_host_gpu_estimated_ms(baseline_ms: i64, target_lane: text, gpu_batched: bool, fallback_explicit: bool) -> i64:
+    if target_lane == ENGINE2D_HOST_GPU_LANE_GPU and gpu_batched and not fallback_explicit:
+        val improved = baseline_ms / 2
+        if improved < 1:
+            return 1
+        return improved
+    baseline_ms
 
 fn engine2d_host_gpu_lane_schedule(source_lane: text, target_lane: text, operation: text, estimated_packet_bytes: i64, max_packet_bytes: i64, mutates_host_semantics: bool, per_widget_dispatch: bool, strict_backend_available: bool, baseline_ms: i64) -> Engine2dHostGpuLaneResult:
     val execution_kind = _engine2d_host_gpu_execution_kind(source_lane, target_lane)
     val gpu_batched = target_lane == ENGINE2D_HOST_GPU_LANE_GPU and _engine2d_host_gpu_is_batch_operation(operation)
     val fallback_explicit = target_lane == ENGINE2D_HOST_GPU_LANE_GPU and not strict_backend_available
-    val estimated_ms = baseline_ms
+    val estimated_ms = _engine2d_host_gpu_estimated_ms(baseline_ms, target_lane, gpu_batched, fallback_explicit)
     if not _engine2d_host_gpu_lane_valid(source_lane):
         return Engine2dHostGpuLaneResult(ok: false, diagnostic: "invalid source lane", source_lane: source_lane, target_lane: target_lane, execution_kind: execution_kind, committed_on_host: false, gpu_batched: gpu_batched, fallback_explicit: fallback_explicit, estimated_packet_bytes: estimated_packet_bytes, max_packet_bytes: max_packet_bytes, baseline_ms: baseline_ms, estimated_ms: baseline_ms)
     if not _engine2d_host_gpu_lane_valid(target_lane):

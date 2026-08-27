@@ -26,15 +26,12 @@ CSS.
   - `simple_web_renderer.spl` — engine2d/Metal presentation shim
     (`simple_web_render_html_to_pixels_with_engine2d_backend`,
     `simple_web_resolved_engine2d_backend_name`).
-  - Browser text uses the shared Draw IR → Engine2D font-renderer path; do not add a private atlas compositor.
+  - `famous_site_glyph_compositor.spl` — glyph atlas compositor (separate path).
 - Consuming feature experts:
   - [web_render_css_parity](../../feature_expert/web_render_css_parity/skill.md)
     (cross-engine widget parity gate).
   - [wm_gui_window_drawing](../../feature_expert/wm_gui_window_drawing/skill.md)
     (giant-glyph regression gate; consumer, not owner).
-  - [rendering_inside_rendering](../../feature_expert/rendering_inside_rendering/skill.md)
-    (iframe embedding is implemented INSIDE `simple_web_html_layout_renderer.spl`:
-    replaced element, srcdoc, `space=separate|shared`, `WEB_IFRAME_DEPTH_CAP=3`).
 - Related layer: [os_compositor](../os_compositor/skill.md).
 
 ## Public Contract / Key Entry Points
@@ -104,42 +101,6 @@ CSS.
   (the chromed-scene flex-stretch path hits this ~line 7012/7063).
 - **Concurrent editing:** multiple agent sessions edit this file; back up each
   edit and re-verify content after any pause.
-
-## Session update 2026-07-20 (half-open hit-test bounds — SECOND engine in this directory, not the parity renderer)
-
-- **This directory holds TWO separate browser engines — don't conflate
-  them.** Everything else in this skill (public contract, paint order,
-  CSS-parse perf) describes the monolithic
-  `simple_web_html_layout_renderer.spl` pipeline (owned here, consumed by
-  [web_render_css_parity](../../feature_expert/web_render_css_parity/skill.md)
-  and `wm_gui_window_drawing`). `layout.spl` (`BeDomNode`, `BeLayoutBox`,
-  `hit_test`) plus `browser_renderer.spl` (`BrowserRenderer`,
-  `BeRenderResult`) are a SEPARATE, modular "Be*"-prefixed engine in the
-  same `src/lib/gc_async_mut/gpu/browser_engine/` directory, consumed by
-  `src/os/compositor/browser_backend.spl`, `src/os/apps/browser_sample/`,
-  and `src/app/ui.chromium/engine_merge.spl` — not by the CSS-parity
-  pipeline. A change to one does not imply anything about the other; check
-  which engine a caller actually imports before assuming impact.
-- **`_box_contains` (`layout.spl`, the Be* engine) is now half-open on the
-  right/bottom edge** (`x < box.x+w`, `y < box.y+h` — was `<=`) to match
-  the GUI reference convention (`common.ui.widget_hit._contains`) and the
-  new shared interaction core's `HitProxy2D.contains_point`: a point on a
-  shared border between two adjacent boxes now hits exactly one box, never
-  both. `compositor_pick_topmost`/`layer_rects_overlap` are now exported
-  from `engine2d/__init__.spl` and `engine2d/mod.spl` (previously internal
-  to `compositor.spl`) so callers outside this layer can pick the topmost
-  hit layer without reimplementing it. Conformance spec
-  `hit_bounds_halfopen_spec.spl` (6/6) + `probe_hit_bounds_halfopen.spl`
-  (6/6), both under `test/01_unit/lib/gpu/browser/`. This does NOT touch
-  paint/CSS pixels — the parity gate is unaffected (see
-  [web_render_css_parity](../../feature_expert/web_render_css_parity/skill.md)'s
-  2026-07-20 note).
-- See the new
-  [interaction_input_routing](../../feature_expert/interaction_input_routing/skill.md)
-  feature expert for the broader half-open-bounds standardization and the
-  pointer-event/hit-test/dispatch core this fix feeds into — the Be*
-  engine's own event handling has NOT adopted that core yet; this landing
-  is the bounds-convention fix only.
 
 ## Update Rule
 
@@ -311,50 +272,5 @@ pixel buffer down as data. Full isolation matrix:
 - Interpreter fixes that unblocked these: ClassInstance `simple` handling and
   nested field-index assignment. Feature-side handoff:
   [browser feature expert](../../feature_expert/browser/skill.md).
-
-## Session update 2026-08-16 — `BeLayoutBox` content contract is now executable
-
-**Read this before touching `layout_box.spl`, `layout_core.spl`, or anything
-that consumes a layout box.**
-
-`BeLayoutBox` stores the **border box** (`x`/`y`/`width`/`height`) plus the box
-model and *derives* the content rectangle on every call:
-
-    content_x      == x + padding_left + border_width
-    content_y      == y + padding_top  + border_width
-    content_width  == width  - padding_left - padding_right  - border_width * 2
-    content_height == height - padding_top  - padding_bottom - border_width * 2
-
-Two consequences, both of which have already produced dead code:
-
-- `content_x`/`content_y`/`content_width`/`content_height` are **methods, not
-  fields**.
-- A box names its element by the integer `node_id` (`-1` for anonymous). There
-  is **no** `node` field holding a `BeDomNode`, and no pipeline currently offers
-  a `node_id -> BeDomNode` resolution — which is why `_paint_box` was deleted
-  rather than ported (`81684d8af46`; record
-  `layout_paint_paint_box_dead_code_wrong_belayoutbox_shape_2026-08-15.md`).
-
-The contract is now stated executably by
-`test/03_system/browser_engine/layout_box_content_contract_spec.spl` (plan:
-`doc/03_plan/sys_test/browser_engine_layout_box_content_contract.md`; mirror:
-`doc/06_spec/03_system/browser_engine/layout_box_content_contract_spec.md`).
-Its third scenario mutates padding *after* construction — the only assertion
-that distinguishes a derived content rectangle from a stored one, i.e. the exact
-defect shape of `_paint_box`.
-
-Also worth knowing: the engine does **not** clamp an over-constrained box.
-Padding plus border wider than the box yields a negative `content_width()`;
-callers must handle that rather than assume non-negative.
-
-`_apply_opacity` is `layout_paint.spl`'s entire surface and has **zero product
-callers** — only the unit coverage spec imports it, and `StyleProps` has no
-`opacity` property, so there is no CSS-to-paint producer. Do not add system-tier
-"integration" coverage for it without first wiring a real producer.
-
-**Status: TEST_BLOCKED.** The spec has never been executed — no admitted
-pure-Simple CLI exists in this tree (`deployed_selfhost_test_subcommand_segv_blocks_bootstrap_2026-08-16.md`).
-It is written fail-closed to verify automatically once one is available; do not
-report it as passing until it has actually run.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`

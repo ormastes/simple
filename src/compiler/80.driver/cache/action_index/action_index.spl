@@ -1,60 +1,57 @@
-# Action Index — ActionDigest -> ResultManifestDigest mapping, namespace-scoped.
+# Action Index — ActionDigest -> ResultManifestDigest mapping storage.
 #
-# Plan: doc/03_plan/compiler/cache/semantic_incremental_build_v2_plan_2026-08-09.md
-# (Agent C1 row). Schema: doc/03_plan/compiler/cache/c0_schema_freeze_2026-08-09.md
-# §"Namespace, manifests, receipts" — `CacheNamespace` values are
-# `workspace_local` / `machine_local` per `cache_trust` enum in
-# src/compiler/80.driver/cache/schema/cache_protocol.sdn.
+# Contract: doc/03_plan/compiler/cache/c0_schema_freeze_2026-08-09.md
+# Design:   doc/05_design/compiler/semantic_incremental_build_cache_aop_formal_2026-08-09.md §14.2, §14.4
 #
-# First-milestone scope only: exact-key lookup, no GC, no remote namespace.
-# One index entry per (namespace, action_digest), stored under its own
-# directory so it never collides with the CAS blob or action-manifest trees
-# in cas_store.spl.
+# One index namespace = one directory tree the caller already scoped to a
+# single tier + trust class, per the design's conceptual layout:
+#   actions/workspace/<workspace-id>/sha256/...
+#   actions/machine/<repo-id>/<user-or-trust-id>/sha256/...
+#   actions/remote/<repo-id>/main/sha256/...
+#   actions/remote/<repo-id>/branch/<branch-id>/sha256/...
+# `tier_router.spl` is responsible for choosing `index_root`; this module only
+# knows how to read/write ONE such tree safely.
 #
-#   <root>/index/<namespace>/sha256/<ab>/<cdef...>
+# This is deliberately a SEPARATE storage format from cas_store.spl's
+# `ActionManifest` (action_get/action_put), which is the older, pre-v2,
+# artifact-digest-list mapping. `ActionIndexEntry` maps to a `ResultManifest`
+# DIGEST (content-addressed, fetched separately via `result_manifest_get`),
+# not to an inline artifact list, and it additionally detects and quarantines
+# conflicting mappings instead of trusting whichever write landed on disk
+# last. Phase 1: standalone module, NOT wired into any load path.
 #
-# Conflict rule: the SAME action_digest mapping to a DIFFERENT
-# result_manifest_digest is a build-determinism violation. It is detected and
-# reported, never silently overwritten (see design §14, §18.7 crash safety —
-# an index entry is written via the same atomic-rename protocol as cas_store).
+# EXACT-KEY ONLY. No prefix, restore-key, nearest-branch, timestamp, or
+# filename fallback is implemented anywhere in this file.
 
-use std.io_runtime.{
-    file_read_result, file_write_exact, file_exists, file_delete,
-    file_move_cross_device, dir_create_all, getpid, time_now_unix_micros
-}
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_move(old_path: text, new_path: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
 
-val ACTION_INDEX_HEADER: text = "simple-action-index-v1"
+val ACTION_INDEX_ENTRY_HEADER: text = "simple-action-index-entry-v1"
 
-# Namespace — mirrors `cache_trust`'s first two values in the frozen schema.
-# Only the two local tiers are in first-milestone scope; remote/CI trust
-# levels are out of scope for C1.
-enum CacheNamespace:
-    WorkspaceLocal
-    MachineLocal
+# One mapping record: which ActionDigest resolves to which ResultManifest.
+# Self-describing (carries its own key) so a misplaced or tampered file is
+# detectable without trusting its filesystem path.
+struct ActionIndexEntry:
+    action_digest: text
+    result_manifest_digest: text
 
-fn cache_namespace_dir(ns: CacheNamespace) -> text:
-    match ns:
-        case CacheNamespace.WorkspaceLocal: "workspace_local"
-        case CacheNamespace.MachineLocal: "machine_local"
+enum ActionIndexPutOutcome:
+    Stored              # written fresh; no prior entry existed
+    AlreadyPresentSame   # an identical mapping already existed; no-op
+    ConflictQuarantined  # a DIFFERENT mapping already existed; both quarantined, nothing overwritten
 
-# Result of a lookup: distinguishes "no entry" from "entry present".
-enum IndexLookupResult:
-    Hit(text)
-    Miss
+# ============================================================================
+# Paths
+# ============================================================================
 
-# Result of a put: Ok on a fresh write or an idempotent identical rewrite;
-# Conflict when the same key already maps to a DIFFERENT value — the caller
-# must never overwrite in that case.
-enum IndexPutResult:
-    Ok
-    Conflict(text, text)
-
-fn action_index_dir(root: text, ns: CacheNamespace) -> text:
-    "{root}/index/{cache_namespace_dir(ns)}"
-
-fn action_index_path(root: text, ns: CacheNamespace, action_digest: text) -> text:
-    val base = action_index_dir(root, ns)
-    "{base}/sha256/{action_digest.substring(0, 2)}/{action_digest.substring(2, action_digest.len())}"
+fn action_index_entry_path(index_root: text, action_digest: text) -> text:
+    "{index_root}/sha256/{action_digest.substring(0, 2)}/{action_digest.substring(2, action_digest.len())}"
 
 fn action_index_parent_dir(path: text) -> text:
     val slash = path.last_index_of("/")
@@ -62,81 +59,129 @@ fn action_index_parent_dir(path: text) -> text:
         return ""
     path.substring(0, slash)
 
-# Read the raw stored result_manifest_digest for a key, or nil if absent /
-# unparseable (unparseable is treated as absent — a corrupt index entry must
-# never be served).
-fn action_index_read_raw(root: text, ns: CacheNamespace, action_digest: text) -> text?:
-    val path = action_index_path(root, ns, action_digest)
-    if not file_exists(path):
-        return nil
-    val content = match file_read_result(path):
-        case Ok(value): value
-        case Err(_): return nil
-    # Decode only the three fields that the index format owns.  Splitting the
-    # complete file allocated one text value for every trailing line even
-    # though legacy readers have always ignored fields after the digest.
-    val header_end = content.index_of("\n")
-    if header_end < 0:
-        return nil
-    if content.substring(0, header_end) != ACTION_INDEX_HEADER:
-        return nil
-    val action_start = header_end + 1
-    val action_end = content.index_of("\n", action_start)
-    if action_end < 0:
-        return nil
-    if content.substring(action_start, action_end) != action_digest:
-        return nil
-    val result_start = action_end + 1
-    val result_end = content.index_of("\n", result_start)
-    if result_end < 0:
-        return content.substring(result_start, content.len())
-    content.substring(result_start, result_end)
+fn action_index_quarantine_dir(index_root: text) -> text:
+    "{index_root}/quarantine"
 
-fn action_index_serialize(action_digest: text, result_manifest_digest: text) -> text:
-    "{ACTION_INDEX_HEADER}\n{action_digest}\n{result_manifest_digest}"
+# ============================================================================
+# Serialization
+# ============================================================================
 
-# Exact-key lookup only — no prefix/fallback matching of any kind.
-fn action_index_get(root: text, ns: CacheNamespace, action_digest: text) -> IndexLookupResult:
-    match action_index_read_raw(root, ns, action_digest):
-        case Some(digest):
-            return IndexLookupResult.Hit(digest)
-        case nil:
-            return IndexLookupResult.Miss
+fn action_index_entry_serialize(e: ActionIndexEntry) -> text:
+    val lines: [text] = [ACTION_INDEX_ENTRY_HEADER, e.action_digest, e.result_manifest_digest]
+    lines.join("\n")
 
-# Insert (action_digest -> result_manifest_digest). Idempotent when the
-# stored value already matches. Refuses to overwrite a different value:
-# returns Conflict(existing, attempted) and leaves the stored entry
-# untouched — this is the sole guard against a nondeterministic build
-# silently clobbering another result under the same key.
-fn action_index_put(root: text, ns: CacheNamespace, action_digest: text, result_manifest_digest: text) -> IndexPutResult:
-    match action_index_read_raw(root, ns, action_digest):
-        case Some(existing):
-            if existing == result_manifest_digest:
-                return IndexPutResult.Ok
-            return IndexPutResult.Conflict(existing, result_manifest_digest)
-        case nil:
-            pass_do_nothing
+fn action_index_entry_parse(content: text) -> ActionIndexEntry?:
+    val lines = content.split("\n")
+    if lines.len() < 3:
+        return nil
+    if lines[0] != ACTION_INDEX_ENTRY_HEADER:
+        return nil
+    ActionIndexEntry(action_digest: lines[1], result_manifest_digest: lines[2])
 
-    val path = action_index_path(root, ns, action_digest)
-    dir_create_all(action_index_parent_dir(path))
-    val tmp_dir = "{root}/tmp"
-    dir_create_all(tmp_dir)
-    val tmp = "{tmp_dir}/index-{action_digest}.{getpid()}.{time_now_unix_micros()}.tmp"
-    if not file_write_exact(tmp, action_index_serialize(action_digest, result_manifest_digest)):
-        return IndexPutResult.Conflict("", result_manifest_digest)
-    if not file_move_cross_device(tmp, path):
-        file_delete(tmp)
-        # Lost race: re-check what landed. Identical bytes is success; a
-        # different value under a lost race is still a conflict.
-        match action_index_read_raw(root, ns, action_digest):
-            case Some(existing2):
-                if existing2 == result_manifest_digest:
-                    return IndexPutResult.Ok
-                return IndexPutResult.Conflict(existing2, result_manifest_digest)
+# ============================================================================
+# Quarantine
+# ============================================================================
+
+# Move whatever is at `path` aside into this index's quarantine/ dir under a
+# unique name. Never silently deletes evidence of a conflict.
+fn action_index_quarantine_path(index_root: text, path: text, tag: text) -> bool:
+    val qdir = action_index_quarantine_dir(index_root)
+    rt_dir_create_all(qdir)
+    val name = "{tag}-{rt_getpid()}-{rt_time_now_unix_micros()}"
+    if rt_file_move(path, "{qdir}/{name}"):
+        return true
+    rt_file_delete(path)
+
+# Write `content` directly into quarantine (used for an attempted write that
+# must never reach the live index because it conflicts with what's already
+# there).
+fn action_index_quarantine_content(index_root: text, content: text, tag: text) -> bool:
+    val qdir = action_index_quarantine_dir(index_root)
+    rt_dir_create_all(qdir)
+    val name = "{tag}-{rt_getpid()}-{rt_time_now_unix_micros()}"
+    rt_file_write_text("{qdir}/{name}", content)
+
+# ============================================================================
+# Put / Get
+# ============================================================================
+
+# Insert action_digest -> result_manifest_digest. If an entry already exists
+# for this EXACT action_digest with a DIFFERENT result_manifest_digest, this
+# is a conflict: BOTH the existing mapping and the attempted new mapping are
+# quarantined (moved out of the live index), and neither is admitted. This is
+# the fail-closed alternative to "last write wins", which would let a
+# nondeterministic or unsound build silently poison every future exact-key
+# hit for this action.
+fn action_index_put(index_root: text, action_digest: text, result_manifest_digest: text) -> ActionIndexPutOutcome:
+    val path = action_index_entry_path(index_root, action_digest)
+    val attempted = ActionIndexEntry(action_digest: action_digest, result_manifest_digest: result_manifest_digest)
+
+    if rt_file_exists(path):
+        val content = rt_file_read_text(path) ?? ""
+        val parsed = action_index_entry_parse(content)
+        match parsed:
+            case Some(existing):
+                if existing.action_digest != action_digest:
+                    # Mislabeled/corrupt slot: quarantine it and refuse the write too.
+                    action_index_quarantine_path(index_root, path, "mislabeled")
+                    action_index_quarantine_content(index_root, action_index_entry_serialize(attempted), "rejected-write")
+                    return ActionIndexPutOutcome.ConflictQuarantined
+                if existing.result_manifest_digest == result_manifest_digest:
+                    return ActionIndexPutOutcome.AlreadyPresentSame
+                # Real conflict: same ActionDigest, two different results.
+                action_index_quarantine_path(index_root, path, "conflict-existing")
+                action_index_quarantine_content(index_root, action_index_entry_serialize(attempted), "conflict-new")
+                return ActionIndexPutOutcome.ConflictQuarantined
             case nil:
-                return IndexPutResult.Conflict("", result_manifest_digest)
-    IndexPutResult.Ok
+                action_index_quarantine_path(index_root, path, "unparseable")
+                action_index_quarantine_content(index_root, action_index_entry_serialize(attempted), "rejected-write")
+                return ActionIndexPutOutcome.ConflictQuarantined
 
-export CacheNamespace, IndexLookupResult, IndexPutResult
-export cache_namespace_dir, action_index_dir, action_index_path
-export action_index_get, action_index_put, action_index_read_raw
+    rt_dir_create_all(action_index_parent_dir(path))
+    rt_dir_create_all("{index_root}/tmp")
+    val tmp = "{index_root}/tmp/idx-{action_digest}.{rt_getpid()}.{rt_time_now_unix_micros()}.tmp"
+    if not rt_file_write_text(tmp, action_index_entry_serialize(attempted)):
+        return ActionIndexPutOutcome.ConflictQuarantined
+    if not rt_file_move(tmp, path):
+        rt_file_delete(tmp)
+        # Lost a race against an identical concurrent writer is fine; anything
+        # else is treated as failure to admit (caller may retry the lookup).
+        if rt_file_exists(path):
+            val raced = rt_file_read_text(path) ?? ""
+            val raced_parsed = action_index_entry_parse(raced)
+            match raced_parsed:
+                case Some(w):
+                    if w.action_digest == action_digest and w.result_manifest_digest == result_manifest_digest:
+                        return ActionIndexPutOutcome.Stored
+                    # A DIFFERENT writer won the race with a DIFFERENT mapping
+                    # for this exact action_digest: this is the same conflict
+                    # action_index_put's existence-check branch above handles
+                    # — never trust whichever write happened to land.
+                    action_index_quarantine_content(index_root, action_index_entry_serialize(attempted), "rejected-write")
+                    return ActionIndexPutOutcome.ConflictQuarantined
+                case nil:
+                    return ActionIndexPutOutcome.ConflictQuarantined
+    ActionIndexPutOutcome.Stored
+
+# EXACT-KEY lookup only. Verifies the stored entry's own action_digest field
+# matches the requested key before trusting result_manifest_digest; a
+# tampered or unparseable entry is quarantined and treated as a miss, never
+# served.
+fn action_index_get(index_root: text, action_digest: text) -> text?:
+    val path = action_index_entry_path(index_root, action_digest)
+    if not rt_file_exists(path):
+        return nil
+    val content = rt_file_read_text(path) ?? ""
+    val parsed = action_index_entry_parse(content)
+    match parsed:
+        case Some(entry):
+            if entry.action_digest != action_digest:
+                action_index_quarantine_path(index_root, path, "key-mismatch")
+                return nil
+            return entry.result_manifest_digest
+        case nil:
+            action_index_quarantine_path(index_root, path, "unparseable")
+            return nil
+
+fn action_index_has(index_root: text, action_digest: text) -> bool:
+    rt_file_exists(action_index_entry_path(index_root, action_digest))

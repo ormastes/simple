@@ -4,15 +4,20 @@
 
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
+use compiler.mir.mir_types.{MirType}
+use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
 
 fn symbol_id_value(symbol: SymbolId) -> i64:
-    symbol.id
+    match symbol:
+        case SymbolId(id): id
 
 fn local_id_value(local: LocalId) -> i64:
-    local.id
+    match local:
+        case LocalId(id): id
 
 fn block_id_value(block: BlockId) -> i64:
-    block.id
+    match block:
+        case BlockId(id): id
 
 fn serialize_switch_case(switch_case: SwitchCase) -> text:
     match switch_case:
@@ -64,11 +69,6 @@ fn serialize_mir_type(t: MirType) -> text:
         case Array(element, size):
             val e = serialize_mir_type(element)
             "{\"Array\":{\"element\":{e},\"size\":{size}}}"
-
-        case Dict(key, value):
-            val k = serialize_mir_type(key)
-            val v = serialize_mir_type(value)
-            "{\"Dict\":{\"key\":{k},\"value\":{v}}}"
 
         case Slice(element):
             val e = serialize_mir_type(element)
@@ -149,6 +149,19 @@ fn serialize_const_value(c: MirConstValue) -> text:
             "\"Zero\""
         case _:
             "null"
+
+fn serialize_rt_hal_exit_codec_plan(plan: RtHalExitCodecPlan) -> text:
+    match plan:
+        case Reject: "{\"Reject\":true}"
+        case Scalar(encoding_code): "{\"Scalar\":{\"encoding_code\":{encoding_code}}}"
+        case ArrayIterate(max_len, element_descriptor):
+            "{\"ArrayIterate\":{\"max_len\":{max_len},\"element_descriptor\":\"{escape_json_string(element_descriptor)}\"}}"
+        case TupleProject(field_index, field_descriptor):
+            "{\"TupleProject\":{\"field_index\":{field_index},\"field_descriptor\":\"{escape_json_string(field_descriptor)}\"}}"
+        case ResultDiscriminator: "{\"ResultDiscriminator\":true}"
+        case ResultBranch(ok_descriptor, err_descriptor):
+            "{\"ResultBranch\":{\"ok_descriptor\":\"{escape_json_string(ok_descriptor)}\",\"err_descriptor\":\"{escape_json_string(err_descriptor)}\"}}"
+        case Utf8Text(max_bytes): "{\"Utf8Text\":{\"max_bytes\":{max_bytes}}}"
 
 # ============================================================================
 # Operation Serialization
@@ -283,8 +296,7 @@ fn serialize_mir_terminator(term: MirTerminator) -> text:
             cases = "{cases}]"
             "{\"Switch\":{\"value\":{v},\"targets\":{cases},\"default\":{block_id_value(defaultBlock)}}}"
 
-        case CallTerminator(maybeDest, func, args, normal, maybeUnwind,
-                            maybePayloadDest, maybeTypeTagDest):
+        case CallTerminator(maybeDest, func, args, normal, maybeUnwind):
             val f = serialize_operand(func)
             var argsStr = "["
             var firstArg = true
@@ -308,19 +320,13 @@ fn serialize_mir_terminator(term: MirTerminator) -> text:
             if val typeTagDest = maybeTypeTagDest:
                 typeTagDestStr = "{local_id_value(typeTagDest)}"
 
-            "{\"CallTerminator\":{\"dest\":{destStr},\"func\":{f},\"args\":{argsStr},\"normal\":{block_id_value(normal)},\"unwind\":{unwindStr},\"unwind_payload_dest\":{payloadDestStr},\"unwind_type_tag_dest\":{typeTagDestStr}}}"
+            "{\"CallTerminator\":{\"dest\":{destStr},\"func\":{f},\"args\":{argsStr},\"normal\":{block_id_value(normal)},\"unwind\":{unwindStr}}}"
 
         case Unreachable:
             "\"Unreachable\""
 
         case Abort(msg):
             "{\"Abort\":\"{escape_json_string(msg)}\"}"
-
-        case Throw(payload, type_tag):
-            "{\"Throw\":{\"payload\":{serialize_operand(payload)},\"type_tag\":{serialize_operand(type_tag)}}}"
-
-        case Resume(payload, type_tag):
-            "{\"Resume\":{\"payload\":{serialize_operand(payload)},\"type_tag\":{serialize_operand(type_tag)}}}"
 
         case _:
             "\"UnknownTerminator\""
@@ -385,9 +391,6 @@ fn serialize_mir_inst_kind(inst: MirInstKind) -> text:
             val v = serialize_operand(value)
             "{\"Store\":{\"ptr\":{p},\"value\":{v}}}"
 
-        case GlobalAddr(dest, symbol, mutable):
-            "{\"GlobalAddr\":{\"dest\":{local_id_value(dest)},\"symbol\":{symbol.id},\"mutable\":{mutable}}}"
-
         case Call(maybeDest, func, args):
             val f = serialize_operand(func)
             var argsStr = "["
@@ -403,6 +406,34 @@ fn serialize_mir_inst_kind(inst: MirInstKind) -> text:
                 "{\"Call\":{\"dest\":{local_id_value(dest)},\"func\":{f},\"args\":{argsStr}}}"
             else:
                 "{\"Call\":{\"dest\":null,\"func\":{f},\"args\":{argsStr}}}"
+
+        # Provenance is a transient compiler side-table instruction, not a
+        # serialisable MIR contract. Reaching JSON means stripping was skipped;
+        # abort rather than publishing a replayable/forgeable representation.
+        case RtHalEnvExecutorProvenance(_, _, _, _, _):
+            panic("E-MIR-RTHAL-UNSTRIPPED-PROVENANCE")
+
+        case RtHalExitCapture(operation_id, compare_c, compare_rust, exit_kind, value, value_type, descriptor, schema_id, output_type_id, error_type_id, effect_type_id, codec_plan, codec_ops):
+            val value_json = match value:
+                case Some(payload): serialize_operand(payload)
+                case nil: "null"
+            val type_json = serialize_mir_type(value_type)
+            var ops_json = "["
+            var first_op = true
+            for op in codec_ops:
+                if not first_op: ops_json = ops_json + ","
+                ops_json = ops_json + serialize_rt_hal_exit_codec_plan(op)
+                first_op = false
+            "{\"RtHalExitCapture\":{\"operation_id\":\"{escape_json_string(operation_id)}\",\"compare_c\":{compare_c},\"compare_rust\":{compare_rust},\"exit_kind\":{exit_kind},\"value\":{value_json},\"value_type\":{type_json},\"descriptor\":\"{escape_json_string(descriptor)}\",\"schema_id\":{schema_id},\"output_type_id\":{output_type_id},\"error_type_id\":{error_type_id},\"effect_type_id\":{effect_type_id},\"codec_plan\":{serialize_rt_hal_exit_codec_plan(codec_plan)},\"codec_ops\":{ops_json}]}}"
+
+        case RtHalExitSchemaRegister(schema_id, output_descriptor, output_lane0, output_lane1, output_lane2, output_lane3, output_encoding, error_descriptor, error_lane0, error_lane1, error_lane2, error_lane3, error_encoding, effect_descriptor, effect_lane0, effect_lane1, effect_lane2, effect_lane3, effect_encoding):
+            "{\"RtHalExitSchemaRegister\":{\"schema_id\":{schema_id},\"output_descriptor\":\"{escape_json_string(output_descriptor)}\",\"output_lanes\":[{output_lane0},{output_lane1},{output_lane2},{output_lane3}],\"output_encoding\":{output_encoding},\"error_descriptor\":\"{escape_json_string(error_descriptor)}\",\"error_lanes\":[{error_lane0},{error_lane1},{error_lane2},{error_lane3}],\"error_encoding\":{error_encoding},\"effect_descriptor\":\"{escape_json_string(effect_descriptor)}\",\"effect_lanes\":[{effect_lane0},{effect_lane1},{effect_lane2},{effect_lane3}],\"effect_encoding\":{effect_encoding}}}"
+
+        case RtHalExitTypeRegister(descriptor, lane0, lane1, lane2, lane3, encoding_code):
+            "{\"RtHalExitTypeRegister\":{\"descriptor\":\"{escape_json_string(descriptor)}\",\"lane0\":{lane0},\"lane1\":{lane1},\"lane2\":{lane2},\"lane3\":{lane3},\"encoding_code\":{encoding_code}}}"
+
+        case RtHalExitSchemaSeal:
+            "\"RtHalExitSchemaSeal\""
 
         case GetField(dest, base, field):
             val b = serialize_operand(base)
@@ -467,13 +498,25 @@ fn serialize_mir_inst_kind(inst: MirInstKind) -> text:
             else:
                 "{\"Intrinsic\":{\"dest\":null,\"name\":\"{escape_json_string(name)}\",\"args\":{argsStr}}}"
 
-        case DecisionProbe(runtime_id, semantic_id, result, authored_path, line, column):
+        case DecisionProbe(runtime_id, semantic_id, source_digest, condition_count, evaluated_mask, true_mask, result, authored_path, line, column):
             val result_json = serialize_operand(result)
-            "{\"DecisionProbe\":{\"runtime_id\":{runtime_id},\"semantic_id\":\"{escape_json_string(semantic_id)}\",\"result\":{result_json},\"authored_path\":\"{escape_json_string(authored_path)}\",\"line\":{line},\"column\":{column}}}"
+            val evaluated_json = serialize_operand(evaluated_mask)
+            val true_json = serialize_operand(true_mask)
+            "{\"DecisionProbe\":{\"runtime_id\":{runtime_id},\"semantic_id\":\"{escape_json_string(semantic_id)}\",\"source_digest\":{source_digest},\"condition_count\":{condition_count},\"evaluated_mask\":{evaluated_json},\"true_mask\":{true_json},\"result\":{result_json},\"authored_path\":\"{escape_json_string(authored_path)}\",\"line\":{line},\"column\":{column}}}"
 
         case ConditionProbe(runtime_id, semantic_id, parent_runtime_id, parent_semantic_id, result, authored_path, line, column):
             val result_json = serialize_operand(result)
             "{\"ConditionProbe\":{\"runtime_id\":{runtime_id},\"semantic_id\":\"{escape_json_string(semantic_id)}\",\"parent_runtime_id\":{parent_runtime_id},\"parent_semantic_id\":\"{escape_json_string(parent_semantic_id)}\",\"result\":{result_json},\"authored_path\":\"{escape_json_string(authored_path)}\",\"line\":{line},\"column\":{column}}}"
+
+        case DynamicDecisionProbe(runtime_id, semantic_id, source_digest, condition_count, evaluated_mask, true_mask, result, authored_path, line, column):
+            val result_json = serialize_operand(result)
+            val evaluated_json = serialize_operand(evaluated_mask)
+            val true_json = serialize_operand(true_mask)
+            "{\"DynamicDecisionProbe\":{\"runtime_id\":{runtime_id},\"semantic_id\":\"{escape_json_string(semantic_id)}\",\"source_digest\":{source_digest},\"condition_count\":{condition_count},\"evaluated_mask\":{evaluated_json},\"true_mask\":{true_json},\"result\":{result_json},\"authored_path\":\"{escape_json_string(authored_path)}\",\"line\":{line},\"column\":{column}}}"
+
+        case DynamicConditionProbe(runtime_id, semantic_id, parent_runtime_id, parent_semantic_id, result, authored_path, line, column):
+            val result_json = serialize_operand(result)
+            "{\"DynamicConditionProbe\":{\"runtime_id\":{runtime_id},\"semantic_id\":\"{escape_json_string(semantic_id)}\",\"parent_runtime_id\":{parent_runtime_id},\"parent_semantic_id\":\"{escape_json_string(parent_semantic_id)}\",\"result\":{result_json},\"authored_path\":\"{escape_json_string(authored_path)}\",\"line\":{line},\"column\":{column}}}"
 
         case GetElementPtr(dest, base, indices):
             val b = serialize_operand(base)
@@ -492,6 +535,28 @@ fn serialize_mir_inst_kind(inst: MirInstKind) -> text:
             val l = serialize_operand(left)
             val r = serialize_operand(right)
             "{\"CheckedBinOp\":{\"dest\":{local_id_value(dest)},\"op\":{opstr},\"left\":{l},\"right\":{r}}}"
+
+        case GpuLaunchConfigured(grid, block, body):
+            var grid_json = "["
+            var first_grid = true
+            for dimension in grid:
+                if not first_grid: grid_json = "{grid_json},"
+                grid_json = "{grid_json}{serialize_operand(dimension)}"
+                first_grid = false
+            grid_json = "{grid_json}]"
+            var block_json = "["
+            var first_block = true
+            for dimension in block:
+                if not first_block: block_json = "{block_json},"
+                block_json = "{block_json}{serialize_operand(dimension)}"
+                first_block = false
+            block_json = "{block_json}]"
+            "{\"GpuLaunchConfigured\":{\"grid\":{grid_json},\"block\":{block_json},\"body\":{block_id_value(body)}}}"
+
+        case GpuSharedAllocInit(dest, element_type, size, init):
+            val type_json = serialize_mir_type(element_type)
+            val init_json = serialize_operand(init)
+            "{\"GpuSharedAllocInit\":{\"dest\":{local_id_value(dest)},\"type\":{type_json},\"size\":{size},\"init\":{init_json}}}"
 
         case VhdlResize(dest, operand, new_width, signed):
             val opnd = serialize_operand(operand)
@@ -574,10 +639,7 @@ fn serialize_mir_signature(sig: MirSignature) -> text:
     json = "{json}],"
 
     # Return type
-    if sig.return_type == nil:
-        json = "{json}\"return_type\":null,"
-    else:
-        json = "{json}\"return_type\":{serialize_mir_type(sig.return_type)},"
+    json = "{json}\"return_type\":{serialize_mir_type(sig.return_type)},"
 
     # Variadic
     val variadicStr = if sig.is_variadic: "true" else: "false"
@@ -609,7 +671,7 @@ fn serialize_mir_local(local: MirLocal) -> text:
                 case Arg(index): "{\"Arg\":{index}}"
                 case Var: "\"Var\""
                 case Temp: "\"Temp\""
-                case Return: "\"Return\""
+                case Ret: "\"Return\""
 
             json = "{json}\"kind\":{kindJson}"
             json = "{json}}"
@@ -656,29 +718,26 @@ fn serialize_mir_function(func: MirFunction) -> text:
 
 fn escape_json_string(s: text) -> text:
     """Escape string for JSON."""
-    # Keep each already-escaped fragment and assemble the output once. Repeated
-    # interpolation copied the full prefix for every input unit, making long
-    # MIR names and diagnostic payloads quadratic in output bytes.
-    var parts: [text] = []
+    var result = ""
     for i in 0..s.len():
         val c = s[i:i+1]
         if c == "\"":
-            parts.push("\\\"")
+            result = "{result}\\\""
         else:
             if c == "\\":
-                parts.push("\\\\")
+                result = "{result}\\\\"
             else:
                 if c == "\n":
-                    parts.push("\\n")
+                    result = "{result}\\n"
                 else:
                     if c == "\r":
-                        parts.push("\\r")
+                        result = "{result}\\r"
                     else:
                         if c == "\t":
-                            parts.push("\\t")
+                            result = "{result}\\t"
                         else:
-                            parts.push(c)
-    parts.join("")
+                            result = "{result}{c}"
+    result
 
 # ============================================================================
 # Exports

@@ -2,6 +2,29 @@
 
 > The functional update operator `->` applies transformations to collections in place, enabling fluent data processing pipelines. Unlike method chaining with `.`, the arrow operator mutates the target variable directly (e.g., `arr->map(...)` transforms `arr` in place). This spec validates `->concat`, `->map`, `->filter`, and `->set` operations on arrays and dicts, verifies correct chaining of multiple operations in sequence, and confirms that lambda expressions with closures work within functional updates.
 
+<!-- sdn-diagram:id=functional_update_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=functional_update_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+functional_update_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=functional_update_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 11 | 11 | 0 | 0 |
@@ -21,7 +44,7 @@ The functional update operator `->` applies transformations to collections in pl
 | Category | Language |
 | Status | Active |
 | Source | `test/03_system/feature/usage/functional_update_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -67,18 +90,17 @@ items->map(\x: x - 5)             # items is now [5, 10, 15]
 
 #### creates new struct with updated field
 
-- creates new struct with updated field
+1. arr->concat
+2. expect arr len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates new struct with updated field")
 # Functional update with concat - modifies in place and returns
 var arr = [1, 2]
 arr->concat([3, 4])
@@ -89,18 +111,16 @@ expect arr.len() == 4
 
 #### leaves original struct unchanged
 
-- leaves original struct unchanged
+1. arr->map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("leaves original struct unchanged")
 # Functional update with map - transforms elements in place
 var arr = [1, 2, 3]
 arr->map(\x: x * 2)
@@ -113,18 +133,17 @@ expect arr[1] == 4
 
 #### updates all specified fields
 
-- updates all specified fields
+1. arr->filter
+2. expect arr len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("updates all specified fields")
 # Functional update with filter - filters elements in place
 var arr = [1, 2, 3, 4, 5]
 arr->filter(\x: x > 2)
@@ -135,18 +154,17 @@ expect arr.len() == 3
 
 #### preserves unmodified fields
 
-- preserves unmodified fields
+1. d->set
+2. expect d len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("preserves unmodified fields")
 # Dict functional update - adds new key
 var d = {"a": 1}
 d->set("b", 2)
@@ -161,18 +179,18 @@ expect d.len() == 2
 
 #### updates nested field values
 
-- updates nested field values
+1. arr->map
+2. arr->filter
+3. expect arr len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("updates nested field values")
 # Chained functional updates - map then filter
 var arr = [1, 2, 3]
 arr->map(\x: x + 1)
@@ -184,18 +202,16 @@ expect arr.len() == 2
 
 #### preserves sibling fields in nested structures
 
-- preserves sibling fields in nested structures
+1. d->set
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("preserves sibling fields in nested structures")
 # Multiple dict operations
 var d = {"x": 1, "y": 2}
 d->set("z", 3)
@@ -209,18 +225,17 @@ expect d["z"] == 3
 
 #### applies updates in correct order
 
-- applies updates in correct order
+1. arr->map
+2. arr->filter
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("applies updates in correct order")
 # Chained array operations: [1,2,3] -> [2,3,4] -> [3,4]
 var arr = [1, 2, 3]
 arr->map(\x: x + 1)
@@ -232,18 +247,17 @@ expect arr == [3, 4]
 
 #### maintains immutability through chain
 
-- maintains immutability through chain
+1. original->filter
+2. original->map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("maintains immutability through chain")
 # Multiple transformations preserve data integrity
 var original = [1, 2, 3, 4, 5]
 original->filter(\x: x % 2 == 0)
@@ -257,18 +271,16 @@ expect original == [20, 40]
 
 #### works with generic types
 
-- works with generic types
+1. numbers->map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("works with generic types")
 # Functional update works with any collection type
 var numbers = [10, 20, 30]
 numbers->map(\x: x / 10)
@@ -279,18 +291,17 @@ expect numbers == [1, 2, 3]
 
 #### supports computed field values in update
 
-- supports computed field values in update
+1. arr->filter
+2. expect arr len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("supports computed field values in update")
 # Lambda with complex computation in functional update
 var arr = [1, 2, 3, 4, 5]
 val threshold = 2
@@ -302,18 +313,17 @@ expect arr.len() == 3
 
 #### handles update expressions with side effects
 
-- handles update expressions with side effects
+1. items->filter
+2. items->map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles update expressions with side effects")
 # Functional update with multiple operations
 var items = [5, 10, 15, 20]
 items->filter(\x: x > 5)
@@ -335,51 +345,3 @@ expect items == [5, 10, 15]
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `72c9407e2e3fb7a2da59d2e4110b86e95a2526b80c05b6194180a8342cd53859`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `72c9407e2e3fb7a2da59d2e4110b86e95a2526b80c05b6194180a8342cd53859`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `72c9407e2e3fb7a2da59d2e4110b86e95a2526b80c05b6194180a8342cd53859`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/functional_update_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/functional_update_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/functional_update_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/functional_update_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/functional_update_spec.spl:66:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates new struct with updated field' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/functional_update_spec.spl:74:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'leaves original struct unchanged' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/functional_update_spec.spl:87:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'updates all specified fields' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

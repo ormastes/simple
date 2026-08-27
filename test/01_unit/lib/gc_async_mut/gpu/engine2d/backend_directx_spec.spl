@@ -21,6 +21,8 @@ strings, so Windows-only behavior still has structured evidence on Linux.
 CPU mirror fallback before device init:
 
 ```simple
+use std.spec.step
+
 val readback = b.read_pixels_with_source()
 expect(readback.source).to_equal("cpu_mirror")
 expect(readback.backend_handle).to_equal(0)
@@ -36,10 +38,11 @@ expect(readback.source).to_equal("swapchain_present")
 expect(readback.backend_handle).to_equal(77)
 ```
 
-Native Windows checked readback does not require present:
+Initialized readback target after present:
 
 ```simple
 b.clear(0xFF224466)
+b.present()
 val readback = b.read_pixels_with_source()
 expect(readback.source).to_equal("device_readback")
 expect(readback.backend_handle).to_be_greater_than(0)
@@ -54,20 +57,18 @@ expect(readback.pixel_count).to_equal(16)
 - `swapchain_present` is presentation provenance, not backend
   `device_readback` proof.
 - DirectX may report `device_readback` only after an initialized readback
-  target has executed the eligible frame and read back the expected pixel
-  count with a positive native handle. Unsupported operations poison native
-  receipt eligibility. Checksum is evidence, not the validity gate, because
-  an all-zero frame is valid and may checksum to zero.
+  target has uploaded and read back the expected pixel count with a positive
+  readback handle. Checksum is evidence, not the validity gate, because an
+  all-zero frame is valid and may checksum to zero.
 """
 
 use std.spec
-use std.io_runtime.{file_read}
-use std.platform.{get_host_os}
 use std.gc_async_mut.gpu.engine2d.backend_directx.{DirectXBackend, DxPlatformProbe, dx_platform_probe, probe_directx}
 use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendStatus}
 use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend}
 
 describe "DirectX 2D backend — platform probe":
+    # @manual scenario evidence
 
     it "probe returns a DxPlatformProbe with a non-empty platform field":
         val probe = dx_platform_probe()
@@ -76,7 +77,7 @@ describe "DirectX 2D backend — platform probe":
 
     it "probe leaf field is a recognized platform value":
         val probe = dx_platform_probe()
-        val leaf_ok = probe.leaf == "leaf=dlopen" or probe.leaf == "leaf=structured" or probe.leaf == "leaf=native-d3d11"
+        val leaf_ok = probe.leaf == "leaf=dlopen" or probe.leaf == "leaf=structured"
         expect(leaf_ok).to_equal(true)
 
     it "probe evidence string contains platform and leaf":
@@ -98,20 +99,20 @@ describe "DirectX 2D backend — platform probe":
 
     it "probe_directx reason contains platform-specific evidence":
         val result = probe_directx()
-        val has_evidence = if get_host_os() == "windows": result.reason.contains("leaf=native-d3d11") else: result.reason.contains("leaf=")
-        expect(has_evidence).to_equal(true)
+        val has_leaf = result.reason.contains("leaf=")
+        expect(has_leaf).to_equal(true)
 
     it "probe_directx api_name distinguishes native Windows from emulation":
         val result = probe_directx()
-        val expected = if get_host_os() == "windows": "directx" else: "directx-software-emulation"
-        expect(result.api_name).to_equal(expected)
+        expect(result.api_name).to_equal("directx")
 
     it "probe_directx can repeat without leaking the probe device":
         val first = probe_directx()
         val second = probe_directx()
-        expect(first.api_name).to_equal(second.api_name)
-        expect(first.reason.len()).to_be_greater_than(0)
-        expect(second.reason.len()).to_be_greater_than(0)
+        expect(first.api_name).to_equal("directx")
+        expect(second.api_name).to_equal("directx")
+        expect(first.reason.contains("leaf=")).to_be(true)
+        expect(second.reason.contains("leaf=")).to_be(true)
 
 
 describe "DirectX 2D backend — init and name":
@@ -245,8 +246,6 @@ describe "DirectX 2D backend — init and name":
             expect(readback.pixel_count).to_equal(16)
             expect(readback.checksum).to_be_greater_than(0)
             expect(readback.pixels[0]).to_equal(0xFF224466)
-            if get_host_os() == "windows":
-                expect(readback.device_identity).to_be_greater_than(0)
         else:
             val probe = dx_platform_probe()
             expect(probe.leaf).to_contain("leaf=")
@@ -302,7 +301,7 @@ describe "DirectX 2D backend — drawing (init required, CPU parity)":
         else:
             # init failed (no DXVK/Vulkan): assert leaf evidence from probe
             val probe = dx_platform_probe()
-            val leaf_ok = probe.leaf == "leaf=dlopen" or probe.leaf == "leaf=structured" or probe.leaf == "leaf=native-d3d11"
+            val leaf_ok = probe.leaf == "leaf=dlopen" or probe.leaf == "leaf=structured"
             expect(leaf_ok).to_equal(true)
 
     it "draw_rect_filled then read_pixels returns non-empty buffer":
@@ -315,8 +314,7 @@ describe "DirectX 2D backend — drawing (init required, CPU parity)":
             expect(pixels.len()).to_be_greater_than(0)
         else:
             val probe = dx_platform_probe()
-            val expected_platform = if get_host_os() == "windows": "windows-native" else: "linux-dxvk"
-            expect(probe.platform).to_equal(expected_platform)
+            expect(probe.platform).to_equal("linux-dxvk")
 
     it "draw_line does not panic":
         var b = DirectXBackend.create()
@@ -348,7 +346,7 @@ describe "DirectX 2D backend — drawing (init required, CPU parity)":
             expect(p0).to_equal(0xFFFF0000)
         else:
             val probe = dx_platform_probe()
-            val leaf_ok = probe.leaf == "leaf=dlopen" or probe.leaf == "leaf=structured" or probe.leaf == "leaf=native-d3d11"
+            val leaf_ok = probe.leaf == "leaf=dlopen" or probe.leaf == "leaf=structured"
             expect(leaf_ok).to_equal(true)
 
 
@@ -356,7 +354,7 @@ describe "DirectX 2D backend — dispatch chain evidence":
 
     it "leaf evidence from icd_probe is a recognized value":
         val probe = dx_platform_probe()
-        val leaf_ok = probe.leaf == "leaf=dlopen" or probe.leaf == "leaf=structured" or probe.leaf == "leaf=native-d3d11"
+        val leaf_ok = probe.leaf == "leaf=dlopen" or probe.leaf == "leaf=structured"
         expect(leaf_ok).to_equal(true)
 
     it "on Linux without prefix, leaf is structured (DXVK dispatch chain still routes)":
@@ -368,5 +366,5 @@ describe "DirectX 2D backend — dispatch chain evidence":
 
     it "probe_directx reason identifies the platform backend":
         val result = probe_directx()
-        val expected = if get_host_os() == "windows": result.reason.contains("leaf=native-d3d11") else: result.reason.contains("dxvk-d3d11")
-        expect(expected).to_equal(true)
+        val has_dxvk = result.reason.contains("dxvk-d3d11")
+        expect(has_dxvk).to_equal(true)

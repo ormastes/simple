@@ -1,6 +1,5 @@
 # Module/lexer arena state slots, module decl registry, ast_reset, and node getters/yield helpers.
 use compiler.frontend.core.ast.*
-use compiler.frontend.trace_policy.{frontend_trace_suppressed}
 # Core Simple — Arena-Based AST
 #
 # Shared core library: AST nodes stored in parallel arrays (arena pattern).
@@ -19,9 +18,9 @@ use compiler.frontend.trace_policy.{frontend_trace_suppressed}
 use compiler.core.ast_expr.*
 use compiler.core.ast_stmt.*
 use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
+use compiler.frontend.core.if_chain_nodes.*
 
 extern fn rt_env_get(key: text) -> text
-extern fn rt_env_get_i64(key: text, default_value: i64) -> i64
 extern fn rt_env_set(key: text, value: text) -> bool
 
 var lexer_state_core_col_slot: [text] = ["1"]
@@ -81,13 +80,7 @@ const AST_ARENA_SLOT_POISON: i64 = -777
 var ast_harden_retired_gens: [i64] = []
 var ast_harden_retired_decl_tag: [[i64]] = []
 var ast_harden_retired_module_decl_slots: [[i64]] = []
-
-fn ast_gen_harden_enabled() -> bool:
-    # Keep this gate scalar.  A freshly promoted streaming module can enter
-    # ast_reset before the module-array cache has a native owner; inspecting
-    # that optional array crashed the self-hosted Stage2 compiler.  This is a
-    # cold, once-per-file reset path, so the direct scalar env read is bounded.
-    rt_env_get_i64("SIMPLE_AST_GEN_HARDEN", 0) == 1
+extern fn rt_transient_heap_promote(value: Any) -> bool
 
 fn _ast_harden_delay_slots() -> i64:
     val configured = rt_env_get_i64("SIMPLE_MEM_ARENA_DELAY_SLOTS", 4)
@@ -124,14 +117,32 @@ fn _ast_harden_evict_oldest():
         new_decl.push(ast_harden_retired_decl_tag[i])
         new_mods.push(ast_harden_retired_module_decl_slots[i])
         i = i + 1
-    ast_harden_retired_gens = new_gens
-    ast_harden_retired_decl_tag = new_decl
-    ast_harden_retired_module_decl_slots = new_mods
+    ast_harden_retired_gens.clear()
+    ast_harden_retired_decl_tag.clear()
+    ast_harden_retired_module_decl_slots.clear()
+    i = 0
+    while i < new_gens.len():
+        ast_harden_retired_gens.push(new_gens[i])
+        ast_harden_retired_decl_tag.push(new_decl[i])
+        ast_harden_retired_module_decl_slots.push(new_mods[i])
+        i = i + 1
+
+fn ast_promote_transient_owner_globals() -> bool:
+    if not ast_gen_harden_enabled():
+        return true
+    var ok = true
+    if not rt_transient_heap_promote(ast_harden_retired_gens):
+        ok = false
+    if not rt_transient_heap_promote(ast_harden_retired_decl_tag):
+        ok = false
+    if not rt_transient_heap_promote(ast_harden_retired_module_decl_slots):
+        ok = false
+    ok
 
 fn _ast_harden_retire_snapshot(retiring_gen: i64, harden_enabled: bool):
     # Called unconditionally from ast_reset(); no-ops when the gate is off so
     # off-path behavior (and cost) is identical to before this feature.
-    if not harden_enabled:
+    if not ast_gen_harden_enabled():
         return
     _ast_harden_arrays_ensure()
     val decl_len = decl_tag.len()
@@ -171,8 +182,6 @@ fn ast_harden_retired_window_depth() -> i64:
 fn _ast_slots_ensure():
     # Nil-guards: module-level var initializers may not run in native
     # binaries (same limitation parser_init_with_path guards against).
-    if module_path_slot == nil:
-        module_path_slot = [""]
     if lexer_state_core_pos_slot == nil:
         lexer_state_core_pos_slot = ["0"]
     if lexer_state_core_line_slot == nil:
@@ -208,11 +217,11 @@ fn _ast_slots_ensure():
 
 fn module_set_path(path: text):
     _ast_slots_ensure()
-    module_path_slot[0] = path
+    module_path_cached = path
 
 fn module_get_path() -> text:
     _ast_slots_ensure()
-    module_path_slot[0]
+    module_path_cached
 
 fn lexer_state_get(key: text) -> text:
     _ast_slots_ensure()
@@ -406,12 +415,12 @@ fn module_add_decl(decl_idx: i64):
     # (grow past the old 128 cap via push). module_decl_at is env-first/array-fallback
     # and only reads index < count, so the array is always the populated truth in
     # compiled stage4. See bug ast_env_var_quadratic_parse_2026-06-13.
-    if rt_env_get_i64("SIMPLE_BOOTSTRAP", 0) == 1 and rt_env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", 0) != 1:
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") != "1":
         rt_env_set("SIMPLE_BOOTSTRAP_MODULE_DECL_" + int_to_str(count), int_to_str(decl_idx))
-    if count < ast_module_decl_slots_len():
-        ast_module_decl_slot_set(count, decl_idx)
+    if count < module_decl_slots.len():
+        module_decl_slots[count] = decl_idx
     else:
-        ast_module_decl_slot_push(decl_idx)
+        module_decl_slots.push(decl_idx)
     ast_module_decl_count_set(count + 1)
 
 fn module_get_decls() -> [i64]:
@@ -432,13 +441,13 @@ fn module_decl_at(index: i64) -> i64:
     if index < 0 or index >= ast_module_decl_count_get():
         return -1
     if rt_env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", 0) == 1:
-        if index >= ast_module_decl_slots_len():
+        if index >= module_decl_slots.len():
             return -1
-        return ast_module_decl_slot_get(index)
+        return module_decl_slots[index]
     val env_value = rt_env_get("SIMPLE_BOOTSTRAP_MODULE_DECL_" + int_to_str(index)) ?? ""
     if env_value != "":
         return ast_parse_i64(env_value)
-    ast_module_decl_slot_get(index)
+    module_decl_slots[index]
 
 # ===== AST Reset =====
 
@@ -458,10 +467,9 @@ fn ast_reset():
     # every reset with the pre-reset arena sizes so an interleaved reset that
     # clobbers a still-in-flight conversion can be pinpointed. Guarded by an
     # env var so it is inert unless explicitly enabled.
-    if rt_env_get_i64("SIMPLE_TRACE_AST_RESET", 0) == 1:
+    if (rt_env_get("SIMPLE_TRACE_AST_RESET") ?? "") == "1":
         ast_reset_seq = ast_reset_seq + 1
-        if not frontend_trace_suppressed():
-            print "[ast_reset] seq={ast_reset_seq}"
+        print "[ast_reset] seq={ast_reset_seq}"
     # Native binaries may zero-initialize module arrays. Allocate once when
     # needed, then clear in place so every parsed file reuses arena storage.
     if decl_tag == nil:
@@ -480,8 +488,6 @@ fn ast_reset():
         decl_ret_type = []
     if decl_body_stmts == nil:
         decl_body_stmts = []
-    if decl_body_stmts_flat == nil:
-        decl_body_stmts_flat = []
     if decl_field_names == nil:
         decl_field_names = []
     if decl_field_types == nil:
@@ -508,8 +514,6 @@ fn ast_reset():
         decl_is_lazy = []
     if decl_is_gpu_kernel == nil:
         decl_is_gpu_kernel = []
-    if decl_rt_hal_flags == nil:
-        decl_rt_hal_flags = []
     if decl_gpu_target_text == nil:
         decl_gpu_target_text = []
     if decl_gpu_target_arg_name_text == nil:
@@ -524,28 +528,36 @@ fn ast_reset():
         decl_derives = []
     if decl_impl_trait == nil:
         decl_impl_trait = []
+    if decl_facet_impl_name == nil:
+        decl_facet_impl_name = []
     if decl_is_trait == nil:
         decl_is_trait = []
     if decl_is_hardware == nil:
         decl_is_hardware = []
     if decl_clocked_args == nil:
         decl_clocked_args = []
-    if decl_vhdl_generic_args == nil:
-        decl_vhdl_generic_args = []
-    if decl_flatten_struct_output == nil:
-        decl_flatten_struct_output = []
     if decl_is_value_type == nil:
         decl_is_value_type = []
+    if decl_doc_comment == nil:
+        decl_doc_comment = []
+    if decl_raw_attributes == nil:
+        decl_raw_attributes = []
     if decl_param_mut_text == nil:
         decl_param_mut_text = []
+    if decl_param_default_text == nil:
+        decl_param_default_text = []
+    if decl_empty_i64 == nil:
+        decl_empty_i64 = []
+    if decl_empty_text == nil:
+        decl_empty_text = []
+    if decl_empty_text_lists == nil:
+        decl_empty_text_lists = []
     if arm_pattern == nil:
         arm_pattern = []
     if arm_guard == nil:
         arm_guard = []
     if arm_body == nil:
         arm_body = []
-    if arm_body_flat == nil:
-        arm_body_flat = []
     if arm_binding == nil:
         arm_binding = []
     if arm_rationale == nil:
@@ -558,9 +570,8 @@ fn ast_reset():
         elif_else = []
     if module_decls == nil:
         module_decls = []
-    # module_decl_slots has no nil-guard here on purpose: it is owned by
-    # decl_nodes.spl and ast_module_decl_slots_clear() below re-seeds it to []
-    # (a cross-module `module_decl_slots = []` from here is dropped anyway).
+    if module_decl_slots == nil:
+        module_decl_slots = []
     ast_decl_mode_slots_refresh()
     # Arena Harden: retire a poisoned, size-only snapshot of the generation
     # that is about to be cleared BEFORE the live pools are wiped below (see
@@ -574,7 +585,6 @@ fn ast_reset():
     decl_param_types.clear()
     decl_ret_type.clear()
     decl_body_stmts.clear()
-    decl_body_stmts_flat.clear()
     decl_field_names.clear()
     decl_field_types.clear()
     decl_field_defaults.clear()
@@ -588,7 +598,6 @@ fn ast_reset():
     decl_type_param_constraint_mode.clear()
     decl_is_lazy.clear()
     decl_is_gpu_kernel.clear()
-    decl_rt_hal_flags.clear()
     decl_gpu_target_text.clear()
     decl_gpu_target_arg_name_text.clear()
     decl_gpu_backends_text.clear()
@@ -596,22 +605,27 @@ fn ast_reset():
     decl_is_packed.clear()
     decl_derives.clear()
     decl_impl_trait.clear()
+    decl_facet_impl_name.clear()
     decl_is_trait.clear()
     decl_is_hardware.clear()
     decl_clocked_args.clear()
-    decl_vhdl_generic_args.clear()
-    decl_flatten_struct_output.clear()
     decl_is_value_type.clear()
+    decl_doc_comment.clear()
+    decl_raw_attributes.clear()
     decl_param_mut_text.clear()
+    decl_param_default_text.clear()
+    decl_empty_i64.clear()
+    decl_empty_text.clear()
+    decl_empty_text_lists.clear()
     arm_pattern.clear()
     arm_guard.clear()
     arm_body.clear()
     arm_body_flat.clear()
     arm_binding.clear()
     arm_rationale.clear()
-    # Owner-module clear: a cross-module `.clear()` on these does not reach the
-    # arena elif_new() appends to (see elif_arena_clear in _Ast/decl_nodes.spl).
-    elif_arena_clear()
+    elif_cond.clear()
+    elif_body.clear()
+    elif_else.clear()
     module_decls.clear()
     # Drop the per-index decl env mirror BEFORE the slot array goes: it is read
     # env-first (module_decl_at / ast_decl_text_get), so anything left here
@@ -639,6 +653,7 @@ fn ast_reset():
     lexer_state_cur_line_slot[0] = "0"
     lexer_state_cur_col_slot[0] = "0"
     lexer_state_cur_suffix_slot[0] = ""
+    flat_if_chain_reset()
     expr_reset()
     stmt_reset()
     ast_decl_count_set(0)
@@ -671,7 +686,7 @@ fn stmt_get(idx: i64) -> CoreStmt:
         expr_idx: stmt_expr[idx],
         name: stmt_name[idx],
         type_tag: stmt_type_tag[idx],
-        body: stmt_get_body(idx),
+        body: stmt_body[idx],
         target: -1,
         value: -1,
         condition: -1,
@@ -684,15 +699,6 @@ fn stmt_get(idx: i64) -> CoreStmt:
     )
 
 fn decl_get(idx: i64) -> CoreDecl:
-    # `idx` can be a decl id captured before ast_reset() (or a module-level
-    # `var` global that does not reliably persist a write across a call into
-    # a different module under this interpreter, see decl_alloc/
-    # module_get_decls investigation) left decl_tag shorter than the id
-    # implies. Return a neutral, tag-0 CoreDecl (no real DECL_* constant is
-    # 0; they all start at 1) instead of indexing out of range.
-    # (doc/08_tracking/bug/lint_pipeline_array_index_out_of_bounds_2026-07-30.md)
-    if idx < 0 or idx >= decl_tag.len():
-        return make_core_decl(0, -1)
     CoreDecl(
         tag: decl_tag[idx],
         span_id: decl_span[idx],
@@ -709,23 +715,28 @@ fn decl_get(idx: i64) -> CoreDecl:
         imports: decl_imports[idx],
         visibility_text: decl_get_visibility_text(idx),
         type_params: decl_type_params[idx],
-        is_async: false,
-        is_value_type: decl_get_is_value_type(idx) != 0
+        is_async: false
     )
 
 # ===== Yield Detection Utilities =====
 # These access both expr and stmt pools so they stay in the unified module.
 
 fn expr_contains_yield(eid: i64) -> bool:
-    # `eid` may be stale relative to the CURRENT expr_tag arena (reset by
-    # ast_reset() for a later parse, or a cross-module global-var visibility
-    # gap under the interpreter). Bound-check like the existing negative
-    # "no expr" sentinel guard, not just `eid < 0`.
-    # (doc/08_tracking/bug/lint_pipeline_array_index_out_of_bounds_2026-07-30.md)
-    if eid < 0 or eid >= expr_tag.len(): return false
+    if eid < 0: return false
     val tag = expr_tag[eid]
     if tag == EXPR_YIELD: return true
     if tag == EXPR_LAMBDA: return false
+    if tag == EXPR_IF_CHAIN:
+        val chain_id = expr_extra[eid]
+        var arm_id = flat_if_chain_first_arm_get(chain_id)
+        var remaining = flat_if_chain_arm_count_get(chain_id)
+        while arm_id >= 0 and remaining > 0:
+            if expr_contains_yield(flat_if_arm_head_get(arm_id)): return true
+            if expr_contains_yield(flat_if_arm_init_get(arm_id)): return true
+            if expr_contains_yield(flat_if_arm_then_expr_get(arm_id)): return true
+            arm_id = flat_if_arm_next_get(arm_id)
+            remaining = remaining - 1
+        return expr_contains_yield(flat_if_chain_else_expr_get(chain_id))
     if expr_contains_yield(expr_left[eid]): return true
     if expr_contains_yield(expr_right[eid]): return true
     if expr_contains_yield(expr_extra[eid]): return true
@@ -736,10 +747,9 @@ fn expr_contains_yield(eid: i64) -> bool:
     false
 
 fn stmt_contains_yield(sid: i64) -> bool:
-    # Same stale-arena-id hazard as expr_contains_yield above.
-    if sid < 0 or sid >= stmt_expr.len(): return false
+    if sid < 0: return false
     if expr_contains_yield(stmt_expr[sid]): return true
-    for child_sid in stmt_get_body(sid):
+    for child_sid in stmt_body[sid]:
         if stmt_contains_yield(child_sid): return true
     false
 

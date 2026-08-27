@@ -1,8 +1,5 @@
 # Bug: Generic struct type parameter not resolved in impl block
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
-
 **ID:** crypto_digest_generic_struct_2026-06-15
 **Date:** 2026-06-15
 **Severity:** P2 (language limitation, workaround exists)
@@ -50,27 +47,3 @@ inside the impl body.
 
 Ensure type parameters declared on the struct head are propagated into the
 impl block's type environment before resolving member types and return types.
-
-## Re-verification 2026-08-17 (fleet lane C, by CONTENT)
-
-STILL-OPEN as a language limitation. `src/compiler/30.types/type_system/checker.spl` (326 lines)
-carries `type_params: [text]` (line 71) but no resolution of an impl-block type parameter
-against a generic struct — the gap the doc describes is intact.
-
-The cited workaround lives in `src/lib/common/crypto/typed/ctypes.spl`, which is claimed by
-another lane this session and was NOT touched. `reproducible_by` is NONE and no spec exists;
-this lane wrote none, because a generic-resolution fix in the type checker is a language
-feature change well outside a bug-fix lane's blast radius.
-
-UNPROVEN: no runtime reproduction was attempted.
-
-## HANDED TO CRITICAL LANE 2026-08-17 (w0001 compiler_spl lane)
-
-Root cause for this row lives in `src/compiler/30.types/type_system/checker.spl`.
-That file was removed from this lane's scope mid-session by the coordinator (a P0
-silently-wrong-results lane took it), so **no source was read for edit and no change
-was made here**. Row handed off unfixed and unreproduced.
-
-Only fact established: the workaround in `src/lib/common/crypto/typed/ctypes.spl`
-(fixed-size `[u8]`) is still what ships, so the underlying language limitation is
-still present.

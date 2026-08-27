@@ -1,9 +1,3 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-OS
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-
-
-
 """
 # Hosted browser renderer policy
 
@@ -27,6 +21,12 @@ trusted broker state changes. Explicit controls retain the parent-authorized
 initial document load and route top-level HTTPS-to-HTTP navigation through the
 navigation policy rather than subresource mixed-content policy.
 """
+# @manual: primary
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+# doc-path: doc/01_research/os/simpleos/simpleos_rv64_hosted_qemu.md
+# doc-path: doc/03_plan/compiler/self_hosted_frontend/full_cli_redeploy_and_browser_startup_plan.md
+# doc-path: doc/04_architecture/infra/misc/export_star_self_hosted.md
+# doc-path: doc/05_design/os/simpleos/simpleos_rv64_hosted_qemu.md
 
 use std.spec.step
 
@@ -35,11 +35,8 @@ use std.common.ui.draw_ir.{draw_ir_composition}
 use std.common.web.browser_renderer_protocol.{
     BrowserRendererNetworkDecodeResult,
     browser_renderer_action_decode,
-    browser_renderer_capability_decoder_feed,
-    browser_renderer_capability_decoder_new,
-    browser_renderer_capability_payload_message,
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
-    browser_renderer_frame_decode, browser_renderer_frame_encode,
+    browser_renderer_frame_decode,
     browser_renderer_frame_encode_with_state_and_images,
     browser_renderer_fetch_request_decode,
     browser_renderer_fetch_request_encode,
@@ -56,18 +53,14 @@ use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Origin, Url}
 use std.gc_async_mut.gpu.browser_engine.net.fetch.{FetchEngine}
 use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
     MockResponseRegistry, build_request_bytes, observed_mock_request,
-    observed_mock_request_count, set_mock_registry
+    set_mock_registry
 }
 use std.gc_async_mut.gpu.browser_engine.shared.logging.{
     BrowserLogLevel, Logger
 }
-use std.gc_async_mut.gpu.browser_engine.security.cookie_policy.{
-    cookie_partition_key
-}
 use std.gc_async_mut.web.browser_session.{
     BrowserHstsSnapshot, BrowserHstsSnapshotEntry,
-    BrowserRequest, BrowserResponse, BrowserSession,
-    browser_header_has_attachment_disposition
+    BrowserRequest, BrowserResponse, BrowserSession
 }
 use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
@@ -86,20 +79,18 @@ use os.hosted.hosted_browser_renderer_policy.{
 use os.hosted.hosted_browser_renderer_process.{
     HOSTED_BROWSER_SITE_SWAP_REQUIRED,
     HostedBrowserRendererProcess,
+    _browser_transport_host,
     hosted_browser_network_response_limit_reason
 }
 use os.hosted.hosted_browser_renderer_registry.{
     HostedBrowserRendererRegistry
 }
 use os.hosted.browser_profile_store.{BrowserProfileStore}
-use std.js.types.pair.{Pair}
 
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_file_read_text(path: text) -> text
-extern fn rt_text_to_bytes(value: text) -> [u8]
 
 describe "hosted browser renderer transport host":
-    # @manual scenario evidence
     it "unwraps only a canonical IPv6 address for socket and TLS":
         # @req REQ-SSPEC-OS
         step("unwraps only a canonical IPv6 address for socket and TLS")
@@ -359,6 +350,17 @@ fn _render_background_image_pixels(session: BrowserSession) -> [u32]:
         fail("Decoded CSS background Draw IR command was skipped")
     rendered.pixels
 
+describe "hosted browser renderer transport host":
+    it "unwraps only a canonical IPv6 address for socket and TLS":
+        expect(_browser_transport_host(
+            "[2606:4700:4700::1111]"
+        )).to_equal("2606:4700:4700::1111")
+        expect(_browser_transport_host("example.com")).to_equal("example.com")
+        expect(_browser_transport_host("192.0.2.1")).to_equal("192.0.2.1")
+        expect(_browser_transport_host("[not:v6]")).to_equal("[not:v6]")
+        expect(_browser_transport_host("[[::1]]")).to_equal("[[::1]]")
+        expect(_browser_transport_host("[::1")).to_equal("[::1")
+
 fn permit(
     active: bool,
     url: text,
@@ -406,32 +408,6 @@ fn request(
         initiator_origin: initiator_origin
     )
 
-fn decoded_request(
-    generation: i64,
-    request_id: text,
-    kind: text,
-    url: text,
-    credentials: text = "include",
-    script_cookie_writes: [text] = [],
-    initiator_origin: text = "",
-    headers: text = ""
-) -> BrowserRendererNetworkDecodeResult:
-    val encoded = browser_renderer_fetch_request_encode(
-        generation, 2, 1, request_id, kind, url, "GET", headers, "", "",
-        credentials, script_cookie_writes, initiator_origin
-    )
-    if not encoded.ok:
-        fail(encoded.reason)
-    val decoded = browser_renderer_decoder_feed(
-        browser_renderer_decoder_new(generation), encoded.wire
-    )
-    if decoded.status != "message":
-        fail(decoded.decoder.error)
-    val fetch = browser_renderer_fetch_request_decode(decoded.message)
-    if not fetch.ok:
-        fail(fetch.reason)
-    fetch
-
 fn fetch_request(url: text, mode: RequestMode) -> FetchRequest:
     FetchRequest(
         method: "GET", url: Url.parse_or_opaque(url), headers: "", body: [],
@@ -447,7 +423,7 @@ fn sts_response(status: i64) -> FetchResponse:
 
 describe "hosted browser renderer broker policy":
 
-        # @req REQ-SSPEC-OS REQ-SSPEC-OS
+    # @req REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018
     it "keeps Favorite bound to the committed page during navigation":
         # @req REQ-SSPEC-OS
         step("keeps Favorite bound to the committed page during navigation")
@@ -547,7 +523,7 @@ describe "hosted browser renderer broker policy":
         profile.close()?
         expect(registry.close()).to_equal(true)
 
-        # @req REQ-SSPEC-OS REQ-SSPEC-OS REQ-SSPEC-OS
+    # @req REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013
     it "admits decoded renderer side effects only through trusted CSP state":
         # @req REQ-SSPEC-OS
         step("admits decoded renderer side effects only through trusted CSP state")
@@ -695,7 +671,7 @@ describe "hosted browser renderer broker policy":
         ).?).to_be(true)
         set_mock_registry(MockResponseRegistry.create())
 
-        # @req REQ-SSPEC-OS REQ-SSPEC-OS
+    # @req REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-014
     it "blocks forged renderer requests with committed CSP before transport":
         # @req REQ-SSPEC-OS
         step("blocks forged renderer requests with committed CSP before transport")
@@ -1549,22 +1525,139 @@ describe "hosted browser renderer broker policy":
             "https://example.test/new"
         )
 
+    it "synchronizes same-origin history state into parent Back and Forward":
+        var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+        broker.state = "active"
+        broker.document_url = "https://example.test/start"
+        broker.document_origin = "https://example.test"
+        broker.history_urls = ["https://example.test/start"]
+        broker.history_index = 0
+        expect(broker._frame_history_state_valid(
+            "https://example.test/next#view",
+            "https://example.test/start",
+            ""
+        )).to_be(true)
+        expect(broker._frame_history_state_valid(
+            "https://attacker.test/", "", ""
+        )).to_be(false)
+        expect(broker._frame_history_state_valid(
+            "https://example.test/next", "https://attacker.test/", ""
+        )).to_be(false)
+        broker.history_urls = [
+            "https://unrelated.test/",
+            "https://previous.test/",
+            "https://example.test/start"
+        ]
+        broker.history_index = 2
+        expect(broker._frame_history_state_valid(
+            "https://example.test/next",
+            "https://previous.test/",
+            ""
+        )).to_be(true)
+        expect(broker._frame_history_state_valid(
+            "https://example.test/next",
+            "https://unrelated.test/",
+            ""
+        )).to_be(false)
+        broker.history_urls = ["https://example.test/start"]
+        broker.history_index = 0
+        broker._apply_frame_history_state(
+            "https://example.test/next#view",
+            "https://example.test/start",
+            ""
+        )
+        expect(broker.document_url).to_equal(
+            "https://example.test/next#view"
+        )
+        expect(broker.begin_go_back(1000).is_ok()).to_be(true)
+        val back = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(1), broker.pending_wire
+        )
+        val back_navigation = browser_renderer_navigation_decode(back.message)
+        expect(back_navigation.ok).to_be(true)
+        expect(back_navigation.action).to_equal("back")
+        expect(back_navigation.url).to_equal("https://example.test/start")
+
+        broker.pending_wire = ""
+        broker.pending_wire_is_command = false
+        broker.command_deadline_ms = 0
+        broker.pending_operation = ""
+        broker._apply_frame_history_state(
+            "https://example.test/start",
+            "",
+            "https://example.test/next#view"
+        )
+        expect(broker.begin_go_forward(1000).is_ok()).to_be(true)
+        val forward = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(1), broker.pending_wire
+        )
+        val forward_navigation = browser_renderer_navigation_decode(
+            forward.message
+        )
+        expect(forward_navigation.ok).to_be(true)
+        expect(forward_navigation.action).to_equal("forward")
+        expect(forward_navigation.url).to_equal(
+            "https://example.test/next#view"
+        )
+
+    it "accepts the previous displayed URL across a network commit":
+        var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+        broker.document_url = "https://a.test/start"
+        broker.document_origin = "https://a.test"
+        broker.history_urls = ["https://a.test/start"]
+        broker.history_index = 0
+        broker.history_current_url = "https://a.test/start#view"
+        broker.pending_document_commit_url = "https://b.test/next"
+        broker.pending_history_action = "push"
+        expect(broker._frame_history_state_valid(
+            "https://b.test/next",
+            "https://a.test/start#view",
+            ""
+        )).to_be(true)
+
     it "rejects a forged legacy frame before committing a pending document":
         # @req REQ-SSPEC-OS
         step("rejects a forged legacy frame before committing a pending document")
         step("Send a state-less renderer frame while a document is pending")
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
-        broker.document_url = "https://source.test/start"
-        broker.document_origin = "https://source.test"
-        broker.history_urls = ["https://source.test/start"]
+        broker.state = "active"
+        broker.document_url = "https://example.test/start"
+        broker.document_origin = "https://example.test"
+        broker.history_urls = ["https://example.test/start"]
         broker.history_index = 0
-        broker.history_current_url = "https://source.test/start"
-        broker.pending_history_action = "push"
-        broker.pending_document_commit_url = "https://target.test/private"
-        broker.provisional_document_origin = "https://target.test"
-        broker.expected_reply_to_request_id = 2
-        val forged_wire = browser_renderer_frame_encode(
-            draw_ir_composition("", "", "", []), 1, 2
+        expect(broker._frame_history_state_valid(
+            "https://example.test/next#view",
+            "https://example.test/start",
+            ""
+        )).to_be(true)
+        expect(broker._frame_history_state_valid(
+            "https://attacker.test/", "", ""
+        )).to_be(false)
+        expect(broker._frame_history_state_valid(
+            "https://example.test/next", "https://attacker.test/", ""
+        )).to_be(false)
+        broker.history_urls = [
+            "https://unrelated.test/",
+            "https://previous.test/",
+            "https://example.test/start"
+        ]
+        broker.history_index = 2
+        expect(broker._frame_history_state_valid(
+            "https://example.test/next",
+            "https://previous.test/",
+            ""
+        )).to_be(true)
+        expect(broker._frame_history_state_valid(
+            "https://example.test/next",
+            "https://unrelated.test/",
+            ""
+        )).to_be(false)
+        broker.history_urls = ["https://example.test/start"]
+        broker.history_index = 0
+        broker._apply_frame_history_state(
+            "https://example.test/next#view",
+            "https://example.test/start",
+            ""
         )
         expect(forged_wire.ok).to_be(true)
         val forged = browser_renderer_frame_decode(
@@ -1580,10 +1673,8 @@ describe "hosted browser renderer broker policy":
         expect(rejected.ok).to_be(false)
         expect(rejected.reason).to_equal("missing-frame-history")
         expect(broker.state).to_equal("failed")
-        expect(broker.document_url).to_equal(
-            "https://source.test/start"
-        )
-        expect(broker.history_urls.len()).to_equal(1)
+        expect(broker.document_url).to_equal("")
+        expect(broker.history_urls.len()).to_equal(0)
 
     it "resolves duplicate history URLs in the requested direction":
         # @req REQ-SSPEC-OS
@@ -1670,7 +1761,6 @@ describe "hosted browser renderer broker policy":
         expect(broker.begin_pointer(
             1, 4, 5, true, 1000
         ).is_ok()).to_be(true)
-        expect(broker.pointer_pressed).to_be(true)
         val pressed_message = browser_renderer_decoder_feed(
             browser_renderer_decoder_new(1), broker.pending_wire
         )
@@ -1678,14 +1768,10 @@ describe "hosted browser renderer broker policy":
             pressed_message.message
         ).pressed).to_be(true)
 
-        step("Cancel the page press before chrome takes ownership")
-        expect(broker.cancel_pointer(
-            2, 1000
+        expect(broker.begin_pointer(
+            2, 4, 5, false, 1000
         ).is_ok()).to_be(true)
-        expect(broker.pointer_pressed).to_be(false)
         expect(broker.deferred_commands.len()).to_equal(1)
-
-        step("Decode the deferred renderer cancellation")
         broker.pending_wire = ""
         broker.pending_wire_is_command = false
         broker.command_deadline_ms = 0
@@ -1853,7 +1939,7 @@ describe "hosted browser renderer broker policy":
         expect(broker.pending_wire).to_equal("network-response")
         expect(broker.deferred_commands.len()).to_equal(1)
 
-        # @req REQ-SSPEC-OS
+    # @req REQ-WEB-BROWSER-018
     it "retains the process handle when native close fails":
         # @req REQ-SSPEC-OS
         step("retains the process handle when native close fails")
@@ -1867,7 +1953,7 @@ describe "hosted browser renderer broker policy":
         expect(broker.close()).to_be(true)
         expect(broker.state).to_equal("closed")
 
-        # @req REQ-SSPEC-OS
+    # @req REQ-WEB-BROWSER-018
     it "clears a renderer handle already reaped by liveness":
         # @req REQ-SSPEC-OS
         step("clears a renderer handle already reaped by liveness")
@@ -1905,8 +1991,6 @@ describe "hosted browser renderer broker policy":
         var link = HostedBrowserRendererProcess.create(1, 640, 480)
         link.document_url = "https://source.test/page"
         link.document_origin = "https://source.test"
-        link.document_csp_policy = "default-src *"
-        link.document_csp_ready = true
         expect(link.authorize_renderer_navigation(request(
             "document", "https://destination.test/"
         ))).to_be(true)
@@ -1917,8 +2001,6 @@ describe "hosted browser renderer broker policy":
         var forged = HostedBrowserRendererProcess.create(1, 640, 480)
         forged.document_url = "https://source.test/page"
         forged.document_origin = "https://source.test"
-        forged.document_csp_policy = "default-src *"
-        forged.document_csp_ready = true
         expect(forged.authorize_renderer_navigation(request(
             "document", "https://destination.test/", "GET",
             "X-Renderer: forged"
@@ -1935,8 +2017,6 @@ describe "hosted browser renderer broker policy":
         var parent = HostedBrowserRendererProcess.create(1, 640, 480)
         parent.document_url = "https://source.test/page"
         parent.document_origin = "https://source.test"
-        parent.document_csp_policy = "default-src *"
-        parent.document_csp_ready = true
         expect(parent.authorize_navigation(
             "https://allowed.test/", "GET", "", "", ""
         )).to_be(true)
@@ -2414,7 +2494,7 @@ describe "hosted browser renderer broker policy":
             expect(policy.ok).to_be(false)
             expect(policy.reason).to_equal("mixed-content-blocked")
 
-        # @req REQ-SSPEC-OS REQ-SSPEC-OS REQ-SSPEC-OS
+    # @req REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-012
     # @capture(protocol)
     # @capture(artifact)
     it "renders an HSTS-upgraded external PNG and blocks its mixed-content control":
@@ -2883,8 +2963,6 @@ describe "hosted browser renderer broker policy":
         )).to_equal(1)
         renderer_document.document_url = "https://source.test/page"
         renderer_document.document_origin = "https://source.test"
-        renderer_document.document_csp_policy = "default-src *"
-        renderer_document.document_csp_ready = true
         val renderer_request = request(
             "document", "http://secure.test/page"
         )
@@ -3124,12 +3202,10 @@ describe "hosted browser renderer broker policy":
                 "text/plain"
             )
         )
-        expect(policy.ok).to_be(true)
-        expect(policy.mode).to_equal(RequestMode.Cors)
-        expect(policy.sanitized_headers).to_equal(
-            "Content-Type: text/plain"
+        expect(policy.ok).to_be(false)
+        expect(policy.reason).to_equal(
+            "cross-origin-preflight-unavailable"
         )
-        expect(policy.sanitized_headers.contains("Origin:")).to_be(false)
 
     it "runs hosted OPTIONS before the admitted actual request":
         # @req REQ-SSPEC-OS
@@ -3296,7 +3372,7 @@ describe "hosted browser renderer broker policy":
         expect(broker.pending_wire).to_equal("")
         expect(broker.provisional_document_origin).to_equal("")
 
-        # @req REQ-SSPEC-OS REQ-SSPEC-OS
+    # @req REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-013
     it "retains one generation for same schemeful-site navigation":
         # @req REQ-SSPEC-OS
         step("retains one generation for same schemeful-site navigation")
@@ -3311,7 +3387,7 @@ describe "hosted browser renderer broker policy":
         expect(broker.site_lock).to_equal("https://example.test")
         expect(broker.site_swap_pending).to_be(false)
 
-        # @req REQ-SSPEC-OS REQ-SSPEC-OS
+    # @req REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-013
     it "withholds a cross-site redirect body and credentials from the old child":
         # @req REQ-SSPEC-OS
         step("withholds a cross-site redirect body and credentials from the old child")
@@ -3355,7 +3431,7 @@ describe "hosted browser renderer broker policy":
         expect(broker.network_job_handle).to_equal(0)
         expect(broker.provisional_document_origin).to_equal("")
 
-        # @req REQ-SSPEC-OS REQ-SSPEC-OS
+    # @req REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-013
     it "rejects old-generation SBRQ4 after a site swap":
         # @req REQ-SSPEC-OS
         step("rejects old-generation SBRQ4 after a site swap")

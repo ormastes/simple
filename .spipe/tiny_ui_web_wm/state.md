@@ -58,6 +58,18 @@ implementation-active
 
 ## Current evidence ledger (2026-08-16)
 
+- B-10 through B-13: the pushed upstream checkpoint is present on this lane's
+  current `origin/main`; this branch does not duplicate that source wave.
+- B-14: source implementation complete in this branch. Six retained owners
+  preallocate twelve token/parser/CSS/layout/paint/GUI backing stores, reset
+  logical extents in place, preserve GUI ownership during control installation,
+  and hit-test counted retained pane slots. Unit/integration sources were
+  adapted and the system SSpec adds a real render/navigation/edit/wheel reuse
+  scenario with REQ/NFR traceability.
+- B-14 verification: `TEST_BLOCKED`. No admitted pure-Simple self-hosted runtime is
+  available, so compilation, behavior, allocator instrumentation, docgen, and
+  runtime PASS are not claimed. The Rust seed was not used as evidence.
+
 - AC-6/AC-7: code fix prepared for retained WM/present mutation, root admission before interaction routing, exact direct-present geometry, pointer capture/release, and wheel routing. Unit/integration/system sources were updated; pure-Simple execution is pending and no PASS is claimed.
 - AC-8: incomplete. The component map exists, but generated factory/destructor/dependency metadata, static/dynamic descriptor parity, excluded-pack closure evidence, and optional-module ABI evidence are missing.
 - AC-9: incomplete. The executable source now traces every REQ/NFR and retains H4/RV32/S0 as explicit `fail(...)` scenarios. The checked-in manual is marked stale pending pure-Simple docgen and manual review.
@@ -72,7 +84,11 @@ The 2026-08-16 independent highest-capability review returned `STATUS: FAIL`, no
 
 The subsequent source-only repair wave prepared B-10 through B-13 fixes and focused test sources: versioned draw envelopes and surface-bound presentation; CSS/attribute/hidden-content and base-container behavior; WM-constrained event-to-frame updates; and generational WM/registry uniqueness. These are implementation progress only. B-10 through B-13 stay open until an admitted pure-Simple runner compiles and passes the preserved focused commands; browser/host integration and valid-empty-resource representation still require merge-owner resolution.
 
-The 2026-08-16 no-GC audit adds B-14: Web token/parser/CSS/layout/paint arrays and GUI node/resolved-pane arrays still grow after `TinyBrowser.create`, and browser control installation replaces the GUI arena. Logical limits alone do not prove NFR-011. The required repair is preallocated backing plus logical counts/reset-in-place and allocation-instrumented render/navigation/event evidence.
+The 2026-08-16 no-GC audit added B-14 for post-initialization Web/GUI transient
+arena growth. Its structural repair is now present: preallocated backing,
+logical counts/reset-in-place, retained GUI pane slots, typed capacity errors,
+and an allocation/reuse receipt. NFR-011 remains open until an admitted runtime
+executes the allocation-instrumented render/navigation/edit/wheel loop.
 
 Core source repair now preallocates counted DrawStream storage and software-2D execution stacks, uses saturating rectangle/pane/translation arithmetic, and validates public pane lookup generationally. The ten-path counted-stream follow-up is commit `544428e1343550cf3f589d8d3a50511d7f4b93a9` with one-pass `STATIC_PASS`. NFR-004/NFR-009/NFR-010/NFR-011 remain active because no admitted pure-Simple runner or retained-allocation evidence has proved these paths.
 
@@ -95,3 +111,4 @@ Verification commands are recorded in `doc/03_plan/agent_tasks/tiny_ui_web_wm.md
 - bounded source follow-up (2026-08-16): commits through `544428e1343550cf3f589d8d3a50511d7f4b93a9` add typed/saturating core safety, optional WM service parity source, V2 resource/navigation and visible-popup source, fixed-capacity WM/browser storage, and counted preallocated draw execution. The latest ten-path slice passed one static consistency gate with unchanged tree file count; all executable blockers remain open.
 - product evidence follow-up (2026-08-16): `b170f8bd370fbdef992873a6f29d4dd8d1cd0faa` adds built-in/ROM/VFS navigation scenarios, and `cda76b5e357d2af31281f5ddf386229b7f1720fa` retains validated presented pixels in preallocated storage with mutation-isolation coverage. Both have runner-independent static evidence only.
 - no-GC audit (2026-08-16): recorded B-14 for post-initialization Web/GUI transient arena growth; no zero-allocation claim is permitted until its source and instrumented runtime gate are complete.
+- B-14 implementation (2026-08-16): retained twelve constructor-owned backing stores across six Web/GUI arena owners; converted consumers to logical extents and reset-in-place; added real integration/system reuse assertions and a hand-mirrored nine-scenario manual. Runtime and allocator PASS remain blocked on an admitted pure-Simple binary.

@@ -56,6 +56,9 @@ scope=full
 resume=0
 source_root=$(pwd -P)
 timeout_seconds=${STAGE4_MATRIX_TIMEOUT_SECONDS:-1800}
+build_jobs=${SIMPLE_BOOTSTRAP_TEST_BUILD_THREADS:-1}
+worker_task=
+active_case_pid=
 
 for arg in "$@"; do
   case "$arg" in
@@ -68,6 +71,8 @@ for arg in "$@"; do
     --scope=*) scope=${arg#*=} ;;
     --source-root=*) source_root=${arg#*=} ;;
     --timeout-seconds=*) timeout_seconds=${arg#*=} ;;
+    --build-jobs=*) build_jobs=${arg#*=} ;;
+    --worker-task=*) worker_task=${arg#*=} ;;
     --resume) resume=1 ;;
     *) die "unknown option: $arg" ;;
   esac
@@ -78,6 +83,10 @@ case "$matrix_id" in
 esac
 case "$scope" in full|link-only) ;; *) die "scope must be full or link-only" ;; esac
 case "$timeout_seconds" in ''|*[!0-9]*|0) die "timeout must be a positive integer" ;; esac
+case "$build_jobs" in ''|*[!0-9]*|0*) die "build jobs must be a positive integer" ;; esac
+[ "${#build_jobs}" -le 2 ] || die "build jobs value is too long"
+[ "$build_jobs" -le 64 ] || die "build jobs exceed hard maximum 64"
+case "$worker_task" in '' ) ;; *[!A-Za-z0-9_-]*) die "worker task must be a contained identifier" ;; esac
 [ -d "$source_root" ] || die "source root is not a directory"
 source_root=$(CDPATH= cd -- "$source_root" && pwd -P) || exit 2
 cd "$source_root" || exit 2
@@ -103,6 +112,7 @@ state="$work_root/state"
 logs="$work_root/logs"
 homes="$work_root/homes"
 tmps="$work_root/tmps"
+task_roots="$work_root/tasks"
 summary="$work_root/summary.env"
 matrix="$work_root/matrix.tsv"
 config="$work_root/config.env"
@@ -113,7 +123,7 @@ fi
 if [ "$resume" -eq 1 ] && { [ ! -f "$matrix" ] || [ ! -f "$config" ]; }; then
   die "resume requires an existing matrix and config"
 fi
-mkdir -p "$state" "$logs" "$homes" "$tmps" || die "cannot create matrix evidence"
+mkdir -p "$state" "$logs" "$homes" "$tmps" "$task_roots" || die "cannot create matrix evidence"
 
 file_hash_or_missing() {
   if [ -f "$1" ]; then hash_file "$1"; else printf 'MISSING\n'; fi
@@ -141,6 +151,7 @@ git_tracked_dirty_hash() {
 config_tmp="$work_root/config.expected.$$"
 matrix_tmp="$work_root/matrix.expected.$$"
 trap 'rm -f "$config_tmp" "$matrix_tmp"' EXIT INT TERM HUP
+if [ -z "$worker_task" ]; then
 {
   echo "schema=Stage4ToolingMatrixConfigV1"
   echo "matrix_id=$matrix_id"
@@ -183,6 +194,10 @@ trap 'rm -f "$config_tmp" "$matrix_tmp"' EXIT INT TERM HUP
   echo "git_head=$(git_head_or_missing)"
   echo "git_tracked_dirty_hash=$(git_tracked_dirty_hash)"
   echo "timeout_seconds=$timeout_seconds"
+  echo "build_jobs=$build_jobs"
+  echo "scheduler_policy=bounded-dependency-ready-parent-commit"
+  echo "case_timeout_policy=per-command"
+  echo "cache_writer_policy=isolated-task-owner"
 } >"$config_tmp"
 
 {
@@ -239,6 +254,9 @@ trap 'rm -f "$config_tmp" "$matrix_tmp"' EXIT INT TERM HUP
   fi
 } >"$matrix_tmp"
 
+[ "$(awk -F '\t' '{ seen[$1]++ } END { for (task in seen) if (seen[task] != 1) duplicate++; print duplicate + 0 }' "$matrix_tmp")" -eq 0 ] ||
+  die "matrix task identifier collision"
+
 write_resume_mismatch_summary() {
   mismatch_status=$1
   mismatch_total=$(wc -l <"$matrix" | tr -d ' ')
@@ -268,19 +286,32 @@ write_resume_mismatch_summary() {
 
 if [ "$resume" -eq 1 ]; then
   if ! cmp -s "$config_tmp" "$config"; then
-    write_resume_mismatch_summary resume-config-identity-mismatch
+    [ -n "$worker_task" ] || write_resume_mismatch_summary resume-config-identity-mismatch
     die "resume config identity mismatch"
   fi
   if ! cmp -s "$matrix_tmp" "$matrix"; then
-    write_resume_mismatch_summary resume-matrix-identity-mismatch
+    [ -n "$worker_task" ] || write_resume_mismatch_summary resume-matrix-identity-mismatch
     die "resume matrix identity mismatch"
   fi
 else
   mv "$config_tmp" "$config"
   mv "$matrix_tmp" "$matrix"
 fi
+else
+  [ "$resume" -eq 1 ] || die "worker mode requires resume"
+  [ -f "$config" ] && [ ! -L "$config" ] && [ -f "$matrix" ] && [ ! -L "$matrix" ] ||
+    die "worker mode requires frozen matrix evidence"
+  [ "$(field matrix_id "$config")" = "$matrix_id" ] || die "worker matrix identity mismatch"
+  [ "$(field scope "$config")" = "$scope" ] || die "worker scope identity mismatch"
+  [ "$(field source_root "$config")" = "$source_root" ] || die "worker source-root identity mismatch"
+  [ "$(field compiler_manifest_path "$config")" = "$compiler_manifest" ] || die "worker compiler manifest mismatch"
+  [ "$(field linker_path "$config")" = "$linker_path" ] || die "worker linker identity mismatch"
+  [ "$(field timeout_seconds "$config")" = "$timeout_seconds" ] || die "worker timeout identity mismatch"
+  [ "$(field build_jobs "$config")" = "$build_jobs" ] || die "worker build-jobs identity mismatch"
+fi
 matrix_hash=$(hash_file "$matrix")
 config_hash=$(hash_file "$config")
+frozen_identity_cache_file=
 
 frozen_identity_snapshot() {
   {
@@ -301,16 +332,45 @@ frozen_identity_snapshot() {
   }
 }
 
-frozen_identity_stable() {
-  frozen_identity_snapshot | while IFS='=' read -r frozen_key frozen_value; do
-    [ "$(field "$frozen_key" "$config")" = "$frozen_value" ] || exit 1
+frozen_identity_from_config() {
+  for frozen_config_key in \
+    compiler_manifest_hash compiler_tree_hash application_tree_hash cli_tree_hash \
+    library_tree_hash mcp_tree_hash lsp_tree_hash all_tests_hash check_scripts_hash \
+    mcp_config_hash runner_hash link_wrapper_hash git_head git_tracked_dirty_hash; do
+    printf '%s=%s\n' "$frozen_config_key" "$(field "$frozen_config_key" "$config")"
   done
+}
+
+frozen_identity_file_stable() {
+  frozen_identity_file=$1
+  [ -f "$frozen_identity_file" ] && [ ! -L "$frozen_identity_file" ] || return 1
+  while IFS='=' read -r frozen_key frozen_value; do
+    [ "$(field "$frozen_key" "$config")" = "$frozen_value" ] || return 1
+  done <"$frozen_identity_file"
+}
+
+frozen_identity_stable() {
+  if [ -n "$worker_task" ]; then
+    frozen_identity_from_config | while IFS='=' read -r frozen_key frozen_value; do
+      [ "$(field "$frozen_key" "$config")" = "$frozen_value" ] || exit 1
+    done
+  elif [ -n "$frozen_identity_cache_file" ]; then
+    frozen_identity_file_stable "$frozen_identity_cache_file"
+  else
+    frozen_identity_snapshot | while IFS='=' read -r frozen_key frozen_value; do
+      [ "$(field "$frozen_key" "$config")" = "$frozen_value" ] || exit 1
+    done
+  fi
 }
 
 write_identity_snapshot() {
   snapshot_task=$1
   snapshot_phase=$2
-  frozen_identity_snapshot >"$state/$snapshot_task.identity-$snapshot_phase"
+  if [ -n "$worker_task" ]; then
+    frozen_identity_from_config >"$state/$snapshot_task.identity-$snapshot_phase"
+  else
+    frozen_identity_snapshot >"$state/$snapshot_task.identity-$snapshot_phase"
+  fi
 }
 
 task_required() {
@@ -1005,6 +1065,11 @@ record_command() {
     echo "cwd=$source_root"
     echo "HOME=$homes/$command_task"
     echo "TMPDIR=$tmps/$command_task"
+    echo "XDG_CACHE_HOME=$task_roots/$command_task/cache"
+    echo "XDG_CONFIG_HOME=$task_roots/$command_task/config"
+    echo "XDG_DATA_HOME=$task_roots/$command_task/data"
+    echo "STAGE4_MATRIX_ID=$matrix_id"
+    echo "STAGE4_MATRIX_TASK_ID=$command_task"
     echo 'SIMPLE_NO_STUB_FALLBACK=1'
     echo 'argv-begin'
     for command_arg in "$@"; do printf '%s\n' "$command_arg"; done
@@ -1016,7 +1081,8 @@ run_logged() {
   run_task=$1
   shift
   run_log="$logs/$run_task.log"
-  mkdir -p "$homes/$run_task" "$tmps/$run_task"
+  mkdir -p "$homes/$run_task" "$tmps/$run_task" \
+    "$task_roots/$run_task/cache" "$task_roots/$run_task/config" "$task_roots/$run_task/data"
   : >"$logs/$run_task.command"
   record_command "$run_task" "$@"
   rm -f "$state/$run_task.watchdog-timeout"
@@ -1024,12 +1090,19 @@ run_logged() {
   run_status=0
   if command -v timeout >/dev/null 2>&1; then
     (cd "$source_root" && env HOME="$homes/$run_task" TMPDIR="$tmps/$run_task" \
+      XDG_CACHE_HOME="$task_roots/$run_task/cache" XDG_CONFIG_HOME="$task_roots/$run_task/config" \
+      XDG_DATA_HOME="$task_roots/$run_task/data" STAGE4_MATRIX_ID="$matrix_id" STAGE4_MATRIX_TASK_ID="$run_task" \
       SIMPLE_NO_STUB_FALLBACK=1 timeout -k 15s "${timeout_seconds}s" "$@") \
-      >"$run_log" 2>&1 || run_status=$?
+      >"$run_log" 2>&1 &
   else
     (cd "$source_root" && env HOME="$homes/$run_task" TMPDIR="$tmps/$run_task" \
-      SIMPLE_NO_STUB_FALLBACK=1 "$@") >"$run_log" 2>&1 || run_status=$?
+      XDG_CACHE_HOME="$task_roots/$run_task/cache" XDG_CONFIG_HOME="$task_roots/$run_task/config" \
+      XDG_DATA_HOME="$task_roots/$run_task/data" STAGE4_MATRIX_ID="$matrix_id" STAGE4_MATRIX_TASK_ID="$run_task" \
+      SIMPLE_NO_STUB_FALLBACK=1 "$@") >"$run_log" 2>&1 &
   fi
+  active_case_pid=$!
+  wait "$active_case_pid" || run_status=$?
+  active_case_pid=
   printf '%s\n' "$(date +%s)" >"$state/$run_task.ended"
   run_elapsed=$(( $(cat "$state/$run_task.ended") - $(cat "$state/$run_task.started") ))
   if [ "$run_status" -eq 124 ]; then
@@ -1042,19 +1115,27 @@ run_logged_append() {
   append_task=$1
   shift
   append_log="$logs/$append_task.log"
-  mkdir -p "$homes/$append_task" "$tmps/$append_task"
+  mkdir -p "$homes/$append_task" "$tmps/$append_task" \
+    "$task_roots/$append_task/cache" "$task_roots/$append_task/config" "$task_roots/$append_task/data"
   append_status=0
   record_command "$append_task" "$@"
   rm -f "$state/$append_task.watchdog-timeout"
   printf '%s\n' "$(date +%s)" >"$state/$append_task.started"
   if command -v timeout >/dev/null 2>&1; then
     (cd "$source_root" && env HOME="$homes/$append_task" TMPDIR="$tmps/$append_task" \
+      XDG_CACHE_HOME="$task_roots/$append_task/cache" XDG_CONFIG_HOME="$task_roots/$append_task/config" \
+      XDG_DATA_HOME="$task_roots/$append_task/data" STAGE4_MATRIX_ID="$matrix_id" STAGE4_MATRIX_TASK_ID="$append_task" \
       SIMPLE_NO_STUB_FALLBACK=1 timeout -k 15s "${timeout_seconds}s" "$@") \
-      >>"$append_log" 2>&1 || append_status=$?
+      >>"$append_log" 2>&1 &
   else
     (cd "$source_root" && env HOME="$homes/$append_task" TMPDIR="$tmps/$append_task" \
-      SIMPLE_NO_STUB_FALLBACK=1 "$@") >>"$append_log" 2>&1 || append_status=$?
+      XDG_CACHE_HOME="$task_roots/$append_task/cache" XDG_CONFIG_HOME="$task_roots/$append_task/config" \
+      XDG_DATA_HOME="$task_roots/$append_task/data" STAGE4_MATRIX_ID="$matrix_id" STAGE4_MATRIX_TASK_ID="$append_task" \
+      SIMPLE_NO_STUB_FALLBACK=1 "$@") >>"$append_log" 2>&1 &
   fi
+  active_case_pid=$!
+  wait "$active_case_pid" || append_status=$?
+  active_case_pid=
   printf '%s\n' "$(date +%s)" >"$state/$append_task.ended"
   append_elapsed=$(( $(cat "$state/$append_task.ended") - $(cat "$state/$append_task.started") ))
   [ "$append_status" -ne 124 ] || printf 'watchdog=true\nelapsed_seconds=%s\n' "$append_elapsed" >"$state/$append_task.watchdog-timeout"
@@ -1086,7 +1167,8 @@ run_logged_with_input() {
   input_file=$2
   shift 2
   input_log="$logs/$input_task.log"
-  mkdir -p "$homes/$input_task" "$tmps/$input_task"
+  mkdir -p "$homes/$input_task" "$tmps/$input_task" \
+    "$task_roots/$input_task/cache" "$task_roots/$input_task/config" "$task_roots/$input_task/data"
   : >"$logs/$input_task.command"
   record_command "$input_task" "$@" "stdin=$input_file"
   input_status=0
@@ -1094,12 +1176,19 @@ run_logged_with_input() {
   printf '%s\n' "$(date +%s)" >"$state/$input_task.started"
   if command -v timeout >/dev/null 2>&1; then
     (cd "$source_root" && env HOME="$homes/$input_task" TMPDIR="$tmps/$input_task" \
+      XDG_CACHE_HOME="$task_roots/$input_task/cache" XDG_CONFIG_HOME="$task_roots/$input_task/config" \
+      XDG_DATA_HOME="$task_roots/$input_task/data" STAGE4_MATRIX_ID="$matrix_id" STAGE4_MATRIX_TASK_ID="$input_task" \
       SIMPLE_NO_STUB_FALLBACK=1 timeout -k 15s "${timeout_seconds}s" "$@" <"$input_file") \
-      >"$input_log" 2>&1 || input_status=$?
+      >"$input_log" 2>&1 &
   else
     (cd "$source_root" && env HOME="$homes/$input_task" TMPDIR="$tmps/$input_task" \
-      SIMPLE_NO_STUB_FALLBACK=1 "$@" <"$input_file") >"$input_log" 2>&1 || input_status=$?
+      XDG_CACHE_HOME="$task_roots/$input_task/cache" XDG_CONFIG_HOME="$task_roots/$input_task/config" \
+      XDG_DATA_HOME="$task_roots/$input_task/data" STAGE4_MATRIX_ID="$matrix_id" STAGE4_MATRIX_TASK_ID="$input_task" \
+      SIMPLE_NO_STUB_FALLBACK=1 "$@" <"$input_file") >"$input_log" 2>&1 &
   fi
+  active_case_pid=$!
+  wait "$active_case_pid" || input_status=$?
+  active_case_pid=
   printf '%s\n' "$(date +%s)" >"$state/$input_task.ended"
   input_elapsed=$(( $(cat "$state/$input_task.ended") - $(cat "$state/$input_task.started") ))
   [ "$input_status" -ne 124 ] || printf 'watchdog=true\nelapsed_seconds=%s\n' "$input_elapsed" >"$state/$input_task.watchdog-timeout"
@@ -1234,7 +1323,6 @@ run_link_task() {
     write_identity_snapshot "$link_task" after
     write_task_input_snapshot "$link_task" after
     write_task_receipt "$link_task" BLOCKED_UPSTREAM identity-drift-before "$link_input" "$link_log" - -
-    write_summary
     return 0
   fi
   link_journal=$(tool_journal "$link_tool")
@@ -1244,7 +1332,6 @@ run_link_task() {
     write_identity_snapshot "$link_task" after
     write_task_input_snapshot "$link_task" after
     write_task_receipt "$link_task" BLOCKED_UPSTREAM missing-journal "$link_input" "$link_log" - -
-    write_summary
     return 0
   fi
   quarantine_publish "$link_tool"
@@ -1279,7 +1366,6 @@ run_link_task() {
     printf 'task=%s_validated_link=true\n' "$link_task" >"$state/$link_task.pass-marker"
   fi
   write_task_receipt "$link_task" "$link_result" "$link_status" "$link_input" "$link_log" "$link_output" "$link_output_hash"
-  write_summary
 }
 
 run_gate_command() {
@@ -1295,7 +1381,6 @@ run_gate_command() {
     write_identity_snapshot "$gate_task" after
     write_task_input_snapshot "$gate_task" after
     write_task_receipt "$gate_task" BLOCKED_UPSTREAM identity-drift-before "$gate_input" "$gate_log" - -
-    write_summary
     return 0
   fi
   if ! task_dependencies_pass "$gate_task"; then
@@ -1303,7 +1388,6 @@ run_gate_command() {
     write_identity_snapshot "$gate_task" after
     write_task_input_snapshot "$gate_task" after
     write_task_receipt "$gate_task" BLOCKED_UPSTREAM required-predecessor "$gate_input" "$gate_log" - -
-    write_summary
     return 0
   fi
   case "$gate_task" in
@@ -1312,7 +1396,6 @@ run_gate_command() {
       write_identity_snapshot "$gate_task" after
       write_task_input_snapshot "$gate_task" after
       write_task_receipt "$gate_task" BLOCKED_UPSTREAM protocol-root-contract-not-accepted "$gate_input" "$gate_log" - -
-      write_summary
       return 0
       ;;
   esac
@@ -1347,7 +1430,8 @@ run_gate_command() {
       run_logged "$gate_task" sh "$source_root/scripts/check/check-core-runtime-smoke.shs" "$cli_output" || gate_status=$?
       ;;
     redeploy_sanity)
-      run_logged "$gate_task" sh "$source_root/scripts/check/cert/redeploy_gate/redeploy_gate.shs" "$cli_output" || gate_status=$?
+      run_logged "$gate_task" env SIMPLE_BOOTSTRAP_TEST_BUILD_THREADS="$build_jobs" \
+        sh "$source_root/scripts/check/cert/redeploy_gate/redeploy_gate.shs" "$cli_output" || gate_status=$?
       ;;
     essential_tools)
       run_logged "$gate_task" env SIMPLE_BINARY="$cli_output" sh "$source_root/scripts/check/check-bootstrap-essential-tools-smoke.shs" "$cli_output" || gate_status=$?
@@ -1492,7 +1576,7 @@ run_gate_command() {
       mkdir -p "$(dirname "$native_out")"
       run_logged "$gate_task" "$cli_output" native-build --backend=cranelift \
         --source "$source_root/src/compiler" --source "$source_root/src/app" --source "$source_root/src/lib" \
-        --entry-closure --threads 1 --cache-dir "$native_cache" \
+        --entry-closure --threads "$build_jobs" --cache-dir "$native_cache" \
         --entry "$source_root/scripts/check/cert/redeploy_gate/fixtures/p2_add.spl" --output "$native_out" || gate_status=$?
       [ "$gate_status" -ne 0 ] || [ -x "$native_out" ] || gate_status=1
       if [ "$gate_status" -eq 0 ]; then run_logged_append "$gate_task" "$native_out" || gate_status=$?; fi
@@ -1529,7 +1613,6 @@ run_gate_command() {
         write_identity_snapshot "$gate_task" after
         write_task_input_snapshot "$gate_task" after
         write_task_receipt "$gate_task" UNSUPPORTED external-prerequisite-unavailable "$gate_input" "$gate_log" - -
-        write_summary
         return 0
       fi
       run_logged "$gate_task" "$cli_output" vscode build "$source_root/scripts/check/cert/redeploy_gate/fixtures/p2_add.spl" || gate_status=$?
@@ -1540,7 +1623,6 @@ run_gate_command() {
         write_identity_snapshot "$gate_task" after
         write_task_input_snapshot "$gate_task" after
         write_task_receipt "$gate_task" UNSUPPORTED external-prerequisite-unavailable "$gate_input" "$gate_log" - -
-        write_summary
         return 0
       fi
       run_logged "$gate_task" "$cli_output" electron build "$source_root/scripts/check/cert/redeploy_gate/fixtures/p2_add.spl" || gate_status=$?
@@ -1552,7 +1634,6 @@ run_gate_command() {
         write_identity_snapshot "$gate_task" after
         write_task_input_snapshot "$gate_task" after
         write_task_receipt "$gate_task" UNSUPPORTED emit-archive-unavailable "$gate_input" "$gate_log" - -
-        write_summary
         return 0
       fi
       run_logged "$gate_task" env SIMPLE_BINARY="$cli_output" \
@@ -1639,21 +1720,326 @@ run_gate_command() {
     if [ "$gate_output" != - ] && [ -f "$gate_output" ]; then gate_output_hash=$(hash_file "$gate_output"); fi
   fi
   write_task_receipt "$gate_task" "$gate_result" "$gate_status" "$gate_input" "$gate_log" "$gate_output" "$gate_output_hash"
-  write_summary
 }
 
-write_summary
-run_link_task cli
-run_link_task mcp
-run_link_task lsp
+run_matrix_task() {
+  matrix_task=$1
+  case "$matrix_task" in
+    link_cli) run_link_task cli ;;
+    link_mcp) run_link_task mcp ;;
+    link_lsp) run_link_task lsp ;;
+    *) run_gate_command "$matrix_task" ;;
+  esac
+}
 
-if [ "$scope" = full ]; then
-  while IFS="$(printf '\t')" read -r task required deps; do
-    case "$task" in link_*) continue ;; esac
-    run_gate_command "$task"
-  done <"$matrix"
+worker_cancel() {
+  worker_cancel_status=$1
+  trap - INT TERM HUP
+  case "$active_case_pid" in
+    ''|*[!0-9]*) ;;
+    *)
+      kill -TERM "$active_case_pid" 2>/dev/null || :
+      wait "$active_case_pid" 2>/dev/null || :
+      ;;
+  esac
+  exit "$worker_cancel_status"
+}
+
+if [ -n "$worker_task" ]; then
+  [ "$(awk -F '\t' -v task="$worker_task" '$1 == task { count++ } END { print count + 0 }' "$matrix")" -eq 1 ] ||
+    die "worker task is not in the frozen matrix: $worker_task"
+  trap 'worker_cancel 130' INT
+  trap 'worker_cancel 143' TERM
+  trap 'worker_cancel 129' HUP
+  run_matrix_task "$worker_task"
+  exit 0
 fi
 
+scheduler_root="$work_root/scheduler"
+scheduler_run="$scheduler_root/run.$$"
+scheduler_active="$scheduler_run/active"
+scheduler_collected="$scheduler_run/collected"
+scheduler_records="$scheduler_run/records"
+scheduler_done="$scheduler_run/done"
+scheduler_worker_meta="$scheduler_run/worker-meta"
+scheduler_manifest="$scheduler_root/schedule.tsv"
+scheduler_parent_identity_before="$scheduler_root/identity-before.env"
+scheduler_parent_identity_after="$scheduler_root/identity-after.env"
+scheduler_launcher="$scheduler_run/task-worker.sh"
+mkdir -p "$scheduler_active" "$scheduler_collected" "$scheduler_records" \
+  "$scheduler_done" "$scheduler_worker_meta" || die "cannot create scheduler state"
+
+{
+  echo '#!/bin/sh'
+  echo 'set -u'
+  echo 'done_file=$1'
+  echo 'meta_file=$2'
+  echo 'shift 2'
+  echo 'launcher_child='
+  echo 'stop_launcher() {'
+  echo '  trap - INT TERM HUP'
+  echo '  case "$launcher_child" in ""|*[!0-9]*) ;; *) kill -TERM "$launcher_child" 2>/dev/null || :; wait "$launcher_child" 2>/dev/null || : ;; esac'
+  echo '  exit 143'
+  echo '}'
+  echo "trap 'stop_launcher' INT TERM HUP"
+  echo 'meta_tmp="${meta_file}.tmp.$$"'
+  echo 'launcher_pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d " ")'
+  echo 'case "$launcher_pgid" in ""|*[!0-9]*) launcher_pgid=$$ ;; esac'
+  echo 'printf "pid=%s\npgid=%s\n" "$$" "$launcher_pgid" >"$meta_tmp"'
+  echo 'mv "$meta_tmp" "$meta_file"'
+  echo '"$@" &'
+  echo 'launcher_child=$!'
+  echo 'launcher_status=0'
+  echo 'wait "$launcher_child" || launcher_status=$?'
+  echo 'done_tmp="${done_file}.tmp.$$"'
+  echo 'printf "worker_status=%s\n" "$launcher_status" >"$done_tmp"'
+  echo 'mv "$done_tmp" "$done_file"'
+  echo 'exit "$launcher_status"'
+} >"$scheduler_launcher"
+chmod 0700 "$scheduler_launcher"
+
+scheduler_capture_identity() {
+  scheduler_identity_path=$1
+  scheduler_identity_tmp="$scheduler_identity_path.tmp.$$"
+  frozen_identity_snapshot >"$scheduler_identity_tmp" || return 1
+  mv "$scheduler_identity_tmp" "$scheduler_identity_path"
+  frozen_identity_file_stable "$scheduler_identity_path"
+}
+
+scheduler_capture_identity "$scheduler_parent_identity_before" ||
+  die "frozen identity drift before scheduler dispatch"
+frozen_identity_cache_file=$scheduler_parent_identity_before
+
+scheduler_parent_pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
+case "$scheduler_parent_pgid" in ''|*[!0-9]*) scheduler_parent_pgid=unknown ;; esac
+
+scheduler_dependencies_collected() {
+  scheduler_dependency_task=$1
+  scheduler_dependency_csv=$(awk -F '\t' -v task="$scheduler_dependency_task" '$1 == task { print $3; exit }' "$matrix")
+  [ "$scheduler_dependency_csv" = - ] && return 0
+  scheduler_old_ifs=$IFS
+  IFS=,
+  set -- $scheduler_dependency_csv
+  IFS=$scheduler_old_ifs
+  for scheduler_dependency in "$@"; do
+    [ -f "$scheduler_collected/$scheduler_dependency" ] || return 1
+  done
+}
+
+scheduler_write_manifest() {
+  scheduler_manifest_tmp="$scheduler_manifest.tmp.$$"
+  {
+    printf 'task\trequired\tdependencies\tdisposition\tpid\tpgid\tgroup_mode\tresult\tstatus\n'
+    while IFS="$(printf '\t')" read -r scheduler_row_task scheduler_row_required scheduler_row_deps; do
+      scheduler_row_record="$scheduler_records/$scheduler_row_task.env"
+      scheduler_row_disposition=$(field disposition "$scheduler_row_record" 2>/dev/null || printf 'missing\n')
+      scheduler_row_pid=$(field pid "$scheduler_row_record" 2>/dev/null || printf '%s\n' -)
+      scheduler_row_pgid=$(field pgid "$scheduler_row_record" 2>/dev/null || printf '%s\n' -)
+      scheduler_row_mode=$(field group_mode "$scheduler_row_record" 2>/dev/null || printf '%s\n' -)
+      scheduler_row_result=$(field result "$state/$scheduler_row_task.env" 2>/dev/null || printf 'INVALID_RECEIPT\n')
+      scheduler_row_status=$(field status "$state/$scheduler_row_task.env" 2>/dev/null || printf 'worker-evidence-missing\n')
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$scheduler_row_task" "$scheduler_row_required" "$scheduler_row_deps" \
+        "$scheduler_row_disposition" "$scheduler_row_pid" "$scheduler_row_pgid" \
+        "$scheduler_row_mode" "$scheduler_row_result" "$scheduler_row_status"
+    done <"$matrix"
+  } >"$scheduler_manifest_tmp"
+  mv "$scheduler_manifest_tmp" "$scheduler_manifest"
+}
+
+scheduler_signal_one() {
+  scheduler_signal_kind=$1
+  scheduler_signal_active_file=$2
+  scheduler_signal_pid=$(field pid "$scheduler_signal_active_file" 2>/dev/null || :)
+  scheduler_signal_mode=$(field group_mode "$scheduler_signal_active_file" 2>/dev/null || :)
+  scheduler_signal_task=$(field task "$scheduler_signal_active_file" 2>/dev/null || :)
+  case "$scheduler_signal_pid" in ''|*[!0-9]*) return 0 ;; esac
+  scheduler_signal_pgid=$(field pgid "$scheduler_worker_meta/$scheduler_signal_task.env" 2>/dev/null || :)
+  case "$scheduler_signal_mode:$scheduler_signal_pgid" in
+    setsid:[0-9]*)
+      if [ "$scheduler_signal_pgid" != "$scheduler_parent_pgid" ]; then
+        kill -"$scheduler_signal_kind" -- "-$scheduler_signal_pgid" 2>/dev/null || :
+      else
+        kill -"$scheduler_signal_kind" "$scheduler_signal_pid" 2>/dev/null || :
+      fi
+      ;;
+    *) kill -"$scheduler_signal_kind" "$scheduler_signal_pid" 2>/dev/null || : ;;
+  esac
+}
+
+scheduler_cancel_all() {
+  for scheduler_cancel_file in "$scheduler_active"/*.env; do
+    [ -f "$scheduler_cancel_file" ] || continue
+    scheduler_signal_one TERM "$scheduler_cancel_file"
+  done
+  sleep 1
+  for scheduler_cancel_file in "$scheduler_active"/*.env; do
+    [ -f "$scheduler_cancel_file" ] || continue
+    scheduler_cancel_pid=$(field pid "$scheduler_cancel_file" 2>/dev/null || :)
+    case "$scheduler_cancel_pid" in ''|*[!0-9]*) continue ;; esac
+    if kill -0 "$scheduler_cancel_pid" 2>/dev/null; then
+      scheduler_signal_one KILL "$scheduler_cancel_file"
+    fi
+  done
+  for scheduler_cancel_file in "$scheduler_active"/*.env; do
+    [ -f "$scheduler_cancel_file" ] || continue
+    scheduler_cancel_pid=$(field pid "$scheduler_cancel_file" 2>/dev/null || :)
+    case "$scheduler_cancel_pid" in ''|*[!0-9]*) continue ;; esac
+    wait "$scheduler_cancel_pid" 2>/dev/null || :
+  done
+}
+
+scheduler_cleanup_run() {
+  [ -d "$scheduler_run" ] || return 0
+  rm -rf -- "$scheduler_run"
+}
+
+scheduler_interrupt() {
+  scheduler_interrupt_status=$1
+  trap - INT TERM HUP
+  scheduler_cancel_all
+  scheduler_capture_identity "$scheduler_parent_identity_after" || :
+  frozen_identity_cache_file=$scheduler_parent_identity_after
+  scheduler_write_manifest
+  write_summary
+  scheduler_cleanup_run
+  exit "$scheduler_interrupt_status"
+}
+
+trap 'scheduler_interrupt 130' INT
+trap 'scheduler_interrupt 143' TERM
+trap 'scheduler_interrupt 129' HUP
+
+scheduler_start_task() {
+  scheduler_start_task_id=$1
+  scheduler_start_record="$scheduler_records/$scheduler_start_task_id.env"
+  scheduler_start_active="$scheduler_active/$scheduler_start_task_id.env"
+  scheduler_start_done="$scheduler_done/$scheduler_start_task_id.env"
+  scheduler_start_meta="$scheduler_worker_meta/$scheduler_start_task_id.env"
+  [ ! -e "$scheduler_start_active" ] && [ ! -e "$scheduler_collected/$scheduler_start_task_id" ] ||
+    die "scheduler task ownership collision: $scheduler_start_task_id"
+  scheduler_start_mode=direct
+  if command -v setsid >/dev/null 2>&1; then
+    scheduler_start_mode=setsid
+    setsid sh "$scheduler_launcher" "$scheduler_start_done" "$scheduler_start_meta" \
+      "$runner" "--matrix-id=$matrix_id" "--compiler-manifest=$compiler_manifest" \
+      "--cli-journal=$cli_journal" "--mcp-journal=$mcp_journal" "--lsp-journal=$lsp_journal" \
+      "--linker=$linker_path" "--scope=$scope" "--source-root=$source_root" \
+      "--timeout-seconds=$timeout_seconds" "--build-jobs=$build_jobs" --resume \
+      "--worker-task=$scheduler_start_task_id" &
+  else
+    sh "$scheduler_launcher" "$scheduler_start_done" "$scheduler_start_meta" \
+      "$runner" "--matrix-id=$matrix_id" "--compiler-manifest=$compiler_manifest" \
+      "--cli-journal=$cli_journal" "--mcp-journal=$mcp_journal" "--lsp-journal=$lsp_journal" \
+      "--linker=$linker_path" "--scope=$scope" "--source-root=$source_root" \
+      "--timeout-seconds=$timeout_seconds" "--build-jobs=$build_jobs" --resume \
+      "--worker-task=$scheduler_start_task_id" &
+  fi
+  scheduler_start_pid=$!
+  {
+    echo "task=$scheduler_start_task_id"
+    echo "pid=$scheduler_start_pid"
+    echo "group_mode=$scheduler_start_mode"
+  } >"$scheduler_start_active.tmp.$$"
+  mv "$scheduler_start_active.tmp.$$" "$scheduler_start_active"
+  {
+    echo 'disposition=executed'
+    echo "pid=$scheduler_start_pid"
+    echo 'pgid=-'
+    echo "group_mode=$scheduler_start_mode"
+    echo "started_epoch=$(date +%s)"
+  } >"$scheduler_start_record"
+}
+
+scheduler_collect_finished() {
+  scheduler_collect_progress=0
+  while IFS="$(printf '\t')" read -r scheduler_collect_task scheduler_collect_required scheduler_collect_deps; do
+    scheduler_collect_active="$scheduler_active/$scheduler_collect_task.env"
+    scheduler_collect_done="$scheduler_done/$scheduler_collect_task.env"
+    [ -f "$scheduler_collect_active" ] && [ -f "$scheduler_collect_done" ] || continue
+    scheduler_collect_pid=$(field pid "$scheduler_collect_active")
+    scheduler_collect_mode=$(field group_mode "$scheduler_collect_active")
+    scheduler_collect_started=$(field started_epoch "$scheduler_records/$scheduler_collect_task.env")
+    scheduler_collect_status=$(field worker_status "$scheduler_collect_done" 2>/dev/null || printf '255\n')
+    wait "$scheduler_collect_pid" 2>/dev/null || :
+    scheduler_collect_pgid=$(field pgid "$scheduler_worker_meta/$scheduler_collect_task.env" 2>/dev/null || printf '%s\n' -)
+    {
+      echo 'disposition=executed'
+      echo "pid=$scheduler_collect_pid"
+      echo "pgid=$scheduler_collect_pgid"
+      echo "group_mode=$scheduler_collect_mode"
+      echo "started_epoch=$scheduler_collect_started"
+      echo "worker_status=$scheduler_collect_status"
+      echo "ended_epoch=$(date +%s)"
+    } >"$scheduler_records/$scheduler_collect_task.env.tmp.$$"
+    mv "$scheduler_records/$scheduler_collect_task.env.tmp.$$" "$scheduler_records/$scheduler_collect_task.env"
+    if [ ! -f "$state/$scheduler_collect_task.env" ]; then
+      {
+        echo 'schema=Stage4SchedulerWorkerFailureV1'
+        echo "task_id=$scheduler_collect_task"
+        echo 'result=CRASH'
+        echo "status=worker-exit-$scheduler_collect_status"
+      } >"$state/$scheduler_collect_task.env"
+    fi
+    : >"$scheduler_collected/$scheduler_collect_task"
+    rm -f "$scheduler_collect_active" "$scheduler_collect_done"
+    scheduler_collect_progress=1
+  done <"$matrix"
+  [ "$scheduler_collect_progress" -eq 0 ] || return 0
+  return 1
+}
+
+scheduler_mark_reusable() {
+  while IFS="$(printf '\t')" read -r scheduler_reuse_task scheduler_reuse_required scheduler_reuse_deps; do
+    scheduler_dependencies_collected "$scheduler_reuse_task" || continue
+    scheduler_reuse_input=$(task_input_fingerprint "$scheduler_reuse_task")
+    if receipt_reusable "$scheduler_reuse_task" "$scheduler_reuse_input"; then
+      : >"$scheduler_collected/$scheduler_reuse_task"
+      {
+        echo 'disposition=reused'
+        echo 'pid=-'
+        echo 'pgid=-'
+        echo 'group_mode=-'
+        echo 'started_epoch=-'
+        echo 'ended_epoch=-'
+      } >"$scheduler_records/$scheduler_reuse_task.env"
+    fi
+  done <"$matrix"
+}
+
+[ "$resume" -ne 1 ] || scheduler_mark_reusable
+scheduler_total=$(wc -l <"$matrix" | tr -d ' ')
+while :; do
+  scheduler_collect_finished || :
+  scheduler_collected_count=$(find "$scheduler_collected" -type f -maxdepth 1 -print | wc -l | tr -d ' ')
+  [ "$scheduler_collected_count" -lt "$scheduler_total" ] || break
+  scheduler_active_count=$(find "$scheduler_active" -type f -maxdepth 1 -print | wc -l | tr -d ' ')
+  scheduler_started=0
+  while IFS="$(printf '\t')" read -r scheduler_task scheduler_required scheduler_deps; do
+    [ "$scheduler_active_count" -lt "$build_jobs" ] || break
+    [ ! -f "$scheduler_collected/$scheduler_task" ] || continue
+    [ ! -f "$scheduler_active/$scheduler_task.env" ] || continue
+    scheduler_dependencies_collected "$scheduler_task" || continue
+    scheduler_start_task "$scheduler_task"
+    scheduler_active_count=$((scheduler_active_count + 1))
+    scheduler_started=1
+  done <"$matrix"
+  if [ "$scheduler_active_count" -eq 0 ] && [ "$scheduler_started" -eq 0 ]; then
+    scheduler_capture_identity "$scheduler_parent_identity_after" || :
+    frozen_identity_cache_file=$scheduler_parent_identity_after
+    scheduler_write_manifest
+    write_summary
+    scheduler_cleanup_run
+    die "scheduler dependency deadlock"
+  fi
+  [ "$scheduler_started" -ne 0 ] || sleep 0.05
+done
+
+scheduler_capture_identity "$scheduler_parent_identity_after" || :
+frozen_identity_cache_file=$scheduler_parent_identity_after
+scheduler_write_manifest
 write_summary
+scheduler_cleanup_run
+trap - INT TERM HUP
 overall=$(field overall "$summary")
 case "$overall" in PASS|SCOPED_PASS) exit 0 ;; *) exit 1 ;; esac

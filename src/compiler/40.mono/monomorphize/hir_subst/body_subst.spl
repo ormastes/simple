@@ -281,6 +281,30 @@ fn subst_hir_stmt(stmt: HirStmt, ctx: HirSubstCtx) -> HirStmt:
         case HirStmtKind.AsmAssert(spec):
             # Compile-time target guard; carries no types or expressions.
             handled = true
+        case HirStmtKind.SharedVal(symbol, ty, has_init, init):
+            var new_init = init
+            if has_init:
+                new_init = subst_hir_expr(init, ctx)
+            out.kind = HirStmtKind.SharedVal(symbol, hs_type(ty, ctx), has_init, new_init)
+            handled = true
+        case HirStmtKind.SharedVar(symbol, ty, has_init, init):
+            var new_init = init
+            if has_init:
+                new_init = subst_hir_expr(init, ctx)
+            out.kind = HirStmtKind.SharedVar(symbol, hs_type(ty, ctx), has_init, new_init)
+            handled = true
+        case HirStmtKind.GpuLaunch(config, body):
+            var grid: [HirExpr] = []
+            for dim in config.grid:
+                grid = grid.push(subst_hir_expr(dim, ctx))
+            var launch_block: [HirExpr] = []
+            for dim in config.block:
+                launch_block = launch_block.push(subst_hir_expr(dim, ctx))
+            out.kind = HirStmtKind.GpuLaunch(
+                HirGpuLaunchConfig(grid: grid, block: launch_block, span: config.span),
+                subst_hir_block(body, ctx)
+            )
+            handled = true
     if not handled:
         hir_subst_unhandled(ctx, "HirStmtKind", stmt.span)
     out
@@ -334,10 +358,6 @@ fn subst_hir_pattern(pattern: HirPattern, ctx: HirSubstCtx) -> HirPattern:
         case HirPatternKind.CompleteRegion(binder):
             handled = true
         case HirPatternKind.DynRegion(binder):
-            handled = true
-        case HirPatternKind.TypeTest(tt_type, tt_binder):
-            # No HirType inside: the type is carried by NAME until the union
-            # rewrite resolves it, so substitution has nothing to rewrite.
             handled = true
     if not handled:
         hir_subst_unhandled(ctx, "HirPatternKind", pattern.span)
@@ -452,9 +472,11 @@ fn subst_hir_expr(expr: HirExpr, ctx: HirSubstCtx) -> HirExpr:
             val cc: HirExpr = callee
             out.kind = HirExprKind.Call(subst_hir_expr(cc, ctx), hs_call_args(args, ctx), hs_types(type_args, ctx))
             handled = true
-        case HirExprKind.MethodCall(receiver, method, args, resolution):
+        case HirExprKind.MethodCall(receiver, method, args, resolution, type_args):
             val mr: HirExpr = receiver
-            out.kind = HirExprKind.MethodCall(subst_hir_expr(mr, ctx), method, hs_call_args(args, ctx), resolution)
+            out.kind = HirExprKind.MethodCall(subst_hir_expr(mr, ctx), method,
+                hs_call_args(args, ctx), resolution,
+                type_args.map(|type_arg| hs_type(type_arg, ctx)))
             handled = true
         case HirExprKind.StaticCall(ty, method, args, resolution):
             val st: HirType = ty

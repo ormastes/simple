@@ -4,32 +4,49 @@
 # - call_function, call_hir_function, call_function_by_id, call_closure
 # - apply_assign_op
 # - try_call_builtin (SFFI dispatch)
-# - value_to_string
+# - value_to_runtime_ptr, runtime_ptr_to_value, value_to_string
 
 use compiler.hir.hir.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.backend.backend_types.*
 use compiler.backend.backend.env.{EvalContext, Environment}
-use compiler.backend.backend.interpreter.{InterpreterBackendImpl, itrace}
-use compiler.backend.backend.interpreter_aop_weave.*
-use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.backend.backend.interpreter.{InterpreterBackendImpl}
 
-extern fn rt_print_value(value: i64)
-extern fn rt_println_value(value: i64)
+enum ValueType:
+    Nil
+    Bool
+    Int
+    Float
+    String
+    Array
+    Dict
+    Object
+    Function
+
+extern fn rt_value_print(value: i64)
+extern fn rt_value_println(value: i64)
+extern fn rt_value_type(value: i64) -> ValueType
+extern fn rt_value_int(value: i64) -> i64
+extern fn rt_value_float(value: f64) -> i64
+extern fn rt_value_bool(value: bool) -> i64
+extern fn rt_value_nil() -> i64
+extern fn rt_value_string(ptr: i64, len: i64) -> i64
+extern fn rt_value_is_int(value: i64) -> bool
+extern fn rt_value_is_float(value: i64) -> bool
+extern fn rt_value_is_bool(value: i64) -> bool
+extern fn rt_value_is_nil(value: i64) -> bool
+extern fn rt_value_as_int(value: i64) -> i64
+extern fn rt_value_as_float(value: i64) -> f64
+extern fn rt_value_as_bool(value: i64) -> bool
 extern fn rt_file_exists(path_ptr: i64, path_len: i64) -> bool
 extern fn rt_file_exists_probe_begin() -> i64
 extern fn rt_file_exists_probe_end(token: i64) -> i64
 extern fn rt_file_is_regular_no_follow(path_ptr: i64, path_len: i64) -> bool
 extern fn rt_file_read_text(path_ptr: i64, path_len: i64) -> text
 extern fn rt_file_write_text(path_ptr: i64, path_len: i64, content_ptr: i64, content_len: i64) -> bool
-@unsafe(reason: "raw borrowed filesystem path pointer/length delete ABI", capabilities: [ffi])
 extern fn rt_file_delete(path_ptr: i64, path_len: i64) -> bool
-extern fn rt_env_get(name_ptr: i64, name_len: i64) -> text
+extern fn rt_env_get(name_ptr: i64, name_len: i64) -> i64
 extern fn rt_env_set(name_ptr: i64, name_len: i64, value_ptr: i64, value_len: i64) -> bool
-
-# itrace is imported from interpreter.spl: the ptr-based rt_env_get here
-# returns a non-zero runtime value even for an UNSET env var, so a local
-# `ptr != 0` gate leaks probes on every run (iteration 18).
 
 # ============================================================================
 # Builtin dispatch table (optimization: avoid per-call string comparison chain)
@@ -53,61 +70,15 @@ enum BuiltinTag:
     FileDelete
     EnvGet
     EnvSet
-    Assert
     Unknown
-
-fn interp_binop_disc(op: HirBinOp) -> i64:
-    match op:
-        case HirBinOp.Add: 0
-        case HirBinOp.Sub: 1
-        case HirBinOp.Mul: 2
-        case HirBinOp.Div: 3
-        case HirBinOp.Mod: 4
-        case HirBinOp.Pow: 5
-        case HirBinOp.MatMul: 6
-        case HirBinOp.Eq: 7
-        case HirBinOp.NotEq: 8
-        case HirBinOp.Lt: 9
-        case HirBinOp.LtEq: 10
-        case HirBinOp.Gt: 11
-        case HirBinOp.GtEq: 12
-        case HirBinOp.And: 13
-        case HirBinOp.Or: 14
-        case HirBinOp.BitAnd: 15
-        case HirBinOp.BitOr: 16
-        case HirBinOp.BitXor: 17
-        case HirBinOp.Shl: 18
-        case HirBinOp.Shr: 19
-        case HirBinOp.BroadcastAdd: 20
-        case HirBinOp.BroadcastSub: 21
-        case HirBinOp.BroadcastMul: 22
-        case HirBinOp.BroadcastDiv: 23
-        case HirBinOp.BroadcastPow: 24
-        case HirBinOp.PipeForward: 25
-        case HirBinOp.Compose: 26
-        case HirBinOp.ComposeBack: 27
-        case HirBinOp.Parallel: 28
-        case HirBinOp.LayerConnect: 29
-        case HirBinOp.In: 30
-        case HirBinOp.NotIn: 31
-        case HirBinOp.Is: 32
-        case HirBinOp.IsNot: 33
-        case HirBinOp.Concat: 34
 
 fn lookup_builtin_tag(name: text) -> BuiltinTag:
     """Map a function name to its BuiltinTag."""
-    if name == "__assert":
-        # `assert COND[, MSG]` desugars to __assert(...) in parser_stmts.spl.
-        return BuiltinTag.Assert
     if name == "print":
         return BuiltinTag.Print
     if name == "println":
         return BuiltinTag.Println
     if name == "to_string":
-        return BuiltinTag.ToString
-    if name == "str" or name == "text":
-        # `str(x)` / `text(x)` conversion builtins — same semantics as to_string
-        # (app.mcp dap_types/assistant, std.common.ponytail.audit).
         return BuiltinTag.ToString
     if name == "type_of":
         return BuiltinTag.TypeOf
@@ -131,71 +102,45 @@ fn lookup_builtin_tag(name: text) -> BuiltinTag:
         return BuiltinTag.EnvGet
     if name == "env_set":
         return BuiltinTag.EnvSet
+    if name == "rt_mem_attr_enabled":
+        return BuiltinTag.MemAttrEnabled
+    if name == "rt_mem_attr_set_owner":
+        return BuiltinTag.MemAttrSetOwner
+    if name == "rt_mem_attr_report_print":
+        return BuiltinTag.MemAttrReportPrint
+    if name == "rt_mem_guard_stats":
+        return BuiltinTag.MemGuardStats
+    if name == "rt_mem_harden_check":
+        return BuiltinTag.MemHardenCheck
+    if name == "rt_mem_profile_abi_version":
+        return BuiltinTag.MemProfileAbiVersion
+    if name == "rt_mem_profile_features":
+        return BuiltinTag.MemProfileFeatures
     BuiltinTag.Unknown
 
 impl InterpreterBackendImpl:
-    fn resolve_function_by_name(name: text, ctx: EvalContext) -> HirFunction?:
-        if ctx.fn_by_name.has(name):
-            return Some(ctx.fn_by_name[name])
-        if ctx.has_fn_index:
-            return nil
-        val candidates = ctx.module.functions.values()
-        var found_index = -1
-        var i = 0
-        while i < candidates.len():
-            val candidate: HirFunction = candidates[i]
-            if candidate.name == name:
-                found_index = i
-            i = i + 1
-        if found_index >= 0:
-            Some(candidates[found_index])
-        else:
-            nil
-
     fn call_function(fn_value: Value, args: [Value], ctx: EvalContext, span: Span) -> Result<Value, BackendError>:
-        itrace("[CF] call_function enter")
         match fn_value:
-            case Value.Function(f):
-                itrace("[CF] Function arm f_nil={f == nil}")
-                # Typed rebind (stage4 extracted-payload hazard, iteration 18).
-                val f_t: FunctionValue = f
-                itrace("[CF] name={f_t.name}")
+            case Function(f):
                 # Check for builtin functions first
-                val builtin_result = self.try_call_builtin(f_t.name, args)
+                val builtin_result = self.try_call_builtin(f.name, args)
                 if builtin_result.?:
                     return builtin_result.unwrap()
 
-                # Resolve the HirFunction by NAME, not by symbol key. The HIR
-                # `functions` Dict is keyed by a synthetic per-index SymbolId
-                # (module_lowering iteration 19: the real per-function SymbolId
-                # returned by SymbolTable.lookup is a shared/corrupt struct on
-                # stage4, so struct-keyed insert collapses 2+ functions). The
-                # Function value carries the same corrupt `symbol`, so a
-                # symbol-keyed `.has()/[]` here would miss or nil-deref. Iterate
-                # `.values()` and match on the populated `name` text instead —
-                # the same robust idiom process_module uses to find `main`.
-                # O(1) resolve via the prebuilt name index (perf); fall back to
-                # the linear scan only when the index is absent (non-process_module
-                # entry points). Last-writer-wins matches the old no-break loop.
-                val cf_target_hit = self.resolve_function_by_name(f_t.name, ctx)
-                if cf_target_hit.?:
-                    self.call_hir_function(cf_target_hit.unwrap(), args, ctx)
-                else:
-                    Err(BackendError.runtime_error("function '{f_t.name}' not found", Some(span)))
+                # Look up function in module
+                if not ctx.module.functions.has(f.symbol):
+                    return Err(BackendError.runtime_error("function '{f.name}' not found", Some(span)))
 
-            case Value.Closure(c):
-                itrace("[CF] Closure arm")
-                val c_t: ClosureValue = c
-                self.call_closure(c_t, args, ctx)
+                val fn_ = ctx.module.functions[f.symbol]
+                self.call_hir_function(fn_, args, ctx)
+
+            case Closure(c):
+                self.call_closure(c, args, ctx)
 
             case _:
-                itrace("[CF] default arm (not callable)")
                 Err(BackendError.type_error("value is not callable", Some(span)))
 
     fn call_hir_function(fn_: HirFunction, args: [Value], ctx: EvalContext) -> Result<Value, BackendError>:
-        # AOP hook (task #31): weave declarative `on pc{...} use ... before`
-        # advice for interpreted calls. See interpreter_aop_weave.spl.
-        self.interp_aop_run_before(fn_, ctx)
         ctx.env.push_scope()
 
         # Bind parameters
@@ -203,21 +148,17 @@ impl InterpreterBackendImpl:
             val param = fn_.params[i]
             val value = if i < args.len():
                 args[i]
-            elif param.has_default:
-                self.eval_expr(param.default, ctx)?
+            elif param.default.?:
+                self.eval_expr(param.default.unwrap(), ctx)?
             else:
                 return Err(BackendError.runtime_error("missing argument for parameter {param.name}", Some(fn_.span)))
 
-            # Env is name-keyed (iteration 21, target (a)); HirParam.name is
-            # reliable while param.symbol is a corrupt looked-up handle.
-            ctx.env.define(param.name, value)
+            ctx.env.define(param.symbol, value)
 
         # Execute body
         val result = self.eval_block(fn_.body, ctx)?
 
         ctx.env.pop_scope()
-        # AOP hook (task #31): weave after_success/after_error advice.
-        self.interp_aop_run_after(fn_, ctx, result)
         Ok(result)
 
     fn call_function_by_id(method_id: SymbolId, args: [Value], ctx: EvalContext, span: Span) -> Result<Value, BackendError>:
@@ -232,9 +173,10 @@ impl InterpreterBackendImpl:
     fn call_closure(closure: ClosureValue, args: [Value], ctx: EvalContext) -> Result<Value, BackendError>:
         ctx.env.push_scope()
 
-        # Captures already use the environment's stable text keys.
-        for name in closure.captures.keys():
-            ctx.env.define(name, closure.captures[name])
+        # Bind captured variables
+        for symbol in closure.captures.keys():
+            val value = closure.captures[symbol]
+            ctx.env.define(symbol, value)
 
         # Bind parameters
         for i in 0..closure.params.len():
@@ -244,7 +186,7 @@ impl InterpreterBackendImpl:
             else:
                 return Err(BackendError.runtime_error("missing argument for parameter", nil))
 
-            ctx.env.define(param.name, value)
+            ctx.env.define(param.symbol, value)
 
         # Evaluate body
         val result = self.eval_expr(closure.body, ctx)?
@@ -253,16 +195,12 @@ impl InterpreterBackendImpl:
         Ok(result)
 
     fn apply_assign_op(op: HirAssignOp, left: Value, right: Value, span: Span) -> Result<Value, BackendError>:
-        # Compound-assign operands arrive as bare Values with no static type, so
-        # unsigned-ness is unknown here; pass signed (false/false) — matches the
-        # pre-existing behavior. Mixed u64/float compound assignment is not part
-        # of the u64_to_f64 comparison bug's scope.
         match op:
-            case HirAssignOp.Add: self.eval_binop(HirBinOp.Add, left, right, span, false, false)
-            case HirAssignOp.Sub: self.eval_binop(HirBinOp.Sub, left, right, span, false, false)
-            case HirAssignOp.Mul: self.eval_binop(HirBinOp.Mul, left, right, span, false, false)
-            case HirAssignOp.Div: self.eval_binop(HirBinOp.Div, left, right, span, false, false)
-            case HirAssignOp.Mod: self.eval_binop(HirBinOp.Mod, left, right, span, false, false)
+            case Add: self.eval_binop(HirBinOp.Add, left, right, span)
+            case Sub: self.eval_binop(HirBinOp.Sub, left, right, span)
+            case Mul: self.eval_binop(HirBinOp.Mul, left, right, span)
+            case Div: self.eval_binop(HirBinOp.Div, left, right, span)
+            case Mod: self.eval_binop(HirBinOp.Mod, left, right, span)
             case _: Err(BackendError.not_implemented("assignment operator not implemented"))
 
     fn try_call_builtin(name: text, args: [Value]) -> Option<Result<Value, BackendError>>:
@@ -271,68 +209,50 @@ impl InterpreterBackendImpl:
         scan of BUILTIN_TABLE), then dispatches via match tag — avoids per-call string
         comparison chain in the common path.
         """
-        itrace("[TCB0] try_call_builtin enter")
         val tag = lookup_builtin_tag(name)
-        itrace("[TCB] try_call_builtin name={name}")
         match tag:
             case BuiltinTag.Print:
-                itrace("[BUILTIN] Print reached args_len={args.len()}")
                 if args.len() > 0:
-                    # Typed rebind (stage4 ANY-erased list element).
-                    val arg: Value = args[0]
-                    itrace("[BUILTIN] Print arg bound nil={arg == nil}")
+                    val arg = args[0]
                     match arg:
-                        case Value.RuntimeValue(ptr):
-                            itrace("[BUILTIN] Print RuntimeValue case")
-                            rt_print_value(ptr)
-                        # Pure-Simple print path for scalars: the
-                        # rt_value_int -> rt_print_value pointer round-trip
-                        # SEGVs on stage4 ("[BUILTIN] Print ptr done" then
-                        # crash, iteration 18); value_to_string + print is
-                        # equivalent and stays in Simple.
-                        case Value.Int(iv):
-                            itrace("[BUILTIN] Print Int case")
-                            print "{iv}"
-                        case Value.Float(fv):
-                            print "{fv}"
-                        case Value.Bool(bv):
-                            if bv:
-                                print "true"
-                            else:
-                                print "false"
-                        case Value.String(sv):
-                            print sv
-                        case Value.Nil:
-                            print "nil"
+                        case RuntimeValue(ptr):
+                            rt_value_print(ptr)
+                        case Int(_):
+                            val ptr = self.value_to_runtime_ptr(arg)
+                            rt_value_print(ptr)
+                        case Float(_):
+                            val ptr = self.value_to_runtime_ptr(arg)
+                            rt_value_print(ptr)
+                        case Bool(_):
+                            val ptr = self.value_to_runtime_ptr(arg)
+                            rt_value_print(ptr)
+                        case Nil:
+                            val ptr = self.value_to_runtime_ptr(arg)
+                            rt_value_print(ptr)
                         case _:
                             val msg = self.value_to_string(arg)
                             print msg
                 else:
                     print ""
                 Some(Ok(Value.Nil))
-            case BuiltinTag.Assert:
-                # A false condition must RAISE. Returning the condition (the
-                # old parser behaviour) made every `assert` a silent no-op.
-                var assert_ok = false
-                if args.len() > 0:
-                    match args[0]:
-                        case Value.Bool(bv): assert_ok = bv
-                        case Value.Int(iv): assert_ok = iv != 0
-                        case Value.Nil: assert_ok = false
-                        case _: assert_ok = true
-                if assert_ok:
-                    Some(Ok(Value.Nil))
-                else:
-                    var assert_msg = "assertion failed"
-                    if args.len() > 1:
-                        assert_msg = "assertion failed: " + self.value_to_string(args[1])
-                    Some(Err(BackendError.runtime_error(assert_msg, nil)))
             case BuiltinTag.Println:
                 if args.len() > 0:
                     val arg = args[0]
                     match arg:
-                        case Value.RuntimeValue(ptr):
-                            rt_println_value(ptr)
+                        case RuntimeValue(ptr):
+                            rt_value_println(ptr)
+                        case Int(_):
+                            val ptr = self.value_to_runtime_ptr(arg)
+                            rt_value_println(ptr)
+                        case Float(_):
+                            val ptr = self.value_to_runtime_ptr(arg)
+                            rt_value_println(ptr)
+                        case Bool(_):
+                            val ptr = self.value_to_runtime_ptr(arg)
+                            rt_value_println(ptr)
+                        case Nil:
+                            val ptr = self.value_to_runtime_ptr(arg)
+                            rt_value_println(ptr)
                         case _:
                             val msg = self.value_to_string(arg)
                             print msg
@@ -341,19 +261,30 @@ impl InterpreterBackendImpl:
                 Some(Ok(Value.Nil))
             case BuiltinTag.ToString:
                 if args.len() > 0:
-                    Some(Ok(Value.String(self.value_to_string(args[0]))))
+                    Some(Ok(Value.string(self.value_to_string(args[0]))))
                 else:
-                    Some(Ok(Value.String("")))
+                    Some(Ok(Value.string("")))
 
             case BuiltinTag.TypeOf:
                 if args.len() > 0:
                     val arg = args[0]
                     match arg:
-                        case Value.RuntimeValue(ptr):
-                            val _ = ptr
-                            Some(Ok(Value.String("runtime_value")))
+                        case RuntimeValue(ptr):
+                            val type_tag = rt_value_type(ptr)
+                            val type_name = match type_tag:
+                                case ValueType.Nil: "nil"
+                                case ValueType.Bool: "bool"
+                                case ValueType.Int: "int"
+                                case ValueType.Float: "float"
+                                case ValueType.String: "string"
+                                case ValueType.Array: "array"
+                                case ValueType.Dict: "dict"
+                                case ValueType.Object: "object"
+                                case ValueType.Function: "function"
+                                case _: "unknown"
+                            Some(Ok(Value.string(type_name)))
                         case _:
-                            Some(Ok(Value.String(arg.type_name())))
+                            Some(Ok(Value.string(arg.type_name())))
                 else:
                     Some(Err(BackendError.runtime_error("type_of requires value argument", nil)))
 
@@ -361,7 +292,7 @@ impl InterpreterBackendImpl:
                 if args.len() > 0:
                     val arg = args[0]
                     match arg:
-                        case Value.RuntimeValue(ptr):
+                        case RuntimeValue(ptr):
                             # Bootstrap interpreter fallback treats the runtime
                             # pointer as an opaque refcounted handle.
                             Some(Ok(Value.RuntimeValue(ptr)))
@@ -374,9 +305,9 @@ impl InterpreterBackendImpl:
             case BuiltinTag.FileExists:
                 if args.len() > 0:
                     match args[0]:
-                        case Value.String(path):
+                        case String(path):
                             val result = rt_file_exists(path.ptr(), path.len())
-                            Some(Ok(Value.Bool(result)))
+                            Some(Ok(Value.bool(result)))
                         case _:
                             Some(Err(BackendError.type_error("file_exists requires string path", nil)))
                 else:
@@ -412,12 +343,13 @@ impl InterpreterBackendImpl:
             case BuiltinTag.FileRead:
                 if args.len() > 0:
                     match args[0]:
-                        case Value.String(path):
+                        case String(path):
                             val ptr = rt_file_read_text(path.ptr(), path.len())
-                            if ptr == "":
-                                Some(Ok(Value.String("")))
+                            if ptr == 0:
+                                Some(Ok(Value.string("")))
                             else:
-                                Some(Ok(Value.String(ptr)))
+                                val result = self.runtime_ptr_to_value(ptr)
+                                Some(Ok(result))
                         case _:
                             Some(Err(BackendError.type_error("file_read requires string path", nil)))
                 else:
@@ -426,11 +358,11 @@ impl InterpreterBackendImpl:
             case BuiltinTag.FileWrite:
                 if args.len() >= 2:
                     match args[0]:
-                        case Value.String(path):
+                        case String(path):
                             match args[1]:
-                                case Value.String(content):
+                                case String(content):
                                     val result = rt_file_write_text(path.ptr(), path.len(), content.ptr(), content.len())
-                                    Some(Ok(Value.Bool(result)))
+                                    Some(Ok(Value.bool(result)))
                                 case _:
                                     Some(Err(BackendError.type_error("file_write requires string path and content", nil)))
                         case _:
@@ -454,12 +386,13 @@ impl InterpreterBackendImpl:
             case BuiltinTag.EnvGet:
                 if args.len() > 0:
                     match args[0]:
-                        case Value.String(name):
+                        case String(name):
                             val ptr = rt_env_get(name.ptr(), name.len())
-                            if ptr == "":
-                                Some(Ok(Value.String("")))
+                            if ptr == 0:
+                                Some(Ok(Value.string("")))
                             else:
-                                Some(Ok(Value.String(ptr)))
+                                val result = self.runtime_ptr_to_value(ptr)
+                                Some(Ok(result))
                         case _:
                             Some(Err(BackendError.type_error("env_get requires string name", nil)))
                 else:
@@ -468,17 +401,60 @@ impl InterpreterBackendImpl:
             case BuiltinTag.EnvSet:
                 if args.len() >= 2:
                     match args[0]:
-                        case Value.String(name):
+                        case String(name):
                             match args[1]:
-                                case Value.String(value):
+                                case String(value):
                                     val result = rt_env_set(name.ptr(), name.len(), value.ptr(), value.len())
-                                    Some(Ok(Value.Bool(result)))
+                                    Some(Ok(Value.bool(result)))
                                 case _:
                                     Some(Err(BackendError.type_error("env_set requires string name and value", nil)))
                         case _:
                             Some(Err(BackendError.type_error("env_set requires string name and value", nil)))
                 else:
                     Some(Err(BackendError.runtime_error("env_set requires name and value arguments", nil)))
+
+            # Memory introspection externs
+            case BuiltinTag.MemAttrEnabled:
+                val result = rt_mem_attr_enabled()
+                Some(Ok(Value.Int(result)))
+
+            case BuiltinTag.MemAttrSetOwner:
+                if args.len() > 0:
+                    match args[0]:
+                        case Value.String(name):
+                            rt_mem_attr_set_owner(name.ptr(), name.len())
+                            Some(Ok(Value.Nil))
+                        case _:
+                            Some(Err(BackendError.type_error("rt_mem_attr_set_owner requires string name", nil)))
+                else:
+                    Some(Err(BackendError.runtime_error("rt_mem_attr_set_owner requires name argument", nil)))
+
+            case BuiltinTag.MemAttrReportPrint:
+                if args.len() > 0:
+                    match args[0]:
+                        case Value.Int(n):
+                            rt_mem_attr_report_print(n)
+                            Some(Ok(Value.Nil))
+                        case _:
+                            Some(Err(BackendError.type_error("rt_mem_attr_report_print requires integer argument", nil)))
+                else:
+                    Some(Err(BackendError.runtime_error("rt_mem_attr_report_print requires count argument", nil)))
+
+            case BuiltinTag.MemGuardStats:
+                val result = rt_mem_guard_stats()
+                Some(Ok(Value.Int(result)))
+
+            case BuiltinTag.MemHardenCheck:
+                val result = rt_mem_harden_check()
+                Some(Ok(Value.Int(result)))
+
+            case BuiltinTag.MemProfileAbiVersion:
+                val result = rt_mem_profile_abi_version()
+                Some(Ok(Value.Int(result)))
+
+            case BuiltinTag.MemProfileFeatures:
+                val result = rt_mem_profile_features()
+                Some(Ok(Value.Int(result)))
 
             case BuiltinTag.Unknown:
                 nil
@@ -487,20 +463,49 @@ impl InterpreterBackendImpl:
     # SFFI RuntimeValue Conversion Helpers
     # ========================================================================
 
+    fn value_to_runtime_ptr(value: Value) -> i64:
+        """Convert Simple Value to RuntimeValue pointer for SFFI operations."""
+        match value:
+            case Int(i): rt_value_int(i)
+            case Float(f): rt_value_float(f)
+            case Bool(b): rt_value_bool(b)
+            case Nil: rt_value_nil()
+            case RuntimeValue(ptr): ptr  # Already a pointer
+            case String(s):
+                rt_value_string(s.ptr(), s.len())
+            case _:
+                rt_value_nil()
+
+    fn runtime_ptr_to_value(ptr: i64) -> Value:
+        """Convert RuntimeValue pointer to Simple Value."""
+        if rt_value_is_int(ptr):
+            val i = rt_value_as_int(ptr)
+            Value.int(i)
+        elif rt_value_is_float(ptr):
+            val f = rt_value_as_float(ptr)
+            Value.float(f)
+        elif rt_value_is_bool(ptr):
+            val b = rt_value_as_bool(ptr)
+            Value.bool(b)
+        elif rt_value_is_nil(ptr):
+            Value.Nil
+        else:
+            Value.RuntimeValue(ptr)
+
     fn value_to_string(value: Value) -> text:
         """Convert a Value to its string representation."""
         match value:
-            case Value.String(s): s
-            case Value.Nil: "nil"
-            case Value.Unit: "()"
-            case Value.Bool(b): if b: "true" else: "false"
-            case Value.Int(i): "{i}"
-            case Value.Float(f): "{f}"
-            case Value.Char(c): "{c}"
-            case Value.Array(elements):
+            case Nil: "nil"
+            case Unit: "()"
+            case Bool(b): if b: "true" else: "false"
+            case Int(i): "{i}"
+            case Float(f): "{f}"
+            case Char(c): "{c}"
+            case String(s): s
+            case Array(elements):
                 var parts: [text] = []
                 for elem in elements:
                     parts = parts.push(self.value_to_string(elem))
                 "[{parts.join(\", \")}]"
-            case Value.RuntimeValue(_): "<runtime_value>"
+            case RuntimeValue(_): "<runtime_value>"
             case _: "<{value.type_name()}>"

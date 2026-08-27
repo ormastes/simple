@@ -1,41 +1,30 @@
-# Standalone lightweight implementation for `simple check`.
-#
-# Keep this entrypoint independent of broad app.cli imports. The small
-# check_options leaf is shared so direct and public entrypoints fail closed.
+# Simple CLI - check command
+# Uses new type inference system
 
 use compiler.core.parser.{parse_module, parser_has_errors, parser_get_errors}
 use compiler.core.ast.{ast_reset}
-use compiler.core.types.{reset_all_pools}
-use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
-use std.nogc_sync_mut.io.file_discovery.{find_spl_files}
 use app.check.sspec_source.{check_sspec_guidance}
-use app.check.targets.{expand_check_targets}
-use app.check.check_options.{check_option_error}
-use app.check.concurrency_lint.{run_concurrency_api_lint}
 
 use std.io_runtime.{get_args}
 use std.io_runtime.{file_exists}
+extern fn rt_file_read_text(path: text) -> text
 use std.io_runtime.{read_file_text}
 @unsafe(reason: "raw transient heap scope ABI", capabilities: [ffi])
 extern fn rt_transient_array_scope_begin() -> bool
-@unsafe(reason: "raw transient heap scope ABI", capabilities: [ffi])
 extern fn rt_transient_array_scope_end() -> bool
-@unsafe(reason: "raw monotonic clock ABI", capabilities: [ffi])
 extern fn rt_time_now_micros() -> i64
 
 fn get_cli_args() -> [text]:
-    val raw_args = get_args()
+    val raw_args = rt_cli_get_args()
     var all_args: [text] = []
     if raw_args != nil:
         all_args = raw_args
-    var args: [text] = []
+    var args = []
     var start_idx = 1
     var scan_idx = 0
-    var found_entry = false
     while scan_idx < all_args.len():
-        if not found_entry and (all_args[scan_idx].ends_with("/app/check/main.spl") or all_args[scan_idx] == "src/app/check/main.spl"):
+        if all_args[scan_idx].ends_with("/app/check/main.spl") or all_args[scan_idx] == "src/app/check/main.spl":
             start_idx = scan_idx + 1
-            found_entry = true
         scan_idx = scan_idx + 1
     var i = start_idx
     while i < all_args.len():
@@ -49,22 +38,14 @@ fn print_help():
     print "Parse and validate Simple source files."
     print ""
     print "Options:"
-    # Keep this list in step with check_option_error() in check_options.spl —
-    # every option accepted there has to be discoverable here.
-    print "  --log-mode <human|llm|json>  Select log rendering mode"
-    print "  --human | --llm | --json     Shorthand log modes"
-    print "  --surface=<stdout|tui>       Select output surface"
+    print "  --human | --llm | --json     Select log rendering mode"
     print "  --progress <summary|count|dot|none>"
-    print "  --dots | --count | --no-progress"
-    print "  --quiet | --verbose"
-    print "  --phase-profile              Emit coarse phase timings (suppressed by --json)"
     print "  -h, --help                   Show this help"
 
 fn is_log_option(arg: text) -> bool:
     arg == "--human" or arg == "--llm" or arg == "--json" or
         arg == "--quiet" or arg == "--verbose" or arg == "--dots" or
         arg == "--count" or arg == "--no-progress" or
-        arg == "--phase-profile" or
         arg == "--log-mode" or arg == "--surface" or arg == "--progress" or
         arg.starts_with("--log-mode=") or arg.starts_with("--surface=") or
         arg.starts_with("--progress=")
@@ -86,7 +67,7 @@ fn wants_phase_profile(args: [text]) -> bool:
 fn check_phase_mark(enabled: bool, phase: text, started_us: i64, path: text, done: i64, total: i64, terminal: text) -> i64:
     if not enabled:
         return started_us
-    val now_us = unsafe(capabilities: [ffi]): rt_time_now_micros()
+    val now_us = rt_time_now_micros()
     val elapsed_ms = (now_us - started_us) / 1000
     eprint "event=check_phase phase={phase} elapsed_ms={elapsed_ms} done={done} total={total} current={path} terminal={terminal}"
     now_us
@@ -105,7 +86,7 @@ fn collect_files(args: [text]) -> [text]:
         elif is_log_option(arg):
             val _skip = 0
         elif not arg.starts_with("-"):
-            if file_exists(arg):
+            if rt_file_exists(arg):
                 val discovered = find_spl_files(arg)
                 if discovered.len() == 0:
                     files.push(arg)
@@ -191,13 +172,13 @@ fn checker_begin_file_scope() -> bool:
     # before allocations become owned by the per-file transient scope.
     reset_all_pools()
     ast_reset()
-    unsafe(capabilities: [ffi]): rt_transient_array_scope_begin()
+    rt_transient_array_scope_begin()
 
 fn checker_end_file_scope() -> bool:
     # Drop source roots first, reclaim the file-owned heap second, then rebuild
     # process-lifetime arenas outside the ended scope for the next file.
     lexer_release_parse_source_globals()
-    val ended = unsafe(capabilities: [ffi]): rt_transient_array_scope_end()
+    val ended = rt_transient_array_scope_end()
     ast_reset()
     ended
 
@@ -213,13 +194,13 @@ fn check_one_profiled(path: text, as_json: bool, phase_profile: bool, done: i64,
     var file_started_us: i64 = 0
     var phase_started_us: i64 = 0
     if phase_profile:
-        file_started_us = unsafe(capabilities: [ffi]): rt_time_now_micros()
+        file_started_us = rt_time_now_micros()
         phase_started_us = file_started_us
-    if not file_exists(path):
+    if not rt_file_exists(path):
         if phase_profile:
             val _marked = check_phase_mark(true, "preflight", phase_started_us, path, done, total, "failed")
         if not as_json:
-            print "ERROR: file not found: {path}"
+            print "ERROR: {path}: file not found"
         return 1
     if not checker_begin_file_scope():
         if phase_profile:
@@ -230,11 +211,10 @@ fn check_one_profiled(path: text, as_json: bool, phase_profile: bool, done: i64,
     if phase_profile:
         phase_started_us = check_phase_mark(true, "scope_setup", phase_started_us, path, done, total, "running")
 
-    val source = read_file_text(path)
+    val source = rt_file_read_text(path) ?? ""
     if phase_profile:
         phase_started_us = check_phase_mark(true, "source_read", phase_started_us, path, done, total, "running")
     val sspec_guidance = check_sspec_guidance(source, path)
-    var failure_count = 0
     if sspec_guidance != "":
         if not as_json:
             print sspec_guidance
@@ -274,7 +254,7 @@ fn main() -> i64:
     val phase_profile = wants_phase_profile(args) and not as_json
     var command_started_us: i64 = 0
     if phase_profile:
-        command_started_us = unsafe(capabilities: [ffi]): rt_time_now_micros()
+        command_started_us = rt_time_now_micros()
     val option_error = check_option_error(args)
     if option_error != "":
         print "ERROR: {option_error}"
@@ -285,31 +265,26 @@ fn main() -> i64:
         print_help()
         return 0
 
-    val raw_files = collect_files(args)
-    if raw_files.len() == 0:
+    val files = collect_files(args)
+    val as_json = wants_json(args)
+    if files.len() == 0:
         if as_json:
             print "{\"command\":\"check\",\"status\":\"error\",\"checked\":0,\"files\":0,\"errors\":1,\"files_with_errors\":0}"
         else:
             print_help()
         return 1
 
-    val (files, empty_directories) = expand_check_targets(raw_files)
     var checked = 0
-    var errors = empty_directories.len()
+    var errors = 0
     var files_with_errors = 0
-    if not as_json:
-        for directory in empty_directories:
-            print "ERROR: {directory}: no Simple source files found"
     for file in files:
         checked = checked + 1
-        val failed = check_one_profiled(file, as_json, phase_profile, checked, files.len())
+        val failed = check_one(file, as_json)
         if failed != 0:
             errors = errors + failed
             files_with_errors = files_with_errors + 1
 
     val status = if errors == 0: "ok" else: "error"
-    if phase_profile:
-        val _command_mark = check_phase_mark(true, "command_total", command_started_us, "all", checked, files.len(), status)
     if as_json:
         print "{\"command\":\"check\",\"status\":\"{status}\",\"checked\":{checked},\"files\":{files.len()},\"errors\":{errors},\"files_with_errors\":{files_with_errors}}"
     elif errors == 0:

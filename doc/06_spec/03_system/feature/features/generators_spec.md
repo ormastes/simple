@@ -2,6 +2,29 @@
 
 > Property Testing Framework - Generator Tests
 
+<!-- sdn-diagram:id=generators_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=generators_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+generators_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=generators_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 23 | 23 | 0 | 0 |
@@ -20,7 +43,7 @@ Property Testing Framework - Generator Tests
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/feature/features/generators_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Property Testing Framework - Generator Tests
@@ -34,18 +57,13 @@ Feature: Generators for property-based testing that produce random test data
 
 #### generates i64 values
 
-- generates i64 values
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates i64 values")
 # Test multiple seeds produce values
 for seed in [1, 42, 100, 12345]:
     val value = gen_i64(seed)
@@ -61,18 +79,13 @@ expect v1 != v2
 
 #### generates i64 in range
 
-- generates i64 in range
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates i64 in range")
 # Test multiple seeds all produce values in range
 for seed in [1, 42, 100, 12345, 999]:
     val value = gen_i64_range(seed=seed, min=10, max=100)
@@ -84,18 +97,13 @@ for seed in [1, 42, 100, 12345, 999]:
 
 #### generates u64 values
 
-- generates u64 values
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates u64 values")
 for seed in [1, 42, 100]:
     val value = gen_u64(seed)
     # u64 values should be non-negative
@@ -106,18 +114,13 @@ for seed in [1, 42, 100]:
 
 #### generates bool values
 
-- generates bool values
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates bool values")
 # Test multiple seeds to get both true and false
 var saw_true = false
 var saw_false = false
@@ -137,18 +140,16 @@ expect saw_true or saw_false
 
 #### generates string values
 
-- generates string values
+1. expect len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates string values")
 for seed in [1, 42, 100]:
     val value = gen_string(seed)
     # Strings are generated with length 0-20
@@ -159,18 +160,16 @@ for seed in [1, 42, 100]:
 
 #### generates ascii strings
 
-- generates ascii strings
+1. expect len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates ascii strings")
 for seed in [1, 42, 100]:
     val value = gen_ascii(seed)
     expect len(value) <= 20
@@ -180,18 +179,17 @@ for seed in [1, 42, 100]:
 
 #### generates strings with length constraints
 
-- generates strings with length constraints
+1. expect len
+2. expect len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates strings with length constraints")
 for seed in [1, 42, 100, 12345]:
     val value = gen_string_with_length(seed=seed, min=5, max=10)
     expect len(value) >= 5
@@ -204,18 +202,16 @@ for seed in [1, 42, 100, 12345]:
 
 #### generates lists
 
-- generates lists
+1. expect len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates lists")
 for seed in [1, 42, 100]:
     val value = gen_list_i64(seed)
     # Lists generated with length 0-20
@@ -226,18 +222,17 @@ for seed in [1, 42, 100]:
 
 #### generates lists with length constraints
 
-- generates lists with length constraints
+1. expect len
+2. expect len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates lists with length constraints")
 for seed in [1, 42, 100, 12345]:
     val value = gen_list_i64_with_length(seed=seed, min=3, max=7)
     expect len(value) >= 3
@@ -248,18 +243,16 @@ for seed in [1, 42, 100, 12345]:
 
 #### generates Option values
 
-- generates Option values
+1. Some
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates Option values")
 var saw_some = false
 var saw_nil = false
 var seed = 0
@@ -277,18 +270,17 @@ expect saw_some or saw_nil
 
 #### generates Result values
 
-- generates Result values
+1. Ok
+2. Err
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates Result values")
 var saw_ok = false
 var saw_err = false
 var seed = 0
@@ -308,18 +300,13 @@ expect saw_ok or saw_err
 
 #### generates 2-tuples
 
-- generates 2-tuples
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates 2-tuples")
 for seed in [1, 42, 100]:
     val t = gen_tuple2(seed=seed, min=0, max=100)
     expect t.0 >= 0
@@ -331,18 +318,16 @@ for seed in [1, 42, 100]:
 
 #### generates 3-tuples
 
-- generates 3-tuples
+1. expect len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates 3-tuples")
 for seed in [1, 42, 100]:
     val t = gen_tuple3(seed=seed, min=0, max=10)
     expect t.0 >= 0
@@ -357,18 +342,13 @@ for seed in [1, 42, 100]:
 
 #### maps generator output
 
-- maps generator output
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("maps generator output")
 for seed in [1, 42, 100]:
     val base = gen_i64_range(seed=seed, min=1, max=10)
     val value = base * 2
@@ -383,18 +363,17 @@ for seed in [1, 42, 100]:
 
 #### filters generator output
 
-- filters generator output
+1. var value = gen i64 range
+2. value = gen i64 range
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("filters generator output")
 for seed in [1, 42, 100]:
     # Keep trying until we get an even value
     var value = gen_i64_range(seed=seed, min=0, max=100)
@@ -410,18 +389,17 @@ for seed in [1, 42, 100]:
 
 #### flat_maps generators
 
-- flat_maps generators
+1. expect len
+2. expect len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("flat_maps generators")
 for seed in [1, 42, 100]:
     # Generate a number, then generate a list of that length
     val n = gen_i64_range(seed=seed, min=1, max=5)
@@ -435,18 +413,13 @@ for seed in [1, 42, 100]:
 
 #### chooses from one_of
 
-- chooses from one_of
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("chooses from one_of")
 var saw_low = false
 var saw_high = false
 var seed = 0
@@ -467,18 +440,13 @@ expect saw_low or saw_high
 
 #### chooses by frequency
 
-- chooses by frequency
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("chooses by frequency")
 var low_count = 0
 var high_count = 0
 var seed = 0
@@ -500,18 +468,18 @@ expect low_count > high_count
 
 #### shrinks i64 towards zero
 
-- shrinks i64 towards zero
+1. expect candidates contains
+2. expect candidates contains
+3. expect candidates contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("shrinks i64 towards zero")
 val candidates = shrink_i64(100)
 # Should include 0 as a candidate
 expect candidates.contains(0)
@@ -525,18 +493,18 @@ expect candidates.contains(99)
 
 #### shrinks lists to smaller lists
 
-- shrinks lists to smaller lists
+1. expect candidates contains
+2. expect len
+3. expect len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("shrinks lists to smaller lists")
 val candidates = shrink_list([1, 2, 3, 4, 5])
 # Should include empty list
 expect candidates.contains([])
@@ -551,18 +519,17 @@ for c in candidates:
 
 #### shrinks bool to false
 
-- shrinks bool to false
+1. expect true shrinks contains
+2. expect len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("shrinks bool to false")
 # Shrinking true should give false
 val true_shrinks = shrink_bool(true)
 expect true_shrinks.contains(false)
@@ -575,18 +542,17 @@ expect len(false_shrinks) == 0
 
 #### shrinks Option to nil
 
-- shrinks Option to nil
+1. expect some shrinks contains
+2. expect len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("shrinks Option to nil")
 # Shrinking Some should give nil
 val some_shrinks = shrink_option(Some(42))
 expect some_shrinks.contains(nil)
@@ -599,18 +565,17 @@ expect len(nil_shrinks) == 0
 
 #### shrinks strings to empty
 
-- shrinks strings to empty
+1. expect candidates contains
+2. expect len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("shrinks strings to empty")
 val candidates = shrink_string("hello")
 # Should include empty string
 expect candidates.contains("")
@@ -633,51 +598,3 @@ expect len(empty_shrinks) == 0
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `ac28dec53dbb9860fd24094ac08958c58fde4d0d43a3412c80df2988453ac5c8`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `ac28dec53dbb9860fd24094ac08958c58fde4d0d43a3412c80df2988453ac5c8`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `ac28dec53dbb9860fd24094ac08958c58fde4d0d43a3412c80df2988453ac5c8`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/features/generators_spec.spl
-mirror: doc/06_spec/03_system/feature/features/generators_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/features/generators_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/features/generators_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/features/generators_spec.spl:150:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'generates i64 values' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/features/generators_spec.spl:163:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'generates i64 in range' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/features/generators_spec.spl:172:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'generates u64 values' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

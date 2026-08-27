@@ -2,14 +2,32 @@
 
 > Tests covering PSK + 0-RTT — RFC 8446 §4.2.11 + §4.2.10 + §7.1.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+```sdn id=psk_0rtt_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+psk_0rtt_spec -> std
+psk_0rtt_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=psk_0rtt_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Psk 0rtt Specification
+# psk_0rtt_spec
+
+Verifies the psk 0rtt behaviour end to end so maintainers of this
 
 ## Scenarios
 
@@ -329,23 +347,8 @@ expect(d.id.obfuscated_ticket_age).to_equal(42u32)
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/tls13/psk_0rtt_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering PSK + 0-RTT — RFC 8446 §4.2.11 + §4.2.10 + §7.1.
-- PSK + 0-RTT — RFC 8446 §4.2.11 + §4.2.10 + §7.1
-
-## Scenario Summary
-
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
 
 
 </details>

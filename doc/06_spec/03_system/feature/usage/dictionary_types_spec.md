@@ -2,6 +2,29 @@
 
 > Tests for dictionary (map) types and their operations.
 
+<!-- sdn-diagram:id=dictionary_types_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=dictionary_types_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+dictionary_types_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=dictionary_types_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 23 | 23 | 0 | 0 |
@@ -21,7 +44,7 @@ Tests for dictionary (map) types and their operations.
 | Category | Language |
 | Status | In Progress |
 | Source | `test/03_system/feature/usage/dictionary_types_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Tests for dictionary (map) types and their operations.
@@ -35,18 +58,16 @@ Verifies dictionary creation, access, modification, and iteration.
 
 #### creates empty dictionary
 
-- creates empty dictionary
+1. expect empty len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates empty dictionary")
 val empty: Dict<text, i32> = {}
 expect empty.len() == 0
 ```
@@ -55,18 +76,16 @@ expect empty.len() == 0
 
 #### creates dictionary with initial values
 
-- creates dictionary with initial values
+1. expect dict len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates dictionary with initial values")
 val dict = {"a": 1, "b": 2, "c": 3}
 expect dict.len() == 3
 ```
@@ -75,18 +94,16 @@ expect dict.len() == 3
 
 #### creates dictionary with string keys and values
 
-- creates dictionary with string keys and values
+1. expect dict len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates dictionary with string keys and values")
 val dict = {"name": "Alice", "city": "NYC"}
 expect dict.len() == 2
 ```
@@ -97,18 +114,13 @@ expect dict.len() == 2
 
 #### retrieves value by key
 
-- retrieves value by key
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("retrieves value by key")
 val dict = {"a": 1, "b": 2}
 expect dict["a"] == 1
 ```
@@ -117,18 +129,13 @@ expect dict["a"] == 1
 
 #### returns null for missing key
 
-- returns null for missing key
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns null for missing key")
 val dict = {"a": 1}
 val value = dict.get("missing")
 expect value == nil
@@ -138,18 +145,17 @@ expect value == nil
 
 #### checks key existence
 
-- checks key existence
+1. expect dict contains
+2. expect dict contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("checks key existence")
 val dict = {"a": 1, "b": 2}
 expect dict.contains("a") == true
 expect dict.contains("c") == false
@@ -161,18 +167,16 @@ expect dict.contains("c") == false
 
 #### adds new key-value pair
 
-- adds new key-value pair
+1. expect dict len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("adds new key-value pair")
 var dict = {"a": 1}
 dict["b"] = 2
 expect dict["b"] == 2
@@ -183,18 +187,16 @@ expect dict.len() == 2
 
 #### updates existing value
 
-- updates existing value
+1. expect dict len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("updates existing value")
 var dict = {"a": 1}
 dict["a"] = 10
 expect dict["a"] == 10
@@ -205,18 +207,18 @@ expect dict.len() == 1
 
 #### removes entry by key
 
-- removes entry by key
+1. dict remove
+2. expect dict contains
+3. expect dict len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("removes entry by key")
 var dict = {"a": 1, "b": 2}
 dict.remove("a")
 expect dict.contains("a") == false
@@ -229,18 +231,13 @@ expect dict.len() == 1
 
 #### iterates over keys
 
-- iterates over keys
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("iterates over keys")
 val dict = {"a": 1, "b": 2, "c": 3}
 var count = 0
 for key in dict.keys():
@@ -252,18 +249,13 @@ expect count == 3
 
 #### iterates over values
 
-- iterates over values
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("iterates over values")
 val dict = {"a": 1, "b": 2, "c": 3}
 var sum = 0
 for value in dict.values():
@@ -275,18 +267,13 @@ expect sum == 6
 
 #### iterates over entries
 
-- iterates over entries
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("iterates over entries")
 val dict = {"a": 1, "b": 2}
 var count = 0
 for entry in dict:
@@ -300,7 +287,26 @@ expect count == 2
 
 #### gets dictionary size
 
-- gets dictionary size
+1. expect dict len
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val dict = {"a": 1, "b": 2, "c": 3}
+expect dict.len() == 3
+```
+
+</details>
+
+#### checks if dictionary is empty
+
+1. expect empty is empty
+2. expect full is empty
 
 
 <details>
@@ -310,28 +316,6 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("gets dictionary size")
-val dict = {"a": 1, "b": 2, "c": 3}
-expect dict.len() == 3
-```
-
-</details>
-
-#### checks if dictionary is empty
-
-- checks if dictionary is empty
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-SYSTEM
-step("checks if dictionary is empty")
 val empty: Dict<text, i32> = {}
 val full = {"a": 1}
 expect empty.is_empty() == true
@@ -342,18 +326,18 @@ expect full.is_empty() == false
 
 #### clears dictionary
 
-- clears dictionary
+1. dict clear
+2. expect dict len
+3. expect dict is empty
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("clears dictionary")
 var dict = {"a": 1, "b": 2}
 dict.clear()
 expect dict.len() == 0
@@ -364,18 +348,16 @@ expect dict.is_empty() == true
 
 #### creates copy of dictionary
 
-- creates copy of dictionary
+1. expect copy len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates copy of dictionary")
 val original = {"a": 1, "b": 2}
 val copy = original.clone()
 expect copy["a"] == 1
@@ -388,18 +370,16 @@ expect copy.len() == original.len()
 
 #### stores different value types
 
-- stores different value types
+1. expect mixed len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("stores different value types")
 val mixed = {"int": 1, "text": "hello", "float": 3.14}
 expect mixed.len() == 3
 ```
@@ -408,18 +388,13 @@ expect mixed.len() == 3
 
 #### accesses values with correct types
 
-- accesses values with correct types
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("accesses values with correct types")
 val dict = {"count": 5}
 val value = dict["count"]
 expect value == 5
@@ -433,18 +408,13 @@ expect value == 5
 
 #### sets key with functional update
 
-- sets key with functional update
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("sets key with functional update")
 var d = {"a": 1}
 d["b"] = 2
 expect d["b"] == 2
@@ -454,18 +424,17 @@ expect d["b"] == 2
 
 #### merges two dictionaries
 
-- merges two dictionaries
+1. d1 = d1 merge
+2. expect d1 len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("merges two dictionaries")
 var d1 = {"a": 1}
 val d2 = {"b": 2}
 d1 = d1.merge(d2)
@@ -478,18 +447,16 @@ expect d1.len() == 2
 
 #### gets value or default
 
-- gets value or default
+1. expect d get or
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("gets value or default")
 val d = {"a": 10}
 expect d.get_or("b", 99) == 99
 ```
@@ -498,18 +465,16 @@ expect d.get_or("b", 99) == 99
 
 #### gets existing value instead of default
 
-- gets existing value instead of default
+1. expect d get or
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("gets existing value instead of default")
 val d = {"a": 10}
 expect d.get_or("a", 99) == 10
 ```
@@ -520,18 +485,13 @@ expect d.get_or("a", 99) == 10
 
 #### creates dict from comprehension
 
-- creates dict from comprehension
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates dict from comprehension")
 val arr = [1, 2, 3]
 val d = {x: x * x for x in arr}
 expect d[2] == 4
@@ -551,51 +511,3 @@ expect d[2] == 4
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `2b7cedccdb473d0021929def8c352119993296ef968eeef9f58f61a55a77c485`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `2b7cedccdb473d0021929def8c352119993296ef968eeef9f58f61a55a77c485`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `2b7cedccdb473d0021929def8c352119993296ef968eeef9f58f61a55a77c485`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/dictionary_types_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/dictionary_types_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/dictionary_types_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/dictionary_types_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/dictionary_types_spec.spl:30:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates empty dictionary' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/dictionary_types_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates dictionary with initial values' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/dictionary_types_spec.spl:42:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates dictionary with string keys and values' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

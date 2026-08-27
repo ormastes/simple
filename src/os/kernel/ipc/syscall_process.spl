@@ -5,18 +5,13 @@
 # _handle_poll, _handle_fcntl, _handle_getpid,
 # and copy-from-user helpers.
 
-use os.kernel.types.syscall_types.{
-    SyscallArgs, SyscallResult, SYSCALL13_AUTHENTICATED_RUN_ABI_V1
-}
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
 use os.kernel.types.task_types.{TaskId, TaskPriority, BlockReason}
 # NOTE: `spawn_full()` is no longer called directly here — every ambient grant
 # now goes through `spawn_authority_ambient_caps()`, which returns `spawn_full()`
 # for authorized callers and the pledged deny-all set for everyone else.
 use os.kernel.loader.spawn_authority.{spawn_authority_ambient_caps, spawn_authority_bootstrap_sealed, spawn_authority_check_spawn, spawn_authority_spawn_caps, spawn_authority_current_recipe}
 use os.kernel.loader.spawn_recipes.{spawn_recipe_is_migrated, spawn_recipe_seed_parent_caps}
-use os.kernel.loader.authenticated_fs_exec_submission_service_v1.{
-    authenticated_fs_exec_user_submit_syscall_v1
-}
 use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.types.vmspace_types.{ProcessVmSpace}
 use os.kernel.scheduler.scheduler.{Scheduler, wait_collect_result_pid, wait_collect_result_status, wait_collect_result_error}
@@ -25,28 +20,27 @@ use os.kernel.ipc.notif_global.{g_notification_table}
 use os.kernel.ipc.notification.{notification_wait_any, notification_register_multi_waiter}
 use os.kernel.log.klog.{KernelLog, klog_write}
 use os.kernel.log.klog_api.{log_raw_println}
-use os.kernel.loader.executable_source.{canonical_seeded_path_from_bytes, resolve_executable_bytes}
+use os.kernel.loader.executable_source.{resolve_executable_bytes, resolve_executable_bytes_from_path_bytes}
 use os.kernel.loader.app_registry.{app_registry_lookup, app_registry_cached_boot_app_id}
 use os.kernel.loader.builtin_binary_registry.{resolve_builtin_binary}
 use os.kernel.loader.process_image.{build_user_process_image}
 use os.kernel.loader.loader_api.{loader_dynopen_bytes, loader_dynsym, loader_dynclose}
 use os.kernel.arch.arch_context.{Architecture}
-use os.kernel.memory.vmm.{vmm_new_process_space, vmm_teardown_user_space, vmm_verify_user_write, vmm_copyin_string_vector, vmm_copyin_packed_string_vector, vmm_copyin_bytes_from_space, vmm_copy_string_vector_result_ok, vmm_copy_string_vector_result_errno, vmm_copy_string_vector_result_values}
+use os.kernel.memory.vmm.{vmm_new_process_space, vmm_teardown_user_space, vmm_verify_user_write, vmm_copyin_string_vector, vmm_copyin_bytes_from_space, vmm_copy_string_vector_result_ok, vmm_copy_string_vector_result_errno, vmm_copy_string_vector_result_values}
 use os.kernel.boot.mmio.{mmio_read16, mmio_read32, mmio_write16, mmio_write32}
 use os.kernel.ipc.capability.{register_task_vmspace, task_vmspace_of}
 use os.kernel.pipe_compat.{posix_pipe}
 use os.kernel.fd_io.{posix_close, posix_dup, posix_dup2, posix_lseek}
-use os.kernel.fd_table.{fd_prepare_fork_to_task, fd_dup_from, fd_is_valid, fd_get_cloexec, fd_set_cloexec, fd_get_status_flags, fd_set_status_flags, fd_get_object_id, fd_poll_ready, fd_poll_notification, fd_current_task, MAX_FDS}
-use os.kernel.fs.fat32_fd_table.{fat32_fd_alias, fat32_fd_is_registered, fat32_fd_object_id, fat32_fd_clear, fat32_fd_clear_task}
+use os.kernel.fd_table.{fd_prepare_fork_to_task, fd_dup_from, fd_is_valid, fd_get_cloexec, fd_set_cloexec, fd_get_status_flags, fd_set_status_flags, fd_get_object_id, fd_poll_ready, fd_poll_notification, MAX_FDS}
 use os.kernel.errno.{EACCES, EFAULT, EINVAL, ENAMETOOLONG}
 use os.kernel.ipc.syscall.{_u64_to_priority, g_scheduler_next_task_id, CURRENT_EXEC_ARCH, MAX_BINARY_PATH_LEN, MAX_EXEC_ARG_COUNT, MAX_EXEC_ENV_COUNT, MAX_EXEC_STRING_LEN, MAX_EXEC_TOTAL_STRING_BYTES, _is_userspace_ptr, _is_userspace_range, g_current_vmspace, _use_x86_64_direct_spawn_handoff, _alloc_x86_64_direct_spawn_pid}
 use os.kernel.ipc.syscall_device.{_dma_release_task_allocs}
-use os.kernel.lifecycle.task_cleanup.{task_cleanup}
+use os.kernel.lifecycle.task_cleanup.{task_cleanup,
+    task_cleanup_device_mappings, task_has_noninheritable_device_memory}
 use os.kernel.ipc.capability.{_vma_range_readable}
 use os.kernel.types.task_types.{TaskState}
 use os.kernel.ipc.syscall_ipc.{IpcSyscallState}
 use os.ai_cli_js_node_contract.{AiCliManifest, ai_cli_process_spawn_decision}
-use os.tools.simplebox.simplebox_artifact_contract.{simplebox_resolve_canonical_path_v1}
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
 extern fn rt_copy_user_byte(ptr_addr: u64) -> u8
 
@@ -66,32 +60,6 @@ fn _close_all_live_fds_with_backends() -> u32:
             closed = closed + 1u32
         i = i + 1
     closed
-
-fn _publish_fat32_dup_alias(task_id: u64, old_fd: i32, duplicated_fd: i32) -> i32:
-    """Mirror a successful generic fd duplication into the FAT32 object owner.
-
-    A non-FAT32 source must clear any replaced target mapping. A FAT32 source
-    attaches the new descriptor to the same canonical object, so positioned
-    and sequential operations share metadata while only sequential operations
-    advance the shared cursor.
-    """
-    if duplicated_fd < 0:
-        return duplicated_fd
-    if not fat32_fd_is_registered(task_id, old_fd):
-        fat32_fd_clear(task_id, duplicated_fd)
-        return duplicated_fd
-    val aliased = fat32_fd_alias(task_id, old_fd, task_id, duplicated_fd)
-    if aliased.is_err():
-        return aliased.unwrap_err()
-    duplicated_fd
-
-fn _publish_fat32_fork_aliases(parent_task_id: u64, child_task_id: u64):
-    """Mirror the generic fd-context fork into canonical FAT32 aliases."""
-    var fd = 0i32
-    while fd.to_u64() < MAX_FDS:
-        if fd_is_valid(fd) and fat32_fd_is_registered(parent_task_id, fd):
-            val _alias = fat32_fd_alias(parent_task_id, fd, child_task_id, fd)
-        fd = fd + 1
 
 fn _close_cloexec_fds_with_backends() -> u32:
     """Apply exec close-on-exec cleanup through backend-aware close."""
@@ -126,45 +94,6 @@ fn _process_grant_errno_for_path(path: text, klog: KernelLog) -> i64:
     var log = klog
     klog_write(log, 3, 1, 0, "process grant denied path={path} reason={reason}")
     0 - EACCES as i64
-
-fn _process_grant_errno_for_resolved_artifact(path: text, klog: KernelLog) -> i64:
-    """Bind process admission to the request and the filesystem artifact.
-
-    Executable resolution normalizes every path and maps SimpleBox applet
-    aliases onto `/bin/simplebox`. Checking only the caller spelling allowed a
-    manifest grant for an alias or non-canonical path to reach an artifact that
-    the same manifest denied explicitly. Preserve command-level policy, then
-    require the independently resolved artifact identity as well.
-    """
-    val requested_errno = _process_grant_errno_for_path(path, klog)
-    if requested_errno < 0:
-        return requested_errno
-    val artifact_path = simplebox_resolve_canonical_path_v1(path)
-    if artifact_path == path:
-        return 0
-    _process_grant_errno_for_path(artifact_path, klog)
-
-fn _resolved_artifact_path_from_bytes(path: text, path_bytes: [u8]) -> text:
-    """Resolve once using the registry/SimpleBox order used by loading.
-
-    `resolve_executable_bytes_from_path_bytes` resolves registered aliases
-    before applying the SimpleBox artifact mapping. Returning that identity
-    lets admission and the subsequent load share one snapshot instead of
-    looking through the mutable registry twice.
-    """
-    val seeded_path = canonical_seeded_path_from_bytes(path_bytes)
-    simplebox_resolve_canonical_path_v1(
-        if seeded_path != nil: seeded_path.unwrap() else: path)
-
-fn _process_grant_errno_for_artifact(
-    requested_path: text, artifact_path: text, klog: KernelLog
-) -> i64:
-    val requested_errno = _process_grant_errno_for_path(requested_path, klog)
-    if requested_errno < 0:
-        return requested_errno
-    if artifact_path == requested_path:
-        return 0
-    _process_grant_errno_for_path(artifact_path, klog)
 
 # ============================================================================
 # Ambient-spawn authority gate (master plan 5.4 — loader/spawn_authority.spl)
@@ -258,6 +187,14 @@ fn _handle_exit_state(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) 
     # stale live entries after task_cleanup unmaps resources.
     _dma_release_task_allocs(exiting_task)
 
+    val exit_space = task_vmspace_of(exiting_task.id.to_u32())
+    if exit_space != nil:
+        val device_cleanup = task_cleanup_device_mappings(exiting_task.id,
+            exit_space.unwrap())
+        register_task_vmspace(exiting_task.id.to_u32(), device_cleanup.space)
+        if device_cleanup.failed > 0u64:
+            log_raw_println("[cleanup] WARN: task {exiting_task.id} retained {device_cleanup.failed} device mappings")
+
     # Step 2: Clean up remaining kernel resources tracked by task_cleanup
     task_cleanup(exiting_task.id)
 
@@ -267,7 +204,6 @@ fn _handle_exit_state(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) 
 
     # Step 4: Close process descriptors for the current process lifecycle.
     _close_all_live_fds_with_backends()
-    fat32_fd_clear_task(exiting_task.id)
 
     # Step 4: Mark as zombie in scheduler
     sched.exit_task(code.to_i32())
@@ -396,9 +332,7 @@ fn _handle_exec_state(args: SyscallArgs, scheduler: Scheduler) -> ProcessSyscall
 
     val path_bytes = path_bytes_result.unwrap()
     val path = _path_bytes_to_text(path_bytes)
-    val artifact_path = _resolved_artifact_path_from_bytes(path, path_bytes)
-    val grant_errno = _process_grant_errno_for_artifact(
-        path, artifact_path, KernelLog.new(16))
+    val grant_errno = _process_grant_errno_for_path(path, KernelLog.new(16))
     if grant_errno < 0:
         return ProcessSyscallState(result: SyscallResult(value: grant_errno), scheduler: scheduler)
     val bytes_result = resolve_executable_bytes(artifact_path, CURRENT_EXEC_ARCH)
@@ -434,6 +368,10 @@ fn _handle_exec_state(args: SyscallArgs, scheduler: Scheduler) -> ProcessSyscall
 
     var sched = scheduler
     val current = sched.get_current()
+    # Exec swaps the active page-table root before legacy BAR cleanup could
+    # safely detach its PTEs. Require explicit DMA/BAR release first.
+    if task_has_noninheritable_device_memory(current.id):
+        return SyscallResult(value: 0 - EBUSY as i64)
     val result = sched.exec_image(current, image_result.unwrap())
     if result == 0:
         _close_cloexec_fds_with_backends()
@@ -527,17 +465,11 @@ fn _handle_pipe(args: SyscallArgs) -> SyscallResult:
 
 fn _handle_dup2(args: SyscallArgs) -> SyscallResult:
     """Duplicate oldfd onto newfd using POSIX dup2 replacement semantics."""
-    val task_id = fd_current_task()
-    val duplicated = posix_dup2(args.arg0 as i32, args.arg1 as i32)
-    SyscallResult(value: _publish_fat32_dup_alias(
-        task_id, args.arg0 as i32, duplicated) as i64)
+    SyscallResult(value: posix_dup2(args.arg0 as i32, args.arg1 as i32) as i64)
 
 fn _handle_dup(args: SyscallArgs) -> SyscallResult:
     """Duplicate oldfd to the lowest available descriptor."""
-    val task_id = fd_current_task()
-    val duplicated = posix_dup(args.arg0 as i32)
-    SyscallResult(value: _publish_fat32_dup_alias(
-        task_id, args.arg0 as i32, duplicated) as i64)
+    SyscallResult(value: posix_dup(args.arg0 as i32) as i64)
 
 fn _handle_dlopen(args: SyscallArgs) -> SyscallResult:
     """Load a path-backed dynamic object and return a kernel registry handle.
@@ -700,13 +632,9 @@ fn _handle_fcntl(args: SyscallArgs) -> SyscallResult:
     val F_SIMPLEOS_GET_OFD: i32 = 1397686273
 
     if cmd == F_DUPFD:
-        val duplicated = fd_dup_from(fd, arg as i32, false)
-        return SyscallResult(value: _publish_fat32_dup_alias(
-            fd_current_task(), fd, duplicated) as i64)
+        return SyscallResult(value: fd_dup_from(fd, arg as i32, false) as i64)
     if cmd == F_DUPFD_CLOEXEC:
-        val duplicated = fd_dup_from(fd, arg as i32, true)
-        return SyscallResult(value: _publish_fat32_dup_alias(
-            fd_current_task(), fd, duplicated) as i64)
+        return SyscallResult(value: fd_dup_from(fd, arg as i32, true) as i64)
     if not fd_is_valid(fd):
         return SyscallResult(value: -9)
     if cmd == F_GETFD:
@@ -718,9 +646,6 @@ fn _handle_fcntl(args: SyscallArgs) -> SyscallResult:
     if cmd == F_SETFL:
         return SyscallResult(value: fd_set_status_flags(fd, arg as u32) as i64)
     if cmd == F_SIMPLEOS_GET_OFD:
-        val fat32_object_id = fat32_fd_object_id(fd_current_task(), fd)
-        if fat32_object_id != 0u64:
-            return SyscallResult(value: fat32_object_id as i64)
         return SyscallResult(value: fd_get_object_id(fd) as i64)
     SyscallResult(value: -22)
 
@@ -948,7 +873,7 @@ fn _handle_spawn_binary_state(args: SyscallArgs, scheduler: Scheduler, klog: Ker
                 result: SyscallResult(value: artifact_grant_errno),
                 scheduler: scheduler)
     val arch = CURRENT_EXEC_ARCH
-    val bytes_result = resolve_executable_bytes(artifact_path, arch)
+    val bytes_result = resolve_executable_bytes_from_path_bytes(path_bytes, arch)
     log_raw_println("[syscall13] resolve_executable_bytes returned")
     if bytes_result.is_err():
         var log = klog
@@ -1035,10 +960,7 @@ fn _direct_spawn_app_id_path(app_id: u64) -> text?:
         return nil
     val entry = app_registry_lookup(canonical.unwrap())
     if entry == nil:
-        # Registry not populated (early boot / hosted unit tests): fall back
-        # to the legacy canonical path. Grant checks and executable
-        # resolution still gate the spawn downstream, so nothing is weakened.
-        return canonical
+        return nil
     Some(entry.unwrap().canonical_path)
 
 fn _legacy_app_id_to_name(app_id: u64) -> text?:
@@ -1058,8 +980,6 @@ fn _legacy_app_id_to_name(app_id: u64) -> text?:
         Some("/sys/apps/shell")
     elif app_id == 5:
         Some("/sys/apps/editor")
-    elif app_id == 12:
-        Some("/sys/apps/clang")
     else:
         nil
 
@@ -1077,11 +997,7 @@ fn _spawn_from_resolved_bytes_for_arch_state(path: text, path_bytes: [u8], bytes
     val priority = _u64_to_priority(priority_raw)
     # Boot/init compat wrapper (see spawn_full); migrates to a per-image
     # SpawnSpec pouch once the injection ABI is wired at boot.
-    # Gate 3/3: sealed bootstrap -> non-root callers get EACCES, not caps.
-    val caller = _ambient_spawn_caller(scheduler)
-    if _ambient_spawn_denied(caller):
-        return SpawnBinaryDirectState(pid: 0 - EACCES as i64, scheduler: scheduler)
-    val caps = _spawn_caps_for(caller)
+    val caps = spawn_full()
     var sched = scheduler
     log_raw_println("[syscall13] staged create_user_task begin")
     val pid = sched.create_user_task_from_bytes_pid(path, bytes, arch, priority, caps)
@@ -1093,10 +1009,45 @@ fn _spawn_from_resolved_bytes_for_arch_state(path: text, path_bytes: [u8], bytes
     SpawnBinaryDirectState(pid: pid as i64, scheduler: sched)
 
 fn _spawn_from_resolved_bytes_for_arch(path: text, path_bytes: [u8], bytes: [u8], priority_raw: u64, scheduler: Scheduler, klog: KernelLog, arch: Architecture) -> i64:
-    _spawn_from_resolved_bytes_for_arch_state(path, path_bytes, bytes, priority_raw, scheduler, klog, arch).pid
+    val _sp_argv: [text] = []
+    val _sp_envp: [text] = []
+    val _path_bytes = path_bytes
+    log_raw_println("[syscall13] build_user_process_image begin")
+    val image_result = build_user_process_image(path, bytes, arch, _sp_argv, _sp_envp)
+    if image_result.is_ok():
+        log_raw_println("[syscall13] build_user_process_image ok")
+        if _use_x86_64_direct_spawn_handoff(arch):
+            val pid = _alloc_x86_64_direct_spawn_pid()
+            val pid_value = pid as i64
+            log_raw_println("[syscall13] user image handoff ok pid={pid_value}")
+            return pid_value
+        val priority = _u64_to_priority(priority_raw)
+        val caps = CapabilitySet.full()
+        var sched = scheduler
+        log_raw_println("[syscall13] create_user_task begin")
+        val raw_pid = sched.create_user_task_pid(image_result.unwrap(), priority, caps)
+        log_raw_println("[syscall13] create_user_task returned")
+        val pid = raw_pid
+        log_raw_println("[syscall13] pid resolved")
+        if pid == 0:
+            log_raw_println("[syscall13] create_user_task failed")
+            return -12
 
-fn _spawn_from_resolved_bytes_state(path: text, path_bytes: [u8], bytes: [u8], priority_raw: u64, scheduler: Scheduler, klog: KernelLog) -> SpawnBinaryDirectState:
-    _spawn_from_resolved_bytes_for_arch_state(path, path_bytes, bytes, priority_raw, scheduler, klog, CURRENT_EXEC_ARCH)
+        val pid_value = pid as i64
+        log_raw_println("[syscall13] log begin")
+        log_raw_println("[syscall13] log done")
+        log_raw_println("[syscall13] user image handoff ok pid={pid_value}")
+        return pid_value
+    else:
+        log_raw_println("[syscall13] build_user_process_image failed")
+
+    var log = klog
+    klog_write(log, 3, 1, 0, "spawn_binary rejected invalid executable: {path}")
+    log_raw_println("[syscall13] rejected invalid filesystem executable")
+    -8
+
+fn _spawn_from_resolved_bytes(path: text, path_bytes: [u8], bytes: [u8], priority_raw: u64, scheduler: Scheduler, klog: KernelLog) -> i64:
+    _spawn_from_resolved_bytes_for_arch(path, path_bytes, bytes, priority_raw, scheduler, klog, CURRENT_EXEC_ARCH)
 
 fn _builtin_binary_path_for_spawn(path: text) -> text:
     if path.ends_with(".smf") and path.len() > 4:
@@ -1106,12 +1057,8 @@ fn _builtin_binary_path_for_spawn(path: text) -> text:
 fn _is_builtin_binary_path(path: text) -> bool:
     resolve_builtin_binary(_builtin_binary_path_for_spawn(path)) != nil
 
-pub fn dispatch_spawn_binary_direct_state(path_ptr: u64, path_len: u64, priority_raw: u64, scheduler: Scheduler, klog: KernelLog) -> SpawnBinaryDirectState:
-    """SpawnBinary bridge returning updated scheduler state for cross-module callers.
-
-    Mirrors syscall_handler_ipc_state: callers outside this module must thread
-    the returned scheduler back into their globals instead of relying on
-    in-place mutation of the passed instance."""
+fn dispatch_spawn_binary_direct(path_ptr: u64, path_len: u64, priority_raw: u64, scheduler: Scheduler, klog: KernelLog) -> i64:
+    """Dedicated SpawnBinary bridge that avoids the generic syscall wrapper."""
     log_raw_println("[syscall13] dispatch_direct enter")
     if path_len == 0:
         var path = ""
@@ -1129,7 +1076,7 @@ pub fn dispatch_spawn_binary_direct_state(path_ptr: u64, path_len: u64, priority
             path = "/sys/apps/clang"
         if path == "":
             return SpawnBinaryDirectState(pid: -14, scheduler: scheduler)
-        val grant_errno = _process_grant_errno_for_resolved_artifact(path, klog)
+        val grant_errno = _process_grant_errno_for_path(path, klog)
         if grant_errno < 0:
             return SpawnBinaryDirectState(pid: grant_errno, scheduler: scheduler)
         val boot_bytes = app_registry_cached_boot_app_id(path_ptr)
@@ -1145,44 +1092,34 @@ pub fn dispatch_spawn_binary_direct_state(path_ptr: u64, path_len: u64, priority
 
     if path_len > MAX_BINARY_PATH_LEN:
         log_raw_println("[syscall13] dispatch_direct path too long")
-        return SpawnBinaryDirectState(pid: -14, scheduler: scheduler)
+        return -14
     val path_bytes_result = _copy_user_bytes(path_ptr, path_len)
     if path_bytes_result.is_err():
         log_raw_println("[syscall13] dispatch_direct path copy failed")
-        return SpawnBinaryDirectState(pid: -14, scheduler: scheduler)
+        return -14
 
     val path_bytes = path_bytes_result.unwrap()
     val path = _path_bytes_to_text(path_bytes)
     log_raw_println("[syscall13] dispatch_direct path-ready len={path_len} path={path}")
-    val artifact_path = _resolved_artifact_path_from_bytes(path, path_bytes)
-    val grant_errno = _process_grant_errno_for_artifact(
-        path, artifact_path, klog)
+    val grant_errno = _process_grant_errno_for_path(path, klog)
     if grant_errno < 0:
-        return SpawnBinaryDirectState(pid: grant_errno, scheduler: scheduler)
+        return grant_errno
     val arch = CURRENT_EXEC_ARCH
     log_raw_println("[syscall13] dispatch_direct arch-ready")
 
-    val bytes_result = resolve_executable_bytes(artifact_path, arch)
+    val bytes_result = resolve_executable_bytes_from_path_bytes(path_bytes, arch)
     log_raw_println("[syscall13] dispatch_direct resolve returned")
     if bytes_result.is_ok():
         log_raw_println("[syscall13] vfs bytes ok; exec handoff active")
-        return _spawn_from_resolved_bytes_state(path, path_bytes, bytes_result.unwrap(), priority_raw, scheduler, klog)
+        return _spawn_from_resolved_bytes(path, path_bytes, bytes_result.unwrap(), priority_raw, scheduler, klog)
 
     if _is_builtin_binary_path(path):
         log_raw_println("[syscall13] builtin resident fallback path={path}")
-        return SpawnBinaryDirectState(pid: -2, scheduler: scheduler)
+        return -2
 
     if bytes_result.is_err():
         var log = klog
         klog_write(log, 3, 1, 0, "spawn_binary rejected unknown binary: {path}")
-        return SpawnBinaryDirectState(pid: -2, scheduler: scheduler)
+        return -2
 
-    SpawnBinaryDirectState(pid: -2, scheduler: scheduler)
-
-fn dispatch_spawn_binary_direct(path_ptr: u64, path_len: u64, priority_raw: u64, scheduler: Scheduler, klog: KernelLog) -> i64:
-    """Dedicated SpawnBinary bridge that avoids the generic syscall wrapper.
-
-    Result-only legacy entrypoint: the scheduler mutation is NOT visible to
-    the caller (value semantics). Use dispatch_spawn_binary_direct_state when
-    the spawned task must survive in the caller's scheduler."""
-    dispatch_spawn_binary_direct_state(path_ptr, path_len, priority_raw, scheduler, klog).pid
+    -2

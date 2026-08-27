@@ -327,6 +327,33 @@ struct ApkFacetLoadV1:
     # apk_loader_generation); a successful one always does, exactly once.
     generation: i64
 
+# Provisional result for the policy-independent activation transaction.  Pack
+# lookup, inflation, and ABI admission have completed, but no binding,
+# generation, or public counter has moved yet.  The caller must pass `payload`
+# through the canonical in-memory SMF loader and then publish or abort this
+# receipt exactly once.
+struct ApkFacetPrepareV1:
+    ok: bool
+    found: bool
+    error_code: text
+    error_message: text
+    receipt: i64
+    loader: i64
+    expected_generation: i64
+    facet_key: text
+    pack_path: text
+    module_id: text
+    # Canonical digest of the semantic ModuleEntry tuple. This is distinct
+    # from module_identity, the public (pack_path,module_id) executable-map key.
+    module_entry_identity: text
+    module_identity: text
+    aspect_id: text
+    activation: i64
+    payload: [u8]
+    packs_opened: i64
+    modules_decompressed: i64
+    bytes_decompressed: i64
+
 # design §14.1 FacetBindingRegistry key: (concrete_type_id, facet_interface_id,
 # generation). facet_key is already "{concrete_type_id}/{facet_interface_id}"
 # by convention (see every catalog entry in this module's specs), so the
@@ -1187,79 +1214,6 @@ fn apk_open_catalog_v1(data: [u8]) -> ApkCatalogHandleV1:
         schema_version: schema, entry_count: entry_count, total_size: total_size,
         profile_count: profile_count, body_off: off)
 
-fn _apk_index_catalog_v1(data: [u8], handle: ApkCatalogHandleV1) -> _ApkCatalogIndexV1:
-    """Build the private exact index after full catalog validation succeeds."""
-    var profile_starts: Dict<text, i64> = {}
-    var profile_counts: Dict<text, i64> = {}
-    var off = APK_CATALOG_HEADER_SIZE_V1
-    var profile = 0
-    while profile < handle.profile_count:
-        val id_len = _apk_read_u32(data, off)
-        val profile_id = _apk_read_text(data, off + 4, id_len)
-        if not profile_starts.has(profile_id):
-            profile_starts[profile_id] = _apk_read_u64(data, off + 4 + id_len)
-            profile_counts[profile_id] = _apk_read_u64(data, off + 4 + id_len + 8)
-        off = off + 4 + id_len + 20
-        profile = profile + 1
-
-    var route_candidate_counts: Dict<text, i64> = {}
-    var indexed_keys: [text] = []
-    var indexed_kinds: [i64] = []
-    var indexed_offsets: [i64] = []
-    var slot = 0
-    while slot < handle.entry_count:
-        val entry_off = off
-        val key_len = _apk_read_u32(data, off)
-        val pack_off = off + 4 + key_len
-        val pack_len = _apk_read_u32(data, pack_off)
-        val module_off = pack_off + 4 + pack_len
-        val module_len = _apk_read_u32(data, module_off)
-        val kind_off = module_off + 4 + module_len
-        val abi_len = _apk_read_u32(data, kind_off + 8)
-        val entry_kind = _apk_read_u32(data, kind_off)
-        val key = _apk_read_text(data, off + 4, key_len)
-        val route_key = _apk_catalog_route_index_key(entry_kind, key)
-        if route_candidate_counts.has(route_key):
-            route_candidate_counts[route_key] = route_candidate_counts[route_key] + 1
-        else:
-            route_candidate_counts[route_key] = 1
-        indexed_keys.push(key)
-        indexed_kinds.push(entry_kind)
-        indexed_offsets.push(entry_off)
-        off = kind_off + 12 + abi_len + 4
-        slot = slot + 1
-
-    # Lay posting lists into two flat arrays in a second pass. This avoids the
-    # copy-on-write quadratic behavior of repeatedly extracting and extending
-    # a Dict<text, [i64]> value for an adversarial repeated key.
-    var route_candidate_starts: Dict<text, i64> = {}
-    var route_candidate_cursors: Dict<text, i64> = {}
-    var flat_count = 0
-    for route_key in route_candidate_counts.keys():
-        route_candidate_starts[route_key] = flat_count
-        route_candidate_cursors[route_key] = 0
-        flat_count = flat_count + route_candidate_counts[route_key]
-    var route_candidate_slots: [i64] = []
-    var route_candidate_offsets: [i64] = []
-    while route_candidate_slots.len() < flat_count:
-        route_candidate_slots.push(0)
-        route_candidate_offsets.push(0)
-    var indexed_slot = 0
-    while indexed_slot < handle.entry_count:
-        val route_key = _apk_catalog_route_index_key(
-            indexed_kinds[indexed_slot], indexed_keys[indexed_slot])
-        val position = route_candidate_starts[route_key] + route_candidate_cursors[route_key]
-        route_candidate_slots[position] = indexed_slot
-        route_candidate_offsets[position] = indexed_offsets[indexed_slot]
-        route_candidate_cursors[route_key] = route_candidate_cursors[route_key] + 1
-        indexed_slot = indexed_slot + 1
-    _ApkCatalogIndexV1(handle: handle, profile_starts: profile_starts,
-        profile_counts: profile_counts,
-        route_candidate_starts: route_candidate_starts,
-        route_candidate_counts: route_candidate_counts,
-        route_candidate_slots: route_candidate_slots,
-        route_candidate_offsets: route_candidate_offsets)
-
 fn _apk_validate_catalog_slice_semantics(keys: [text], packs: [text], modules: [text],
         kinds: [i64], abi_hashes: [text], start: i64, count: i64) -> text:
     """O(slice entries) ambiguity/ABI validation matching the catalog builder."""
@@ -1696,35 +1650,21 @@ var _fc_pack: [text] = []
 # rebuilding it byte-by-byte, and unload compaction moves one reference per
 # surviving binding rather than copying every surviving payload byte.
 var _fc_payload: [[u8]] = []
-# Canonical ModuleEntry identity, computed once on publication. It is retained
-# beside the reference-backed payload so lookup and compaction never rebuild or
-# rehash module metadata.
-var _fc_module_identity: [text] = []
 var _fc_generation: [i64] = []
 # design §14.7 unload: per-binding lifecycle state and pin count. A binding is
 # freed only when nothing still holds it.
 var _fc_state: [i64] = []
 var _fc_refs: [i64] = []
-# Compact bounded history ledger: preserves recent public UNLOADED observations
-# without retaining payloads or full binding rows.  `_fc_unloaded_order` is a
-# fixed-capacity FIFO ring once full; the Dict therefore never exceeds the
-# declared capacity.
+# Compact history ledger: preserves the public UNLOADED observation without
+# retaining payloads or full tombstone rows. One row per loader/key.
 var _fc_unloaded: Dict<text, bool> = {}
-var _fc_unloaded_order: [text] = []
-var _fc_unloaded_head: i64 = 0
 
-# Exact facet-key -> global SoA row, partitioned by loader. The old hot path
-# scanned every binding from every loader. Dict lookup is average O(1); each
-# compaction rebuilds every loader's map because removing a middle global row
-# shifts survivor rows belonging to this loader and to other loaders.
-var _ld_binding_index: [Dict<text, i64>] = []
-
-# One path-indexed registry per loader. Keeping the registry with its loader
-# makes duplicate detection and routed lookup independent of the number of
-# packs registered by this or any other loader. Dict values retain the same
-# reference-backed byte arrays that the former parallel `_pk_data` array did;
-# registration and lookup therefore do not copy payload bytes.
-var _ld_packs: [Dict<text, [u8]>] = []
+var _pk_ld: [i64] = []
+var _pk_path: [text] = []
+# Keep each pack as one value. Arrays are reference-backed values, so this
+# avoids copying every byte into a second flat pool at registration and again
+# out of that pool on every first facet load.
+var _pk_data: [[u8]] = []
 
 # design §14.6 / §21 E-APACK007 activation cycle guard: a flat per-process
 # stack of (loader, facet_key) pairs CURRENTLY being activated. This module
@@ -1749,6 +1689,13 @@ var _stk_key: [text] = []
 # (not deferred) so the wiring is a one-line call, not a design exercise, once
 # that owner exists.
 var _ld_operational_sealed: [bool] = []
+
+# Outstanding activation receipts. The ledger retains the canonical receipt,
+# including one reference-backed payload value, until publish or abort consumes
+# it in O(1). The monotonically increasing nonce is identity, not a loader
+# statistic.
+var _apk_next_prepare_receipt: i64 = 1
+var _apk_prepared_by_receipt: Dict<i64, ApkFacetPrepareV1> = {}
 
 fn apk_loader_new() -> i64:
     """Create a loader with zeroed counters. Returns its handle."""
@@ -1910,6 +1857,25 @@ fn apk_loader_unregister_pack(ld: i64, path: text) -> bool:
             _ld_last_error[ld] = "loader has an activating facet; pack removal refused: {path}"
             return false
         i = i + 1
+    _pk_ld = _pk_ld.push(ld)
+    _pk_path = _pk_path.push(path)
+    _pk_data = _pk_data.push(data)
+    _ld_last_error[ld] = ""
+    true
+
+fn apk_loader_unregister_pack(ld: i64, path: text) -> bool:
+    """Remove one registered pack after releasing its unpinned bindings.
+    Pinned or activating bindings refuse removal, leaving registration intact.
+    """
+    var i = 0
+    while i < _stk_ld.len():
+        if _stk_ld[i] == ld:
+            # Before first publication there is intentionally no facet row
+            # from which to recover the pack path. Refuse any pack removal
+            # for this loader while an activation is in flight.
+            _ld_last_error[ld] = "loader has an activating facet; pack removal refused: {path}"
+            return false
+        i = i + 1
     i = 0
     while i < _fc_ld.len():
         if _fc_ld[i] == ld and _fc_pack[i] == path and _fc_state[i] != APK_FC_UNLOADED:
@@ -1918,13 +1884,25 @@ fn apk_loader_unregister_pack(ld: i64, path: text) -> bool:
                 return false
         i = i + 1
     _apk_release_pack_bindings(ld, path)
-    var packs = _ld_packs[ld]
-    val found = packs.contains_key(path)
+    var next_ld: [i64] = []
+    var next_path: [text] = []
+    var next_data: [[u8]] = []
+    var found = false
+    i = 0
+    while i < _pk_ld.len():
+        if _pk_ld[i] == ld and _pk_path[i] == path:
+            found = true
+        else:
+            next_ld.push(_pk_ld[i])
+            next_path.push(_pk_path[i])
+            next_data.push(_pk_data[i])
+        i = i + 1
     if not found:
         _ld_last_error[ld] = "pack is not registered: {path}"
         return false
-    packs = packs.remove(path)
-    _ld_packs[ld] = packs
+    _pk_ld = next_ld
+    _pk_path = next_path
+    _pk_data = next_data
     _ld_last_error[ld] = ""
     true
 
@@ -1961,6 +1939,26 @@ fn _apk_facet_miss(facet_key: text) -> ApkFacetLoadV1:
         facet_key: facet_key, pack_path: "", module_id: "", aspect_id: "",
         activation: APK_ACT_OFF, from_cache: false, payload: empty, generation: 0)
 
+fn _apk_prepare_error(ld: i64, facet_key: text, code: text, message: text) -> ApkFacetPrepareV1:
+    ApkFacetPrepareV1(ok: false, found: false, error_code: code, error_message: message,
+        receipt: 0, loader: ld, expected_generation: _ld_generation[ld],
+        facet_key: facet_key, pack_path: "", module_id: "", module_entry_identity: "",
+        module_identity: "",
+        aspect_id: "", activation: APK_ACT_OFF, payload: [], packs_opened: 0,
+        modules_decompressed: 0, bytes_decompressed: 0)
+
+fn _apk_prepare_miss(ld: i64, facet_key: text) -> ApkFacetPrepareV1:
+    ApkFacetPrepareV1(ok: true, found: false, error_code: "", error_message: "",
+        receipt: 0, loader: ld, expected_generation: _ld_generation[ld],
+        facet_key: facet_key, pack_path: "", module_id: "", module_entry_identity: "",
+        module_identity: "",
+        aspect_id: "", activation: APK_ACT_OFF, payload: [], packs_opened: 0,
+        modules_decompressed: 0, bytes_decompressed: 0)
+
+fn apk_module_identity_v1(pack_path: text, module_id: text) -> text:
+    """Injective stable identity for the `(pack_path,module_id)` tuple."""
+    "apk:{pack_path.len()}:{pack_path}:module:{module_id.len()}:{module_id}"
+
 fn _apk_split_facet_key(facet_key: text) -> ApkFacetKeyPartsV1:
     """Split "{concrete_type_id}/{facet_interface_id}" at the FIRST '/'. Every
     catalog entry in this module follows that convention."""
@@ -1995,14 +1993,17 @@ fn apk_try_facet(ld: i64, facet_key: text) -> ApkFacetLoadV1:
     """Design §6.7 `try_facet`: NEVER performs I/O. Returns an already-bound
     facet or a clean miss — it never consults the catalog, never opens a pack
     and never decompresses, so none of the loader counters can move."""
-    val i = _apk_fc_index(ld, facet_key)
-    if i >= 0 and _fc_state[i] == APK_FC_BOUND:
-        _ld_cache_hits[ld] = _ld_cache_hits[ld] + 1
-        _ld_last_error[ld] = ""
-        return ApkFacetLoadV1(ok: true, found: true, error_code: "", error_message: "",
-            facet_key: facet_key, pack_path: _fc_pack[i], module_id: _fc_module[i],
-            aspect_id: _fc_aspect[i], activation: _fc_activation[i],
-            from_cache: true, payload: _fc_payload[i], generation: _fc_generation[i])
+    var i = 0
+    val n = _fc_ld.len()
+    while i < n:
+        if _fc_ld[i] == ld and _fc_key[i] == facet_key and _fc_state[i] == APK_FC_BOUND:
+            _ld_cache_hits[ld] = _ld_cache_hits[ld] + 1
+            _ld_last_error[ld] = ""
+            return ApkFacetLoadV1(ok: true, found: true, error_code: "", error_message: "",
+                facet_key: facet_key, pack_path: _fc_pack[i], module_id: _fc_module[i],
+                aspect_id: _fc_aspect[i], activation: _fc_activation[i],
+                from_cache: true, payload: _fc_payload[i], generation: _fc_generation[i])
+        i = i + 1
     _apk_facet_miss(facet_key)
 
 fn apk_load_facet(ld: i64, catalog: [u8], facet_key: text) -> ApkFacetLoadV1:
@@ -2119,134 +2120,218 @@ fn _apk_acquire_facet_preflight(ld: i64, facet_key: text,
     # scheduler/publication layer calls it.
     if not explicit and _ld_operational_sealed[ld]:
         _ld_last_error[ld] = "E-APACK008 attempted lazy I/O in forbidden execution context: operational state is sealed, cannot lazy-load {facet_key}"
-        return Some(_apk_facet_error("E-APACK008", _ld_last_error[ld]))
-    nil
+        return _apk_facet_error("E-APACK008", _ld_last_error[ld])
+    _apk_acquire_facet_body(ld, catalog, facet_key, explicit)
 
-fn _apk_acquire_facet_body(ld: i64, catalog: [u8], facet_key: text, explicit: bool) -> ApkFacetLoadV1:
+fn _apk_prepare_facet_body_v1(ld: i64, catalog: [u8], facet_key: text, explicit: bool) -> ApkFacetPrepareV1:
+    """Prepare one routed activation without publishing observable state.
+
+    The returned payload is a complete ordinary SMF image.  A production
+    caller parses, maps, and relocates it with the canonical in-memory module
+    loader before calling `apk_publish_prepared_facet_v1`.  Every failure and
+    `apk_abort_prepared_facet_v1` leave generation, bindings, and counters
+    unchanged.
+    """
     val cat = apk_open_catalog_v1(catalog)
     if not cat.ok:
         _ld_last_error[ld] = cat.error_message
-        return _apk_facet_error(cat.error_code, cat.error_message)
-    _apk_acquire_facet_body_opened(ld, catalog, cat, facet_key, explicit, nil)
-
-fn _apk_acquire_facet_body_opened(ld: i64, catalog: [u8],
-        cat: ApkCatalogHandleV1, facet_key: text, explicit: bool,
-        catalog_index: _ApkCatalogIndexV1?) -> ApkFacetLoadV1:
+        return _apk_prepare_error(ld, facet_key, cat.error_code, cat.error_message)
     # design §14.7 step 2: while a binding is quiescing, NEW acquisitions are
     # refused. Existing pinned references stay valid; this is what makes an
     # unload ordered rather than a race.
     val resident_index = _apk_fc_index(ld, facet_key)
     if resident_index >= 0 and _fc_state[resident_index] == APK_FC_QUIESCING:
         _ld_last_error[ld] = "aspect is quiescing and cannot be re-acquired: {facet_key}"
-        return _apk_facet_error("APK_ASPECT_QUIESCING", "aspect is quiescing and cannot be re-acquired: {facet_key}")
-    var route = _apk_catalog_route_miss(facet_key, APK_ENTRY_FACET)
-    if val index = catalog_index:
-        route = _apk_catalog_route_kind_indexed_v1(
-            catalog, index, facet_key, APK_ENTRY_FACET)
-        if _ld_profile[ld] != "":
-            route = _apk_catalog_route_in_profile_indexed_v1(
-                catalog, index, _ld_profile[ld], facet_key)
-    elif _ld_profile[ld] != "":
+        return _apk_prepare_error(ld, facet_key, "APK_ASPECT_QUIESCING", _ld_last_error[ld])
+    var route = apk_catalog_route_v1(catalog, cat, facet_key)
+    if _ld_profile[ld] != "":
         route = apk_catalog_route_in_profile_v1(catalog, cat, _ld_profile[ld], facet_key)
     else:
         route = apk_catalog_route_v1(catalog, cat, facet_key)
     if not route.ok:
         _ld_last_error[ld] = route.error_message
-        return _apk_facet_error(route.error_code, route.error_message)
+        return _apk_prepare_error(ld, facet_key, route.error_code, route.error_message)
     if not route.found:
         _ld_last_error[ld] = ""
-        return _apk_facet_miss(facet_key)
+        return _apk_prepare_miss(ld, facet_key)
 
     # activation policy (design §9.4) — decided from the catalog alone, so a
     # refused aspect costs no pack open and no decompression at all.
     if route.activation == APK_ACT_OFF:
         _ld_last_error[ld] = "aspect is excluded from this image: {facet_key}"
-        return _apk_facet_error("APK_ASPECT_EXCLUDED", "aspect is excluded from this image: {facet_key}")
+        return _apk_prepare_error(ld, facet_key, "APK_ASPECT_EXCLUDED", _ld_last_error[ld])
     if route.activation == APK_ACT_MANUAL and not explicit:
         _ld_last_error[ld] = "manual aspect requires an explicit load: {facet_key}"
-        return _apk_facet_error("APK_ASPECT_MANUAL", "manual aspect requires an explicit load: {facet_key}")
+        return _apk_prepare_error(ld, facet_key, "APK_ASPECT_MANUAL", _ld_last_error[ld])
 
     # Locate the routed pack by exact path. The per-loader Dict avoids a scan
     # across this loader's packs and every other loader's packs.
     val packs = _ld_packs[ld]
     if not packs.contains_key(route.pack_path):
         _ld_last_error[ld] = "routed pack is not deployed: {route.pack_path}"
-        return _apk_facet_error("APK_PACK_MISSING", "routed pack is not deployed: {route.pack_path}")
+        return _apk_prepare_error(ld, facet_key, "APK_PACK_MISSING", _ld_last_error[ld])
     val pack = packs[route.pack_path]
 
-    _ld_packs_opened[ld] = _ld_packs_opened[ld] + 1
     val handle = apk_open_pack_v1(pack)
     if not handle.ok:
         _ld_last_error[ld] = handle.error_message
-        return _apk_facet_error(handle.error_code, handle.error_message)
+        return _apk_prepare_error(ld, facet_key, handle.error_code, handle.error_message)
     val load = apk_load_module_v1(pack, handle, route.module_id)
     if not load.ok:
         _ld_last_error[ld] = load.error_message
-        return _apk_facet_error(load.error_code, load.error_message)
+        return _apk_prepare_error(ld, facet_key, load.error_code, load.error_message)
     if not load.found:
         _ld_last_error[ld] = "catalog routed to a module absent from its pack: {route.module_id}"
-        return _apk_facet_error("APK_ROUTE_DANGLING", "catalog routed to a module absent from its pack: {route.module_id}")
+        return _apk_prepare_error(ld, facet_key, "APK_ROUTE_DANGLING", _ld_last_error[ld])
     # design §17: the route promises a facet contract ABI; the module states
     # its own. A mismatch is a load failure, never a best-effort bind. An
     # empty promise means the route declares no ABI and nothing is checked.
     if route.abi_hash != "" and route.abi_hash != load.module_abi_hash:
         _ld_last_error[ld] = "facet contract ABI mismatch for {facet_key}: catalog {route.abi_hash} vs module {load.module_abi_hash}"
-        return _apk_facet_error("APK_ABI_MISMATCH", "facet contract ABI mismatch for {facet_key}: catalog {route.abi_hash} vs module {load.module_abi_hash}")
+        return _apk_prepare_error(ld, facet_key, "APK_ABI_MISMATCH", _ld_last_error[ld])
     # design §17: required_core_public_abi_hash and variant_fingerprint are
     # carried by every module and are readable above (load.*), but a deployer
     # must OPT IN with the expected value before either is enforced — with
     # nothing set the gate is SKIPPED, not silently passed.
     if _ld_expected_core_abi[ld] != "" and _ld_expected_core_abi[ld] != load.required_core_public_abi_hash:
         _ld_last_error[ld] = "core public ABI mismatch for {facet_key}: expected {_ld_expected_core_abi[ld]} vs module {load.required_core_public_abi_hash}"
-        return _apk_facet_error("APK_CORE_ABI_MISMATCH", "core public ABI mismatch for {facet_key}: expected {_ld_expected_core_abi[ld]} vs module {load.required_core_public_abi_hash}")
+        return _apk_prepare_error(ld, facet_key, "APK_CORE_ABI_MISMATCH", _ld_last_error[ld])
     if _ld_expected_core_layout[ld] != "" and _ld_expected_core_layout[ld] != load.required_core_layout_hash:
         _ld_last_error[ld] = "core layout hash mismatch for {facet_key}: expected {_ld_expected_core_layout[ld]} vs module {load.required_core_layout_hash}"
-        return _apk_facet_error("APK_CORE_LAYOUT_MISMATCH", "core layout hash mismatch for {facet_key}: expected {_ld_expected_core_layout[ld]} vs module {load.required_core_layout_hash}")
+        return _apk_prepare_error(ld, facet_key, "APK_CORE_LAYOUT_MISMATCH", _ld_last_error[ld])
     if _ld_expected_variant_fingerprint[ld] != "" and _ld_expected_variant_fingerprint[ld] != load.variant_fingerprint:
         _ld_last_error[ld] = "variant fingerprint mismatch for {facet_key}: expected {_ld_expected_variant_fingerprint[ld]} vs module {load.variant_fingerprint}"
-        return _apk_facet_error("APK_VARIANT_MISMATCH", "variant fingerprint mismatch for {facet_key}: expected {_ld_expected_variant_fingerprint[ld]} vs module {load.variant_fingerprint}")
-    _ld_modules_decompressed[ld] = _ld_modules_decompressed[ld] + load.modules_decompressed
-    _ld_bytes_decompressed[ld] = _ld_bytes_decompressed[ld] + load.bytes_decompressed
+        return _apk_prepare_error(ld, facet_key, "APK_VARIANT_MISMATCH", _ld_last_error[ld])
     _ld_last_error[ld] = ""
 
-    # Compute the canonical ModuleEntry identity once. The binding row retains
-    # this digest through hits and compaction; no hot lookup re-encodes fields.
-    val module_identity = _apk_module_identity_v1(load.module_id, load.aspect_id,
+    # Compute the canonical ModuleEntry identity while the admitted directory
+    # fields are in scope. Publication retains this digest without re-encoding.
+    val module_entry_identity = _apk_module_identity_v1(load.module_id, load.aspect_id,
         load.module_abi_hash, load.required_core_public_abi_hash,
         load.required_core_layout_hash, load.variant_fingerprint)
+    if module_entry_identity == "":
+        _ld_last_error[ld] = "module identity is missing for facet: {facet_key}"
+        return _apk_prepare_error(ld, facet_key, "APK_BINDING_IDENTITY_MISSING", _ld_last_error[ld])
+
+    val receipt = _apk_next_prepare_receipt
+    _apk_next_prepare_receipt = _apk_next_prepare_receipt + 1
+    val prepared = ApkFacetPrepareV1(ok: true, found: true, error_code: "", error_message: "",
+        receipt: receipt, loader: ld, expected_generation: _ld_generation[ld],
+        facet_key: facet_key, pack_path: route.pack_path, module_id: load.module_id,
+        module_entry_identity: module_entry_identity,
+        module_identity: apk_module_identity_v1(route.pack_path, load.module_id),
+        aspect_id: load.aspect_id, activation: route.activation, payload: load.payload,
+        packs_opened: 1, modules_decompressed: load.modules_decompressed,
+        bytes_decompressed: load.bytes_decompressed)
+    _apk_prepared_by_receipt[receipt] = prepared
+    prepared
+
+fn apk_prepare_facet_v1(ld: i64, catalog: [u8], facet_key: text, explicit: bool) -> ApkFacetPrepareV1:
+    """Begin an activation transaction and retain its cycle-guard frame."""
+    if not explicit and _ld_operational_sealed[ld]:
+        _ld_last_error[ld] = "E-APACK008 attempted lazy I/O in forbidden execution context: operational state is sealed, cannot lazy-load {facet_key}"
+        return _apk_prepare_error(ld, facet_key, "E-APACK008", _ld_last_error[ld])
+    if not apk_activation_stack_enter_v1(ld, facet_key):
+        return _apk_prepare_error(ld, facet_key, "APK_ACTIVATION_CYCLE", _ld_last_error[ld])
+    val prepared = _apk_prepare_facet_body_v1(ld, catalog, facet_key, explicit)
+    if not prepared.ok or not prepared.found:
+        apk_activation_stack_exit_v1(ld, facet_key)
+    prepared
+
+fn apk_abort_prepared_facet_v1(prepared: ApkFacetPrepareV1) -> bool:
+    """Consume a provisional receipt without publishing any loader state."""
+    if prepared.receipt <= 0 or not _apk_prepared_by_receipt.contains_key(prepared.receipt):
+        return false
+    val canonical = _apk_prepared_by_receipt[prepared.receipt]
+    _apk_prepared_by_receipt = _apk_prepared_by_receipt.remove(prepared.receipt)
+    apk_activation_stack_exit_v1(canonical.loader, canonical.facet_key)
+    true
+
+fn apk_publish_prepared_facet_v1(prepared: ApkFacetPrepareV1) -> ApkFacetLoadV1:
+    """Atomically publish a successfully parsed/mapped/relocated SMF receipt."""
+    if not prepared.ok or not prepared.found or prepared.receipt <= 0:
+        return _apk_facet_error("APK_PREPARE_INVALID", "facet activation receipt is not publishable")
+    if not _apk_prepared_by_receipt.contains_key(prepared.receipt):
+        return _apk_facet_error("APK_PREPARE_CONSUMED", "facet activation receipt was already consumed")
+    val canonical = _apk_prepared_by_receipt[prepared.receipt]
+    val fields_match = (
+        prepared.loader == canonical.loader and
+        prepared.expected_generation == canonical.expected_generation and
+        prepared.facet_key == canonical.facet_key and
+        prepared.pack_path == canonical.pack_path and
+        prepared.module_id == canonical.module_id and
+        prepared.module_entry_identity == canonical.module_entry_identity and
+        prepared.module_identity == canonical.module_identity and
+        prepared.aspect_id == canonical.aspect_id and
+        prepared.activation == canonical.activation and
+        prepared.packs_opened == canonical.packs_opened and
+        prepared.modules_decompressed == canonical.modules_decompressed and
+        prepared.bytes_decompressed == canonical.bytes_decompressed and
+        sha256_u8_hex(prepared.payload) == sha256_u8_hex(canonical.payload)
+    )
+    if not fields_match:
+        _apk_prepared_by_receipt = _apk_prepared_by_receipt.remove(prepared.receipt)
+        apk_activation_stack_exit_v1(canonical.loader, canonical.facet_key)
+        return _apk_facet_error("APK_PREPARE_TAMPERED", "facet activation receipt fields were modified")
+    val ld = canonical.loader
+    if _ld_generation[ld] != canonical.expected_generation:
+        _apk_prepared_by_receipt = _apk_prepared_by_receipt.remove(prepared.receipt)
+        apk_activation_stack_exit_v1(ld, canonical.facet_key)
+        return _apk_facet_error("APK_PREPARE_STALE", "facet activation generation changed before publication")
+    if canonical.module_entry_identity == "":
+        _ld_last_error[ld] = "module identity is missing for facet: {canonical.facet_key}"
+        _apk_prepared_by_receipt = _apk_prepared_by_receipt.remove(prepared.receipt)
+        apk_activation_stack_exit_v1(ld, canonical.facet_key)
+        return _apk_facet_error("APK_BINDING_IDENTITY_MISSING", _ld_last_error[ld])
 
     # Under this module's current single-owner loader contract, prepare the
     # next §5.7 activation epoch, publish the row plus index entry, and advance
     # only after publication succeeds. Cross-thread first-use serialization is
     # outside this container; within one owner, a duplicate loader/key entry is
     # an integrity failure, never a silent overwrite.
-    if module_identity == "":
-        _ld_last_error[ld] = "module identity is missing for facet: {facet_key}"
-        return _apk_facet_error("APK_BINDING_IDENTITY_MISSING", _ld_last_error[ld])
     var binding_index = _ld_binding_index[ld]
-    if binding_index.contains_key(facet_key):
-        _ld_last_error[ld] = "facet binding already published: {facet_key}"
-        return _apk_facet_error("APK_BINDING_DUPLICATE", _ld_last_error[ld])
+    if binding_index.contains_key(canonical.facet_key):
+        _ld_last_error[ld] = "facet was published by another activation: {canonical.facet_key}"
+        _apk_prepared_by_receipt = _apk_prepared_by_receipt.remove(prepared.receipt)
+        apk_activation_stack_exit_v1(ld, canonical.facet_key)
+        return _apk_facet_error("APK_PREPARE_DUPLICATE", _ld_last_error[ld])
     val gen = _ld_generation[ld] + 1
     val row = _fc_ld.len()
     _fc_ld = _fc_ld.push(ld)
-    _fc_key = _fc_key.push(facet_key)
-    _fc_module = _fc_module.push(load.module_id)
-    _fc_aspect = _fc_aspect.push(load.aspect_id)
-    _fc_activation = _fc_activation.push(route.activation)
-    _fc_pack = _fc_pack.push(route.pack_path)
-    _fc_payload = _fc_payload.push(load.payload)
-    _fc_module_identity = _fc_module_identity.push(module_identity)
+    _fc_key = _fc_key.push(canonical.facet_key)
+    _fc_module = _fc_module.push(canonical.module_id)
+    _fc_aspect = _fc_aspect.push(canonical.aspect_id)
+    _fc_activation = _fc_activation.push(canonical.activation)
+    _fc_pack = _fc_pack.push(canonical.pack_path)
+    _fc_payload = _fc_payload.push(canonical.payload)
+    _fc_module_identity = _fc_module_identity.push(canonical.module_entry_identity)
     _fc_generation = _fc_generation.push(gen)
     _fc_state = _fc_state.push(APK_FC_BOUND)
     _fc_refs = _fc_refs.push(0)
-    binding_index[facet_key] = row
+    binding_index[canonical.facet_key] = row
     _ld_binding_index[ld] = binding_index
     _ld_generation[ld] = gen
+    _ld_packs_opened[ld] = _ld_packs_opened[ld] + canonical.packs_opened
+    _ld_modules_decompressed[ld] = _ld_modules_decompressed[ld] + canonical.modules_decompressed
+    _ld_bytes_decompressed[ld] = _ld_bytes_decompressed[ld] + canonical.bytes_decompressed
+    _ld_last_error[ld] = ""
+    _apk_prepared_by_receipt = _apk_prepared_by_receipt.remove(prepared.receipt)
+    apk_activation_stack_exit_v1(ld, canonical.facet_key)
     ApkFacetLoadV1(ok: true, found: true, error_code: "", error_message: "",
-        facet_key: facet_key, pack_path: route.pack_path, module_id: load.module_id,
-        aspect_id: load.aspect_id, activation: route.activation, from_cache: false,
-        payload: load.payload, generation: gen)
+        facet_key: canonical.facet_key, pack_path: canonical.pack_path, module_id: canonical.module_id,
+        aspect_id: canonical.aspect_id, activation: canonical.activation, from_cache: false,
+        payload: canonical.payload, generation: gen)
+
+fn _apk_acquire_facet_body(ld: i64, catalog: [u8], facet_key: text, explicit: bool) -> ApkFacetLoadV1:
+    # Compatibility surface: callers that only need resident payload bytes
+    # retain their API. Product ModuleLoader callers use the public prepare /
+    # publish split and place the canonical SMF loader between these calls.
+    val prepared = apk_prepare_facet_v1(ld, catalog, facet_key, explicit)
+    if not prepared.ok:
+        return _apk_facet_error(prepared.error_code, prepared.error_message)
+    if not prepared.found:
+        return _apk_facet_miss(facet_key)
+    apk_publish_prepared_facet_v1(prepared)
 
 # ---------------------------------------------------------------- unload
 #
@@ -2346,40 +2431,15 @@ fn apk_facet_unpin_v1(ld: i64, facet_key: text) -> bool:
     true
 
 fn _apk_record_unloaded(ld: i64, key: text):
-    val tombstone = "{ld}\0{key}"
-    if _fc_unloaded.has(tombstone):
-        return
-    if _fc_unloaded_order.len() < APK_MAX_RETAINED_TOMBSTONES_V1:
-        _fc_unloaded_order.push(tombstone)
-    else:
-        val evicted = _fc_unloaded_order[_fc_unloaded_head]
-        _fc_unloaded = _fc_unloaded.remove(evicted)
-        _fc_unloaded_order[_fc_unloaded_head] = tombstone
-        _fc_unloaded_head = (
-            _fc_unloaded_head + 1) % APK_MAX_RETAINED_TOMBSTONES_V1
-    _fc_unloaded[tombstone] = true
-
-fn apk_retained_tombstone_count_v1() -> i64:
-    """Current process-wide unload-history rows; always at or below capacity."""
-    _fc_unloaded.keys().len() as i64
-
-fn apk_retained_tombstone_capacity_v1() -> i64:
-    APK_MAX_RETAINED_TOMBSTONES_V1
+    _fc_unloaded["{ld}\0{key}"] = true
 
 fn _apk_compact_bindings(ld: i64, index: i64, pack_path: text, by_pack: bool, all_loader: bool):
     """design §14.7 step 5: free the binding. Only ever reached with a zero
-    refcount, so a resident, still-referenced module can never be freed.
-
-    With B global live bindings and L loaders this is O(B + L). It allocates
-    one replacement array per SoA column and one empty Dict per loader, then
-    inserts one row reference per survivor. Payload arrays and identity texts
-    remain reference-backed values: payload bytes are not copied and module
-    identities are not rehashed.
-    """
-    # Compact all parallel columns and rebuild every loader index in one pass.
-    # Leaving tombstone rows makes reload grow RSS and every lookup without
-    # bound; rebuilding is required because a middle removal shifts later rows
-    # owned by this loader and by other loaders.
+    refcount, so a resident, still-referenced module can never be freed."""
+    # Compact the SoA and reference-backed payload values in one pass. Leaving
+    # tombstone rows here makes reload grow RSS and every future lookup without
+    # bound; copying payload bytes would make unload proportional to all live
+    # payload bytes rather than the number of live bindings.
     var next_ld: [i64] = []
     var next_key: [text] = []
     var next_module: [text] = []
@@ -2387,15 +2447,9 @@ fn _apk_compact_bindings(ld: i64, index: i64, pack_path: text, by_pack: bool, al
     var next_activation: [i64] = []
     var next_pack: [text] = []
     var next_payload: [[u8]] = []
-    var next_module_identity: [text] = []
     var next_generation: [i64] = []
     var next_state: [i64] = []
     var next_refs: [i64] = []
-    var next_binding_index: [Dict<text, i64>] = []
-    var loader_index = 0
-    while loader_index < _ld_binding_index.len():
-        next_binding_index.push({})
-        loader_index = loader_index + 1
     var released = 0
     var row = 0
     while row < _fc_ld.len():
@@ -2410,7 +2464,6 @@ fn _apk_compact_bindings(ld: i64, index: i64, pack_path: text, by_pack: bool, al
             _apk_record_unloaded(_fc_ld[row], _fc_key[row])
             released = released + 1
         else:
-            val next_row = next_ld.len()
             next_ld.push(_fc_ld[row])
             next_key.push(_fc_key[row])
             next_module.push(_fc_module[row])
@@ -2418,13 +2471,9 @@ fn _apk_compact_bindings(ld: i64, index: i64, pack_path: text, by_pack: bool, al
             next_activation.push(_fc_activation[row])
             next_pack.push(_fc_pack[row])
             next_payload.push(_fc_payload[row])
-            next_module_identity.push(_fc_module_identity[row])
             next_generation.push(_fc_generation[row])
             next_state.push(_fc_state[row])
             next_refs.push(_fc_refs[row])
-            var survivor_index = next_binding_index[_fc_ld[row]]
-            survivor_index[_fc_key[row]] = next_row
-            next_binding_index[_fc_ld[row]] = survivor_index
         row = row + 1
     _fc_ld = next_ld
     _fc_key = next_key
@@ -2433,11 +2482,9 @@ fn _apk_compact_bindings(ld: i64, index: i64, pack_path: text, by_pack: bool, al
     _fc_activation = next_activation
     _fc_pack = next_pack
     _fc_payload = next_payload
-    _fc_module_identity = next_module_identity
     _fc_generation = next_generation
     _fc_state = next_state
     _fc_refs = next_refs
-    _ld_binding_index = next_binding_index
     _ld_unloads[ld] = _ld_unloads[ld] + released
 
 fn _apk_release_binding(ld: i64, i: i64):
@@ -2445,14 +2492,13 @@ fn _apk_release_binding(ld: i64, i: i64):
     _apk_compact_bindings(ld, i, "", false, false)
 
 fn _apk_release_pack_bindings(ld: i64, path: text):
-    """Free all unpinned bindings for a pack with one O(B + L) compaction."""
+    """Free all unpinned bindings for a pack with one O(active-bindings) pass."""
     _apk_compact_bindings(ld, -1, path, true, false)
 
 fn apk_loader_invalidate_catalog_v1(ld: i64) -> bool:
     """Release every unpinned binding before a visible-catalog replacement.
 
-    This is a two-phase, O(active bindings + loaders + activation depth)
-    transition:
+    This is a two-phase, O(active bindings + activation depth) transition:
     first prove that no activation or pin can observe a partial replacement,
     then compact all loader rows once. Pack registrations and payload arrays
     are not scanned or copied. On refusal absolutely no state changes.

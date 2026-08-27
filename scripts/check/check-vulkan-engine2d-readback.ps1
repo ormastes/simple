@@ -10,7 +10,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Read-ExactOneKeyValueFile([string]$path) {
+function Read-KeyValueFile([string]$path) {
     $map = @{}
     if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path)) {
         return $map
@@ -21,12 +21,7 @@ function Read-ExactOneKeyValueFile([string]$path) {
             return
         }
         $idx = $line.IndexOf("=")
-        $key = $line.Substring(0, $idx)
-        if ($map.ContainsKey($key)) {
-            $map[$key] = $null
-        } else {
-            $map[$key] = $line.Substring($idx + 1)
-        }
+        $map[$line.Substring(0, $idx)] = $line.Substring($idx + 1)
     }
     return $map
 }
@@ -38,13 +33,8 @@ function Value-Or([hashtable]$map, [string]$key, [string]$fallback = "") {
     return $fallback
 }
 
-function Test-PositiveDecimal([string]$value) {
-    [long]$parsed = 0
-    return $value -match '^[0-9]+$' -and [long]::TryParse($value, [ref]$parsed) -and $parsed -gt 0
-}
-
 function Write-Env([string]$status, [string]$reason, [string]$specStatus) {
-    $e = Read-ExactOneKeyValueFile $EvidenceLog
+    $e = Read-KeyValueFile $EvidenceLog
     $rows = @(
         "vulkan_engine2d_readback_status=$status",
         "vulkan_engine2d_readback_reason=$reason",
@@ -64,17 +54,11 @@ function Write-Env([string]$status, [string]$reason, [string]$specStatus) {
         "vulkan_engine2d_readback_clear_expected_checksum=$(Value-Or $e 'clear_expected_checksum')",
         "vulkan_engine2d_readback_clear_actual_checksum=$(Value-Or $e 'clear_actual_checksum')",
         "vulkan_engine2d_readback_clear_mismatches=$(Value-Or $e 'clear_mismatches')",
-        "vulkan_engine2d_readback_clear_source=$(Value-Or $e 'clear_readback_source')",
-        "vulkan_engine2d_readback_clear_backend_handle=$(Value-Or $e 'clear_backend_handle')",
-        "vulkan_engine2d_readback_clear_device_identity=$(Value-Or $e 'clear_device_identity')",
         "vulkan_engine2d_readback_rect_status=$(Value-Or $e 'rect_status')",
         "vulkan_engine2d_readback_rect_pixels=$(Value-Or $e 'rect_readback_pixels')",
         "vulkan_engine2d_readback_rect_expected_checksum=$(Value-Or $e 'rect_expected_checksum')",
         "vulkan_engine2d_readback_rect_actual_checksum=$(Value-Or $e 'rect_actual_checksum')",
         "vulkan_engine2d_readback_rect_mismatches=$(Value-Or $e 'rect_mismatches')",
-        "vulkan_engine2d_readback_rect_source=$(Value-Or $e 'rect_readback_source')",
-        "vulkan_engine2d_readback_rect_backend_handle=$(Value-Or $e 'rect_backend_handle')",
-        "vulkan_engine2d_readback_rect_device_identity=$(Value-Or $e 'rect_device_identity')",
         "vulkan_engine2d_readback_blur_or_tolerance_used=false",
         "vulkan_engine2d_readback_vulkan_strict_exit_code=$script:StrictCode",
         "vulkan_engine2d_readback_cpu_vulkan_parity_exit_code=$script:ParityCode",
@@ -93,7 +77,6 @@ function Write-Env([string]$status, [string]$reason, [string]$specStatus) {
         "gui_web_2d_vulkan_simple_backend_name=$(Value-Or $e 'backend_name')",
         "gui_web_2d_vulkan_simple_argb_width=16",
         "gui_web_2d_vulkan_simple_argb_height=16",
-        "gui_web_2d_vulkan_simple_argb_pixel_count=$(Value-Or $e 'rect_readback_pixels')",
         "gui_web_2d_vulkan_simple_argb_checksum=$(Value-Or $e 'rect_actual_checksum')"
     )
     $rows | Set-Content -Encoding ASCII -Path $EvidencePath
@@ -204,7 +187,7 @@ if ($evidenceCode -ne 0) {
     exit 1
 }
 
-$evidence = Read-ExactOneKeyValueFile $EvidenceLog
+$evidence = Read-KeyValueFile $EvidenceLog
 if ((Value-Or $evidence "overall") -ne "pass") {
     Write-Env "fail" "evidence-status-not-pass" "not_run"
     exit 1

@@ -2,9 +2,15 @@
 
 > This specification checks the durable recovery contract without claiming that
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+Focused behavioral companion:
+`cached_render_entry_closure_runtime_selection_spec.md`. It covers configured
+candidate priority, canonical Rust-seed rejection, and missing-candidate
+nonzero preflight without claiming Stage 4 admission.
+
+This operator manual mirrors
+`test/03_system/check/cached_render_entry_closure_contract_spec.spl`. It is
+checked in so the blocked lane remains discoverable; TODO688 requires canonical
+`spipe-docgen` regeneration before this manual is admitted as generated evidence.
 
 <details>
 <summary>Full Scenario Manual</summary>

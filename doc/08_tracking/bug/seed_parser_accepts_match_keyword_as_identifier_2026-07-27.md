@@ -1,7 +1,6 @@
 # Seed parser accepts `match` keyword as an identifier — divergence detonates at bootstrap Stage 4
 
-**Status:** fixed / RESOLVED 2026-08-02
-**Fix owner:** `codex-pure-parser-close` (RESOLVED)
+**Status:** open
 **Found:** 2026-07-27 (Simple RISC-V hardening campaign, Lane H bootstrap redeploy)
 **Area:** Rust seed parser (`src/compiler_rust/`) vs pure-Simple parser
 **Severity:** medium — lets invalid code land, then fails the full-CLI stage of every bootstrap
@@ -41,30 +40,6 @@ Reserve `match` (and audit other keywords) as identifiers in the seed parser so
 seed-compiled code is a strict subset of self-hosted-compilable code. A cheap
 interim guard: a lint/CI grep for `\b(val|var) match =` and keyword-binding
 patterns.
-
-## Resolution
-
-The pure-Simple statement parser now explicitly rejects `match` at the
-immutable `val` binding boundary before its general contextual-keyword path.
-The Rust seed mirrors that val-only rule. Paired focused regressions preserve
-the documented distinctions: `var match` and `val class` parse, while
-`val case` remains rejected. The focused pure run found that the pure parser's
-general contextual-keyword branch had also begun accepting `val case`; the
-pure guard now rejects both match-family control-flow keywords, matching the
-already-strict Rust seed. Both implementations need the explicit rule
-because both otherwise route statement-local binding names through permissive
-keyword-pattern handling.
-
-The initial focused pure regression exposed one additional pure-Simple owner
-defect: `parse_module_silent_checked` read parser module state only after its
-split-module parse helper returned. Self-hosted module-state writes are not
-reliable across that boundary. `_parse_module_with_diagnostics` now captures
-and returns the error verdict by value before returning, using the existing
-process mirror for errors raised by `parser_stmts`. Coverage includes the exact
-function-local reproducer, top-level `val match`, the adjacent accepted
-`var match` and `val class` forms, rejected `val case`, and a clean parse after
-an error to prove mirror reset. No further Rust change was justified: the seed
-parser's grammar guard was already independently fixed.
 
 ## Interim guard (landed)
 

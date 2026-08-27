@@ -1,0 +1,59 @@
+use std.spec
+use std.common.debug.capability.{CapLevel}
+use std.common.debug.contracts_v1.{DebugVerificationV1, debug_policy_observe_only_v1}
+use std.common.debug.service_v1.{
+    central_debug_service_v1_open, central_debug_service_v1_graph,
+    central_debug_service_v1_receipts, central_debug_service_v1_close,
+}
+use app.debug.browser.offline_provenance_v1.{
+    BrowserDebugMetadataKindV1, BrowserDebugProvenanceInputV1,
+    browser_offline_provenance_v1,
+}
+
+val BUILD = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val SOURCE = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+fn metadata(kind: BrowserDebugMetadataKindV1) -> BrowserDebugProvenanceInputV1:
+    BrowserDebugProvenanceInputV1(kind: kind, artifact_build_id: BUILD,
+        source_revision: SOURCE, expected_source_revision: SOURCE,
+        source_anchor: "src/web/demo.spl:12:4-12:18", symbol_id: "demo.render",
+        generated_location: "bundle.js:8:21", producer: "simple-compiler-v1",
+        producer_verified: true)
+
+describe "REQ-016 offline browser source provenance":
+    it "creates a JS to Simple boundary only from exact build and source identities":
+        val session = central_debug_service_v1_open(BUILD, debug_policy_observe_only_v1()).unwrap()
+        val result = browser_offline_provenance_v1(session, "browser://target/page-1",
+            metadata(BrowserDebugMetadataKindV1.JsSourceMap)).unwrap()
+        expect(result.verification).to_equal(DebugVerificationV1.FixtureVerified)
+        expect(result.frames.len()).to_equal(1)
+        expect(result.frames[0].from_runtime).to_equal("javascript")
+        expect(result.frames[0].source_anchor).to_equal("src/web/demo.spl:12:4-12:18")
+        expect(result.frames[0].symbol_id).to_equal("demo.render")
+        expect(result.reason).to_contain("live source breakpoint not verified")
+        expect(central_debug_service_v1_receipts(session).last().execution_changed).to_equal(false)
+        central_debug_service_v1_close(session).unwrap()
+
+    it "accepts verified Wasm DWARF provenance without upgrading it to live verification":
+        val session = central_debug_service_v1_open(BUILD, debug_policy_observe_only_v1()).unwrap()
+        var input = metadata(BrowserDebugMetadataKindV1.WasmDwarf)
+        input.generated_location = "module.wasm:func[7]+0x19"
+        val result = browser_offline_provenance_v1(session, "browser://target/wasm-1", input).unwrap()
+        expect(result.frames[0].from_runtime).to_equal("wasm")
+        expect(result.verification).to_equal(DebugVerificationV1.FixtureVerified)
+        central_debug_service_v1_close(session).unwrap()
+
+    it "emits no boundary and a blocked row when provenance mismatches":
+        val session = central_debug_service_v1_open(BUILD, debug_policy_observe_only_v1()).unwrap()
+        var input = metadata(BrowserDebugMetadataKindV1.JsSourceMap)
+        input.expected_source_revision = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        val result = browser_offline_provenance_v1(session, "browser://target/page-2", input).unwrap()
+        expect(result.frames.len()).to_equal(0)
+        expect(result.support).to_equal(CapLevel.Unavailable)
+        expect(result.verification).to_equal(DebugVerificationV1.Blocked)
+        expect(result.reason).to_contain("source revision")
+        val graph = central_debug_service_v1_graph(session).unwrap()
+        expect(graph.capabilities.last().verification).to_equal(DebugVerificationV1.Blocked)
+        expect(central_debug_service_v1_receipts(session).last().allowed).to_equal(true)
+        expect(central_debug_service_v1_receipts(session).last().outcome).to_equal("failed")
+        central_debug_service_v1_close(session).unwrap()

@@ -3,10 +3,6 @@
 
 Purpose: make optimizer claims truthful, share frontend/MIR facts, add precise performance diagnostics, and remove measured compiler/tool hot-path waste without unsafe speculative rewrites.
 
-Current frontier: request-local `HirPerfFacts` now records resolved collection
-operations and loop ancestry with fail-closed metadata. The standard-library
-registry/driver adapter and CollectionPlan are still planned, not active.
-
 Core structure:
 
 ```text
@@ -31,6 +27,24 @@ Decisions:
 Hot-path rules: one parse/typed artifact per revision; metadata-only severity projection;
 one CFG build per function revision; bounded caches/solvers; no warm-request full-tree
 scan/compiler subprocess; disabled profiling performs no allocation/I/O.
+
+Bootstrap Stage 3 destination-owner decision (2026-08-26):
+
+- Streaming HIR construction writes directly into `HirExprOutput`,
+  `HirBlockOutput`, and `BootstrapHirFunctionOutput` through `_into` APIs.
+  By-value compatibility wrappers remain available but stay off production.
+- Explicit `Return` and assignment forms remain statements. The compiler must
+  not rewrite a complex expression tail into `Return` merely to avoid an
+  aggregate return boundary.
+- The path remains O(N) time and O(depth) transient space, with one function
+  owner plus geometrically grown reusable composite-depth slots; disabled
+  routing and scalar tails add no allocations. Aggregate-boundary finalization
+  must continue through owner-index MIR.
+- Cycle 15 proved the direct simple-tail path (`native_build_help`: `has=true`,
+  `stmts=0`) but crashed before publication of the later composite-tail
+  `native_build_entry_from_args`. Repeated malformed-span receipts make a
+  pre-publication composite boundary the strongest inference, not a proven
+  fault location.
 
 Start at:
 

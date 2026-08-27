@@ -1,8 +1,7 @@
 # .gitattributes eol rule corrupts vendored zerocopy .cargo-checksum.json for every cargo build
 
 - **Date:** 2026-08-15
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- **Status:** MOSTLY RESOLVED 2026-08-15 — .gitattributes fixed and verified; ONE residual: the committed `win-cargo.bat` blob at current HEAD is EOL-mangled and needs a one-file re-commit (see Resolution)
 - **Area:** .gitattributes vs src/compiler_rust/vendor/zerocopy/
 - **Severity:** build friction — every fresh checkout/worktree needs a manual workaround before any seed build
 

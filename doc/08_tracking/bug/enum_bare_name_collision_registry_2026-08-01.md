@@ -1,10 +1,7 @@
 # Enum bare-name collisions: enumeration, mechanism correction, and resolution options
 
-> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
-
 **Date:** 2026-08-01
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+**Status:** ENUMERATION LANDED — no fix applied. Needs an owner decision on the
 resolution strategy before any code change or rename sweep.
 **Severity:** CRITICAL — silent wrong arm selection across a module boundary,
 no diagnostic, exit code 0. Blocks promoting the match-fallthrough diagnostic

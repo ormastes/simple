@@ -9,7 +9,6 @@ use nvme_types.*
 val WRITE_BUFFER_CAP_BLOCKS: i64 = 16
 val WRITE_BUFFER_ENTRY_BYTES: i64 = 4096
 val WRITE_BUFFER_DRAM_BUDGET_BYTES: i64 = 65536
-val DRAM_COUNTER_MAX: i64 = 1000000000000000000
 
 fn dram_fill(size: i64, fill: i64) -> [i64]:
     var arr: [i64] = []
@@ -18,13 +17,6 @@ fn dram_fill(size: i64, fill: i64) -> [i64]:
         arr.push(fill)
         i = i + 1
     arr
-
-fn dram_counter_next(v: i64) -> i64:
-    if v < 0:
-        return 1
-    if v >= DRAM_COUNTER_MAX:
-        return DRAM_COUNTER_MAX
-    v + 1
 
 struct DramWriteBuffer:
     data: [i64]
@@ -42,18 +34,6 @@ fn dram_write_buffer_new() -> DramWriteBuffer:
     DramWriteBuffer(data: dram_fill(WRITE_BUFFER_CAP_BLOCKS, 0), used_slots: dram_fill(WRITE_BUFFER_CAP_BLOCKS, 0), cap: WRITE_BUFFER_CAP_BLOCKS, count: 0, overflows: 0)
 
 impl DramWriteBuffer:
-    me effective_cap() -> i64:
-        var c: i64 = me.cap
-        if c < 0:
-            return 0
-        if c > WRITE_BUFFER_CAP_BLOCKS:
-            c = WRITE_BUFFER_CAP_BLOCKS
-        if c > me.data.len():
-            c = me.data.len()
-        if c > me.used_slots.len():
-            c = me.used_slots.len()
-        c
-
     me clear():
         me.count = 0
         val cap: i64 = me.effective_cap()
@@ -128,7 +108,7 @@ impl DramWriteBuffer:
             me.overflows = dram_counter_next(me.overflows)
             return SC_NS_NOT_READY
         if index < 0:
-            me.overflows = dram_counter_next(me.overflows)
+            me.overflows = me.overflows + 1
             return SC_NS_NOT_READY
         if index >= span.len:
             me.overflows = dram_counter_next(me.overflows)
@@ -164,16 +144,9 @@ impl DramWriteBuffer:
         me.data[slot]
 
     me used() -> i64:
-        if me.count < 0:
-            return 0
-        val cap: i64 = me.effective_cap()
-        if me.count > cap:
-            return cap
         me.count
 
     me overflow_count() -> i64:
-        if me.overflows < 0:
-            return 0
         me.overflows
 
 fn dram_selftest() -> i64:

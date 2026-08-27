@@ -14,10 +14,10 @@
 #   fn wrapper(): make_list()           # calls allocating fn = allocates
 #   fn pure(x: i64): x + 1             # no alloc path = non-allocating
 
-use compiler.core.ast.{DECL_FN, EXPR_CALL, EXPR_IDENT, EXPR_LAMBDA}
+use compiler.core.ast.{DECL_FN, EXPR_CALL, EXPR_IDENT, EXPR_LAMBDA, EXPR_IF_CHAIN}
 use compiler.core.ast.{EXPR_NEW, EXPR_ARRAY_LIT, EXPR_DICT_LIT, EXPR_INTERPOLATED_STRING}
 use compiler.core.ast.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_ASSIGN, STMT_RETURN}
-use compiler.core.ast.{STMT_IF, STMT_FOR, STMT_WHILE, STMT_MATCH, STMT_BLOCK, STMT_COMPOUND_ASSIGN}
+use compiler.core.ast.{STMT_IF, STMT_IF_CHAIN, STMT_FOR, STMT_WHILE, STMT_MATCH, STMT_BLOCK, STMT_COMPOUND_ASSIGN}
 use compiler.core.ast.{decl_count, decl_get_tag, decl_get_name, decl_get_body}
 use compiler.core.ast.{stmt_get_tag, stmt_get_expr, stmt_get_body, stmt_get_type}
 use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left, expr_get_right, expr_get_extra}
@@ -26,6 +26,11 @@ use compiler.core.ast.{elif_get_cond, elif_get_body, elif_get_else}
 use compiler.core.ast.{arm_get_body}
 use compiler.core.call_edge_utils.{ceu_reset, ceu_register_functions, ceu_extract_call_edges}
 use compiler.core.call_edge_utils.{ceu_get_fn_names, ceu_get_fn_count, ceu_get_fn_index, ceu_get_callees}
+use compiler.frontend.core.if_chain_nodes.{ARM_CONDITION}
+use compiler.frontend.core.if_chain_nodes.{flat_if_chain_first_arm_get, flat_if_chain_arm_count_get}
+use compiler.frontend.core.if_chain_nodes.{flat_if_chain_else_expr_get, flat_if_chain_else_stmt_count_get, flat_if_chain_else_stmt_at}
+use compiler.frontend.core.if_chain_nodes.{flat_if_arm_next_get, flat_if_arm_kind_get, flat_if_arm_head_get, flat_if_arm_init_get}
+use compiler.frontend.core.if_chain_nodes.{flat_if_arm_then_expr_get, flat_if_arm_body_count_get, flat_if_arm_body_at}
 
 # ===== Module State =====
 
@@ -85,6 +90,14 @@ fn alloc_inference_get_non_alloc_fns() -> [text]:
             result.push(ai_fn_names[i])
     result
 
+fn alloc_inference_reset():
+    ai_fn_names = []
+    ai_fn_count = 0
+    ai_fn_index = {}
+    ai_direct_alloc = []
+    ai_callees = []
+    ai_alloc_result = []
+
 # ===== Phase 2: Scan Direct Allocations =====
 
 fn scan_direct_allocations():
@@ -100,6 +113,9 @@ fn scan_direct_allocations():
 
 fn scan_stmt_for_alloc(stmt_idx: i64, fn_idx: i64):
     val tag = stmt_get_tag(stmt_idx)
+    if tag == STMT_IF_CHAIN:
+        scan_if_chain_for_alloc(stmt_get_type(stmt_idx), fn_idx)
+        return
     val expr_idx = stmt_get_expr(stmt_idx)
     val body = stmt_get_body(stmt_idx)
 
@@ -133,6 +149,11 @@ fn scan_expr_for_alloc(expr_idx: i64, fn_idx: i64):
         return
     val tag = expr_get_tag(expr_idx)
 
+    # EXTRA owns the chain id for EXPR_IF_CHAIN; it is not a child expr.
+    if tag == EXPR_IF_CHAIN:
+        scan_if_chain_for_alloc(expr_get_extra(expr_idx), fn_idx)
+        return
+
     # Check for direct allocation patterns
     if tag == EXPR_NEW:
         ai_direct_alloc[fn_idx] = 1
@@ -161,6 +182,29 @@ fn scan_expr_for_alloc(expr_idx: i64, fn_idx: i64):
     for stmt_idx in stmts:
         scan_stmt_for_alloc(stmt_idx, fn_idx)
 
+fn scan_if_chain_for_alloc(chain_id: i64, fn_idx: i64):
+    var arm_id = flat_if_chain_first_arm_get(chain_id)
+    var remaining = flat_if_chain_arm_count_get(chain_id)
+    while arm_id >= 0 and remaining > 0:
+        val kind = flat_if_arm_kind_get(arm_id)
+        if kind == ARM_CONDITION:
+            scan_expr_for_alloc(flat_if_arm_head_get(arm_id), fn_idx)
+        else:
+            # Binding patterns are metadata; only their initializer executes.
+            scan_expr_for_alloc(flat_if_arm_init_get(arm_id), fn_idx)
+        scan_expr_for_alloc(flat_if_arm_then_expr_get(arm_id), fn_idx)
+        var body_i = 0
+        while body_i < flat_if_arm_body_count_get(arm_id):
+            scan_stmt_for_alloc(flat_if_arm_body_at(arm_id, body_i), fn_idx)
+            body_i = body_i + 1
+        arm_id = flat_if_arm_next_get(arm_id)
+        remaining = remaining - 1
+    scan_expr_for_alloc(flat_if_chain_else_expr_get(chain_id), fn_idx)
+    var else_i = 0
+    while else_i < flat_if_chain_else_stmt_count_get(chain_id):
+        scan_stmt_for_alloc(flat_if_chain_else_stmt_at(chain_id, else_i), fn_idx)
+        else_i = else_i + 1
+
 # ===== Phase 4: Fixpoint Propagation =====
 
 fn propagate_alloc():
@@ -186,4 +230,3 @@ fn propagate_alloc():
                         changed = true
 
 # ===== Exports =====
-

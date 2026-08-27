@@ -1,287 +1,357 @@
-# Backend Probe Specification
+# backend_probe_spec
 
-> Tests covering Engine2D strict backend probe.
+> test/perf/graphics_2d/backend_probe_spec.spl
+
+<!-- sdn-diagram:id=backend_probe_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=backend_probe_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+backend_probe_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=backend_probe_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 17 | 17 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Backend Probe Specification
+# backend_probe_spec
 
-## Scenarios
-
-### Engine2D strict backend probe
-
-#### portable CPU baseline
-
-#### initializes, renders, and reads back without fallback
-
-- initializes, renders, and reads back without fallback
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-PERF
-step("initializes, renders, and reads back without fallback")
-assert_strict_backend("cpu", "none")
-```
-
-</details>
-
-#### native GPU backends
-
-<details>
-<summary>Advanced: executes CUDA when initialized or reports structured unavailability</summary>
-
-#### executes CUDA when initialized or reports structured unavailability _(slow)_
-
-- executes CUDA when initialized or reports structured unavailability
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-PERF
-step("executes CUDA when initialized or reports structured unavailability")
-assert_strict_backend("cuda", "ptx")
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: executes Vulkan SPIR-V when initialized or reports structured unavailability</summary>
-
-#### executes Vulkan SPIR-V when initialized or reports structured unavailability _(slow)_
-
-- executes Vulkan SPIR-V when initialized or reports structured unavailability
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-PERF
-step("executes Vulkan SPIR-V when initialized or reports structured unavailability")
-assert_strict_backend("vulkan", "spirv")
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: keeps a multi-primitive Vulkan frame exact and device-backed</summary>
-
-#### keeps a multi-primitive Vulkan frame exact and device-backed _(slow)_
-
-- keeps a multi-primitive Vulkan frame exact and device-backed
-   - Expected: probe.status == BackendStatus.Unavailable or probe.status == BackendStatus.Failed is true
-   - Expected: actual.source == "cpu_mirror" is false
-   - Expected: actual.pixels.len() equals `expected.len()`
-   - Expected: actual.pixels[i] equals `expected[i]`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 44 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-PERF
-step("keeps a multi-primitive Vulkan frame exact and device-backed")
-val probe = Engine2D.probe_backend(32, 24, "vulkan")
-val probe_ready = probe.status == BackendStatus.Initialized
-if not probe_ready:
-    expect(probe.status == BackendStatus.Unavailable or probe.status == BackendStatus.Failed).to_equal(true)
-# The create is independent of the probe, so it is attempted
-# regardless and every assertion below reads the create/readback.
-val strict = Engine2D.create_with_backend_strict(32, 24, "vulkan")
-val created = strict.is_ok()
-if probe_ready != created:
-    print "[toctou] vulkan-multi-primitive: probe predicted ready={probe_ready} but the independent create returned ok={created} — the prediction did not survive the gap; asserting on the CREATE, not the probe"
-if created:
-    var vulkan = strict.unwrap()
-    var cpu = Engine2D.create_with_backend(32, 24, "cpu")
-    paint_vulkan_probe_scene(cpu)
-    paint_vulkan_probe_scene(vulkan)
-    val expected = cpu.read_pixels()
-    val actual = vulkan.read_pixels_with_source()
-    _assert_provenance_invariants("vulkan-multi-primitive", actual.source,
-        actual.backend_handle, actual.device_identity, actual.pixel_count,
-        (32 * 24).to_i64())
-    # Same owned-create claim as above: a strict vulkan create that
-    # succeeded may never silently report cpu_mirror.
-    expect(actual.source == "cpu_mirror").to_equal(false)
-    _report_outcome("vulkan-multi-primitive", actual.source, actual.backend_handle,
-        actual.device_identity, actual.pixel_count, (32 * 24).to_i64())
-    # Bit-exact parity against the CPU oracle holds for whichever
-    # backend actually served the frame — strictly more coverage than
-    # the old GPU-only branch. Skipped only when NO frame was produced,
-    # since those sources carry an empty pixel array.
-    if _source_is_no_frame(actual.source):
-        print "[probe-gpu] vulkan-multi-primitive: FRAME ASSERTIONS SKIPPED — no frame was produced (source={actual.source}, {actual.pixel_count} pixels); this example proves NOTHING about rendering correctness"
-    else:
-        expect(actual.pixels.len()).to_equal(expected.len())
-        var i = 0
-        while i < expected.len():
-            expect(actual.pixels[i]).to_equal(expected[i])
-            i = i + 1
-    cpu.shutdown()
-    vulkan.shutdown()
-else:
-    val failure = strict.unwrap_err()
-    _assert_strict_failure_is_structured("vulkan-multi-primitive", failure.selected_name)
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: executes Metal MSL when initialized or reports structured unavailability</summary>
-
-#### executes Metal MSL when initialized or reports structured unavailability _(slow)_
-
-- executes Metal MSL when initialized or reports structured unavailability
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-PERF
-step("executes Metal MSL when initialized or reports structured unavailability")
-assert_strict_backend("metal", "msl")
-```
-
-</details>
-
-
-</details>
-
-#### reports the macOS Metal gate without emulation on non-macOS hosts
-
-- reports the macOS Metal gate without emulation on non-macOS hosts
-   - Expected: probe.status equals `BackendStatus.Unavailable`
-   - Expected: probe.feature_gate equals `macos`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 9 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-PERF
-step("reports the macOS Metal gate without emulation on non-macOS hosts")
-if not is_macos():
-    val probe = Engine2D.probe_backend(16, 16, "metal")
-    expect(probe.status).to_equal(BackendStatus.Unavailable)
-    expect(probe.feature_gate).to_equal("macos")
-print "[probe-gpu] RUN VERDICT: this run's GPU evidence is exactly the set of '[probe-gpu] <backend>: GPU-PROVEN' lines above."
-print "[probe-gpu] RUN VERDICT: every '[probe-gpu] <backend>: GPU BRANCH SKIPPED' line marks an example that proves NOTHING about the GPU path."
-print "[probe-gpu] RUN VERDICT: a PASS with no GPU-PROVEN line does NOT attest any GPU backend — read it as 'device unavailable', not as 'GPU works'."
-```
-
-</details>
+test/perf/graphics_2d/backend_probe_spec.spl
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
-| Category | Other |
-| Status | Active |
+| Feature IDs | AC-1 — Backend probe strict-fail, no silent fallback |
+| Category | Graphics \| Backend \| Probe |
+| Status | Pending implementation (Phase 5) |
 | Source | `test/05_perf/graphics_2d/backend_probe_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Overview
+test/perf/graphics_2d/backend_probe_spec.spl
 
-Tests covering Engine2D strict backend probe.
-- Engine2D strict backend probe
+Verifies that backend_probe reports selected backend identity,
+enforces strict mode (no silent CPU fallback when GPU is requested),
+and surfaces shader format in the probe result.
 
-## Scenario Summary
-
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
-| Slow scenarios | 4 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
-
-
-</details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-PERF`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
+@cover src/lib/gc_async_mut/gpu/engine2d/backend_probe.spl
+@cover src/lib/gc_async_mut/gpu/engine2d/ffi_dispatch.spl
 
 - Canonical SPipe generation for source `49fe9694f6b0c10bb8b5104b263407674f190006b33141057dc3586d7bec81dd`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `49fe9694f6b0c10bb8b5104b263407674f190006b33141057dc3586d7bec81dd`.
-<!-- sspec-maintain:provenance:end -->
+### backend_probe — AC-1: strict probe, no silent fallback
 
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
+### BackendProbeResult field contract
 
-Source SHA-256: `49fe9694f6b0c10bb8b5104b263407674f190006b33141057dc3586d7bec81dd`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+#### AC-1: probe result carries requested_name field
 
-SSpec documentization score: 92/100
-source: test/05_perf/graphics_2d/backend_probe_spec.spl
-mirror: doc/06_spec/05_perf/graphics_2d/backend_probe_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/05_perf/graphics_2d/backend_probe_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/05_perf/graphics_2d/backend_probe_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/05_perf/graphics_2d/backend_probe_spec.spl:205:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'initializes, renders, and reads back without fallback' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/05_perf/graphics_2d/backend_probe_spec.spl:211:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'executes CUDA when initialized or reports structured unavailability' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/05_perf/graphics_2d/backend_probe_spec.spl:216:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'executes Vulkan SPIR-V when initialized or reports structured unavailability' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val r: ProbeResultSentinel = make_ok_sentinel("vulkan", "vulkan", "spirv")
+expect(r.requested_name).to_equal("vulkan")
+```
+
+</details>
+
+#### AC-1: probe result carries selected_name field
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val r: ProbeResultSentinel = make_ok_sentinel("vulkan", "vulkan", "spirv")
+expect(r.selected_name).to_equal("vulkan")
+```
+
+</details>
+
+#### AC-1: probe result carries status field
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val r: ProbeResultSentinel = make_ok_sentinel("vulkan", "vulkan", "spirv")
+expect(r.status).to_equal(STATUS_OK)
+```
+
+</details>
+
+#### AC-1: probe result carries shader_format field
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val r: ProbeResultSentinel = make_ok_sentinel("vulkan", "vulkan", "spirv")
+expect(r.shader_format).to_equal("spirv")
+```
+
+</details>
+
+#### AC-1: probe result carries fallback_reason field (empty on Ok)
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val r: ProbeResultSentinel = make_ok_sentinel("vulkan", "vulkan", "spirv")
+expect(r.fallback_reason).to_equal("")
+```
+
+</details>
+
+#### AC-1: failed probe result has non-empty fallback_reason
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val r: ProbeResultSentinel = make_failed_sentinel("cuda")
+expect(r.fallback_reason).to_equal("device not present")
+```
+
+</details>
+
+#### AC-1: failed probe status is Failed
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val r: ProbeResultSentinel = make_failed_sentinel("cuda")
+expect(r.status).to_equal(STATUS_FAILED)
+```
+
+</details>
+
+### strict mode — no silent GPU→CPU fallback
+
+#### AC-1: fallback sentinel from GPU request is a strict violation
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val r: ProbeResultSentinel = make_fallback_sentinel("vulkan", "cpu")
+expect(is_strict_fallback_violation(r)).to_equal(true)
+```
+
+</details>
+
+#### AC-1: fallback sentinel from cuda request is a strict violation
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val r: ProbeResultSentinel = make_fallback_sentinel("cuda", "cpu")
+expect(is_strict_fallback_violation(r)).to_equal(true)
+```
+
+</details>
+
+#### AC-1: fallback sentinel from metal request is a strict violation
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val r: ProbeResultSentinel = make_fallback_sentinel("metal", "cpu")
+expect(is_strict_fallback_violation(r)).to_equal(true)
+```
+
+</details>
+
+#### AC-1: fallback sentinel from webgpu request is a strict violation
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val r: ProbeResultSentinel = make_fallback_sentinel("webgpu", "software")
+expect(is_strict_fallback_violation(r)).to_equal(true)
+```
+
+</details>
+
+#### AC-1: cpu-requested fallback is not a strict violation
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val r: ProbeResultSentinel = make_fallback_sentinel("cpu", "software")
+expect(is_strict_fallback_violation(r)).to_equal(false)
+```
+
+</details>
+
+#### AC-1: Ok status with matching requested/selected is not a violation
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val r: ProbeResultSentinel = make_ok_sentinel("vulkan", "vulkan", "spirv")
+expect(is_strict_fallback_violation(r)).to_equal(false)
+```
+
+</details>
+
+### GLSL exclusion from selection
+
+#### AC-1: shader_format 'glsl' must not appear in an Ok probe result for vulkan
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val r: ProbeResultSentinel = make_ok_sentinel("vulkan", "vulkan", "spirv")
+expect(r.shader_format).to_equal("spirv")
+```
+
+</details>
+
+#### AC-1: shader_format 'spirv' is the only acceptable vulkan format
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val glsl_format: text = "glsl"
+val spirv_format: text = "spirv"
+expect(glsl_format == spirv_format).to_equal(false)
+```
+
+</details>
+
+### CPU-only default when no GPU feature enabled
+
+#### AC-1: cpu probe status is Ok with shader_format none
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val r: ProbeResultSentinel = make_ok_sentinel("cpu", "cpu", "none")
+expect(r.status).to_equal(STATUS_OK)
+expect(r.shader_format).to_equal("none")
+```
+
+</details>
+
+#### AC-1: software probe status is Ok with shader_format none
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val r: ProbeResultSentinel = make_ok_sentinel("software", "software", "none")
+expect(r.status).to_equal(STATUS_OK)
+expect(r.shader_format).to_equal("none")
+```
+
+</details>
+
+@cover src/lib/gc_async_mut/gpu/engine2d/backend_probe.spl
+@cover src/lib/gc_async_mut/gpu/engine2d/ffi_dispatch.spl
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 17 |
+| Active scenarios | 17 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+### backend_probe — AC-1: strict probe, no silent fallback
+
+### BackendProbeResult field contract
+
+#### AC-1: probe result carries requested_name field
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val r: ProbeResultSentinel = make_ok_sentinel("vulkan", "vulkan", "spirv")
+expect(r.requested_name).to_equal("vulkan")
+```
+
+</details>

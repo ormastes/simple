@@ -1,0 +1,277 @@
+use std.sffi.dynamic.{DynLib}
+
+extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
+
+extern fn rt_vk_engine2d_presenter_create(width: i32, height: i32) -> i64
+extern fn rt_vk_engine2d_presenter_create_low_latency(width: i32, height: i32) -> i64
+extern fn rt_vk_engine2d_presenter_create_external_linux(platform: i64, display: i64, window_or_surface: i64, width: i32, height: i32, prefer_no_vsync: i32) -> i64
+extern fn rt_vk_engine2d_presenter_physical_adapter_identity(presenter_handle: i64) -> i64
+extern fn rt_vk_engine2d_presenter_physical_adapter_driver_identity(presenter_handle: i64) -> text
+extern fn rt_vk_engine2d_presenter_engine2d_buffer_owned(presenter_handle: i64, engine2d_buffer_handle: i64) -> i32
+extern fn rt_vk_engine2d_presenter_last_damage_copy_bytes(presenter_handle: i64) -> i64
+extern fn rt_vk_engine2d_presenter_last_damage_rect_count(presenter_handle: i64) -> i64
+extern fn rt_vk_engine2d_presenter_last_damage_full_fallback(presenter_handle: i64) -> i32
+extern fn rt_vk_engine2d_presenter_present(presenter_handle: i64, engine2d_buffer_handle: i64) -> i32
+extern fn rt_vk_engine2d_presenter_present_retained(presenter_handle: i64, engine2d_buffer_handle: i64, producer_receipt: i64, frame_revision: i64) -> i32
+extern fn rt_vk_engine2d_presenter_present_damage_array(presenter_handle: i64, engine2d_buffer_handle: i64, producer_receipt: i64, base_revision: i64, frame_revision: i64, damage_rects: [i64]) -> i32
+extern fn rt_vk_engine2d_presenter_recreate(presenter_handle: i64, width: i32, height: i32) -> i32
+extern fn rt_vk_engine2d_presenter_destroy(presenter_handle: i64) -> i32
+
+# Winit lives in the sanctioned sibling cdylib rather than the core runtime.
+# Query native handles through that owner while the window slot is live; the
+# presenter runtime copies the scalar triple immediately and never owns the
+# Winit window or its raw display/window values.
+fn vulkan_presenter_winit_library() -> DynLib?:
+    val candidates: [text] = [
+        "build/sffi/libspl_winit.so",
+        "build/sffi/libspl_winit.dylib",
+        "build/sffi/libspl_winit.dll",
+    ]
+    var index = 0
+    while index < candidates.len():
+        val lib = DynLib.open(candidates[index])
+        if lib.handle > 0:
+            return lib
+        index = index + 1
+    nil
+
+fn vulkan_presenter_winit_native_handles(window_handle: i64) -> [i64]:
+    var out: [i64] = [0, 0, 0, 0]
+    if window_handle <= 0:
+        return out
+    var lib = vulkan_presenter_winit_library()
+    if lib == nil:
+        return out
+    val platform_fn = lib!.sym("rt_winit_window_vulkan_platform")
+    val display_fn = lib!.sym("rt_winit_window_vulkan_display")
+    val surface_fn = lib!.sym("rt_winit_window_vulkan_surface")
+    val lease_fn = lib!.sym("rt_winit_window_vulkan_lease_acquire")
+    val release_fn = lib!.sym("rt_winit_window_vulkan_lease_release")
+    if (platform_fn > 0 and display_fn > 0 and surface_fn > 0 and
+        lease_fn > 0 and release_fn > 0):
+        out[3] = spl_wffi_call_i64(lease_fn, [window_handle], 1)
+    if out[3] > 0:
+        out[0] = spl_wffi_call_i64(platform_fn, [window_handle], 1)
+        out[1] = spl_wffi_call_i64(display_fn, [window_handle], 1)
+        out[2] = spl_wffi_call_i64(surface_fn, [window_handle], 1)
+        if out[0] <= 0 or out[1] <= 0 or out[2] <= 0:
+            val _ = spl_wffi_call_i64(
+                release_fn, [window_handle, out[3]], 2)
+            out = [0, 0, 0, 0]
+    lib!.close()
+    out
+
+fn vulkan_presenter_winit_release_lease(
+    window_handle: i64, lease_token: i64
+) -> bool:
+    if window_handle <= 0 and lease_token <= 0:
+        return true
+    if window_handle <= 0 or lease_token <= 0:
+        return false
+    var lib = vulkan_presenter_winit_library()
+    if lib == nil:
+        return false
+    val release_fn = lib!.sym("rt_winit_window_vulkan_lease_release")
+    val released = release_fn > 0 and (
+        spl_wffi_call_i64(
+            release_fn, [window_handle, lease_token], 2) > 0)
+    lib!.close()
+    released
+
+struct VulkanEngine2dPresenterReceipt:
+    # Stable UTF-16/31 tag of the actual Vulkan physical-device identity.
+    # This is never a Vulkan buffer address or a nullable resource sentinel.
+    physical_adapter_identity: i64
+    # `name|vendor=...|device=...|driver=...|api=...`, captured by the Rust
+    # owner when it selects the present-capable logical device.
+    physical_adapter_driver_identity: text
+    # `1` means the live Engine2D framebuffer belongs to that exact device;
+    # `0` is an ownership mismatch and negative values are FFI errors.
+    engine2d_buffer_ownership_status: i32
+
+    fn is_valid() -> bool:
+        self.physical_adapter_identity > 0 and
+            self.physical_adapter_driver_identity != "" and
+            self.engine2d_buffer_ownership_status == 1
+
+struct VulkanEngine2dPresentDamageReceipt:
+    # Exact FFI status from the most recent direct damage present. `3` is a
+    # partial-region copy and `4` is a correctness-preserving full fallback.
+    last_present_status: i32
+    # Resolved retained-damage regions for a partial copy, including history
+    # for the acquired swapchain image; status `4` instead identifies a full
+    # fallback and `copied_bytes` is the authoritative transfer quantity.
+    rect_count: i64
+    # Actual device-to-swapchain copy bytes retained by the presenter.
+    copied_bytes: i64
+    # True only when the presenter had to repair a stale image with a full copy.
+    full_fallback: bool
+    # Direct-present has no host readback API edge. Evidence capture must use
+    # the compositor's explicit readback path instead.
+    readback_performed: bool
+
+    fn is_direct_partial_present() -> bool:
+        self.last_present_status == 3 and
+            self.rect_count > 0 and
+            self.copied_bytes > 0 and
+            not self.full_fallback and
+            not self.readback_performed
+
+class VulkanEngine2dPresenter:
+    handle: i64
+    # Scoped Winit-window lease. The raw native handles are valid only while
+    # this lease remains held; close releases it after VkSurface destruction.
+    window_handle: i64 = 0
+    window_lease_token: i64 = 0
+    presenter_destroyed: bool = false
+    # A failed destroy keeps native ownership and the exact Winit lease alive,
+    # but the facade becomes unusable immediately.  Callers may retry `close`;
+    # they may never resume presentation through a teardown-requested handle.
+    close_requested: bool = false
+
+    static fn open(width: i32, height: i32) -> VulkanEngine2dPresenter?:
+        if width <= 0 or height <= 0:
+            return nil
+        val handle = rt_vk_engine2d_presenter_create(width, height)
+        if handle <= 0:
+            return nil
+        VulkanEngine2dPresenter(handle: handle)
+
+    static fn open_low_latency(width: i32, height: i32) -> VulkanEngine2dPresenter?:
+        if width <= 0 or height <= 0:
+            return nil
+        val handle = rt_vk_engine2d_presenter_create_low_latency(width, height)
+        if handle <= 0:
+            return nil
+        VulkanEngine2dPresenter(handle: handle)
+
+    static fn open_for_winit(window_handle: i64, width: i32, height: i32, low_latency: bool = false) -> VulkanEngine2dPresenter?:
+        if window_handle <= 0 or width <= 0 or height <= 0:
+            return nil
+        val native = vulkan_presenter_winit_native_handles(window_handle)
+        val platform = native[0]
+        val display = native[1]
+        val surface = native[2]
+        val lease = native[3]
+        if platform <= 0 or display <= 0 or surface <= 0 or lease <= 0:
+            return nil
+        val handle = rt_vk_engine2d_presenter_create_external_linux(
+            platform,
+            display,
+            surface,
+            width,
+            height,
+            if low_latency: 1 else: 0,
+        )
+        if handle <= 0:
+            val _ = vulkan_presenter_winit_release_lease(
+                window_handle, lease)
+            return nil
+        VulkanEngine2dPresenter(
+            handle: handle, window_handle: window_handle,
+            window_lease_token: lease,
+            presenter_destroyed: false)
+
+    fn is_open() -> bool:
+        self.handle > 0 and not self.close_requested
+
+    fn receipt_for(engine2d_buffer_handle: i64) -> VulkanEngine2dPresenterReceipt:
+        if not self.is_open() or engine2d_buffer_handle <= 0:
+            return VulkanEngine2dPresenterReceipt(
+                physical_adapter_identity: 0,
+                physical_adapter_driver_identity: "",
+                engine2d_buffer_ownership_status: -2,
+            )
+        VulkanEngine2dPresenterReceipt(
+            physical_adapter_identity:
+                rt_vk_engine2d_presenter_physical_adapter_identity(self.handle),
+            physical_adapter_driver_identity:
+                rt_vk_engine2d_presenter_physical_adapter_driver_identity(self.handle),
+            engine2d_buffer_ownership_status:
+                rt_vk_engine2d_presenter_engine2d_buffer_owned(
+                    self.handle, engine2d_buffer_handle),
+        )
+
+    fn present(engine2d_buffer_handle: i64) -> i32:
+        if not self.is_open() or engine2d_buffer_handle <= 0:
+            return -2
+        rt_vk_engine2d_presenter_present(self.handle, engine2d_buffer_handle)
+
+    fn present_retained(engine2d_buffer_handle: i64, producer_receipt: i64, frame_revision: i64) -> i32:
+        if (not self.is_open() or engine2d_buffer_handle <= 0 or
+            producer_receipt <= 0):
+            return -2
+        rt_vk_engine2d_presenter_present_retained(
+            self.handle, engine2d_buffer_handle, producer_receipt, frame_revision)
+
+    fn present_damage(engine2d_buffer_handle: i64, producer_receipt: i64, base_revision: i64, frame_revision: i64, damage_rects: [i64]) -> i32:
+        if (not self.is_open() or engine2d_buffer_handle <= 0 or
+            producer_receipt <= 0):
+            return -2
+        if damage_rects.len() % 4 != 0:
+            return -3
+        rt_vk_engine2d_presenter_present_damage_array(
+            self.handle,
+            engine2d_buffer_handle,
+            producer_receipt,
+            base_revision,
+            frame_revision,
+            damage_rects,
+        )
+
+    fn present_damage_with_receipt(
+        engine2d_buffer_handle: i64,
+        producer_receipt: i64,
+        base_revision: i64,
+        frame_revision: i64,
+        damage_rects: [i64]
+    ) -> VulkanEngine2dPresentDamageReceipt:
+        val status = self.present_damage(
+            engine2d_buffer_handle, producer_receipt,
+            base_revision, frame_revision, damage_rects)
+        if status < 0:
+            return VulkanEngine2dPresentDamageReceipt(
+                last_present_status: status,
+                rect_count: -1,
+                copied_bytes: -1,
+                full_fallback: false,
+                readback_performed: false,
+            )
+        VulkanEngine2dPresentDamageReceipt(
+            last_present_status: status,
+            rect_count: rt_vk_engine2d_presenter_last_damage_rect_count(self.handle),
+            copied_bytes: rt_vk_engine2d_presenter_last_damage_copy_bytes(self.handle),
+            full_fallback:
+                rt_vk_engine2d_presenter_last_damage_full_fallback(self.handle) == 1,
+            readback_performed: false,
+        )
+
+    me recreate(width: i32, height: i32) -> bool:
+        # This is intentionally an explicit recovery operation.  A failed
+        # present remains one-shot; callers must render/stage a fresh frame
+        # after successful swapchain recreation rather than retrying a stale
+        # candidate.
+        if not self.is_open() or width <= 0 or height <= 0:
+            return false
+        rt_vk_engine2d_presenter_recreate(self.handle, width, height) == 0
+
+    me close() -> bool:
+        self.close_requested = true
+        if self.handle > 0 and not self.presenter_destroyed:
+            val status = rt_vk_engine2d_presenter_destroy(self.handle)
+            if status != 0:
+                # Retain both the presenter and Winit lease so the native
+                # window cannot disappear under an in-flight WSI transaction.
+                return false
+            self.handle = 0
+            self.presenter_destroyed = true
+        if self.window_handle > 0 or self.window_lease_token > 0:
+            if not vulkan_presenter_winit_release_lease(
+                self.window_handle, self.window_lease_token):
+                return false
+            self.window_handle = 0
+            self.window_lease_token = 0
+        true
+
+export VulkanEngine2dPresenter, VulkanEngine2dPresenterReceipt,
+    VulkanEngine2dPresentDamageReceipt

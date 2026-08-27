@@ -52,12 +52,6 @@ SECTIONS {
         . += 4;
     } > BRAM
 
-    .nandram (NOLOAD) : ALIGN(16) {
-        _nandram_start = .;
-        . += 256;
-        _nandram_end = .;
-    } > BRAM
-
     /* Stack grows DOWN from _stack_top. Kept small (8 KB) and placed so both
      * _stack_top and the deepest push stay inside the 64 KB window (word < 16384)
      * and ABOVE .text/.rodata — no aliasing, no code corruption. The firmware's

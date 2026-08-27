@@ -1,6 +1,30 @@
 # 15 Eval Specification
 
-> Tests covering T32 eval expressions.
+> 1. Ok
+
+<!-- sdn-diagram:id=15_eval_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=15_eval_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+15_eval_spec -> std
+15_eval_spec -> test
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=15_eval_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,19 +43,18 @@
 
 #### eval VERSION.BUILD()
 
-- eval VERSION.BUILD()
+1. Ok
+2. Err
    - Expected: "VERSION.BUILD failed: {e}" equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("eval VERSION.BUILD()")
 val result = t32_hw_eval(client, "VERSION.BUILD()")
 match result:
     Ok(v):
@@ -45,19 +68,18 @@ match result:
 
 #### eval STATE.RUN()
 
-- eval STATE.RUN()
+1. Ok
+2. Err
    - Expected: "STATE.RUN failed: {e}" equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("eval STATE.RUN()")
 val result = t32_hw_eval(client, "STATE.RUN()")
 match result:
     Ok(v):
@@ -71,19 +93,18 @@ match result:
 
 #### eval DEBUGMODE()
 
-- eval DEBUGMODE()
+1. Ok
+2. Err
    - Expected: "DEBUGMODE failed: {e}" equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("eval DEBUGMODE()")
 val result = t32_hw_eval(client, "DEBUGMODE()")
 match result:
     Ok(v):
@@ -96,19 +117,18 @@ match result:
 
 #### eval Register(PC)
 
-- eval Register(PC)
+1. Ok
+2. Err
    - Expected: "Register(PC) failed: {e}" equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("eval Register(PC)")
 val result = t32_hw_eval(client, "Register(PC)")
 match result:
     Ok(v):
@@ -124,18 +144,16 @@ match result:
 
 #### eval invalid expression
 
-- eval invalid expression
+1. Ok
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("eval invalid expression")
 val result = t32_hw_eval(client, "NONEXISTENT.FUNC.12345()")
 match result:
     Err(_): expect("error accepted").to_contain("accepted")
@@ -153,12 +171,12 @@ match result:
 | Category | Other |
 | Status | Active |
 | Source | `test/02_integration/t32_hw/15_eval_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering T32 eval expressions.
+Tests covering:
 - T32 eval expressions
 
 ## Scenario Summary
@@ -173,51 +191,3 @@ Tests covering T32 eval expressions.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-INTEGRATION`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `07537989cf514a66eb760bc20e41fefd2e895ba5e6fa04e3be82ebd1cf1aee8d`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `07537989cf514a66eb760bc20e41fefd2e895ba5e6fa04e3be82ebd1cf1aee8d`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `07537989cf514a66eb760bc20e41fefd2e895ba5e6fa04e3be82ebd1cf1aee8d`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/02_integration/t32_hw/15_eval_spec.spl
-mirror: doc/06_spec/02_integration/t32_hw/15_eval_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/t32_hw/15_eval_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/t32_hw/15_eval_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/02_integration/t32_hw/15_eval_spec.spl:39:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'eval VERSION.BUILD()' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/t32_hw/15_eval_spec.spl:50:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'eval STATE.RUN()' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/t32_hw/15_eval_spec.spl:61:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'eval DEBUGMODE()' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

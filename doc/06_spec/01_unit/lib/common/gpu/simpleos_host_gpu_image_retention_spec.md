@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -20,7 +20,7 @@ Image-resource revision retention: an additive, capability-gated codec on top of
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/common/gpu/simpleos_host_gpu_image_retention_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-07-20 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -38,8 +38,9 @@ resource on the next submit carries only an id+checksum reference and the
 host resolves it byte-identically from its retained table, (c) a changed
 resource re-sends full bytes and the retained table adopts the new
 content, (d) a reference to an unknown or stale id fails CLOSED — never
-resolved, never rendered, and the retained table stays unchanged — and
-(e) the untouched legacy (non-retained) encode/decode path is unaffected.
+resolved, never rendered, and the retained table stays unchanged, (e) a
+replacement frame retires omitted image pixels before teardown, and (f) the
+untouched legacy (non-retained) encode/decode path is unaffected.
 
 ## Examples
 
@@ -56,11 +57,6 @@ reports the actual bytes-saved ratio (reference stays under 200 bytes vs.
 
 #### (a) first submit: a full entry encodes and decodes pixel bytes, and resolves+caches into an empty table
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- (a) first submit: a full entry encodes and decodes pixel bytes, and resolves+caches into an empty table
 - Build and encode a single FULL entry
    - Expected: encoded.resource_count equals `1`
 - Decode: entry must round-trip as non-reference with exact pixels
@@ -74,12 +70,10 @@ reports the actual bytes-saved ratio (reference stays under 200 bytes vs.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("(a) first submit: a full entry encodes and decodes pixel bytes, and resolves+caches into an empty table")
 step("Build and encode a single FULL entry")
 val pixels_a = _solid_pixels(4, 0xff112233u32)
 val full_entry = simpleos_host_gpu_image_resource_full("asset://icon", 2, 2, pixels_a)
@@ -105,7 +99,6 @@ expect(resolution.retained[0].image_uri).to_equal("asset://icon")
 
 #### (b) unchanged resource: reference-only wire is far smaller, and resolves byte-identically from the retained table
 
-- (b) unchanged resource: reference-only wire is far smaller, and resolves byte-identically from the retained table
 - Frame 1: full submit establishes the retained table (same fixture as case a)
 - Frame 2: same content -> guest sends a reference (id + checksum only, no pixels)
 - Reference wire bytes must be strictly smaller than the full submit's wire bytes
@@ -120,12 +113,10 @@ expect(resolution.retained[0].image_uri).to_equal("asset://icon")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("(b) unchanged resource: reference-only wire is far smaller, and resolves byte-identically from the retained table")
 step("Frame 1: full submit establishes the retained table (same fixture as case a)")
 val pixels_a = _solid_pixels(4, 0xff112233u32)
 val full_entry = simpleos_host_gpu_image_resource_full("asset://icon", 2, 2, pixels_a)
@@ -135,9 +126,7 @@ val frame1 = simpleos_host_gpu_resolve_retained_images(full_decoded.entries, [])
 expect(frame1.ok).to_be(true)
 
 step("Frame 2: same content -> guest sends a reference (id + checksum only, no pixels)")
-val checksum_a = simpleos_host_gpu_image_revision(
-    2, 2, pixels_a, pixels_a.len().to_i64()
-)
+val checksum_a = simpleos_host_gpu_readback_checksum(pixels_a, pixels_a.len().to_i64())
 val ref_entry = simpleos_host_gpu_image_resource_ref("asset://icon", 2, 2, checksum_a)
 val ref_encoded = simpleos_host_gpu_image_resources_encode_retained([ref_entry], RETENTION_TEST_MAX_BYTES, RETENTION_TEST_MAX_RESOURCES)
 expect(ref_encoded.ok).to_be(true)
@@ -161,7 +150,6 @@ expect(frame2.resolved[0].height).to_equal(2)
 
 #### (c) changed resource re-sends full bytes and the retained table adopts the new content
 
-- (c) changed resource re-sends full bytes and the retained table adopts the new content
 - Frame 1: establish the retained table with an original icon
 - Content changes: a new full entry (not a reference) must be sent
    - Expected: decoded.entries[0].pixels equals `pixels_b`
@@ -173,12 +161,10 @@ expect(frame2.resolved[0].height).to_equal(2)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("(c) changed resource re-sends full bytes and the retained table adopts the new content")
 step("Frame 1: establish the retained table with an original icon")
 val pixels_a = _solid_pixels(4, 0xff112233u32)
 val frame1 = simpleos_host_gpu_resolve_retained_images([simpleos_host_gpu_image_resource_full("asset://icon", 2, 2, pixels_a)], [])
@@ -203,7 +189,6 @@ expect(frame2.retained[0].pixels).to_equal(pixels_b)
 
 #### (d) a reference to an unknown or stale id fails closed and never renders
 
-- (d) a reference to an unknown or stale id fails closed and never renders
 - Reference to a uri the host has never retained
    - Expected: unknown_resolution.reason equals `unknown-image-resource`
    - Expected: unknown_resolution.resolved.len() equals `0`
@@ -219,12 +204,10 @@ expect(frame2.retained[0].pixels).to_equal(pixels_b)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("(d) a reference to an unknown or stale id fails closed and never renders")
 step("Reference to a uri the host has never retained")
 val unknown_ref = simpleos_host_gpu_image_resource_ref("asset://ghost", 2, 2, 12345)
 val unknown_resolution = simpleos_host_gpu_resolve_retained_images([unknown_ref], [])
@@ -248,90 +231,8 @@ expect(stale_resolution.retained[0].pixels).to_equal(pixels_a)
 
 </details>
 
-#### (e) frame replacement releases omitted image pixels before teardown
+#### (e) the untouched legacy (non-retained) codec is unaffected by the retention extension
 
-- (e) frame replacement releases omitted image pixels before teardown
-- Retain two full image resources for one frame
-   - Expected: first.retained.len() equals `2`
-- Replace the frame with one active resource and prune the old pixels
-   - Expected: replaced.resolved.len() equals `1`
-   - Expected: replaced.retained.len() equals `1`
-   - Expected: replaced.retained[0].pixels equals `replacement_pixels`
-- Resolve the remaining resource by reference on the next frame
-   - Expected: reused.resolved[0].pixels equals `replacement_pixels`
-   - Expected: reused.retained.len() equals `1`
-- Resolve the same resource by reference for a second consecutive frame
-   - Expected: reused_again.resolved[0].pixels equals `replacement_pixels`
-   - Expected: reused_again.retained.len() equals `1`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 53 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-LIB
-step("(e) frame replacement releases omitted image pixels before teardown")
-step("Retain two full image resources for one frame")
-val old_pixels = _solid_pixels(4, 0xff112233u32)
-val active_pixels = _solid_pixels(4, 0xff998877u32)
-val first = simpleos_host_gpu_resolve_retained_images([
-    simpleos_host_gpu_image_resource_full(
-        "asset://old", 2, 2, old_pixels
-    ),
-    simpleos_host_gpu_image_resource_full(
-        "asset://active", 2, 2, active_pixels
-    )
-], [])
-expect(first.ok).to_be(true)
-expect(first.retained.len()).to_equal(2)
-
-step("Replace the frame with one active resource and prune the old pixels")
-val replacement_pixels = _solid_pixels(4, 0xff224466u32)
-val replaced = simpleos_host_gpu_resolve_retained_images([
-    simpleos_host_gpu_image_resource_full(
-        "asset://replacement", 2, 2, replacement_pixels
-    )
-], first.retained)
-expect(replaced.ok).to_be(true)
-expect(replaced.resolved.len()).to_equal(1)
-expect(replaced.retained.len()).to_equal(1)
-expect(replaced.retained[0].image_uri).to_equal(
-    "asset://replacement"
-)
-expect(replaced.retained[0].pixels).to_equal(replacement_pixels)
-
-step("Resolve the remaining resource by reference on the next frame")
-val checksum = simpleos_host_gpu_image_revision(
-    2, 2, replacement_pixels, replacement_pixels.len().to_i64()
-)
-val reused = simpleos_host_gpu_resolve_retained_images([
-    simpleos_host_gpu_image_resource_ref(
-        "asset://replacement", 2, 2, checksum
-    )
-], replaced.retained)
-expect(reused.ok).to_be(true)
-expect(reused.resolved[0].pixels).to_equal(replacement_pixels)
-expect(reused.retained.len()).to_equal(1)
-
-step("Resolve the same resource by reference for a second consecutive frame")
-val reused_again = simpleos_host_gpu_resolve_retained_images([
-    simpleos_host_gpu_image_resource_ref(
-        "asset://replacement", 2, 2, checksum
-    )
-], reused.retained)
-expect(reused_again.ok).to_be(true)
-expect(reused_again.resolved[0].pixels).to_equal(replacement_pixels)
-expect(reused_again.retained.len()).to_equal(1)
-```
-
-</details>
-
-#### (f) the untouched legacy (non-retained) codec is unaffected by the retention extension
-
-- (f) the untouched legacy (non-retained) codec is unaffected by the retention extension
 - Same fixture through the ORIGINAL simpleos_host_gpu_image_resources_encode/decode path
 - Re-encoding the same fixture is deterministic (byte-for-byte stable — no hidden retention state leaks in)
    - Expected: legacy_encoded_again.bytes equals `legacy_encoded.bytes`
@@ -343,12 +244,10 @@ expect(reused_again.retained.len()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("(f) the untouched legacy (non-retained) codec is unaffected by the retention extension")
 step("Same fixture through the ORIGINAL simpleos_host_gpu_image_resources_encode/decode path")
 val resource = simpleos_host_gpu_image_resource("asset://icon", 2, 2, _solid_pixels(4, 0xff112233u32))
 val legacy_encoded = simpleos_host_gpu_image_resources_encode([resource], RETENTION_TEST_MAX_BYTES, RETENTION_TEST_MAX_RESOURCES)
@@ -367,28 +266,24 @@ expect(entry_encoded.bytes.len().to_i64()).to_equal(legacy_encoded.bytes.len().t
 
 #### reports a representative-frame bytes-saved estimate for a retained 64x64 icon
 
-- reports a representative-frame bytes-saved estimate for a retained 64x64 icon
 - A 64x64 ARGB icon (16384 pixel bytes) sent full vs. sent as a reference on an unchanged frame
+- print
 - The reference is at least two orders of magnitude smaller than the full transfer
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("reports a representative-frame bytes-saved estimate for a retained 64x64 icon")
 step("A 64x64 ARGB icon (16384 pixel bytes) sent full vs. sent as a reference on an unchanged frame")
 val pixels = _solid_pixels(64 * 64, 0xff224466u32)
 val full_entry = simpleos_host_gpu_image_resource_full("asset://icon-64", 64, 64, pixels)
 val full_encoded = simpleos_host_gpu_image_resources_encode_retained([full_entry], RETENTION_TEST_MAX_BYTES, RETENTION_TEST_MAX_RESOURCES)
 expect(full_encoded.ok).to_be(true)
-val checksum = simpleos_host_gpu_image_revision(
-    64, 64, pixels, pixels.len().to_i64()
-)
+val checksum = simpleos_host_gpu_readback_checksum(pixels, pixels.len().to_i64())
 val ref_entry = simpleos_host_gpu_image_resource_ref("asset://icon-64", 64, 64, checksum)
 val ref_encoded = simpleos_host_gpu_image_resources_encode_retained([ref_entry], RETENTION_TEST_MAX_BYTES, RETENTION_TEST_MAX_RESOURCES)
 expect(ref_encoded.ok).to_be(true)
@@ -402,91 +297,15 @@ expect(ref_bytes).to_be_less_than(200)
 
 </details>
 
-#### uses a position-sensitive revision for equal-sum pixel permutations
-
-- uses a position-sensitive revision for equal-sum pixel permutations
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 9 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-LIB
-step("uses a position-sensitive revision for equal-sum pixel permutations")
-val left = [1u32, 2u32, 3u32, 4u32]
-val right = [4u32, 3u32, 2u32, 1u32]
-expect(simpleos_host_gpu_image_revision(
-    2, 2, left, left.len().to_i64()
-) == simpleos_host_gpu_image_revision(
-    2, 2, right, right.len().to_i64()
-)).to_be(false)
-```
-
-</details>
-
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-LIB`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `86dcc9cffcd78fffd6fc1a3ab3f49cea22dec33e71d4ef8fa681fb07796d3f8c`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `86dcc9cffcd78fffd6fc1a3ab3f49cea22dec33e71d4ef8fa681fb07796d3f8c`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `86dcc9cffcd78fffd6fc1a3ab3f49cea22dec33e71d4ef8fa681fb07796d3f8c`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/01_unit/lib/common/gpu/simpleos_host_gpu_image_retention_spec.spl
-mirror: doc/06_spec/01_unit/lib/common/gpu/simpleos_host_gpu_image_retention_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/common/gpu/simpleos_host_gpu_image_retention_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/common/gpu/simpleos_host_gpu_image_retention_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/common/gpu/simpleos_host_gpu_image_retention_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 12 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/lib/common/gpu/simpleos_host_gpu_image_retention_spec.spl:67:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario '(a) first submit: a full entry encodes and decodes pixel bytes, and resolves+caches into an empty table' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/common/gpu/simpleos_host_gpu_image_retention_spec.spl:90:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario '(b) unchanged resource: reference-only wire is far smaller, and resolves byte-identically from the retained table' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/common/gpu/simpleos_host_gpu_image_retention_spec.spl:123:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario '(c) changed resource re-sends full bytes and the retained table adopts the new content' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

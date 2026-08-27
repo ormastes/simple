@@ -94,55 +94,6 @@ enough for self-hosted native-build to complete under the wrapper timeout. Do
 not default this wrapper to the Rust seed: it is useful differential evidence,
 but repo policy keeps the seed bootstrap-only.
 
-## Update — minimal live checker reaches HIR stack overflow (2026-07-07)
-
-The smaller diagnostic wrapper `scripts/check/check-nvme-rv32-minimal-live.shs`
-now has two useful modes:
-
-```bash
-NVME_RV32_MINIMAL_SECTIONS=0 NVME_RV32_BUILD_TIMEOUT_SECS=120 \
-  sh scripts/check/check-nvme-rv32-minimal-live.shs
-```
-
-passes as a root-only RV32 object/link diagnostic:
-
-```text
-STATUS: PASS nvme-rv32-minimal-live-root-build diagnostic_only=true
-```
-
-The first real firmware section still fails before producing a bootable ELF:
-
-```bash
-NVME_RV32_MINIMAL_SECTIONS=1 NVME_RV32_BUILD_TIMEOUT_SECS=120 \
-  sh scripts/check/check-nvme-rv32-minimal-live.shs
-```
-
-Observed failure:
-
-```text
-[BOOTSTRAP-PHASE] phase3:hir:function:start ...rv32_rain_recover7
-thread 'simple-main' has overflowed its stack
-fatal runtime error: stack overflow, aborting
-```
-
-This narrows the current blocker from the full rv32 boot wrapper timeout to a
-compiler HIR-lowering stack overflow on the generated minimal firmware root.
-The root-only path proves the RV32 object/link skeleton can be built; the first
-real RAIN section proves the firmware logic still cannot be lowered by the
-self-hosted HIR path.
-
-Dead-end checks already tried:
-
-- Flattening the RAIN XOR expression into a helper with wide scalar parameters
-  moved the overflow to the helper.
-- Splitting recovery into tiny no-argument scalar functions moved the overflow
-  to one of those recovery functions.
-- Converting recovery temporaries from `var` reassignment to `val` chains still
-  overflowed in HIR lowering.
-
-So the next fix should target HIR lowering stack use for this generated
-firmware-root shape, not further cosmetic rewrites of the RAIN algorithm.
-
 ## Update — exact phase2 source narrowed (2026-07-05)
 
 The phase profile now logs each native entry-closure source before and after
@@ -314,44 +265,6 @@ extended guard in `rt_as_heap`. **Result:** the selftest now runs to completion
 and boot proceeds — the serial prints all 21 stage letters, then `MEM OK`,
 `PMM OK`, **`HEAP OK`**, **`SVC OK`**, `BOOT OK`. Two of the three required
 markers (`HEAP OK`, `SVC OK`) now pass.
-
-## Update — bootstrap compiler proof moved to LLVM direct-call blocker (2026-07-06)
-
-The self-hosted firmware build remains blocked by the broader Stage 2 compiler
-production proof, not by the NVMe OpenSSD firmware sources themselves. The
-latest bounded Stage 2 probe now sees real bootstrap bodies:
-
-```text
-[mir-lower-free] functions:count 6
-[hir-lower] bootstrap-functions:count 6
-```
-
-It fails later in LLVM object compilation on malformed direct-call IR:
-
-```text
-%l0 = call i64 0()
-llc: error: integer constant must have integer type
-```
-
-Evidence: `build/stage2_after_arena_fix.log`, preserved IR
-`/tmp/simple_llvm_1942949.ll`.
-
-Current narrow compiler progress: bootstrap `get_args()` / `eprint()` and known
-entry helpers now stay named through HIR/MIR, direct string function operands
-render as `@symbol`, and LLVM GEP/aggregate lowering no longer emits invalid
-`nil` element types. This does not claim firmware runtime PASS.
-
-Latest remaining compiler blocker:
-
-```text
-llc: /tmp/simple_llvm_2155269.ll:80:32: error: '%l1' defined with type 'i64' but expected 'ptr'
-  %l8 = getelementptr i64, ptr %l1, %l7
-                               ^
-```
-
-So the next compiler fix is still upstream of firmware: MIR must resolve
-same-module bootstrap `Var(symbol)` call return types by recovered symbol name
-so `get_cli_args()` is called as `ptr`, not `i64`.
 
 **Fault 2 (STILL OPEN, blocks `ALL RV32 NVME FW CHECKS PASS`): seed rv32 `i64`
 codegen miscompiles the selftest value-flow.** With the hang gone, the selftest
@@ -574,12 +487,13 @@ marker now reaches beyond `logic_power_cycle.spl` and starts
 [BOOTSTRAP-PHASE] phase2:parse:entry examples/.../logic_backpressure_abort.spl
 ```
 
-### Stock boot-hook root restored; live boot still fails closed (2026-07-06)
+### Diagnostic root made deterministic; live boot still fails closed (2026-07-06)
 
-The RV32 wrapper now generates a tiny `build/os/generated/nvme_fw_boot_root.spl`
-that imports the stock `os.kernel.arch.riscv32.boot` module and `entry.spl`'s
-strong `rt_rv32_boot_optional_nvme_fw_selftest` hook. The ELF now links the real
-rv32 `_start`/`boot_main` path instead of a diagnostic replacement `_start`:
+The RV32 wrapper now generates a root-level `build/os/generated/nvme_fw_boot_root.spl`,
+symlinks the `fw_rv32/logic*.spl` modules into that generated source root, avoids
+freestanding `char_code`, and calls the actual generated `nvme_fw_boot_root__boot_main`
+symbol from `_start`. This removes stale generated-module dependence and lets the
+diagnostic seed build link again:
 
 ```sh
 NVME_RV32_SIMPLE_BIN=src/compiler_rust/target/bootstrap/simple \
@@ -591,26 +505,14 @@ sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs
 The production default still uses `bin/simple` and remains covered by the
 self-hosted native-build timeout above. The seed-built ELF is diagnostic only.
 
-QEMU now reaches the real boot path and firmware hook, initializes the boot
-subsystems, then fails closed with the firmware section mask:
+QEMU now reaches the generated firmware root and fails closed with a broad section
+mask instead of hanging at the previous stale reactor note:
 
 ```text
 SimpleOS RV32
-[BOOT] UART initialized
-[BOOT] RISC-V 32
-[BOOT] Memory map parsed
-[BOOT] RAM at 0x80000000
 [BOOT] boot complete
-[BOOT] SMP harts: 1
-LOG OK
-RV32 NVME FW BEGIN
 EJMBSPHQIFACTDWLYKGN
 RV32 NVME FW FAIL
-MEM OK
-PMM OK
-HEAP OK
-SVC OK
-BOOT OK
 ```
 
 Host logic still passes:
@@ -939,7 +841,7 @@ switch the wrapper default to the seed.
  1 example, 0 failures
  ```
  
-Release remains blocked:
+ Release remains blocked:
  
  - RV32 QEMU boot proof fails because the firmware self-test marker is absent.
  - Required MCP integration gate fails in this workspace because
@@ -1082,55 +984,6 @@ Release remains blocked:
    first-byte workaround.
  
 No commit, rebase, or push was performed.
-
-### Minimal pure-Simple live reproducer added (2026-07-07)
-
-Added `scripts/check/check-nvme-rv32-minimal-live.shs` so this blocker no longer
-requires the full stock SimpleOS boot graph to reproduce. The script writes a
-tiny rv32 `_start`, strips comments/blank lines from the existing firmware
-sources into `build/os/generated/nvme_fw_rv32_minimal_src`, builds with
-production `bin/simple`, boots QEMU, and requires
-`ALL RV32 NVME FW CHECKS PASS` with no `FAIL` marker.
-
-Current production result:
-
-```sh
-NVME_RV32_BUILD_TIMEOUT_SECS=90 sh scripts/check/check-nvme-rv32-minimal-live.shs
-# STATUS: FAIL nvme-rv32-minimal-live build_rc=124 timeout=90s
-```
-
-The narrowed source set is 24 files and excludes the full OS boot graph, but
-phase2 parse still dominates:
-
-```text
-[BOOTSTRAP-PHASE] phase1:load_sources:done n_sources=24
-[BOOTSTRAP-PHASE] phase2:parse:file:done .../entry.spl          +20.5s
-[BOOTSTRAP-PHASE] phase2:parse:file:done .../logic.spl          +34.3s
-[BOOTSTRAP-PHASE] phase2:parse:file:done .../logic_rain.spl     +43.0s
-[BOOTSTRAP-PHASE] phase2:parse:file:done .../logic_ecc.spl      +59.7s
-[BOOTSTRAP-PHASE] phase2:parse:file:done .../logic_journal.spl  +76.9s
-[BOOTSTRAP-PHASE] phase2:parse:file:start .../logic_map.spl
-```
-
-This confirms the remaining production media blocker is pure-Simple
-native-build parse/front-end throughput across the firmware closure, not stock
-rv32 boot imports.
-
-Rejected shortcut: bundling the stripped firmware logic into one generated
-70 KB `.spl` source reduced the closure to `n_sources=1`, but it was worse:
-`NVME_RV32_BUILD_TIMEOUT_SECS=90 sh scripts/check/check-nvme-rv32-minimal-live.shs`
-timed out while still parsing that single root file. Keep the minimal checker on
-split stripped sources unless the parser gets a real large-file throughput fix.
-
-Rust diagnostic compilers are not an acceptable fallback. Current
-`src/compiler_rust/target/bootstrap/simple` and `target/debug/simple` both print
-the bootstrap-seed warning and fail this wrapper because LLVM is not available:
-
-```text
-WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool.
-Build and use the pure-Simple bin/simple instead.
-error: native backend 'llvm' is not available in this build
-```
 
 ### Latest status: source fast path fixed, deployed wrapper not yet reproven (2026-07-06)
 
@@ -1464,8 +1317,7 @@ The `icmp ne i64 undef` blocker is fixed for the bounded real-main shard.
 Source regression now covers:
 
 - normal bootstrap binary operators bypass the optional special-op nil path;
-- typed array indexes retain their element type; only unknown bootstrap indexes
-  fall back to text values;
+- untyped bootstrap indexes default to text values;
 - `lower_if` preserves explicit `return` terminators instead of overwriting
   branch blocks with `goto merge`;
 - pointer/text CLI comparisons lower through typed `rt_strcmp`;

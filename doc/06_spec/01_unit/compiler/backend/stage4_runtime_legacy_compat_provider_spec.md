@@ -1,6 +1,6 @@
-# Stage4 Runtime Legacy Compat Provider Specification
+# Contract spec: test/01_unit/compiler/backend/stage4_runtime_legacy_compat_provider_spec.spl
 
-> Tests covering Stage4 localized runtime legacy compatibility provider.
+> Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,47 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Stage4 Runtime Legacy Compat Provider Specification
+# Contract spec: test/01_unit/compiler/backend/stage4_runtime_legacy_compat_provider_spec.spl
+
+Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Compiler |
+| Status | Active |
+| Source | `test/01_unit/compiler/backend/stage4_runtime_legacy_compat_provider_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and Audience
+
+Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
+contracts red-visible, so a regression in the owned code fails this spec
+instead of shipping silently.
+
+## Scope and Preconditions
+
+Precondition: the repository working tree holds the subject code under test.
+Each scenario exercises the subject and asserts its observable contract; no
+behavior outside the named subject is claimed.
+
+## Primary Workflow
+
+Run the scenarios; each one drives the subject through its pinned contract
+and asserts the expected observable outcome with an executed oracle.
+
+## Unsupported / Limitations
+
+Only the pinned contracts are asserted here; end-to-end and integration
+behavior of the surrounding system is covered by companion specs.
+
+## Verification and Recovery
+
+A red scenario names the contract that regressed. Recover by restoring the
+pinned behavior in the subject; verify with
+`bin/simple test test/01_unit/compiler/backend/stage4_runtime_legacy_compat_provider_spec.spl` and a green Results line.
 
 ## Scenarios
 
@@ -106,7 +146,7 @@ for symbol in [
 ]:
     expect(exports).to_contain(symbol)
 for symbol in legacy_localized_symbols():
-    expect(exports.contains(symbol)).to_be(false)
+    expect(exports).to_not_contain(symbol)
 ```
 
 </details>
@@ -152,7 +192,7 @@ expect(stage4_validate_runtime_legacy_compat_symbol_contract(localized, "coff-mi
 val raw = legacy_raw_nm("coff-msvc")
 val localize = stage4_runtime_legacy_compat_localization_symbols(raw, "coff-mingw").unwrap()
 expect(localize).to_contain("spl_array_new")
-expect(localize.contains("_spl_array_new")).to_be(false)
+expect(localize).to_not_contain("_spl_array_new")
 ```
 
 </details>
@@ -178,7 +218,7 @@ for object_format in ["elf", "macho", "coff-msvc", "coff-mingw"]:
     for symbol in legacy_localized_symbols():
         expect(localized).to_contain(legacy_raw_symbol(symbol, object_format))
     for symbol in stage4_runtime_legacy_compat_exports():
-        expect(localized.contains(legacy_raw_symbol(symbol, object_format))).to_be(false)
+        expect(localized).to_not_contain(legacy_raw_symbol(symbol, object_format))
 ```
 
 </details>
@@ -306,7 +346,7 @@ expect(direct_owners).to_contain("spl_str_len=runtime_legacy_compat")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -328,8 +368,7 @@ expect(labels_pos).to_be_greater_than(build_pos)
 expect(paths_pos).to_be_greater_than(build_pos)
 expect(owner_pos).to_be_greater_than(paths_pos)
 expect(strict_source.split("file_delete(runtime_legacy_compat_archive)").len() - 1).to_be_greater_than(4)
-expect(strict_source.contains("candidate_paths = candidate_paths.push(runtime_legacy_core")).to_be(false)
-expect(source.contains("llvm_stage4_build_single_object_provider_archive(runtime_objects, \"runtime_legacy_core\"")).to_be(false)
+expect(strict_source).to_not_contain("candidate_paths = candidate_paths.push(runtime_legacy_core")        expect(source).to_not_contain("llvm_stage4_build_single_object_provider_archive(runtime_objects, \"runtime_legacy_core\"")
 ```
 
 </details>
@@ -342,7 +381,7 @@ expect(source.contains("llvm_stage4_build_single_object_provider_archive(runtime
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -352,26 +391,10 @@ val compile_source = rt_file_read_text("src/compiler/70.backend/backend/runtime_
 val link_source = compiler_native_link_source()
 expect(compile_source).to_contain("if include_stage4_legacy_compat:\n        sources = sources.push(\"runtime_legacy_core\")\n        objects = objects.push(\"{{object_prefix}}runtime_legacy_core{{ext}}\")")
 expect(link_source).to_contain("stage4_runtime_provider_object_matches(object, \"runtime_legacy_core\"")
-expect(link_source.contains("candidate_labels = candidate_labels.push(\"runtime_legacy_core\")")).to_be(false)
-expect(link_source.contains("candidate_paths = candidate_paths.push(runtime_legacy_core_archive)")).to_be(false)
+expect(link_source).to_not_contain("candidate_labels = candidate_labels.push(\"runtime_legacy_core\")")        expect(link_source).to_not_contain("candidate_paths = candidate_paths.push(runtime_legacy_core_archive)")
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Compiler |
-| Status | Active |
-| Source | `test/01_unit/compiler/backend/stage4_runtime_legacy_compat_provider_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering Stage4 localized runtime legacy compatibility provider.
-- Stage4 localized runtime legacy compatibility provider
 
 ## Scenario Summary
 
@@ -391,56 +414,42 @@ Tests covering Stage4 localized runtime legacy compatibility provider.
 
 Requirements covered by the scenarios in this manual:
 
-- `REQ-SSPEC-UNIT`
 - `REQ-SSPEC-COMPILER`
 <!-- sspec-maintain:traceability:end -->
 
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `5074e96ab9432ccba0fbdf248afabd523374b81e01b0b29109312bf1f1d3aadb`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `a48b6496ca8808735afc1beb45cff370e86ca6de71163dc085bfecf4f9181e7d`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `5074e96ab9432ccba0fbdf248afabd523374b81e01b0b29109312bf1f1d3aadb`.
+Source SHA-256: `a48b6496ca8808735afc1beb45cff370e86ca6de71163dc085bfecf4f9181e7d`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `5074e96ab9432ccba0fbdf248afabd523374b81e01b0b29109312bf1f1d3aadb`  
+Source SHA-256: `a48b6496ca8808735afc1beb45cff370e86ca6de71163dc085bfecf4f9181e7d`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **72/100**; effective score: **49/100**; blockers: **2**.
+Raw score: **91/100**; effective score: **91/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 91/100
 source: test/01_unit/compiler/backend/stage4_runtime_legacy_compat_provider_spec.spl
 mirror: doc/06_spec/01_unit/compiler/backend/stage4_runtime_legacy_compat_provider_spec.md (current)
-findings: 8 blockers: 2
-  narrative=100 structure=100 oracle=30
-  traceability=60 evidence=70 coverage=100 maintainability=70
+findings: 4 blockers: 0
+  narrative=100 structure=100 oracle=80
+  traceability=100 evidence=70 coverage=100 maintainability=100
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=72; blocker cap makes effective=49
-doc/06_spec/01_unit/compiler/backend/stage4_runtime_legacy_compat_provider_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/compiler/backend/stage4_runtime_legacy_compat_provider_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/compiler/backend/stage4_runtime_legacy_compat_provider_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
 test/01_unit/compiler/backend/stage4_runtime_legacy_compat_provider_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
   why: Reviewers need to know why a magic expected value is authoritative.
   improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/compiler/backend/stage4_runtime_legacy_compat_provider_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/01_unit/compiler/backend/stage4_runtime_legacy_compat_provider_spec.spl:52:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'names the exact compatibility archive for every hosted object ABI' has no retained capture or evidence
+test/01_unit/compiler/backend/stage4_runtime_legacy_compat_provider_spec.spl:84:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'names the exact compatibility archive for every hosted object ABI' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler/backend/stage4_runtime_legacy_compat_provider_spec.spl:63:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'maps each hosted ABI to its exact portable symbol format' has no retained capture or evidence
+test/01_unit/compiler/backend/stage4_runtime_legacy_compat_provider_spec.spl:95:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'maps each hosted ABI to its exact portable symbol format' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler/backend/stage4_runtime_legacy_compat_provider_spec.spl:74:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'exposes only the audited safe 21-symbol compatibility ABI' has no retained capture or evidence
+test/01_unit/compiler/backend/stage4_runtime_legacy_compat_provider_spec.spl:106:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'exposes only the audited safe 21-symbol compatibility ABI' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

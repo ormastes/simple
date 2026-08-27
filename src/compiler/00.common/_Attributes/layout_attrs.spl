@@ -17,13 +17,13 @@ use compiler.common.attributes.*
 #
 # Returns a LayoutAttr for use in type layout computation.
 
-# bypass: parsing functions need L1 (Attribute/Expr) and L3 (LayoutAttr/TypeLayoutKind) types.
+# bypass: parsing functions need L1 (Attribute/Expr) and L3 (LayoutAttr/LayoutKind) types.
 # Split deferred — spawn_analysis.spl (L1) consumes parse_function_attrs/parse_task_attr,
 # so moving parsing fns to L2 would create a new L1→L2 violation.
 use compiler.frontend.parser_types.{Attribute}
 use compiler.frontend.parser_types_expr.{Expr, ExprKind, expr_kind}
 use compiler.types.type_layout.{
-    LayoutAttr, TypeLayoutKind,
+    LayoutAttr, LayoutKind,
     PlatformAbi, PlatformBit, PlatformPredicate, PlatformVariant, PlatformParseResult,
     PlatformLayoutDiagnostic, platform_abi_from_text, platform_bit_from_text,
     platform_cpu_from_text, platform_os_from_text,
@@ -31,12 +31,6 @@ use compiler.types.type_layout.{
 }
 use compiler.common.diagnostics.span.{Span}
 
-# ============================================================================
-# Named Argument Extraction Helpers
-# ============================================================================
-
-# Import shared helpers from attributes.spl
-use compiler.common.attributes.{NamedArg, extract_named_args, get_named_string_arg, get_named_int_arg, get_named_int_array_arg}
 
 # ============================================================================
 # Volatile Attribute Types
@@ -73,60 +67,64 @@ fn parse_task_attr(attrs: [Attribute]) -> TaskAttr?:
     for attr in attrs:
         if attr.name == "task":
             found = true
-            val named_args = extract_named_args(attr)
-            if named_args.has("instances"):
-                val v = extract_int_arg(named_args["instances"])
-                if v != nil:
-                    instances = v ?? 1
-            if named_args.has("group"):
-                val g = extract_string_arg(named_args["group"])
-                if g.len() > 0:
-                    has_group = true
-                    group_value = g
-            if named_args.has("frame"):
-                val frame_parsed = extract_int_arg(named_args["frame"])
-                if frame_parsed.?:
-                    has_frame = true
-                    frame_value = frame_parsed.unwrap()
-            if named_args.has("wait_nodes"):
-                val w = extract_int_arg(named_args["wait_nodes"])
-                if w != nil:
-                    wait_nodes = w ?? 0
-            if named_args.has("policy"):
-                policy = extract_string_arg(named_args["policy"])
-            if named_args.has("weight"):
-                val weight_parsed = extract_int_arg(named_args["weight"])
-                if weight_parsed.?:
-                    has_weight = true
-                    weight_value = weight_parsed.unwrap()
-            if named_args.has("priority"):
-                val priority_parsed = extract_int_arg(named_args["priority"])
-                if priority_parsed.?:
-                    has_priority = true
-                    priority_value = priority_parsed.unwrap()
-            if named_args.has("latency_hint"):
-                val h = extract_string_arg(named_args["latency_hint"])
-                if h.len() > 0:
-                    has_latency_hint = true
-                    latency_hint_value = h
-            if named_args.has("runtime"):
-                val runtime_parsed = extract_int_arg(named_args["runtime"])
-                if runtime_parsed.?:
-                    has_runtime_ns = true
-                    runtime_ns_value = runtime_parsed.unwrap()
-            if named_args.has("period"):
-                val period_parsed = extract_int_arg(named_args["period"])
-                if period_parsed.?:
-                    has_period_ns = true
-                    period_ns_value = period_parsed.unwrap()
-            if named_args.has("deadline"):
-                val deadline_parsed = extract_int_arg(named_args["deadline"])
-                if deadline_parsed.?:
-                    has_deadline_ns = true
-                    deadline_ns_value = deadline_parsed.unwrap()
-
             for arg in attr.args:
                 match arg.kind:
+                    case Assign(left, op, right):
+                        match left.kind:
+                            case Ident(name):
+                                if name == "instances":
+                                    val v = extract_int_arg(right)
+                                    if v != nil:
+                                        instances = v ?? 1
+                                elif name == "group":
+                                    val g = extract_string_arg(right)
+                                    if g.len() > 0:
+                                        has_group = true
+                                        group_value = g
+                                elif name == "frame":
+                                    val frame_parsed = extract_int_arg(right)
+                                    if frame_parsed.?:
+                                        has_frame = true
+                                        frame_value = frame_parsed.unwrap()
+                                elif name == "wait_nodes":
+                                    val w = extract_int_arg(right)
+                                    if w != nil:
+                                        wait_nodes = w ?? 0
+                                elif name == "policy":
+                                    val p = extract_string_arg(right)
+                                    if p.len() > 0:
+                                        policy = p
+                                elif name == "weight":
+                                    val weight_parsed = extract_int_arg(right)
+                                    if weight_parsed.?:
+                                        has_weight = true
+                                        weight_value = weight_parsed.unwrap()
+                                elif name == "priority":
+                                    val priority_parsed = extract_int_arg(right)
+                                    if priority_parsed.?:
+                                        has_priority = true
+                                        priority_value = priority_parsed.unwrap()
+                                elif name == "latency_hint":
+                                    val h = extract_string_arg(right)
+                                    if h.len() > 0:
+                                        has_latency_hint = true
+                                        latency_hint_value = h
+                                elif name == "runtime":
+                                    val runtime_parsed = extract_int_arg(right)
+                                    if runtime_parsed.?:
+                                        has_runtime_ns = true
+                                        runtime_ns_value = runtime_parsed.unwrap()
+                                elif name == "period":
+                                    val period_parsed = extract_int_arg(right)
+                                    if period_parsed.?:
+                                        has_period_ns = true
+                                        period_ns_value = period_parsed.unwrap()
+                                elif name == "deadline":
+                                    val deadline_parsed = extract_int_arg(right)
+                                    if deadline_parsed.?:
+                                        has_deadline_ns = true
+                                        deadline_ns_value = deadline_parsed.unwrap()
+                            case _: ()
                     case IntLit(value):
                         # Bare integer: @task(4) means instances=4
                         instances = value
@@ -232,7 +230,7 @@ fn validate_task_policy_attr(attr: TaskAttr, runtime_family: text, effects: [tex
 
 fn parse_layout_attrs(attrs: [Attribute]) -> LayoutAttr:
     """Extract layout attributes from a list of attributes."""
-    var layout_kind = TypeLayoutKind.Simple
+    var layout_kind = LayoutKind.Simple
     var has_explicit_align = false
     var explicit_align_value: i64 = 0
     var is_packed = false
@@ -244,15 +242,15 @@ fn parse_layout_attrs(attrs: [Attribute]) -> LayoutAttr:
             if attr.args.len() > 0:
                 val repr_kind = extract_string_arg(attr.args[0])
                 if repr_kind == "C":
-                    layout_kind = TypeLayoutKind.C
+                    layout_kind = LayoutKind.C
                     is_preserve_order = true
                 elif repr_kind == "packed":
-                    layout_kind = TypeLayoutKind.Packed
+                    layout_kind = LayoutKind.Packed
                     is_packed = true
                 elif repr_kind == "transparent":
-                    layout_kind = TypeLayoutKind.Transparent
+                    layout_kind = LayoutKind.Transparent
         elif attr.name == "packed":
-            layout_kind = TypeLayoutKind.Packed
+            layout_kind = LayoutKind.Packed
             is_packed = true
         elif attr.name == "align":
             if attr.args.len() > 0:

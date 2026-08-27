@@ -1,3 +1,32 @@
+bootstrap_stage3_validate_helper_binding() {
+    bootstrap_stage3_helper_input=$1
+    bootstrap_stage3_helper_display=$2
+    bootstrap_stage3_helper_expected_display=$3
+    [ -f "$bootstrap_stage3_helper_input" ] ||
+        bootstrap_stage3_provenance_fail "helper-descriptor-missing" ||
+        return 1
+    [ "$bootstrap_stage3_helper_display" = \
+        "$bootstrap_stage3_helper_expected_display" ] ||
+        bootstrap_stage3_provenance_fail "helper-display-mismatch" ||
+        return 1
+    if [ "${BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE:-0}" = 1 ]; then
+        case "$bootstrap_stage3_helper_input" in /proc/*/fd/*) ;; *)
+            bootstrap_stage3_provenance_fail \
+                "helper-input-not-descriptor" || return 1 ;;
+        esac
+    else
+        [ "$bootstrap_stage3_helper_input" = \
+            "$bootstrap_stage3_helper_display" ] &&
+            [ -f "$bootstrap_stage3_helper_display" ] &&
+            [ ! -L "$bootstrap_stage3_helper_display" ] &&
+            [ "$(bootstrap_stage3_canonical_file \
+                "$bootstrap_stage3_helper_display")" = \
+                "$bootstrap_stage3_helper_display" ] ||
+            bootstrap_stage3_provenance_fail \
+                "helper-input-display-mismatch" || return 1
+    fi
+}
+
 bootstrap_stage3_write_manifest() {
     [ "$(CDPATH= cd -- "$BSTAGE3_ROOT" && pwd -P)" = "$BSTAGE3_ROOT" ] ||
         bootstrap_stage3_provenance_fail "repository-root-not-canonical" ||
@@ -56,21 +85,27 @@ bootstrap_stage3_write_manifest() {
             "provenance-helper-bundle-changed-during-bootstrap" ||
         return 1
 
+    bootstrap_stage3_validate_helper_binding \
+        "$BSTAGE3_BOOTSTRAP_SCRIPT" "$BSTAGE3_BOOTSTRAP_SCRIPT_DISPLAY" \
+        "$BSTAGE3_ROOT/scripts/bootstrap/bootstrap-from-scratch.sh" ||
+        return 1
+    bootstrap_stage3_validate_helper_binding \
+        "$BSTAGE3_HELPER" "$BSTAGE3_HELPER_DISPLAY" \
+        "$BSTAGE3_ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs" ||
+        return 1
+
     for bootstrap_stage3_required in \
         "$BSTAGE3_SEED" "$BSTAGE3_NATIVE_ALL" "$BSTAGE3_STAGE2" \
-        "$BSTAGE3_STAGE2_ADMITTED" "$BSTAGE3_STAGE2_ADMISSION" \
-        "$BSTAGE3_STAGE3" \
+        "$BSTAGE3_STAGE2_ADMITTED" "$BSTAGE3_STAGE3" \
         "$BSTAGE3_STAGE2_LOG" "$BSTAGE3_STAGE3_LOG" \
-        "$BSTAGE3_SEED_STAMP" "$BSTAGE3_HELPER" \
+        "$BSTAGE3_SEED_STAMP" \
         "$BSTAGE3_GIT_BEFORE" "$BSTAGE3_GIT_AFTER" \
         "$BSTAGE3_STAGE2_TRANSCRIPT" \
         "$BSTAGE3_STAGE3_TRANSCRIPT" "$BSTAGE3_STAGE2_SANITY" \
         "$BSTAGE3_STAGE2_RECEIVER" "$BSTAGE3_STAGE3_SANITY" \
-        "$BSTAGE3_BOOTSTRAP_SCRIPT" \
         "$BSTAGE3_SOURCE_BEFORE" "$BSTAGE3_SOURCE_AFTER" \
         "$BSTAGE3_RUNTIME_ORIGIN_BEFORE" "$BSTAGE3_RUNTIME_ORIGIN_AFTER" \
-        "$BSTAGE3_RUNTIME_ADMITTED_SNAPSHOT" "$BSTAGE3_TOOL_AUTHORITY" \
-        "$BSTAGE3_TOOL_AUTHORITY_BEFORE"; do
+        "$BSTAGE3_RUNTIME_ADMITTED_SNAPSHOT" "$BSTAGE3_TOOL_AUTHORITY"; do
         [ -f "$bootstrap_stage3_required" ] &&
             [ ! -L "$bootstrap_stage3_required" ] ||
             bootstrap_stage3_provenance_fail "required-input-missing" ||
@@ -81,6 +116,41 @@ bootstrap_stage3_write_manifest() {
                 "required-input-not-canonical" ||
             return 1
     done
+    [ "$BSTAGE3_JOBS_RECEIPT" = \
+        "$(dirname -- "$BSTAGE3_MANIFEST")/effective-build-jobs.env" ] ||
+        bootstrap_stage3_provenance_fail "stage3-jobs-receipt-path-invalid" ||
+        return 1
+    bootstrap_stage3_jobs_receipt_sha=$(
+        bootstrap_stage3_hash_file "$BSTAGE3_JOBS_RECEIPT"
+    ) || return 1
+    [ "$bootstrap_stage3_jobs_receipt_sha" = \
+        "$BSTAGE3_JOBS_RECEIPT_SHA256_BEFORE" ] ||
+        bootstrap_stage3_provenance_fail "stage3-jobs-receipt-changed" ||
+        return 1
+    [ "$(bootstrap_stage3_manifest_value schema "$BSTAGE3_JOBS_RECEIPT")" = \
+        simple-bootstrap-effective-build-jobs-v1 ] || return 1
+    bootstrap_stage3_jobs_owner=$(bootstrap_stage3_manifest_value owner \
+        "$BSTAGE3_JOBS_RECEIPT") || return 1
+    case "$bootstrap_stage3_jobs_owner" in
+        bootstrap-from-scratch|resume-stage3-from-admitted) ;;
+        *) return 1 ;;
+    esac
+    bootstrap_stage3_jobs_receipt_effective=$(bootstrap_stage3_manifest_value \
+        effective "$BSTAGE3_JOBS_RECEIPT") || return 1
+    case "$bootstrap_stage3_jobs_receipt_effective" in
+        ''|*[!0-9]*|0|0*) return 1 ;;
+    esac
+    [ "${#bootstrap_stage3_jobs_receipt_effective}" -le 2 ] || return 1
+    [ "$bootstrap_stage3_jobs_receipt_effective" -le 64 ] || return 1
+    [ "$bootstrap_stage3_jobs_receipt_effective" = \
+        "$BSTAGE3_JOBS_EFFECTIVE" ] &&
+        [ "$BSTAGE3_JOBS_EFFECTIVE" = "$BSTAGE3_STAGE3_THREADS" ] ||
+        bootstrap_stage3_provenance_fail "stage3-jobs-effective-mismatch" ||
+        return 1
+    [ "$(bootstrap_stage3_manifest_value cache_writer_policy \
+        "$BSTAGE3_JOBS_RECEIPT")" = single-native-build-owner ] &&
+        [ "$(bootstrap_stage3_manifest_value parallel_cache_writers \
+            "$BSTAGE3_JOBS_RECEIPT")" = false ] || return 1
     bootstrap_stage3_verify_seed_stamp "$BSTAGE3_SEED_STAMP" \
         "$BSTAGE3_SEED_INPUTS_FINGERPRINT" "$BSTAGE3_SEED" \
         "$BSTAGE3_NATIVE_ALL" "$BSTAGE3_BACKFILL" ||
@@ -100,34 +170,24 @@ bootstrap_stage3_write_manifest() {
     bootstrap_stage3_seed_inputs_rederived=$(
         bootstrap_stage3_seed_inputs_fingerprint "$BSTAGE3_ROOT" \
             "$BSTAGE3_BACKEND" "$BSTAGE3_SEED_FEATURES" \
-            "$bootstrap_stage3_seed_authority_path" "$BSTAGE3_PLATFORM"
+            "$bootstrap_stage3_seed_authority_path"
     ) || return 1
     [ "$bootstrap_stage3_seed_inputs_rederived" = \
         "$BSTAGE3_SEED_INPUTS_FINGERPRINT" ] ||
         bootstrap_stage3_provenance_fail \
             "seed-input-fingerprint-not-rederived" ||
         return 1
-    bootstrap_stage3_verify_sanity_evidence_receipt \
-        "$BSTAGE3_STAGE2_SANITY" "$BSTAGE3_STAGE2" "$BSTAGE3_ROOT" ||
+    bootstrap_stage3_verify_sanity_evidence \
+        "$BSTAGE3_STAGE2_SANITY" "$BSTAGE3_STAGE2" \
+        "$BSTAGE3_ROOT" "$BSTAGE3_BACKEND" \
+        "$(bootstrap_stage3_transcript_host_value \
+            "$BSTAGE3_STAGE2_TRANSCRIPT" HOME)" \
+        "$(bootstrap_stage3_transcript_host_value \
+            "$BSTAGE3_STAGE2_TRANSCRIPT" TMPDIR)" \
+        "$(bootstrap_stage3_transcript_host_value \
+            "$BSTAGE3_STAGE2_TRANSCRIPT" PATH)" ||
         bootstrap_stage3_provenance_fail "stage2-sanity-evidence-invalid" ||
         return 1
-    bootstrap_stage3_verify_receiver_evidence_receipt \
-        "$BSTAGE3_STAGE2_RECEIVER" "$BSTAGE3_STAGE2" \
-        "$BSTAGE3_RUNTIME_ADMITTED_SNAPSHOT" \
-        "$(dirname -- "$BSTAGE3_STAGE2_RECEIVER")/stage2-receiver.log" ||
-        bootstrap_stage3_provenance_fail \
-            "stage2-receiver-evidence-invalid" || return 1
-    [ "$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE2")" = \
-        "$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE2_ADMITTED")" ] ||
-        bootstrap_stage3_provenance_fail \
-            "stage2-admitted-artifact-mismatch" || return 1
-    bootstrap_stage3_verify_stage2_admission_receipt \
-        "$BSTAGE3_STAGE2_ADMISSION" "$BSTAGE3_STAGE2_ADMITTED" \
-        "$BSTAGE3_SOURCE_BEFORE" "$BSTAGE3_RUNTIME_ADMITTED_SNAPSHOT" \
-        "$BSTAGE3_TOOL_AUTHORITY_BEFORE" "$BSTAGE3_STAGE2_ARGS_SHA256" \
-        "$BSTAGE3_STAGE2_SANITY" "$BSTAGE3_STAGE2_RECEIVER" "$BSTAGE3_ROOT" ||
-        bootstrap_stage3_provenance_fail \
-            "stage2-admission-receipt-invalid" || return 1
     bootstrap_stage3_verify_sanity_evidence \
         "$BSTAGE3_STAGE3_SANITY" "$BSTAGE3_STAGE3" \
         "$BSTAGE3_ROOT" "$BSTAGE3_BACKEND" \
@@ -143,6 +203,28 @@ bootstrap_stage3_write_manifest() {
         [ "$(tr -d '[:space:]' <"$BSTAGE3_LOCK/pid")" = "$$" ] ||
         bootstrap_stage3_provenance_fail "bootstrap-lock-not-owned" ||
         return 1
+    if [ -n "${BSTAGE3_LOCK_COMPATIBILITY_RECEIPT:-}" ]; then
+        [ "$BSTAGE3_LOCK_COMPATIBILITY_RECEIPT" = \
+            "$BSTAGE3_LOCK/compatibility.env" ] &&
+            [ -f "$BSTAGE3_LOCK_COMPATIBILITY_RECEIPT" ] &&
+            [ ! -L "$BSTAGE3_LOCK_COMPATIBILITY_RECEIPT" ] &&
+            [ "$(bootstrap_stage3_manifest_value schema \
+                "$BSTAGE3_LOCK_COMPATIBILITY_RECEIPT")" = \
+                simple-stage3-lock-compatibility-v1 ] &&
+            [ "$(bootstrap_stage3_manifest_value authority \
+                "$BSTAGE3_LOCK_COMPATIBILITY_RECEIPT")" = false ] &&
+            [ "$(bootstrap_stage3_manifest_value lock_path \
+                "$BSTAGE3_LOCK_COMPATIBILITY_RECEIPT")" = "$BSTAGE3_LOCK" ] &&
+            [ "$(bootstrap_stage3_manifest_value owner_pid \
+                "$BSTAGE3_LOCK_COMPATIBILITY_RECEIPT")" = "$$" ] &&
+            [ "$(bootstrap_stage3_manifest_value run_id \
+                "$BSTAGE3_LOCK_COMPATIBILITY_RECEIPT")" = \
+                "${SIMPLE_EVIDENCE_RUN_ID:-}" ] &&
+            [ "$(bootstrap_stage3_manifest_value status \
+                "$BSTAGE3_LOCK_COMPATIBILITY_RECEIPT")" = held ] ||
+            bootstrap_stage3_provenance_fail \
+                "bootstrap-lock-compatibility-receipt-invalid" || return 1
+    fi
 
     bootstrap_stage3_source_count=$(
         wc -l <"$BSTAGE3_SOURCE_AFTER" | tr -d ' '
@@ -150,22 +232,6 @@ bootstrap_stage3_write_manifest() {
     bootstrap_stage3_source_sha=$(
         bootstrap_stage3_hash_file "$BSTAGE3_SOURCE_AFTER"
     ) || return 1
-    bootstrap_stage3_stage2_admission_identity=$(
-        bootstrap_stage3_stage2_admission_identity \
-            "$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE2")" \
-            "$bootstrap_stage3_source_sha" \
-            "$(bootstrap_stage3_hash_file \
-                "$BSTAGE3_RUNTIME_ADMITTED_SNAPSHOT")" \
-            "$(bootstrap_stage3_hash_file "$BSTAGE3_TOOL_AUTHORITY")" \
-            "$BSTAGE3_STAGE2_ARGS_SHA256" \
-            "$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE2_SANITY")" \
-            "$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE2_RECEIVER")"
-    ) || return 1
-    [ "$(bootstrap_stage3_manifest_value admission_identity \
-        "$BSTAGE3_STAGE2_ADMISSION")" = \
-        "$bootstrap_stage3_stage2_admission_identity" ] ||
-        bootstrap_stage3_provenance_fail \
-            "stage2-admission-identity-mismatch" || return 1
     bootstrap_stage3_backfill_status=absent
     bootstrap_stage3_backfill_sha=absent
     if [ -f "$BSTAGE3_BACKFILL" ]; then
@@ -184,7 +250,7 @@ bootstrap_stage3_write_manifest() {
     bootstrap_stage3_manifest_tmp="${BSTAGE3_MANIFEST}.tmp.$$"
     umask 077
     {
-        echo "schema=simple-bootstrap-stage3-provenance-v4"
+        echo "schema=simple-bootstrap-stage3-provenance-v3"
         echo "status=pass"
         echo "artifact_kind=pure-simple-bootstrap-compiler"
         echo "full_cli_status=separate-not-proven"
@@ -197,79 +263,80 @@ bootstrap_stage3_write_manifest() {
         echo "source_roots=src/compiler:src/app:src/lib"
         echo "source_file_count=$bootstrap_stage3_source_count"
         echo "source_fingerprint=$bootstrap_stage3_source_sha"
-        echo "git_state_path=$BSTAGE3_GIT_AFTER"
+        echo "git_state_path=$BSTAGE3_GIT_AFTER_DISPLAY"
         echo "git_state_sha256=$(bootstrap_stage3_hash_file "$BSTAGE3_GIT_AFTER")"
         echo "git_head=$(bootstrap_stage3_manifest_value head "$BSTAGE3_GIT_AFTER")"
         echo "git_dirty_fingerprint=$(bootstrap_stage3_manifest_value dirty_fingerprint "$BSTAGE3_GIT_AFTER")"
         echo "bootstrap_lock_path=$BSTAGE3_LOCK"
         echo "bootstrap_lock_owner_pid=$$"
-        echo "seed_path=$BSTAGE3_SEED"
+        echo "seed_path=$BSTAGE3_SEED_DISPLAY"
         echo "seed_sha256=$(bootstrap_stage3_hash_file "$BSTAGE3_SEED")"
         echo "seed_inputs_fingerprint=$BSTAGE3_SEED_INPUTS_FINGERPRINT"
         echo "seed_backend=$BSTAGE3_BACKEND"
         echo "seed_features=$BSTAGE3_SEED_FEATURES"
-        echo "seed_inputs_stamp_path=$BSTAGE3_SEED_STAMP"
+        echo "seed_inputs_stamp_path=$BSTAGE3_SEED_STAMP_DISPLAY"
         echo "seed_inputs_stamp_sha256=$(bootstrap_stage3_hash_file "$BSTAGE3_SEED_STAMP")"
-        echo "native_all_path=$BSTAGE3_NATIVE_ALL"
+        echo "native_all_path=$BSTAGE3_NATIVE_ALL_DISPLAY"
         echo "native_all_sha256=$(bootstrap_stage3_hash_file "$BSTAGE3_NATIVE_ALL")"
-        echo "compiler_backfill_path=$BSTAGE3_BACKFILL"
+        echo "compiler_backfill_path=$BSTAGE3_BACKFILL_DISPLAY"
         echo "compiler_backfill_status=$bootstrap_stage3_backfill_status"
         echo "compiler_backfill_sha256=$bootstrap_stage3_backfill_sha"
-        echo "stage2_path=$BSTAGE3_STAGE2"
+        echo "stage2_path=$BSTAGE3_STAGE2_DISPLAY"
         echo "stage2_sha256=$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE2")"
-        echo "stage2_admitted_path=$BSTAGE3_STAGE2_ADMITTED"
+        echo "stage2_admitted_path=$BSTAGE3_STAGE2_ADMITTED_DISPLAY"
         echo "stage2_admitted_sha256=$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE2_ADMITTED")"
         echo "stage2_threads=$BSTAGE3_STAGE2_THREADS"
-        echo "stage2_command_output=$BSTAGE3_STAGE2_COMMAND_OUTPUT"
+        echo "stage2_command_output=$BSTAGE3_STAGE2_DISPLAY"
         echo "stage2_build_args_sha256=$BSTAGE3_STAGE2_ARGS_SHA256"
-        echo "stage2_command_transcript_path=$BSTAGE3_STAGE2_TRANSCRIPT"
+        echo "stage2_command_transcript_path=$BSTAGE3_STAGE2_TRANSCRIPT_DISPLAY"
         echo "stage2_command_transcript_sha256=$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE2_TRANSCRIPT")"
-        echo "stage2_build_log_path=$BSTAGE3_STAGE2_LOG"
+        echo "stage2_build_log_path=$BSTAGE3_STAGE2_LOG_DISPLAY"
         echo "stage2_build_log_sha256=$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE2_LOG")"
         echo "stage2_sanity_status=pass"
-        echo "stage2_sanity_evidence_path=$BSTAGE3_STAGE2_SANITY"
+        echo "stage2_sanity_evidence_path=$BSTAGE3_STAGE2_SANITY_DISPLAY"
         echo "stage2_sanity_evidence_sha256=$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE2_SANITY")"
-        echo "stage2_receiver_status=pass"
-        echo "stage2_receiver_evidence_path=$BSTAGE3_STAGE2_RECEIVER"
-        echo "stage2_receiver_evidence_sha256=$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE2_RECEIVER")"
-        echo "stage2_check_policy=identity-scoped-receipt-reuse"
-        echo "stage2_admission_identity=$bootstrap_stage3_stage2_admission_identity"
-        echo "stage2_admission_receipt_path=$BSTAGE3_STAGE2_ADMISSION"
-        echo "stage2_admission_receipt_sha256=$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE2_ADMISSION")"
-        echo "stage2_checks_executed_at_admission=1"
-        echo "stage2_checks_replayed_during_stage3=0"
         echo "stage3_path=$BSTAGE3_STAGE3"
         echo "stage3_sha256=$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE3")"
         echo "stage3_threads=$BSTAGE3_STAGE3_THREADS"
+        echo "stage3_jobs_receipt_path=$BSTAGE3_JOBS_RECEIPT"
+        echo "stage3_jobs_receipt_sha256=$bootstrap_stage3_jobs_receipt_sha"
+        echo "stage3_jobs_effective=$BSTAGE3_JOBS_EFFECTIVE"
         echo "stage3_command_output=$BSTAGE3_STAGE3_COMMAND_OUTPUT"
         echo "stage3_build_args_sha256=$BSTAGE3_STAGE3_ARGS_SHA256"
-        echo "stage3_command_transcript_path=$BSTAGE3_STAGE3_TRANSCRIPT"
+        echo "stage3_command_transcript_path=$BSTAGE3_STAGE3_TRANSCRIPT_DISPLAY"
         echo "stage3_command_transcript_sha256=$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE3_TRANSCRIPT")"
-        echo "stage3_build_log_path=$BSTAGE3_STAGE3_LOG"
+        echo "stage3_build_log_path=$BSTAGE3_STAGE3_LOG_DISPLAY"
         echo "stage3_build_log_sha256=$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE3_LOG")"
         echo "stage3_sanity_status=pass"
-        echo "stage3_sanity_evidence_path=$BSTAGE3_STAGE3_SANITY"
+        echo "stage3_sanity_evidence_path=$BSTAGE3_STAGE3_SANITY_DISPLAY"
         echo "stage3_sanity_evidence_sha256=$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE3_SANITY")"
-        echo "stage2_native_cache_dir=$BSTAGE3_STAGE2_CACHE_DIR"
-        echo "stage3_native_cache_dir=$BSTAGE3_STAGE3_CACHE_DIR"
-        echo "runtime_path=$BSTAGE3_RUNTIME_PATH"
-        echo "runtime_origin_snapshot_path=$BSTAGE3_RUNTIME_ORIGIN_AFTER"
+        echo "stage2_native_cache_dir=$BSTAGE3_STAGE2_CACHE_DIR_DISPLAY"
+        echo "stage3_native_cache_dir=$BSTAGE3_STAGE3_CACHE_DIR_DISPLAY"
+        echo "runtime_path=$BSTAGE3_RUNTIME_PATH_DISPLAY"
+        echo "runtime_origin_snapshot_path=$BSTAGE3_RUNTIME_ORIGIN_AFTER_DISPLAY"
         echo "runtime_origin_snapshot_sha256=$(bootstrap_stage3_hash_file "$BSTAGE3_RUNTIME_ORIGIN_AFTER")"
-        echo "runtime_admitted_snapshot_path=$BSTAGE3_RUNTIME_ADMITTED_SNAPSHOT"
+        echo "runtime_admitted_snapshot_path=$BSTAGE3_RUNTIME_ADMITTED_DISPLAY"
         echo "runtime_admitted_snapshot_sha256=$(bootstrap_stage3_hash_file "$BSTAGE3_RUNTIME_ADMITTED_SNAPSHOT")"
-        echo "tool_authority_path=$BSTAGE3_TOOL_AUTHORITY"
+        echo "tool_authority_path=$BSTAGE3_TOOL_AUTHORITY_DISPLAY"
         echo "tool_authority_sha256=$(bootstrap_stage3_hash_file "$BSTAGE3_TOOL_AUTHORITY")"
-        echo "bootstrap_script_path=$BSTAGE3_BOOTSTRAP_SCRIPT"
+        echo "bootstrap_script_path=$BSTAGE3_BOOTSTRAP_SCRIPT_DISPLAY"
         echo "bootstrap_script_sha256=$bootstrap_stage3_script_after"
-        echo "provenance_helper_path=$BSTAGE3_HELPER"
+        echo "provenance_helper_path=$BSTAGE3_HELPER_DISPLAY"
         echo "provenance_helper_sha256=$bootstrap_stage3_helper_after"
         echo "provenance_helper_bundle_fingerprint=$bootstrap_stage3_helper_bundle_after"
-        echo "source_snapshot_path=$BSTAGE3_SOURCE_AFTER"
+        echo "source_snapshot_path=$BSTAGE3_SOURCE_AFTER_DISPLAY"
         echo "source_snapshot_sha256=$bootstrap_stage3_source_sha"
-        echo "output_path=$BSTAGE3_STAGE3"
+        echo "output_path=$BSTAGE3_STAGE3_DISPLAY"
         echo "output_sha256=$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE3")"
-    } >"$bootstrap_stage3_manifest_tmp" || return 1
-    mv "$bootstrap_stage3_manifest_tmp" "$BSTAGE3_MANIFEST"
+        } >"$bootstrap_stage3_manifest_tmp"
+    ) || return 1
+    [ -f "$bootstrap_stage3_manifest_tmp" ] &&
+        [ ! -L "$bootstrap_stage3_manifest_tmp" ] || return 1
+    if ! ln "$bootstrap_stage3_manifest_tmp" "$BSTAGE3_MANIFEST"; then
+        rm -f "$bootstrap_stage3_manifest_tmp"
+        return 1
+    fi
+    rm -f "$bootstrap_stage3_manifest_tmp" || return 1
 }
 
 # Re-derive all mutable bindings. Consumers must additionally require the

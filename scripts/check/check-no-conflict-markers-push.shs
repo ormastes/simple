@@ -113,30 +113,6 @@ die() {
 # comment explaining why it is legitimately allowed to contain markers.
 ALLOWLIST=""
 
-# Explicit, RECORDED per-push escape (added 2026-08-18, lane FPGUARD).
-# `--allow <path>` (repeatable, must precede the range) exempts exactly one
-# tracked path for exactly this run and NAMES it in the verdict line, following
-# the `--expect-files <n>` / `--expect-removals <n>` precedent. It is
-# path-scoped on purpose: a count-based escape here would wave through a real
-# rebase-injected marker in some OTHER file, which is the whole failure this
-# guard exists to catch. A path-scoped escape cannot.
-# Proven false positive it exists for: a legitimate documentation page that
-# SHOWS conflict-marker syntax in a fenced example (e.g. a "how to resolve a
-# conflict" guide) has a matching open+close pair in committed content and is
-# rejected identically to a poisoned source file. Reproducer:
-#   doc/08_tracking/bug/pre_push_guard_false_positives_2026-08-18.md
-CLI_ALLOW=""
-
-while [ "${1:-}" = "--allow" ]; do
-    shift
-    [ "$#" -gt 0 ] || { echo "$SELF: ERROR — --allow needs a path" >&2; exit 2; }
-    CLI_ALLOW="$CLI_ALLOW$1
-"
-    ALLOWLIST="$ALLOWLIST$1
-"
-    shift
-done
-
 range="${1:-}"
 explicit=0
 [ -n "$range" ] && explicit=1
@@ -242,9 +218,7 @@ fi
 
 found=0
 scanned=0
-exempted=0
 skipped_deleted=0
-skipped_gitlink=0
 
 while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -253,17 +227,7 @@ while IFS= read -r line; do
     case "$status" in
         D*) skipped_deleted=$((skipped_deleted + 1)); continue ;;
     esac
-    # A submodule (gitlink, mode 160000) has no blob content in THIS repo, so
-    # `git show <tip>:<path>` fails with "bad object". That is not unreadable
-    # content: there is nothing here that could carry a conflict marker, and the
-    # submodule's own history is guarded inside its own repository. Skip it
-    # explicitly and COUNT it, so the skip is visible in the verdict.
-    if [ "$(git ls-tree -d --format='%(objectmode)' "$tip" -- "$path" 2>/dev/null)" = "160000" ]; then
-        skipped_gitlink=$((skipped_gitlink + 1))
-        continue
-    fi
     if is_allowlisted "$path"; then
-        exempted=$((exempted + 1))
         continue
     fi
     if ! git show "$tip:$path" > "$TMPD/content" 2>"$TMPD/showerr"; then
@@ -272,28 +236,8 @@ while IFS= read -r line; do
   git said: $(head -1 "$TMPD/showerr" 2>/dev/null)"
     fi
     scanned=$((scanned + 1))
-    # jj picks a marker LENGTH per file (>=7) so the markers cannot collide with
-    # the content being wrapped -- a materialized conflict is routinely 10 chars
-    # (`<<<<<<<<<< Conflict 1 of 1`). The old fixed-width `^<<<<<<< ` required a
-    # space at column 8 and so silently missed every marker longer than 7. That
-    # is not hypothetical: .spipe/scv-remaining/impl_ws_a.md reached origin with
-    # a 10-char pair while this guard reported clean (found 2026-08-02).
-    #
-    # The label is optional too. `git merge-file -L '' -L '' -L ''` emits
-    # "<<<<<<< " / ">>>>>>> " -- marker, space, EMPTY label -- and any
-    # trailing-whitespace strip (every formatter, this repo's own fmt/lint, most
-    # editors on save) turns those into a bare "<<<<<<<" / ">>>>>>>". PROVED
-    # 2026-08-02: the pre-strip block matched, the post-strip block did not, so a
-    # real conflict block survived a formatter and became invisible. Requiring a
-    # space at the end of the run was the same fixed-shape mistake as requiring
-    # it at column 8.
-    #
-    # `^<{7,}( |$)` accepts >=7 markers followed by a space OR end of line, and
-    # still rejects a shorter run and a run glued to other text ("<<<<<<<x").
-    # Measured across all 109,516 files of the tree at 4834c449124: zero files
-    # gain a matching pair from the relaxation, so it costs no false positive.
-    open_lines=$("$GREP" -nE '^<{7,}( |$)' "$TMPD/content" 2>/dev/null)
-    close_lines=$("$GREP" -nE '^>{7,}( |$)' "$TMPD/content" 2>/dev/null)
+    open_lines=$("$GREP" -n '^<<<<<<< ' "$TMPD/content" 2>/dev/null)
+    close_lines=$("$GREP" -n '^>>>>>>> ' "$TMPD/content" 2>/dev/null)
     if [ -n "$open_lines" ] && [ -n "$close_lines" ]; then
         echo "CONFLICT MARKERS: $path" >&2
         printf '%s\n' "$open_lines" | while IFS=: read -r ln _; do
@@ -306,22 +250,9 @@ while IFS= read -r line; do
     fi
 done < "$TMPD/paths"
 
-# Verdict suffix that RECORDS any escape actually used, so a passing run can
-# never hide the fact that a path was exempted.
-allow_note=""
-if [ -n "$CLI_ALLOW" ]; then
-    allow_note=", $(printf '%s' "$CLI_ALLOW" | "$GREP" -c . ) path(s) exempted by explicit --allow: $(printf '%s' "$CLI_ALLOW" | tr '\n' ' ' | sed 's/ $//')"
-fi
-
 if [ "$scanned" -eq 0 ]; then
-    # Still fail closed when the zero came from anything OTHER than paths the
-    # caller named on the command line for this run.
-    if [ "$exempted" -eq 0 ] || [ -z "$CLI_ALLOW" ] || [ "$exempted" -ne "$(printf '%s' "$CLI_ALLOW" | "$GREP" -c .)" ]; then
-        die 2 "range '$range' changed $nlines path(s) but 0 were scanned
+    die 2 "range '$range' changed $nlines path(s) but 0 were scanned
   ($skipped_deleted deletion(s), the rest allowlisted). Nothing was verified."
-    fi
-    echo "$SELF: PASS — 0 file(s) scanned at $tip across $ncommits commit(s) in $range$allow_note (repo $toplevel)"
-    exit 0
 fi
 
 if [ "$found" -ne 0 ]; then
@@ -348,11 +279,9 @@ then re-check:
   jj resolve --list
   jj log -r 'roots(conflicts())'    # resolve the ROOT, descendants auto-rebase
 EOF
-    echo "$SELF: FAIL — conflict markers found in $range ($scanned file(s) scanned$allow_note)"
+    echo "$SELF: FAIL — conflict markers found in $range ($scanned file(s) scanned)"
     exit 1
 fi
-gitlink_note=""
-[ "$skipped_gitlink" -eq 0 ] || gitlink_note=" ($skipped_gitlink submodule gitlink(s) skipped: no blob content in this repo)"
 
-echo "$SELF: PASS — $scanned file(s) scanned at $tip across $ncommits commit(s) in $range, 0 conflict markers$allow_note$gitlink_note (repo $toplevel)"
+echo "$SELF: PASS — $scanned file(s) scanned at $tip across $ncommits commit(s) in $range, 0 conflict markers$allow_note (repo $toplevel)"
 exit 0

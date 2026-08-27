@@ -55,6 +55,34 @@ resume_stage4_prepare() {
     [ ! -e "${full}.provenance.env" ] && [ ! -L "${full}.provenance.env" ] || {
     echo "error: Stage 4 resume output collision" >&2; return 1;
   }
+  jobs_receipt=$(bootstrap_stage3_canonical_file \
+    "$(bootstrap_stage3_manifest_value stage3_jobs_receipt_path "$manifest")") || return 1
+  jobs_receipt_sha=$(bootstrap_stage3_manifest_value \
+    stage3_jobs_receipt_sha256 "$manifest") || return 1
+  [ "$(bootstrap_stage3_hash_file "$jobs_receipt")" = "$jobs_receipt_sha" ] || {
+    echo "error: admitted Stage 3 effective jobs receipt hash changed" >&2
+    return 1
+  }
+  admitted_jobs=$(bootstrap_stage3_manifest_value \
+    stage3_jobs_effective "$manifest") || return 1
+  bootstrap_build_jobs_verify_receipt "$jobs_receipt" "$admitted_jobs" || {
+    echo "error: admitted Stage 3 effective jobs receipt did not verify" >&2
+    return 1
+  }
+  case "${bootstrap_build_jobs_source:-default}" in
+    default)
+      jobs=$admitted_jobs
+      selfhost_jobs=$admitted_jobs
+      bootstrap_build_jobs_effective=$admitted_jobs
+      ;;
+    env|cli)
+      [ "$jobs" = "$admitted_jobs" ] || {
+        echo "error: explicit Stage 4 jobs do not match admitted Stage 3 jobs" >&2
+        return 1
+      }
+      ;;
+    *) return 1 ;;
+  esac
   lock=${bootstrap_lock_handle:?canonical bootstrap output lock is required}
   [ -f "$lock" ] && [ ! -L "$lock" ] && portable_lock_handle_is_owned "$lock" || {
     echo "error: admitted Stage 4 continuation lock is not parent-owned" >&2; return 1;
@@ -65,6 +93,9 @@ resume_stage4_prepare() {
   resume_stage4_snapshot "$resume_stage4_before" "$output" "$platform" || return 1
   receipt="$output/stage4-continuation.env"; resume_stage4_receipt=$receipt
   [ ! -e "$receipt" ] && [ ! -L "$receipt" ] || return 1
+  identity="${receipt}.current-tree.$$"; resume_stage4_work=$identity
+  stage4_write_current_tree_identity "$identity" "$root" || return 1
+  stage4_verify_stage3_identity_fields "$identity" "$manifest" "$root" || return 1
   umask 077
   {
     echo schema=simple-bootstrap-stage4-continuation-v1
@@ -79,16 +110,39 @@ resume_stage4_prepare() {
     echo lineage_sha256="${scheduler_lineage_sha256:?scheduler lineage hash is required}"
     echo bootstrap_lock_path="$lock"
     echo bootstrap_lock_owner_pid="$$"
+    echo build_jobs_effective="$jobs"
+    echo build_jobs_receipt_path="$jobs_receipt"
+    echo build_jobs_receipt_sha256="$jobs_receipt_sha"
     echo immutable_snapshot_path="$resume_stage4_before"
     echo immutable_snapshot_sha256="$(bootstrap_stage3_hash_file "$resume_stage4_before")"
+    echo repository_root="$(bootstrap_stage3_manifest_value repository_root "$identity")"
+    echo source_revision_kind="$(bootstrap_stage3_manifest_value source_revision_kind "$identity")"
+    echo source_revision="$(bootstrap_stage3_manifest_value source_revision "$identity")"
+    echo source_roots="$(bootstrap_stage3_manifest_value source_roots "$identity")"
+    echo stage3_source_snapshot_sha256="$(bootstrap_stage3_manifest_value stage3_source_snapshot_sha256 "$identity")"
+    echo git_state_sha256="$(bootstrap_stage3_manifest_value git_state_sha256 "$identity")"
+    echo git_head="$(bootstrap_stage3_manifest_value git_head "$identity")"
+    echo git_dirty_fingerprint="$(bootstrap_stage3_manifest_value git_dirty_fingerprint "$identity")"
+    echo stage3_producer_path="$(bootstrap_stage3_manifest_value stage3_producer_path "$identity")"
+    echo stage3_producer_sha256="$(bootstrap_stage3_manifest_value stage3_producer_sha256 "$identity")"
   } >"${receipt}.tmp.$$"
   mv "${receipt}.tmp.$$" "$receipt"
+  rm -f "$identity"; resume_stage4_work=
   STAGE4_CONTINUATION_RECEIPT=$receipt
   export STAGE4_CONTINUATION_RECEIPT
 }
 
 resume_stage4_verify_immutable() {
   [ -n "${resume_stage4_before:-}" ] || return 0
+  current_manifest=$(bootstrap_stage3_canonical_file \
+    "$(bootstrap_stage3_manifest_value stage3_provenance_path "$resume_stage4_receipt")") || return 1
+  stage4_verify_current_tree_identity "$resume_stage4_receipt" "$repo_root" || {
+    echo "error: current source/tree identity no longer matches Stage 4 continuation" >&2; return 1;
+  }
+  stage4_verify_stage3_identity_fields \
+    "$resume_stage4_receipt" "$current_manifest" "$repo_root" || {
+    echo "error: Stage 3 producer/source identity no longer matches Stage 4 continuation" >&2; return 1;
+  }
   after="${resume_stage4_before%.sha256}-after.sha256"
   resume_stage4_snapshot "$after" "$output_dir" "$PLATFORM" || return 1
   cmp -s "$resume_stage4_before" "$after" || {

@@ -1,0 +1,568 @@
+# Destination-owned lowering for scalar literals, collections, access, and
+# operators.  Every helper writes through the scalar registry facade: no
+# HirExpr/HirType/HirDestinationGraph aggregate crosses this boundary.
+use compiler.frontend.parser_types_expr.*
+use compiler.common.config.{TypeDefault}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.hir_destination_graph.{
+    HD_RANGE_EXPR, HD_RANGE_AUX, HD_AUX_RANGE_NONE, HD_AUX_RANGE_INTERPOLATION,
+    HD_AUX_RANGE_DICT_ENTRY, HD_EXPR_CAST, HD_EXPR_EXISTS, HD_EXPR_UNWRAP,
+    HD_TYPE_BOOL, HD_TYPE_STR, HD_TYPE_UNIT, HD_TYPE_ANY
+}
+use compiler.hir.hir_lowering.hir_destination_registry_writer.{
+    hdw_reserve_expr, hdw_reserve_type, hdw_reserve_aux, hdw_reserve_range,
+    hdw_set_range_at, hdw_publish_range, hdw_int, hdw_float, hdw_string,
+    hdw_bool, hdw_nil, hdw_error, hdw_named_var, hdw_qualified_named_var,
+    hdw_unary, hdw_binary, hdw_array,
+    hdw_array_repeat, hdw_tuple, hdw_dict, hdw_set, hdw_field,
+    hdw_resolved_field, hdw_index,
+    hdw_tuple_index, hdw_optional_chain, hdw_null_coalesce, hdw_single_expr,
+    hdw_cast_like, hdw_optional_range, hdw_type_test,
+    hdw_type_int, hdw_type_float,
+    hdw_type_leaf, hdw_type_infer, hdw_interpolation,
+    hdw_dict_entry, hdw_destination_member_symbol,
+    hdw_destination_member_module
+}
+use compiler.hir.hir_lowering._Expressions.expression_support.{
+    is_tuple_positional_field, parse_tuple_field_index
+}
+use compiler.hir.hir_lowering._Expressions.type_test_operand.{binary_is_type_operand}
+
+extern fn rt_enum_discriminant(value: Any) -> i64
+
+impl HirLowering:
+    me destination_expr_reserve(span: Span) -> i64:
+        hdw_reserve_expr(self.destination_slot, self.destination_generation,
+            span.start, span.end, span.line, span.col, span.file, span.length)
+
+    me destination_expr_reserve_aux(span: Span) -> i64:
+        hdw_reserve_aux(self.destination_slot, self.destination_generation,
+            span.start, span.end, span.line, span.col, span.file, span.length)
+
+    # Dictionary rows require a key type even while source types remain
+    # unresolved.  A fresh inference row preserves that deferred decision.
+    me destination_expr_infer_type(span: Span) -> i64:
+        val row = hdw_reserve_type(self.destination_slot, self.destination_generation,
+            span.start, span.end, span.line, span.col, span.file, span.length)
+        if row < 0: return -1
+        if not hdw_type_infer(self.destination_slot, self.destination_generation, row, 0, 0): return -1
+        row
+
+    # Scalar spelling of get_empty_array_default().  Keeping the conversion
+    # here avoids constructing a temporary HirType merely to copy it into the
+    # destination graph.
+    me destination_expr_empty_array_type(span: Span) -> i64:
+        val row = hdw_reserve_type(self.destination_slot, self.destination_generation,
+            span.start, span.end, span.line, span.col, span.file, span.length)
+        if row < 0: return -1
+        val default_type = if self.type_inference_config.?:
+            self.type_inference_config.unwrap().empty_array_default
+        else:
+            TypeDefault.I32
+        val ok = match default_type:
+            case TypeDefault.Void | TypeDefault.Nil:
+                hdw_type_leaf(self.destination_slot, self.destination_generation,
+                    row, HD_TYPE_UNIT)
+            case TypeDefault.Bool:
+                hdw_type_leaf(self.destination_slot, self.destination_generation,
+                    row, HD_TYPE_BOOL)
+            case TypeDefault.I8:
+                hdw_type_int(self.destination_slot, self.destination_generation, row, 8, true)
+            case TypeDefault.I16:
+                hdw_type_int(self.destination_slot, self.destination_generation, row, 16, true)
+            case TypeDefault.I32:
+                hdw_type_int(self.destination_slot, self.destination_generation, row, 32, true)
+            case TypeDefault.I64:
+                hdw_type_int(self.destination_slot, self.destination_generation, row, 64, true)
+            case TypeDefault.U8:
+                hdw_type_int(self.destination_slot, self.destination_generation, row, 8, false)
+            case TypeDefault.U16:
+                hdw_type_int(self.destination_slot, self.destination_generation, row, 16, false)
+            case TypeDefault.U32:
+                hdw_type_int(self.destination_slot, self.destination_generation, row, 32, false)
+            case TypeDefault.U64:
+                hdw_type_int(self.destination_slot, self.destination_generation, row, 64, false)
+            case TypeDefault.F32:
+                hdw_type_float(self.destination_slot, self.destination_generation, row, 32)
+            case TypeDefault.F64:
+                hdw_type_float(self.destination_slot, self.destination_generation, row, 64)
+            case TypeDefault.String:
+                hdw_type_leaf(self.destination_slot, self.destination_generation,
+                    row, HD_TYPE_STR)
+            case TypeDefault.Any:
+                hdw_type_leaf(self.destination_slot, self.destination_generation,
+                    row, HD_TYPE_ANY)
+            case _:
+                hdw_type_int(self.destination_slot, self.destination_generation, row, 32, true)
+        if ok: row else: -1
+
+    me destination_expr_publish_range(handle: i64, subtype: i64) -> bool:
+        hdw_publish_range(self.destination_slot, self.destination_generation,
+            handle, HD_RANGE_AUX, subtype)
+
+    me destination_expr_binary_code(op: BinOp, span: Span) -> i64:
+        match op:
+            case BinOp.Add: 0
+            case BinOp.Sub: 1
+            case BinOp.Mul: 2
+            case BinOp.Div: 3
+            case BinOp.Mod: 4
+            case BinOp.Pow: 5
+            case BinOp.MatMul: 6
+            case BinOp.Eq: 7
+            case BinOp.NotEq: 8
+            case BinOp.Lt: 9
+            case BinOp.LtEq: 10
+            case BinOp.Gt: 11
+            case BinOp.GtEq: 12
+            case BinOp.And: 13
+            case BinOp.Or: 14
+            case BinOp.BitAnd: 15
+            case BinOp.BitOr: 16
+            case BinOp.BitXor: 17
+            case BinOp.Shl: 18
+            case BinOp.Shr: 19
+            case BinOp.BroadcastAdd: 20
+            case BinOp.BroadcastSub: 21
+            case BinOp.BroadcastMul: 22
+            case BinOp.BroadcastDiv: 23
+            case BinOp.BroadcastPow: 24
+            case BinOp.PipeForward: 25
+            case BinOp.Compose: 26
+            case BinOp.ComposeBack: 27
+            case BinOp.Parallel: 28
+            case BinOp.LayerConnect: 29
+            case BinOp.In: 30
+            case BinOp.NotIn: 31
+            case BinOp.Is: 32
+            case BinOp.IsNot: 33
+            case _: -1
+
+    me destination_expr_unary_code(op: UnaryOp) -> i64:
+        match op:
+            case UnaryOp.Neg: 0
+            case UnaryOp.Not: 1
+            case UnaryOp.BitNot: 2
+            case UnaryOp.Ref: 3
+            case UnaryOp.RefMut: 4
+            case UnaryOp.Deref: 5
+            case UnaryOp.Transpose: 6
+            case _: -1
+
+    me destination_expr_nil_sentinel(span: Span) -> i64:
+        val row = self.destination_expr_reserve(span)
+        if row < 0: return -1
+        if hdw_nil(self.destination_slot, self.destination_generation, row): row else: -1
+
+    me destination_lower_literals_access(e: Expr) -> i64:
+        self.destination_lower_literals_access_unchecked(e)
+
+    me destination_lower_literals_access_unchecked(e: Expr) -> i64:
+        val kind: ExprKind = e.kind
+        # `Field` collides with a struct name in bootstrap pattern lowering;
+        # isolate it behind its stable discriminant before destructuring.
+        if rt_enum_discriminant(kind) == 21232742:
+            match kind:
+                case ExprKind.Field(base, name):
+                    val parent = self.destination_expr_reserve(e.span)
+                    if parent < 0: return -1
+                    # A module namespace field naming a callable is a value
+                    # symbol, never a runtime receiver field.
+                    match base.kind:
+                        case ExprKind.Ident(base_name):
+                            if val base_symbol = self.symbols.lookup(base_name):
+                                if val base_record = self.symbols.get_symbol_raw(base_symbol.id):
+                                    if val module_name = base_record.defining_module:
+                                        if val callable = self.field_module_callable(module_name, name):
+                                            val display = self.symbols.symbol_display_name(callable, name)
+                                            val defining_module =
+                                                self.destination_named_symbol_module(
+                                                    callable.id, e.span)
+                                            if defining_module < 0: return -1
+                                            if hdw_qualified_named_var(
+                                                    self.destination_slot,
+                                                    self.destination_generation,
+                                                    parent, defining_module,
+                                                    callable.id, display): return parent
+                                            return -1
+                        case _: ()
+                    val base_row = self.destination_lower_expr(base)
+                    if base_row < 0: return -1
+                    if is_tuple_positional_field(name):
+                        val index_row = self.destination_expr_reserve(e.span)
+                        if index_row < 0: return -1
+                        if not hdw_int(self.destination_slot, self.destination_generation,
+                                index_row, parse_tuple_field_index(name), false, ""): return -1
+                        if hdw_index(self.destination_slot, self.destination_generation,
+                                parent, base_row, index_row): return parent
+                        return -1
+                    var has_member_symbol = false
+                    var member_symbol = -1
+                    var member_module = -1
+                    match base.kind:
+                        case ExprKind.Ident(base_name):
+                            if val base_symbol = self.symbols.lookup(base_name):
+                                if self.field_access_for_base_raw(
+                                        base_symbol.id, name) == 0:
+                                    self.error("field `{name}` is not visible from this module", e.span)
+                                    return -1
+                                val member_row =
+                                    self.resolve_current_destination_member_from_symbol(
+                                        base_symbol.id, name)
+                                if member_row < 0:
+                                    self.error(
+                                        "E-HIR-DEST-MEMBER-RESOLUTION: field `" +
+                                        name + "` has no module-qualified destination member",
+                                        e.span)
+                                    return -1
+                                member_symbol = hdw_destination_member_symbol(
+                                    self.destination_slot,
+                                    self.destination_generation, member_row)
+                                member_module = hdw_destination_member_module(
+                                    self.destination_slot,
+                                    self.destination_generation, member_row)
+                                if member_symbol < 0 or member_module < 0: return -1
+                                has_member_symbol = true
+                        case _: ()
+                    if has_member_symbol:
+                        if hdw_resolved_field(self.destination_slot,
+                                self.destination_generation, parent, base_row,
+                                name, member_module, member_symbol): return parent
+                    elif hdw_field(self.destination_slot,
+                            self.destination_generation, parent, base_row,
+                            name, false, -1): return parent
+                    return -1
+                case _: return -1
+
+        match kind:
+            case ExprKind.IntLit(value):
+                val parent = self.destination_expr_reserve(e.span)
+                if parent >= 0 and hdw_int(self.destination_slot, self.destination_generation, parent, value, false, ""): parent else: -1
+            case ExprKind.FloatLit(value):
+                val parent = self.destination_expr_reserve(e.span)
+                if parent >= 0 and hdw_float(self.destination_slot, self.destination_generation, parent, value, false, ""): parent else: -1
+            case ExprKind.StringLit(value, interps):
+                val parent = self.destination_expr_reserve(e.span)
+                if parent < 0: return -1
+                match interps:
+                    case Some(items):
+                        val count = items.len()
+                        val range = hdw_reserve_range(self.destination_slot,
+                            self.destination_generation, HD_RANGE_AUX,
+                            HD_AUX_RANGE_INTERPOLATION, count)
+                        if range < 0: return -1
+                        var offset = 0
+                        while offset < count:
+                            val item: Interpolation = items[offset]
+                            val aux = self.destination_expr_reserve_aux(item.span)
+                            if aux < 0: return -1
+                            val child = self.destination_lower_expr(item.expr)
+                            if child < 0: return -1
+                            if not hdw_interpolation(self.destination_slot,
+                                    self.destination_generation, aux, child,
+                                    item.has_format, item.format): return -1
+                            if not hdw_set_range_at(self.destination_slot,
+                                    self.destination_generation, range,
+                                    HD_RANGE_AUX, offset, aux): return -1
+                            offset = offset + 1
+                        if not self.destination_expr_publish_range(
+                                range, HD_AUX_RANGE_INTERPOLATION): return -1
+                        if hdw_string(self.destination_slot,
+                                self.destination_generation, parent, value,
+                                true, range, count): parent else: -1
+                    case _:
+                        if hdw_string(self.destination_slot,
+                                self.destination_generation, parent, value,
+                                false, -1, 0): parent else: -1
+            case ExprKind.BoolLit(value):
+                val parent = self.destination_expr_reserve(e.span)
+                if parent >= 0 and hdw_bool(self.destination_slot, self.destination_generation, parent, value): parent else: -1
+            case ExprKind.NilLit:
+                self.destination_expr_nil_sentinel(e.span)
+            case ExprKind.Error:
+                val parent = self.destination_expr_reserve(e.span)
+                if parent >= 0 and hdw_error(self.destination_slot,
+                        self.destination_generation, parent): parent else: -1
+            case ExprKind.ArrayLit(values):
+                val parent = self.destination_expr_reserve(e.span)
+                if parent < 0: return -1
+                val count = values.len()
+                if count == 0 and self.is_strict_empty_collections():
+                    self.error("empty array requires explicit type annotation", e.span)
+                    return -1
+                val range = hdw_reserve_range(self.destination_slot,
+                    self.destination_generation, HD_RANGE_EXPR, 0, count)
+                if range < 0: return -1
+                var offset = 0
+                while offset < count:
+                    val child = self.destination_lower_expr(values[offset])
+                    if child < 0: return -1
+                    if not hdw_set_range_at(self.destination_slot,
+                            self.destination_generation, range,
+                            HD_AUX_RANGE_NONE, offset, child): return -1
+                    offset = offset + 1
+                if not hdw_publish_range(self.destination_slot,
+                        self.destination_generation, range,
+                        HD_RANGE_EXPR, 0): return -1
+                if count == 0:
+                    val default_type = self.destination_expr_empty_array_type(e.span)
+                    if default_type < 0: return -1
+                    if hdw_array(self.destination_slot,
+                            self.destination_generation, parent, range,
+                            count, true, default_type): return parent
+                    return -1
+                if hdw_array(self.destination_slot, self.destination_generation,
+                        parent, range, count, false, -1): parent else: -1
+            case ExprKind.TupleLit(values):
+                val parent = self.destination_expr_reserve(e.span)
+                if parent < 0: return -1
+                val count = values.len()
+                val range = hdw_reserve_range(self.destination_slot,
+                    self.destination_generation, HD_RANGE_EXPR, 0, count)
+                if range < 0: return -1
+                var offset = 0
+                while offset < count:
+                    val child = self.destination_lower_expr(values[offset])
+                    if child < 0: return -1
+                    if not hdw_set_range_at(self.destination_slot,
+                            self.destination_generation, range,
+                            HD_AUX_RANGE_NONE, offset, child): return -1
+                    offset = offset + 1
+                if not hdw_publish_range(self.destination_slot,
+                        self.destination_generation, range,
+                        HD_RANGE_EXPR, 0): return -1
+                if hdw_tuple(self.destination_slot, self.destination_generation,
+                        parent, range, count): parent else: -1
+            case ExprKind.SetLit(values):
+                val parent = self.destination_expr_reserve(e.span)
+                if parent < 0: return -1
+                val count = values.len()
+                val range = hdw_reserve_range(self.destination_slot,
+                    self.destination_generation, HD_RANGE_EXPR, 0, count)
+                if range < 0: return -1
+                var offset = 0
+                while offset < count:
+                    val child = self.destination_lower_expr(values[offset])
+                    if child < 0: return -1
+                    if not hdw_set_range_at(self.destination_slot,
+                            self.destination_generation, range,
+                            HD_AUX_RANGE_NONE, offset, child): return -1
+                    offset = offset + 1
+                if not hdw_publish_range(self.destination_slot,
+                        self.destination_generation, range,
+                        HD_RANGE_EXPR, 0): return -1
+                if hdw_set(self.destination_slot, self.destination_generation,
+                        parent, range, count, false, -1): parent else: -1
+            case ExprKind.DictLit(entries):
+                val parent = self.destination_expr_reserve(e.span)
+                if parent < 0: return -1
+                val count = entries.len()
+                val range = hdw_reserve_range(self.destination_slot,
+                    self.destination_generation, HD_RANGE_AUX,
+                    HD_AUX_RANGE_DICT_ENTRY, count)
+                if range < 0: return -1
+                var offset = 0
+                while offset < count:
+                    val (key_source, value_source) = entries[offset]
+                    val aux = self.destination_expr_reserve_aux(e.span)
+                    if aux < 0: return -1
+                    val key = self.destination_lower_expr(key_source)
+                    if key < 0: return -1
+                    val entry_value = self.destination_lower_expr(value_source)
+                    if entry_value < 0: return -1
+                    if not hdw_dict_entry(self.destination_slot,
+                            self.destination_generation, aux, key,
+                            entry_value): return -1
+                    if not hdw_set_range_at(self.destination_slot,
+                            self.destination_generation, range,
+                            HD_RANGE_AUX, offset, aux): return -1
+                    offset = offset + 1
+                if not self.destination_expr_publish_range(
+                        range, HD_AUX_RANGE_DICT_ENTRY): return -1
+                val key_type = self.destination_expr_infer_type(e.span)
+                if key_type < 0: return -1
+                if hdw_dict(self.destination_slot, self.destination_generation,
+                        parent, range, count, key_type, false, -1): parent else: -1
+            case ExprKind.ArrayRepeat(value, count):
+                val parent = self.destination_expr_reserve(e.span)
+                if parent < 0: return -1
+                val value_row = self.destination_lower_expr(value)
+                if value_row < 0: return -1
+                val count_row = self.destination_lower_expr(count)
+                if count_row < 0: return -1
+                if hdw_array_repeat(self.destination_slot, self.destination_generation,
+                        parent, value_row, count_row, false, -1): parent else: -1
+            case ExprKind.Ident(name):
+                val parent = self.destination_expr_reserve(e.span)
+                if parent < 0: return -1
+                if val symbol = self.symbols.lookup(name):
+                    val display = self.symbols.symbol_display_name(symbol, name)
+                    if val record = self.symbols.get_symbol_raw(symbol.id):
+                        if record.defining_module.?:
+                            val defining_module =
+                                self.destination_named_symbol_module(
+                                    symbol.id, e.span)
+                            if defining_module < 0: return -1
+                            if hdw_qualified_named_var(self.destination_slot,
+                                    self.destination_generation, parent,
+                                    defining_module, symbol.id, display): parent else: -1
+                        else:
+                            if hdw_named_var(self.destination_slot,
+                                    self.destination_generation, parent,
+                                    symbol.id, display): parent else: -1
+                    else:
+                        -1
+                else:
+                    -1
+            case ExprKind.Index(base, index):
+                val parent = self.destination_expr_reserve(e.span)
+                if parent < 0: return -1
+                # Preserve the legacy ExistsCheck(Index(...)) rewrite and its
+                # evaluation order: index first, then the unwrapped base.
+                match base.kind:
+                    case ExprKind.ExistsCheck(exists_base):
+                        val indexed = self.destination_expr_reserve(e.span)
+                        if indexed < 0: return -1
+                        val exists_index_row = self.destination_lower_expr(index)
+                        if exists_index_row < 0: return -1
+                        val exists_base_row = self.destination_lower_expr(exists_base)
+                        if exists_base_row < 0: return -1
+                        if not hdw_index(self.destination_slot,
+                                self.destination_generation, indexed,
+                                exists_base_row, exists_index_row): return -1
+                        if hdw_single_expr(self.destination_slot,
+                                self.destination_generation, parent,
+                                HD_EXPR_EXISTS, indexed): return parent
+                        return -1
+                    case _: ()
+                # Ordinary indexing also lowers the index first; this matches
+                # the canonical path's observable child ordering.
+                val index_row = self.destination_lower_expr(index)
+                if index_row < 0: return -1
+                val base_row = self.destination_lower_expr(base)
+                if base_row < 0: return -1
+                if not hdw_index(self.destination_slot, self.destination_generation,
+                        parent, base_row, index_row): return -1
+                val base_type = self.destination_direct_symbol_type(base)
+                if base_type >= 0:
+                    val shape = hdw_destination_type_shape(self.destination_slot,
+                        self.destination_generation, base_type)
+                    var result_type = -1
+                    if shape == HD_TYPE_DICT:
+                        result_type = hdw_destination_type_child1(
+                            self.destination_slot, self.destination_generation,
+                            base_type)
+                    elif shape == HD_TYPE_ARRAY or shape == HD_TYPE_SLICE:
+                        result_type = hdw_destination_type_child0(
+                            self.destination_slot, self.destination_generation,
+                            base_type)
+                    if result_type >= 0 and not hdw_set_expr_type(
+                            self.destination_slot, self.destination_generation,
+                            parent, result_type): return -1
+                parent
+            case ExprKind.OptionalChain(base, field):
+                val parent = self.destination_expr_reserve(e.span)
+                if parent < 0: return -1
+                val child = self.destination_lower_expr(base)
+                if child < 0: return -1
+                if hdw_optional_chain(self.destination_slot, self.destination_generation,
+                        parent, child, field): parent else: -1
+            case ExprKind.NullCoalesce(left, right):
+                val parent = self.destination_expr_reserve(e.span)
+                if parent < 0: return -1
+                val left_row = self.destination_lower_expr(left)
+                if left_row < 0: return -1
+                val right_row = self.destination_lower_expr(right)
+                if right_row < 0: return -1
+                if hdw_null_coalesce(self.destination_slot, self.destination_generation,
+                        parent, left_row, right_row): parent else: -1
+            case ExprKind.ExistsCheck(base) | ExprKind.ForceUnwrap(base):
+                val parent = self.destination_expr_reserve(e.span)
+                if parent < 0: return -1
+                val child = self.destination_lower_expr(base)
+                if child < 0: return -1
+                val shape = if rt_enum_discriminant(kind) == rt_enum_discriminant(ExprKind.ExistsCheck(base)): HD_EXPR_EXISTS else: HD_EXPR_UNWRAP
+                if hdw_single_expr(self.destination_slot, self.destination_generation,
+                        parent, shape, child): parent else: -1
+            case ExprKind.Cast(value, target):
+                val parent = self.destination_expr_reserve(e.span)
+                if parent < 0: return -1
+                val value_row = self.destination_lower_expr(value)
+                if value_row < 0: return -1
+                val type_row = self.destination_lower_type(target)
+                if type_row < 0: return -1
+                if hdw_cast_like(self.destination_slot, self.destination_generation,
+                        parent, HD_EXPR_CAST, value_row, type_row): parent else: -1
+            case ExprKind.Binary(op, left, right):
+                val parent = self.destination_expr_reserve(e.span)
+                if parent < 0: return -1
+                val type_name = binary_is_type_operand(op, right)
+                if type_name != "":
+                    if op == BinOp.Is:
+                        val value_row = self.destination_lower_expr(left)
+                        if value_row < 0 or not hdw_type_test(
+                                self.destination_slot, self.destination_generation,
+                                parent, value_row, type_name): return -1
+                        return parent
+                    # IsNot is unary Not(TypeTest(...)); reserve the fixed
+                    # TypeTest child before descending into its value.
+                    val tested = self.destination_expr_reserve(e.span)
+                    if tested < 0: return -1
+                    val value_row = self.destination_lower_expr(left)
+                    if value_row < 0 or not hdw_type_test(
+                            self.destination_slot, self.destination_generation,
+                            tested, value_row, type_name) or not hdw_unary(
+                            self.destination_slot, self.destination_generation,
+                            parent, 1, tested): return -1
+                    return parent
+                val op_code = self.destination_expr_binary_code(op, e.span)
+                if op_code < 0: return -1
+                val left_row = self.destination_lower_expr(left)
+                if left_row < 0: return -1
+                val right_row = self.destination_lower_expr(right)
+                if right_row < 0: return -1
+                if hdw_binary(self.destination_slot, self.destination_generation,
+                        parent, op_code, left_row, right_row): parent else: -1
+            case ExprKind.Unary(op, value):
+                val parent = self.destination_expr_reserve(e.span)
+                if parent < 0: return -1
+                val op_code = self.destination_expr_unary_code(op)
+                if op_code < 0: return -1
+                val child = self.destination_lower_expr(value)
+                if child < 0: return -1
+                if hdw_unary(self.destination_slot, self.destination_generation,
+                        parent, op_code, child): parent else: -1
+            case ExprKind.Range(start, end, inclusive, step):
+                val parent = self.destination_expr_reserve(e.span)
+                if parent < 0: return -1
+                var has_start = false
+                var start_row = -1
+                match start:
+                    case Some(value):
+                        start_row = self.destination_lower_expr(value)
+                        has_start = true
+                    case _: ()
+                if has_start and start_row < 0: return -1
+                var has_end = false
+                var end_row = -1
+                match end:
+                    case Some(value):
+                        end_row = self.destination_lower_expr(value)
+                        has_end = true
+                    case _: ()
+                if has_end and end_row < 0: return -1
+                var has_step = false
+                var step_row = -1
+                match step:
+                    case Some(value):
+                        step_row = self.destination_lower_expr(value)
+                        has_step = true
+                    case _: ()
+                if has_step and step_row < 0: return -1
+                if hdw_optional_range(self.destination_slot,
+                        self.destination_generation, parent, has_start,
+                        start_row, has_end, end_row, inclusive, has_step,
+                        step_row): parent else: -1
+            case _:
+                -1

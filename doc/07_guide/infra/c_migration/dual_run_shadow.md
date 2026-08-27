@@ -24,11 +24,7 @@ inside one test loop and compared. This catches:
   false divergence),
 - text-formatting drift for the text-returning pairs (`dual_check_text`).
 
-## Wired pairs (17)
-
-Seven general pairs are wired in
-`test/01_unit/lib/common/spec/dual_run_shadow_spec.spl`; the ten timestamp
-pairs are wired in `test/01_unit/lib/common/time_utils_crosslang_spec.spl`.
+## Wired pairs (13, `test/01_unit/lib/common/spec/dual_run_shadow_spec.spl`)
 
 | C-MIG id | Simple function | C/Rust oracle |
 |---|---|---|
@@ -36,16 +32,12 @@ pairs are wired in `test/01_unit/lib/common/time_utils_crosslang_spec.spl`.
 | C-MIG-0032 | `numeric_round.ceil_f64` | `rt_math_ceil` |
 | C-MIG-0026 | `convert.i64_to_text` | `rt_raw_i64_to_string` |
 | C-MIG-0028 | `encoding.byte_char.byte_char` | `rt_byte_char` |
-| C-MIG-0019 | `time_utils.timestamp_from_components` | test-only `rt_timestamp_oracle_from_components` |
-| C-MIG-0019 | `time_utils.timestamp_add_days` | test-only `rt_timestamp_oracle_add_days` |
-| C-MIG-0019 | `time_utils.timestamp_diff_days` | test-only `rt_timestamp_oracle_diff_days` |
-| C-MIG-0019 | `time_utils.timestamp_get_year` | test-only `rt_timestamp_oracle_get_year` |
-| C-MIG-0019 | `time_utils.timestamp_get_month` | test-only `rt_timestamp_oracle_get_month` |
-| C-MIG-0019 | `time_utils.timestamp_get_day` | test-only `rt_timestamp_oracle_get_day` |
-| C-MIG-0019 | `time_utils.timestamp_get_hour` | test-only `rt_timestamp_oracle_get_hour` |
-| C-MIG-0019 | `time_utils.timestamp_get_minute` | test-only `rt_timestamp_oracle_get_minute` |
-| C-MIG-0019 | `time_utils.timestamp_get_second` | test-only `rt_timestamp_oracle_get_second` |
-| C-MIG-0019 | `time_utils.timestamp_get_microsecond` | test-only `rt_timestamp_oracle_get_microsecond` |
+| C-MIG-0019 | `time_utils.timestamp_from_components` | `rt_timestamp_from_components` |
+| C-MIG-0019 | `time_utils.timestamp_add_days` | `rt_timestamp_add_days` |
+| C-MIG-0019 | `time_utils.timestamp_diff_days` | `rt_timestamp_diff_days` |
+| C-MIG-0019 | `time_utils.timestamp_get_year` | `rt_timestamp_get_year` |
+| C-MIG-0019 | `time_utils.timestamp_get_month` | `rt_timestamp_get_month` |
+| C-MIG-0019 | `time_utils.timestamp_get_day` | `rt_timestamp_get_day` |
 | C-MIG-0020 | `hash.rt_hash_text` (ABI bridge) | `rt_hash_text` |
 | C-MIG-0021 | `text.parse_i64` (well-formed input only — sentinel differs, see spec comment) | `rt_string_to_int` |
 | C-MIG-0022 | `base_encoding.utilities.validated_utf8_bytes_to_text_linear` | `rt_text_validate_utf8` |

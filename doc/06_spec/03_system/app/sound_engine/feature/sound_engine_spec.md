@@ -1,6 +1,29 @@
 # Sound Engine Specification
 
-> Tests covering Sound engine system design contract.
+> <details>
+
+<!-- sdn-diagram:id=sound_engine_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=sound_engine_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+sound_engine_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=sound_engine_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,26 +40,21 @@
 
 #### REQ-001 REQ-004 REQ-005 runs lifecycle through no-audio backend
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- REQ-001 REQ-004 REQ-005 runs lifecycle through no-audio backend
 - Create a no-audio backend for deterministic CI playback
+- var engine = SoundEngine create
    - Expected: engine.capability.status equals `portable`
    - Expected: engine.capability.backend equals `no-audio`
+- engine teardown
    - Expected: engine.teardown_count equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("REQ-001 REQ-004 REQ-005 runs lifecycle through no-audio backend")
 step("Create a no-audio backend for deterministic CI playback")
 var engine = SoundEngine.create(SoundEngineConfig.no_audio())
 expect(engine.capability.status).to_equal("portable")
@@ -50,7 +68,6 @@ expect(engine.teardown_count).to_equal(1)
 
 #### REQ-002 REQ-003 reports every selected platform explicitly
 
-- REQ-002 REQ-003 reports every selected platform explicitly
 - Probe each requested platform without silent native fallback
    - Expected: linux.status equals `native`
    - Expected: bsd.status equals `host-unavailable`
@@ -61,12 +78,10 @@ expect(engine.teardown_count).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("REQ-002 REQ-003 reports every selected platform explicitly")
 step("Probe each requested platform without silent native fallback")
 val linux = sound_capability("linux", "linux")
 val bsd = sound_capability("bsd", "linux")
@@ -86,8 +101,8 @@ expect(simple_os.backend).to_equal("simpleos-audio-service")
 
 #### REQ-006 emits a renderer-independent 2D positional command
 
-- REQ-006 emits a renderer-independent 2D positional command
 - Attach a sound to a 2D entity and derive pan and volume
+- var engine = SoundEngine create
    - Expected: cmd.kind equals `play-2d`
    - Expected: cmd.entity_id equals `enemy-7`
    - Expected: cmd.volume_milli equals `875`
@@ -98,12 +113,10 @@ expect(simple_os.backend).to_equal("simpleos-audio-service")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("REQ-006 emits a renderer-independent 2D positional command")
 step("Attach a sound to a 2D entity and derive pan and volume")
 var engine = SoundEngine.create(SoundEngineConfig.no_audio())
 val cmd = engine.play_2d("enemy-7", "hit.wav", 250, 0)
@@ -119,8 +132,8 @@ expect(engine.command_count()).to_equal(1)
 
 #### REQ-007 emits 3D listener metadata for spatial playback
 
-- REQ-007 emits 3D listener metadata for spatial playback
 - Attach a sound to a 3D entity with Doppler, occlusion, and HRTF metadata
+- var engine = SoundEngine create
    - Expected: cmd.kind equals `play-3d`
    - Expected: cmd.volume_milli equals `880`
 
@@ -128,12 +141,10 @@ expect(engine.command_count()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("REQ-007 emits 3D listener metadata for spatial playback")
 step("Attach a sound to a 3D entity with Doppler, occlusion, and HRTF metadata")
 var engine = SoundEngine.create(SoundEngineConfig.no_audio())
 val cmd = engine.play_3d("drone-3", "engine.ssnd", 120, 1040, 250)
@@ -148,7 +159,6 @@ expect(cmd.metadata).to_contain("hrtf=ready")
 
 #### REQ-008 REQ-009 decodes fixed vectors and rejects malformed sound assets
 
-- REQ-008 REQ-009 decodes fixed vectors and rejects malformed sound assets
 - Decode lossless and compact game-asset vectors
    - Expected: pcm.encoding equals `pcm-lossless`
    - Expected: compact.encoding equals `delta-game-asset`
@@ -160,12 +170,10 @@ expect(cmd.metadata).to_contain("hrtf=ready")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("REQ-008 REQ-009 decodes fixed vectors and rejects malformed sound assets")
 step("Decode lossless and compact game-asset vectors")
 val pcm = sound_engine_decode_vector("SSND:rate=48000 channels=2 pcm")
 val compact = sound_engine_decode_vector("SSND:rate=48000 channels=2 delta")
@@ -182,7 +190,6 @@ expect(bad_rate.error).to_equal("bad-sample-rate")
 
 #### REQ-010 keeps mixer ordering deterministic across worker and fallback modes
 
-- REQ-010 keeps mixer ordering deterministic across worker and fallback modes
 - Run decode preparation with and without a worker pool
    - Expected: worker.mode equals `worker-pool`
    - Expected: inline.mode equals `inline-fallback`
@@ -194,12 +201,10 @@ expect(bad_rate.error).to_equal("bad-sample-rate")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("REQ-010 keeps mixer ordering deterministic across worker and fallback modes")
 step("Run decode preparation with and without a worker pool")
 val worker = sound_engine_parallel_plan(true)
 val inline = sound_engine_parallel_plan(false)
@@ -214,7 +219,6 @@ expect(worker.order_hash).to_equal(inline.order_hash)
 
 #### REQ-011 covers hardening labels for invalid and extreme inputs
 
-- REQ-011 covers hardening labels for invalid and extreme inputs
 - Reject invalid codec boundaries and unsupported device states
    - Expected: bad_channels.error equals `bad-channel-count`
    - Expected: unknown.status equals `unsupported`
@@ -223,12 +227,10 @@ expect(worker.order_hash).to_equal(inline.order_hash)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("REQ-011 covers hardening labels for invalid and extreme inputs")
 step("Reject invalid codec boundaries and unsupported device states")
 val bad_channels = sound_engine_decode_vector("SSND:rate=48000 channels=9 pcm")
 val unknown = sound_capability("plan9", "linux")
@@ -241,19 +243,16 @@ expect(unknown.reason).to_contain("unknown")
 
 #### REQ-012 REQ-013 records scenario manual and documentation evidence
 
-- REQ-012 REQ-013 records scenario manual and documentation evidence
 - Verify design artifacts identify primary flows and review handoff
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("REQ-012 REQ-013 records scenario manual and documentation evidence")
 step("Verify design artifacts identify primary flows and review handoff")
 val manual = "2d-flow 3d-flow streaming no-audio platform-status"
 val docs = "architecture requirements nfr test-plan agent-tasks"
@@ -272,12 +271,12 @@ expect(docs).to_contain("agent-tasks")
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/sound_engine/feature/sound_engine_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Sound engine system design contract.
+Tests covering:
 - Sound engine system design contract
 
 ## Scenario Summary
@@ -292,59 +291,3 @@ Tests covering Sound engine system design contract.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-- `REQ-004`
-- `REQ-005`
-- `REQ-003`
-- `REQ-009`
-- `REQ-013`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `649f048637d2e2ea479764f970ac9e8513ad161c3ce9af39ca1f4351f80c05e7`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `649f048637d2e2ea479764f970ac9e8513ad161c3ce9af39ca1f4351f80c05e7`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `649f048637d2e2ea479764f970ac9e8513ad161c3ce9af39ca1f4351f80c05e7`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/03_system/app/sound_engine/feature/sound_engine_spec.spl
-mirror: doc/06_spec/03_system/app/sound_engine/feature/sound_engine_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/app/sound_engine/feature/sound_engine_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/app/sound_engine/feature/sound_engine_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/sound_engine/feature/sound_engine_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 8 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/app/sound_engine/feature/sound_engine_spec.spl:16:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'REQ-001 REQ-004 REQ-005 runs lifecycle through no-audio backend' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/sound_engine/feature/sound_engine_spec.spl:27:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'REQ-002 REQ-003 reports every selected platform explicitly' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/sound_engine/feature/sound_engine_spec.spl:44:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'REQ-006 emits a renderer-independent 2D positional command' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

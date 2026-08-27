@@ -1,0 +1,139 @@
+# Typed one-hot selector for normalized runtime ALU and illegal completions.
+
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwConstant,
+    HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort, HwSelectOp,
+    HwSignal}
+
+fn selector_payload_fields(x: i32) -> [(text, i32)]:
+    [("privilege", 2), ("original_instruction", 32), ("canonical_instruction", 32),
+        ("instruction_length_bytes", 3), ("pc_before", x), ("pc_after", x),
+        ("rd", 5), ("rd_write", 1), ("rd_value", x), ("memory_address", x),
+        ("memory_read_mask", 32), ("memory_write_mask", 32),
+        ("memory_read_data", x), ("memory_write_data", x),
+        ("execute_trap_valid", 1), ("execute_trap_cause", x),
+        ("execute_trap_tval", x), ("memory_trap_valid", 1),
+        ("memory_trap_cause", x), ("memory_trap_tval", x),
+        ("redirect_valid", 1), ("redirect_target", x),
+        ("provider_event_id", 64), ("decode_event_id", 64), ("illegal_valid", 1)]
+
+fn selector_ports(x: i32) -> [HwPort]:
+    var ports = [HwPort.input("uop_valid", "Bits", 1),
+        HwPort.input("uop_illegal_valid", "Bits", 1),
+        HwPort.input("uop_lineage_valid", "Bits", 1),
+        HwPort.input("uop_privilege", "Bits", 2),
+        HwPort.input("uop_original_instruction", "Bits", 32),
+        HwPort.input("uop_canonical_instruction", "Bits", 32),
+        HwPort.input("uop_instruction_length_bytes", "Bits", 3),
+        HwPort.input("uop_pc_before", "Bits", x), HwPort.input("uop_fallthrough_pc", "Bits", x),
+        HwPort.input("uop_provider_event_id", "Bits", 64),
+        HwPort.input("uop_decode_event_id", "Bits", 64),
+        HwPort.input("alu_valid", "Bits", 1), HwPort.input("alu_fault", "Bits", 1),
+        HwPort.input("illegal_valid", "Bits", 1), HwPort.input("illegal_fault", "Bits", 1),
+        HwPort.input("completion_ready", "Bits", 1),
+        HwPort.output("selected_valid", "Bits", 1), HwPort.output("uop_ready", "Bits", 1),
+        HwPort.output("selector_fault", "Bits", 1)]
+    for lane in ["alu", "illegal"]:
+        for field in selector_payload_fields(x):
+            ports.push(HwPort.input(lane + "_" + field[0], "Bits", field[1]))
+    for field in selector_payload_fields(x):
+        ports.push(HwPort.output("selected_" + field[0], "Bits", field[1]))
+    ports
+
+fn selector_zero(width: i32) -> text:
+    if width == 1: return "zero1"
+    if width == 2: return "zero2"
+    if width == 3: return "zero3"
+    if width == 5: return "zero5"
+    if width == 32: return "zero32"
+    "zero64"
+
+pub fn strict_riscv_scalar_runtime_completion_selector(module_name: text,
+    config: CoreConfig) -> Result<HwModuleDef, text>:
+    if module_name == "": return Err("HWIR-E-RISCV-RUNTIME-SELECTOR-ID: completion selector requires a module name")
+    val config_error = config.diagnostic(); if config_error != "": return Err(config_error)
+    val x = config.xlen
+    val constants = [HwConstant.bits("zero1", 1, 0), HwConstant.bits("zero2", 2, 0),
+        HwConstant.bits("zero3", 3, 0), HwConstant.bits("zero5", 5, 0),
+        HwConstant.bits("zero32", 32, 0), HwConstant.bits("zero64", 64, 0)]
+    var signals = [HwSignal.comb("overlap", "Bits", 1),
+        HwSignal.comb("any_valid", "Bits", 1), HwSignal.comb("not_any", "Bits", 1),
+        HwSignal.comb("missing", "Bits", 1), HwSignal.comb("not_uop", "Bits", 1),
+        HwSignal.comb("unsolicited", "Bits", 1), HwSignal.comb("expected_alu", "Bits", 1),
+        HwSignal.comb("wrong_alu", "Bits", 1), HwSignal.comb("wrong_illegal", "Bits", 1),
+        HwSignal.comb("wrong_lane", "Bits", 1), HwSignal.comb("provider_fault", "Bits", 1),
+        HwSignal.comb("fault_01", "Bits", 1), HwSignal.comb("fault_23", "Bits", 1),
+        HwSignal.comb("fault_234", "Bits", 1), HwSignal.comb("metadata_invalid", "Bits", 1),
+        HwSignal.comb("metadata_fault", "Bits", 1),
+        HwSignal.comb("fault_all", "Bits", 1),
+        HwSignal.comb("not_fault", "Bits", 1), HwSignal.comb("selected_any", "Bits", 1)]
+    var ops = [HwCombOp.binary("and", "overlap", "alu_valid", "illegal_valid", 1),
+        HwCombOp.binary("or", "any_valid", "alu_valid", "illegal_valid", 1),
+        HwCombOp.binary("eq", "not_any", "any_valid", "zero1", 1),
+        HwCombOp.binary("and", "missing", "uop_valid", "not_any", 1),
+        HwCombOp.binary("eq", "not_uop", "uop_valid", "zero1", 1),
+        HwCombOp.binary("and", "unsolicited", "any_valid", "not_uop", 1),
+        HwCombOp.binary("eq", "expected_alu", "uop_illegal_valid", "zero1", 1),
+        HwCombOp.binary("and", "wrong_alu", "alu_valid", "uop_illegal_valid", 1),
+        HwCombOp.binary("and", "wrong_illegal", "illegal_valid", "expected_alu", 1),
+        HwCombOp.binary("or", "wrong_lane", "wrong_alu", "wrong_illegal", 1),
+        HwCombOp.binary("or", "provider_fault", "alu_fault", "illegal_fault", 1),
+        HwCombOp.binary("or", "fault_01", "provider_fault", "overlap", 1),
+        HwCombOp.binary("or", "fault_23", "missing", "wrong_lane", 1),
+        HwCombOp.binary("or", "fault_234", "fault_23", "unsolicited", 1)]
+    var metadata_ok = "uop_lineage_valid"
+    for lane in ["alu", "illegal"]:
+        var lane_metadata_ok = "uop_lineage_valid"
+        for field in [("privilege", "uop_privilege", 2),
+                ("original_instruction", "uop_original_instruction", 32),
+                ("canonical_instruction", "uop_canonical_instruction", 32),
+                ("instruction_length_bytes", "uop_instruction_length_bytes", 3),
+                ("pc_before", "uop_pc_before", x), ("pc_after", "uop_fallthrough_pc", x),
+                ("provider_event_id", "uop_provider_event_id", 64),
+                ("decode_event_id", "uop_decode_event_id", 64)]:
+            val equal = lane + "_metadata_equal_" + field[0]
+            val accumulated = lane + "_metadata_accumulated_" + field[0]
+            signals.push(HwSignal.comb(equal, "Bits", 1))
+            signals.push(HwSignal.comb(accumulated, "Bits", 1))
+            ops.push(HwCombOp.binary("eq", equal, lane + "_" + field[0], field[1], field[2]))
+            ops.push(HwCombOp.binary("and", accumulated, lane_metadata_ok, equal, 1))
+            lane_metadata_ok = accumulated
+        val not_lane = "not_" + lane + "_valid"
+        val lane_ok = lane + "_metadata_ok"
+        val all_ok = lane + "_all_metadata_ok"
+        signals.push(HwSignal.comb(not_lane, "Bits", 1))
+        signals.push(HwSignal.comb(lane_ok, "Bits", 1))
+        signals.push(HwSignal.comb(all_ok, "Bits", 1))
+        ops.push(HwCombOp.binary("eq", not_lane, lane + "_valid", "zero1", 1))
+        ops.push(HwCombOp.binary("or", lane_ok, not_lane, lane_metadata_ok, 1))
+        ops.push(HwCombOp.binary("and", all_ok, metadata_ok, lane_ok, 1))
+        metadata_ok = all_ok
+    signals.push(HwSignal.comb("metadata_ok", "Bits", 1))
+    ops.push(HwCombOp.unary("passthrough", "metadata_ok", metadata_ok, 1))
+    ops.push(HwCombOp.binary("eq", "metadata_invalid", "metadata_ok", "zero1", 1))
+    ops.push(HwCombOp.binary("and", "metadata_fault", "any_valid", "metadata_invalid", 1))
+    ops.push(HwCombOp.binary("or", "fault_all", "fault_234", "metadata_fault", 1))
+    ops.push(HwCombOp.binary("or", "selector_fault", "fault_01", "fault_all", 1))
+    ops.push(HwCombOp.binary("eq", "not_fault", "selector_fault", "zero1", 1))
+    ops.push(HwCombOp.binary("and", "selected_any", "any_valid", "uop_valid", 1))
+    ops.push(HwCombOp.binary("and", "selected_valid", "selected_any", "not_fault", 1))
+    ops.push(HwCombOp.binary("and", "uop_ready", "selected_valid", "completion_ready", 1))
+    var selects: [HwSelectOp] = []
+    for field in selector_payload_fields(x):
+        val candidate = "candidate_" + field[0]
+        signals.push(HwSignal.comb(candidate, "Bits", field[1]))
+        selects.push(HwSelectOp.mux(candidate, "illegal_valid",
+            "illegal_" + field[0], "alu_" + field[0], field[1]))
+        selects.push(HwSelectOp.mux("selected_" + field[0], "selected_valid",
+            candidate, selector_zero(field[1]), field[1]))
+    val ports = selector_ports(x)
+    val module = HwModuleDef(summary: HwModule(name: module_name, profile: config.profile,
+            port_count: ports.len(), signal_count: signals.len(), register_count: 0,
+            comb_op_count: ops.len() + selects.len(), memory_count: 0,
+            clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty()),
+        config: config, node_id: HwNodeId.module_root(module_name), origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "one-hot"),
+                source_name: "riscv.scalar.runtime.alu-illegal.one-hot-completion")],
+        ports: ports, signals: signals, constants: constants, comb_ops: ops,
+        compare_ops: [], select_ops: selects, clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic(); if diagnostic != "": return Err(diagnostic)
+    Ok(module)

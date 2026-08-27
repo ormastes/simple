@@ -1,0 +1,217 @@
+# Mode A publish path — reads the CI provenance record, writes through the
+# gateway.
+#
+# The provenance file is the SDN emitted by
+# scripts/cache/promotion/collect-git-provenance.shs. It is parsed here rather
+# than trusted as flags, so a caller cannot assert e.g. `fetch_performed: true`
+# on the command line without the collector having actually fetched.
+
+use compiler.driver.cache.promotion.git_provenance.{GitProvenanceFacts}
+use compiler.driver.cache.promotion.promotion_receipt.{
+    PromotionReceipt, TrustedBuilder, promotion_receipt_digest
+}
+use compiler.driver.cache.remote.remote_client.{remote_client_local_fake}
+use compiler.driver.cache.remote.namespace_policy.{NS_MAIN, NS_BRANCH}
+use app.cache_gateway.gateway.{
+    GatewayPrincipal, GatewayWriteRequest, GatewayResponse,
+    gateway_put_action, gateway_authenticate, gateway_resolve_namespace
+}
+use app.cache_gateway.quota.{gateway_quota_default}
+use app.cache_gateway.metrics.{gateway_metrics_new}
+use compiler.driver.cache.promotion.promotion_gate.{
+    promotion_attestation_full, promotion_gate_admit
+}
+use std.common.crypto.sha256.{sha256_text}
+use std.fs.{File, read_file}
+use std.env.{env_var}
+
+fn env_or(name: text, fallback: text) -> text:
+    val v = env_var(name)
+    if v:
+        return v
+    fallback
+
+# ---------------------------------------------------------------------------
+# Provenance SDN reader
+# ---------------------------------------------------------------------------
+
+fn sdn_strip(raw: text) -> text:
+    var s = raw.trim()
+    if s.len() >= 2 and s.starts_with("\"") and s.ends_with("\""):
+        return s.substring(1, s.len() - 1)
+    s
+
+fn sdn_field(body: text, key: text) -> text:
+    for line in body.split("\n"):
+        val t = line.trim()
+        if t.starts_with(key + ":"):
+            return sdn_strip(t.substring(key.len() + 1, t.len()))
+    ""
+
+fn sdn_bool(body: text, key: text) -> bool:
+    sdn_field(body, key) == "true"
+
+fn sdn_int(body: text, key: text) -> i64:
+    val v = sdn_field(body, key)
+    if v == "":
+        return 0
+    v.to_i64()
+
+fn load_git_provenance_facts(path: text) -> GitProvenanceFacts?:
+    if not File.exists(path):
+        return nil
+    val body = read_file(path)
+    if not body.contains("git_provenance_facts:"):
+        return nil
+    GitProvenanceFacts(
+        repository_url: sdn_field(body, "repository_url"),
+        repository_id: sdn_field(body, "repository_id"),
+        remote_authenticated: sdn_bool(body, "remote_authenticated"),
+        trusted_ref: sdn_field(body, "trusted_ref"),
+        origin_main_tip_before_fetch: sdn_field(body, "origin_main_tip_before_fetch"),
+        origin_main_tip: sdn_field(body, "origin_main_tip"),
+        fetch_performed: sdn_bool(body, "fetch_performed"),
+        fetch_epoch_seconds: sdn_int(body, "fetch_epoch_seconds"),
+        now_epoch_seconds: sdn_int(body, "now_epoch_seconds"),
+        build_commit: sdn_field(body, "build_commit"),
+        build_tree: sdn_field(body, "build_tree"),
+        worktree_clean: sdn_bool(body, "worktree_clean"),
+        clean_tree_digest: sdn_field(body, "clean_tree_digest"),
+        is_ancestor_of_main_tip: sdn_bool(body, "is_ancestor_of_main_tip"),
+        merge_strategy: sdn_field(body, "merge_strategy"),
+        rebased_commit: sdn_field(body, "rebased_commit"),
+        builder_id: sdn_field(body, "builder_id"),
+        builder_is_trusted: sdn_bool(body, "builder_is_trusted"),
+        workflow_digest: sdn_field(body, "workflow_digest"),
+        workflow_is_approved: sdn_bool(body, "workflow_is_approved")
+    )
+
+# ---------------------------------------------------------------------------
+# Publish
+# ---------------------------------------------------------------------------
+
+struct PublishOutcome:
+    ok: bool
+    reason: text
+
+# The principal is enrolled from the CI environment's ATTESTED identity. Note
+# it is the gateway that decides what that identity is worth: an empty
+# builder_id here yields a developer role and the write is refused, which is
+# exactly what happens if a developer runs this command locally.
+fn publish_principal(facts: GitProvenanceFacts, secret: text) -> GatewayPrincipal:
+    GatewayPrincipal(
+        token_id: env_or(name: "CACHE_GATEWAY_TOKEN_ID", fallback: ""),
+        secret_digest: sha256_text(secret),
+        display_name: "trusted-main-ci",
+        requested_role: "trusted_main_ci",
+        attested_builder_id: facts.builder_id,
+        attested_workflow_digest: facts.workflow_digest,
+        workflow_is_approved: facts.workflow_is_approved,
+        branch_namespace_enabled: false,
+        repository_id: facts.repository_id,
+        target_profile: env_or(name: "CACHE_TARGET_PROFILE", fallback: ""),
+        schema_version: 2,
+        branch_identity: ""
+    )
+
+fn publish_via_gateway(facts: GitProvenanceFacts, receipt: PromotionReceipt) -> PublishOutcome:
+    val secret = env_or(name: "CACHE_GATEWAY_SECRET", fallback: "")
+    val root = env_or(name: "CACHE_GATEWAY_ROOT", fallback: "")
+    if secret == "" or root == "":
+        return PublishOutcome(ok: false, reason: "SKIP — gateway credentials absent; nothing published (build unaffected)")
+    val principal = publish_principal(facts, secret)
+    var principals: [GatewayPrincipal] = []
+    principals.push(principal)
+    val auth = gateway_authenticate(principals, principal.token_id, secret)
+    if not auth.ok:
+        return PublishOutcome(ok: false, reason: "SKIP — " + auth.reason)
+    var builders: [TrustedBuilder] = []
+    builders.push(TrustedBuilder(
+        builder_id: facts.builder_id,
+        signing_key: env_or(name: "PROMOTION_SIGNING_KEY", fallback: ""),
+        approved_workflow_digests: [facts.workflow_digest]
+    ))
+    val client = remote_client_local_fake(root, auth.policy)
+    val quota = gateway_quota_default(
+        main_max_bytes: 64000000000,
+        branch_max_bytes: 8000000000,
+        cas_max_bytes: 32000000000,
+        fs_free_bytes: 200000000000,
+        fs_total_bytes: 500000000000
+    )
+    val req = GatewayWriteRequest(
+        token_id: principal.token_id,
+        presented_secret: secret,
+        namespace_kind: NS_MAIN,
+        action_digest: receipt.action_digest,
+        result_manifest_digest: receipt.result_manifest_digest,
+        receipt_digest: promotion_receipt_digest(receipt),
+        payload_bytes: 0
+    )
+    # The gate runs BEFORE the write, on the same facts and receipt.
+    val target = gateway_resolve_namespace(auth, NS_MAIN)
+    val admission = promotion_gate_admit(auth.policy, target, facts, receipt, builders, promotion_attestation_full())
+    if not admission.admitted:
+        return PublishOutcome(ok: false, reason: "REJECT — " + admission.reason)
+    val res = gateway_put_action(client, principals, quota, gateway_metrics_new(), req, facts.now_epoch_seconds)
+    if not res.ok:
+        return PublishOutcome(ok: false, reason: "SKIP — " + res.status + ": " + res.reason)
+    PublishOutcome(ok: true, reason: "PUBLISHED " + receipt.action_digest)
+
+# ---------------------------------------------------------------------------
+# Branch namespace publish — no receipt, TTL'd, own quota
+# ---------------------------------------------------------------------------
+
+# The branch credential is enrolled with requested_role=trusted_branch_ci. Even
+# if this function asked for NS_MAIN, `namespace_policy_may_write` would refuse
+# it: that role has no main authority and no argument grants one.
+fn branch_principal(secret: text) -> GatewayPrincipal:
+    GatewayPrincipal(
+        token_id: env_or(name: "CACHE_GATEWAY_TOKEN_ID", fallback: ""),
+        secret_digest: sha256_text(secret),
+        display_name: "trusted-branch-ci",
+        requested_role: "trusted_branch_ci",
+        attested_builder_id: env_or(name: "CACHE_GATEWAY_TOKEN_ID", fallback: ""),
+        attested_workflow_digest: env_or(name: "CACHE_WORKFLOW_DIGEST", fallback: ""),
+        workflow_is_approved: true,
+        branch_namespace_enabled: true,
+        repository_id: env_or(name: "CACHE_REPOSITORY_ID", fallback: ""),
+        target_profile: env_or(name: "CACHE_TARGET_PROFILE", fallback: ""),
+        schema_version: 2,
+        branch_identity: env_or(name: "CACHE_BRANCH_IDENTITY", fallback: "")
+    )
+
+fn publish_branch_via_gateway(action_digest: text, manifest_digest: text, now: i64) -> PublishOutcome:
+    val secret = env_or(name: "CACHE_GATEWAY_SECRET", fallback: "")
+    val root = env_or(name: "CACHE_GATEWAY_ROOT", fallback: "")
+    if secret == "" or root == "":
+        return PublishOutcome(ok: false, reason: "SKIP — gateway credentials absent; nothing published (build unaffected)")
+    val principal = branch_principal(secret)
+    if principal.attested_workflow_digest == "":
+        return PublishOutcome(ok: false, reason: "SKIP — no attested workflow digest; branch lane stays read-only")
+    var principals: [GatewayPrincipal] = []
+    principals.push(principal)
+    val auth = gateway_authenticate(principals, principal.token_id, secret)
+    if not auth.ok:
+        return PublishOutcome(ok: false, reason: "SKIP — " + auth.reason)
+    val client = remote_client_local_fake(root, auth.policy)
+    val quota = gateway_quota_default(
+        main_max_bytes: 64000000000,
+        branch_max_bytes: 8000000000,
+        cas_max_bytes: 32000000000,
+        fs_free_bytes: 200000000000,
+        fs_total_bytes: 500000000000
+    )
+    val req = GatewayWriteRequest(
+        token_id: principal.token_id,
+        presented_secret: secret,
+        namespace_kind: NS_BRANCH,
+        action_digest: action_digest,
+        result_manifest_digest: manifest_digest,
+        receipt_digest: "",
+        payload_bytes: 0
+    )
+    val res = gateway_put_action(client, principals, quota, gateway_metrics_new(), req, now)
+    if not res.ok:
+        return PublishOutcome(ok: false, reason: "SKIP — " + res.status + ": " + res.reason)
+    PublishOutcome(ok: true, reason: "PUBLISHED branch " + action_digest)

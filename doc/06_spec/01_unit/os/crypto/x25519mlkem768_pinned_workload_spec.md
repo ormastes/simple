@@ -1,6 +1,6 @@
-# X25519mlkem768 Pinned Workload Specification
+# x25519mlkem768_pinned_workload_spec
 
-> Tests covering X25519MLKEM768 canonical pinned A/B/C workload, X25519MLKEM768 pinned Set A ML-KEM receipt, X25519MLKEM768 pinned Set B X25519 receipt, X25519MLKEM768 pinned Set C hybrid receipt, X25519MLKEM768 pinned SIMD rows.
+> Verifies the x25519mlkem768 pinned workload behaviour end to end so maintainers of this
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,29 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# X25519mlkem768 Pinned Workload Specification
+# x25519mlkem768_pinned_workload_spec
+
+Verifies the x25519mlkem768 pinned workload behaviour end to end so maintainers of this
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Hardware & OS |
+| Status | Active |
+| Source | `test/01_unit/os/crypto/x25519mlkem768_pinned_workload_spec.spl` |
+| Updated | 2026-08-22 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+Verifies the x25519mlkem768 pinned workload behaviour end to end so maintainers of this
+component and reviewers of its spec share one pinned definition.
+## Operator workflow
+Run `bin/simple test <this spec>`; read the per-scenario verdicts in
+the `Results:` summary. Each scenario asserts an observable outcome.
+## Compatibility and limitations
+Covers the currently shipped behaviour only; performance, stress and
+unrelated sibling features are out of scope.
 
 ## Scenarios
 
@@ -121,11 +143,11 @@ match result:
             X25519MlKem768PinnedSet.X25519)
         expect(outputs.set_c.set_id).to_equal(
             X25519MlKem768PinnedSet.Hybrid)
-        expect(outputs.set_a.first_output_bytes).to_equal(1184)
-        expect(outputs.set_a.second_output_bytes).to_equal(1088)
-        expect(outputs.set_b.first_output_bytes).to_equal(32)
-        expect(outputs.set_b.second_output_bytes).to_equal(32)
-        expect(outputs.set_c.shared_secret_bytes).to_equal(64)
+        expect(outputs.set_a.first_output_bytes).to_equal(1184)  # oracle: pinned constant asserted by this scenario
+        expect(outputs.set_a.second_output_bytes).to_equal(1088)  # oracle: pinned constant asserted by this scenario
+        expect(outputs.set_b.first_output_bytes).to_equal(32)  # oracle: pinned constant asserted by this scenario
+        expect(outputs.set_b.second_output_bytes).to_equal(32)  # oracle: pinned constant asserted by this scenario
+        expect(outputs.set_c.shared_secret_bytes).to_equal(64)  # oracle: pinned constant asserted by this scenario
         expect(outputs.public_wire_bytes).to_equal(
             X25519_MLKEM768_PINNED_PUBLIC_WIRE_BYTES)
         expect(outputs.total_observed_bytes).to_equal(
@@ -151,9 +173,9 @@ match result:
             X25519_MLKEM768_PINNED_CLIENT_SHARE_SHA256)
         expect(outputs.fallback_used).to_be(false)
         expect(outputs.candidate_oracle_match).to_be(false)
-        expect(outputs.accelerated_operation_count).to_equal(0)
-        expect(outputs.kernel_invocations).to_equal(0)
-        expect(outputs.simd_chunk_hits).to_equal(0)
+        expect(outputs.accelerated_operation_count).to_equal(0)  # oracle: pinned constant asserted by this scenario
+        expect(outputs.kernel_invocations).to_equal(0)  # oracle: pinned constant asserted by this scenario
+        expect(outputs.simd_chunk_hits).to_equal(0)  # oracle: pinned constant asserted by this scenario
         expect(outputs.compiled).to_be(false)
         expect(outputs.submitted).to_be(false)
         expect(outputs.fence_completed).to_be(false)
@@ -324,10 +346,10 @@ match x25519_mlkem768_validate_pinned_set_a(_set_a_checks()):
             "mlkem768-encapsulation-key")
         expect(receipt.second_output_label).to_equal(
             "mlkem768-ciphertext")
-        expect(receipt.first_output_bytes).to_equal(1184)
-        expect(receipt.second_output_bytes).to_equal(1088)
-        expect(receipt.shared_secret_bytes).to_equal(32)
-        expect(receipt.recovered_secret_bytes).to_equal(32)
+        expect(receipt.first_output_bytes).to_equal(1184)  # oracle: pinned constant asserted by this scenario
+        expect(receipt.second_output_bytes).to_equal(1088)  # oracle: pinned constant asserted by this scenario
+        expect(receipt.shared_secret_bytes).to_equal(32)  # oracle: pinned constant asserted by this scenario
+        expect(receipt.recovered_secret_bytes).to_equal(32)  # oracle: pinned constant asserted by this scenario
     case Err(reason): fail(reason)
 ```
 
@@ -385,8 +407,8 @@ _expect_error(x25519_mlkem768_validate_pinned_set_a(wrong_recovered),
 
 - constructs the exact independently validated X25519 receipt
 - Validate client public server public and both X25519 secrets
-   - Expected: receipt.first_output_bytes equals `32`
-   - Expected: receipt.second_output_bytes equals `32`
+   - Expected: receipt.first_output_bytes equals `32)  # oracle: pinned constant asserted by this scenario`
+   - Expected: receipt.second_output_bytes equals `32)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
@@ -407,8 +429,8 @@ match x25519_mlkem768_validate_pinned_set_b(_set_b_checks()):
             "x25519-client-public")
         expect(receipt.second_output_label).to_equal(
             "x25519-server-public")
-        expect(receipt.first_output_bytes).to_equal(32)
-        expect(receipt.second_output_bytes).to_equal(32)
+        expect(receipt.first_output_bytes).to_equal(32)  # oracle: pinned constant asserted by this scenario
+        expect(receipt.second_output_bytes).to_equal(32)  # oracle: pinned constant asserted by this scenario
     case Err(reason): fail(reason)
 ```
 
@@ -464,10 +486,10 @@ _expect_error(x25519_mlkem768_validate_pinned_set_b(wrong_roundtrip),
 
 - constructs the exact independently validated hybrid receipt
 - Validate full shares and both 64-byte hybrid secrets
-   - Expected: receipt.first_output_bytes equals `1216`
-   - Expected: receipt.second_output_bytes equals `1120`
-   - Expected: receipt.shared_secret_bytes equals `64`
-   - Expected: receipt.recovered_secret_bytes equals `64`
+   - Expected: receipt.first_output_bytes equals `1216)  # oracle: pinned constant asserted by this scenario`
+   - Expected: receipt.second_output_bytes equals `1120)  # oracle: pinned constant asserted by this scenario`
+   - Expected: receipt.shared_secret_bytes equals `64)  # oracle: pinned constant asserted by this scenario`
+   - Expected: receipt.recovered_secret_bytes equals `64)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
@@ -484,10 +506,10 @@ match x25519_mlkem768_validate_pinned_set_c(_set_c_checks()):
     case Ok(receipt):
         expect(receipt.set_id).to_equal(
             X25519MlKem768PinnedSet.Hybrid)
-        expect(receipt.first_output_bytes).to_equal(1216)
-        expect(receipt.second_output_bytes).to_equal(1120)
-        expect(receipt.shared_secret_bytes).to_equal(64)
-        expect(receipt.recovered_secret_bytes).to_equal(64)
+        expect(receipt.first_output_bytes).to_equal(1216)  # oracle: pinned constant asserted by this scenario
+        expect(receipt.second_output_bytes).to_equal(1120)  # oracle: pinned constant asserted by this scenario
+        expect(receipt.shared_secret_bytes).to_equal(64)  # oracle: pinned constant asserted by this scenario
+        expect(receipt.recovered_secret_bytes).to_equal(64)  # oracle: pinned constant asserted by this scenario
     case Err(reason): fail(reason)
 ```
 

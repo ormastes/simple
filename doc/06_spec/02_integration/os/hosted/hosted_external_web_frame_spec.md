@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -34,7 +34,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-INTEGRATION
 step("keeps positive-owner content out of the in-process renderer")
 val hostile = (
-    "<style>body{{background-color:#ef4444}}</style>" +
+    "<style>body{background-color:#ef4444}</style>" +
     "<script>document.body.setAttribute('data-ran','yes')</script>"
 )
 var local = HostCompositor.new_headless(Size(
@@ -78,12 +78,17 @@ remote_raster.shutdown()
 
 - keeps trusted frames isolated by window through close
 - Open two browser compositor windows
+- 1, 1, COMP CREATE WINDOW to i64
+- 2, 2, COMP CREATE WINDOW to i64
 - Attach distinct trusted external frames
 - Close one window without releasing the other frame
    - Expected: comp.external_web_window_ids.len() equals `1`
    - Expected: comp.external_web_frames.len() equals `1`
    - Expected: comp.external_web_window_ids[0] equals `2`
    - Expected: comp.external_web_frames[0].window_id equals `2`
+- comp pure simple pixel buffer
+- comp pure simple pixel buffer
+- raster shutdown
 
 
 <details>
@@ -162,6 +167,7 @@ raster.shutdown()
    - Expected: committed.pixels[0] equals `0xFF123456u32`
    - Expected: base.pixels[1 * 104 + 1] equals `0xFF123456u32`
 
+## Overview
 
 <details>
 <summary>Executable SSpec</summary>
@@ -280,10 +286,8 @@ raster.shutdown()
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/02_integration/os/hosted/hosted_external_web_frame_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-07-29 |
 | Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
 
 Tests covering hosted external browser frames.
 - hosted external browser frames
@@ -292,8 +296,8 @@ Tests covering hosted external browser frames.
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

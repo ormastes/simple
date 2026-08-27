@@ -1,6 +1,30 @@
 # Vhdl Source Facade Specification
 
-> Tests covering VHDL Source Facade.
+> 1. delete file
+
+<!-- sdn-diagram:id=vhdl_source_facade_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=vhdl_source_facade_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+vhdl_source_facade_spec -> std
+vhdl_source_facade_spec -> compiler
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=vhdl_source_facade_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,22 +41,28 @@
 
 #### aot_vhdl_file writes a typed add design unit from minimal source
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- aot_vhdl_file writes a typed add design unit from minimal source
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. check msg
+8. check msg
+9. check msg
+10. check msg
+11. check msg
+12. delete file
+13. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file writes a typed add design unit from minimal source")
 val src_path = "/tmp/sml_vhdl_source_facade_add.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_add.vhd"
 delete_file(src_path)
@@ -58,18 +88,23 @@ delete_file(out_path)
 
 #### aot_vhdl_file writes arithmetic with integer constants
 
-- aot_vhdl_file writes arithmetic with integer constants
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. delete file
+8. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file writes arithmetic with integer constants")
 val src_path = "/tmp/sml_vhdl_source_facade_const.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_const.vhd"
 delete_file(src_path)
@@ -90,18 +125,23 @@ delete_file(out_path)
 
 #### aot_vhdl_file writes a boolean if expression as a result mux
 
-- aot_vhdl_file writes a boolean if expression as a result mux
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. delete file
+8. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file writes a boolean if expression as a result mux")
 val src_path = "/tmp/sml_vhdl_source_facade_if.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_if.vhd"
 delete_file(src_path)
@@ -122,18 +162,23 @@ delete_file(out_path)
 
 #### aot_vhdl_file writes a supported source cast
 
-- aot_vhdl_file writes a supported source cast
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. delete file
+8. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file writes a supported source cast")
 val src_path = "/tmp/sml_vhdl_source_facade_cast.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_cast.vhd"
 delete_file(src_path)
@@ -154,18 +199,23 @@ delete_file(out_path)
 
 #### aot_vhdl_file writes constant arithmetic with fixed-width literals
 
-- aot_vhdl_file writes constant arithmetic with fixed-width literals
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. delete file
+8. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file writes constant arithmetic with fixed-width literals")
 val src_path = "/tmp/sml_vhdl_source_facade_consts.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_consts.vhd"
 delete_file(src_path)
@@ -186,18 +236,23 @@ delete_file(out_path)
 
 #### aot_vhdl_file lowers an inline boolean if expression
 
-- aot_vhdl_file lowers an inline boolean if expression
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. delete file
+8. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file lowers an inline boolean if expression")
 val src_path = "/tmp/sml_vhdl_source_facade_if_inline.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_if_inline.vhd"
 delete_file(src_path)
@@ -218,18 +273,23 @@ delete_file(out_path)
 
 #### aot_vhdl_file lowers a block boolean if expression
 
-- aot_vhdl_file lowers a block boolean if expression
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. delete file
+8. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file lowers a block boolean if expression")
 val src_path = "/tmp/sml_vhdl_source_facade_if_block.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_if_block.vhd"
 delete_file(src_path)
@@ -250,18 +310,23 @@ delete_file(out_path)
 
 #### aot_vhdl_file lowers a clean bool to integer cast
 
-- aot_vhdl_file lowers a clean bool to integer cast
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. delete file
+8. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file lowers a clean bool to integer cast")
 val src_path = "/tmp/sml_vhdl_source_facade_cast.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_cast.vhd"
 delete_file(src_path)
@@ -282,18 +347,24 @@ delete_file(out_path)
 
 #### aot_vhdl_file lowers integer comparisons to std_logic
 
-- aot_vhdl_file lowers integer comparisons to std_logic
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. check msg
+8. delete file
+9. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file lowers integer comparisons to std_logic")
 val src_path = "/tmp/sml_vhdl_source_facade_compare.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_compare.vhd"
 delete_file(src_path)
@@ -315,18 +386,25 @@ delete_file(out_path)
 
 #### aot_vhdl_file lowers boolean logic expressions
 
-- aot_vhdl_file lowers boolean logic expressions
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. check msg
+8. check msg
+9. delete file
+10. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file lowers boolean logic expressions")
 val src_path = "/tmp/sml_vhdl_source_facade_bool_logic.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_bool_logic.vhd"
 delete_file(src_path)
@@ -349,18 +427,27 @@ delete_file(out_path)
 
 #### aot_vhdl_file lowers hardware labeled tuple returns to output ports
 
-- aot_vhdl_file lowers hardware labeled tuple returns to output ports
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. check msg
+8. check msg
+9. check msg
+10. check msg
+11. delete file
+12. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file lowers hardware labeled tuple returns to output ports")
 val src_path = "/tmp/sml_vhdl_source_facade_full_add.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_full_add.vhd"
 delete_file(src_path)
@@ -385,18 +472,28 @@ delete_file(out_path)
 
 #### aot_vhdl_file lowers multi-function hardware scalar outputs
 
-- aot_vhdl_file lowers multi-function hardware scalar outputs
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. check msg
+8. check msg
+9. check msg
+10. check msg
+11. check msg
+12. delete file
+13. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file lowers multi-function hardware scalar outputs")
 val src_path = "/tmp/sml_vhdl_source_facade_multi_scalar.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_multi_scalar.vhd"
 delete_file(src_path)
@@ -422,18 +519,25 @@ delete_file(out_path)
 
 #### aot_vhdl_file hardware labeled tuple return passes GHDL analysis and elaboration
 
-- aot_vhdl_file hardware labeled tuple return passes GHDL analysis and elaboration
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. delete file
+7. delete file
+8. check msg
+9. delete file
+10. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file hardware labeled tuple return passes GHDL analysis and elaboration")
 val src_path = "/tmp/sml_vhdl_source_facade_full_add_ghdl.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_full_add_ghdl.vhd"
 delete_file(src_path)
@@ -460,18 +564,29 @@ delete_file(out_path)
 
 #### aot_vhdl_file lowers anonymous hardware tuple outputs to deterministic ports
 
-- aot_vhdl_file lowers anonymous hardware tuple outputs to deterministic ports
+1. delete file
+2. delete file
+3. delete file
+4. write file
+5. check msg
+6. check msg
+7. check msg
+8. check msg
+9. check msg
+10. check msg
+11. check msg
+12. delete file
+13. delete file
+14. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file lowers anonymous hardware tuple outputs to deterministic ports")
 val src_path = "/tmp/sml_vhdl_source_facade_anonymous_output.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_anonymous_output.vhd"
 val map_path = out_path + ".map.json"
@@ -500,18 +615,27 @@ delete_file(map_path)
 
 #### aot_vhdl_file emits generic blocks for hardware entities
 
-- aot_vhdl_file emits generic blocks for hardware entities
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. check msg
+8. check msg
+9. check msg
+10. check msg
+11. delete file
+12. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file emits generic blocks for hardware entities")
 val src_path = "/tmp/sml_vhdl_source_facade_generic.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_generic.vhd"
 delete_file(src_path)
@@ -537,18 +661,28 @@ delete_file(out_path)
 
 #### aot_vhdl_file emits clocked reset-aware processes
 
-- aot_vhdl_file emits clocked reset-aware processes
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. check msg
+8. check msg
+9. check msg
+10. check msg
+11. check msg
+12. delete file
+13. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file emits clocked reset-aware processes")
 val src_path = "/tmp/sml_vhdl_source_facade_clocked.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_clocked.vhd"
 delete_file(src_path)
@@ -575,18 +709,27 @@ delete_file(out_path)
 
 #### aot_vhdl_file emits active-high asynchronous reset when clocked metadata requests it
 
-- aot_vhdl_file emits active-high asynchronous reset when clocked metadata requests it
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. check msg
+8. check msg
+9. check msg
+10. check msg
+11. delete file
+12. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file emits active-high asynchronous reset when clocked metadata requests it")
 val src_path = "/tmp/sml_vhdl_source_facade_clocked_active_high.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_clocked_active_high.vhd"
 delete_file(src_path)
@@ -612,18 +755,27 @@ delete_file(out_path)
 
 #### aot_vhdl_file emits synchronous reset when clocked metadata requests it
 
-- aot_vhdl_file emits synchronous reset when clocked metadata requests it
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. check msg
+8. check msg
+9. check msg
+10. check msg
+11. delete file
+12. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file emits synchronous reset when clocked metadata requests it")
 val src_path = "/tmp/sml_vhdl_source_facade_clocked_sync.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_clocked_sync.vhd"
 delete_file(src_path)
@@ -649,18 +801,27 @@ delete_file(out_path)
 
 #### aot_vhdl_file flattens labeled tuple input ports
 
-- aot_vhdl_file flattens labeled tuple input ports
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. check msg
+8. check msg
+9. check msg
+10. check msg
+11. delete file
+12. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file flattens labeled tuple input ports")
 val src_path = "/tmp/sml_vhdl_source_facade_tuple_input.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_tuple_input.vhd"
 delete_file(src_path)
@@ -686,20 +847,22 @@ delete_file(out_path)
 
 #### aot_vhdl_file rejects flattened input and output port collisions
 
-- aot_vhdl_file rejects flattened input and output port collisions
+1. delete file
+2. delete file
+3. write file
    - Expected: result.is_success() is false
    - Expected: rt_file_exists(out_path) is false
+4. delete file
+5. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file rejects flattened input and output port collisions")
 val src_path = "/tmp/sml_vhdl_source_facade_tuple_input_output_collision.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_tuple_input_output_collision.vhd"
 delete_file(src_path)
@@ -720,18 +883,27 @@ delete_file(out_path)
 
 #### aot_vhdl_file lowers payload-free enum declarations in the source facade
 
-- aot_vhdl_file lowers payload-free enum declarations in the source facade
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. check msg
+8. check msg
+9. check msg
+10. check msg
+11. delete file
+12. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file lowers payload-free enum declarations in the source facade")
 val src_path = "/tmp/sml_vhdl_source_facade_enum_decl.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_enum_decl.vhd"
 delete_file(src_path)
@@ -757,18 +929,30 @@ delete_file(out_path)
 
 #### aot_vhdl_file lowers payload enum declarations as tagged records in the source facade
 
-- aot_vhdl_file lowers payload enum declarations as tagged records in the source facade
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. check msg
+8. check msg
+9. check msg
+10. check msg
+11. check msg
+12. check msg
+13. check msg
+14. delete file
+15. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file lowers payload enum declarations as tagged records in the source facade")
 val src_path = "/tmp/sml_vhdl_source_facade_payload_enum_decl.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_payload_enum_decl.vhd"
 delete_file(src_path)
@@ -797,21 +981,27 @@ delete_file(out_path)
 
 #### aot_vhdl_file rejects ROM RAM inference facade paths and removes stale artifacts
 
-- aot_vhdl_file rejects ROM RAM inference facade paths and removes stale artifacts
+1. delete file
+2. delete file
+3. delete file
+4. write file
+5. write file
+6. write file
    - Expected: result.is_success() is false
    - Expected: rt_file_exists(out_path) is false
    - Expected: rt_file_exists(map_path) is false
+7. delete file
+8. delete file
+9. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file rejects ROM RAM inference facade paths and removes stale artifacts")
 val src_path = "/tmp/sml_vhdl_source_facade_memory_decl.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_memory_decl.vhd"
 val map_path = out_path + ".map.json"
@@ -837,20 +1027,22 @@ delete_file(map_path)
 
 #### aot_vhdl_file rejects undeclared enum-like hardware port types
 
-- aot_vhdl_file rejects undeclared enum-like hardware port types
+1. delete file
+2. delete file
+3. write file
    - Expected: result.is_success() is false
    - Expected: rt_file_exists(out_path) is false
+4. delete file
+5. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file rejects undeclared enum-like hardware port types")
 val src_path = "/tmp/sml_vhdl_source_facade_enum_port.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_enum_port.vhd"
 delete_file(src_path)
@@ -870,18 +1062,28 @@ delete_file(out_path)
 
 #### aot_vhdl_file flattens one nested labeled tuple input bundle
 
-- aot_vhdl_file flattens one nested labeled tuple input bundle
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. check msg
+8. check msg
+9. check msg
+10. check msg
+11. check msg
+12. delete file
+13. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file flattens one nested labeled tuple input bundle")
 val src_path = "/tmp/sml_vhdl_source_facade_nested_tuple_input.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_nested_tuple_input.vhd"
 delete_file(src_path)
@@ -908,18 +1110,29 @@ delete_file(out_path)
 
 #### aot_vhdl_file flattens named labeled tuple bundle aliases
 
-- aot_vhdl_file flattens named labeled tuple bundle aliases
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. check msg
+8. check msg
+9. check msg
+10. check msg
+11. check msg
+12. check msg
+13. delete file
+14. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file flattens named labeled tuple bundle aliases")
 val src_path = "/tmp/sml_vhdl_source_facade_named_bundle_alias.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_named_bundle_alias.vhd"
 delete_file(src_path)
@@ -947,18 +1160,30 @@ delete_file(out_path)
 
 #### aot_vhdl_file flattens nested bundle aliases deterministically
 
-- aot_vhdl_file flattens nested bundle aliases deterministically
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. check msg
+8. check msg
+9. check msg
+10. check msg
+11. check msg
+12. check msg
+13. check msg
+14. delete file
+15. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file flattens nested bundle aliases deterministically")
 val src_path = "/tmp/sml_vhdl_source_facade_nested_bundle_alias.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_nested_bundle_alias.vhd"
 delete_file(src_path)
@@ -990,20 +1215,22 @@ delete_file(out_path)
 
 #### aot_vhdl_file rejects nested bundle alias flattened port collisions
 
-- aot_vhdl_file rejects nested bundle alias flattened port collisions
+1. delete file
+2. delete file
+3. write file
    - Expected: result.is_success() is false
    - Expected: rt_file_exists(out_path) is false
+4. delete file
+5. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file rejects nested bundle alias flattened port collisions")
 val src_path = "/tmp/sml_vhdl_source_facade_nested_bundle_alias_collision.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_nested_bundle_alias_collision.vhd"
 delete_file(src_path)
@@ -1024,18 +1251,25 @@ delete_file(out_path)
 
 #### aot_vhdl_file supports all fixed-width integer facade port types
 
-- aot_vhdl_file supports all fixed-width integer facade port types
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. check msg
+8. check msg
+9. delete file
+10. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file supports all fixed-width integer facade port types")
 val src_path = "/tmp/sml_vhdl_source_facade_widths.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_widths.vhd"
 delete_file(src_path)
@@ -1058,20 +1292,22 @@ delete_file(out_path)
 
 #### aot_vhdl_file rejects implicit-width integer facade ports before VHDL output
 
-- aot_vhdl_file rejects implicit-width integer facade ports before VHDL output
+1. delete file
+2. delete file
+3. write file
    - Expected: result.is_success() is false
    - Expected: rt_file_exists(out_path) is false
+4. delete file
+5. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file rejects implicit-width integer facade ports before VHDL output")
 val src_path = "/tmp/sml_vhdl_source_facade_implicit_int_port.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_implicit_int_port.vhd"
 delete_file(src_path)
@@ -1092,20 +1328,22 @@ delete_file(out_path)
 
 #### aot_vhdl_file rejects implicit-width tuple fields before VHDL output
 
-- aot_vhdl_file rejects implicit-width tuple fields before VHDL output
+1. delete file
+2. delete file
+3. write file
    - Expected: result.is_success() is false
    - Expected: rt_file_exists(out_path) is false
+4. delete file
+5. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file rejects implicit-width tuple fields before VHDL output")
 val src_path = "/tmp/sml_vhdl_source_facade_implicit_tuple_field.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_implicit_tuple_field.vhd"
 delete_file(src_path)
@@ -1126,20 +1364,22 @@ delete_file(out_path)
 
 #### aot_vhdl_file rejects implicit-width cast targets before VHDL output
 
-- aot_vhdl_file rejects implicit-width cast targets before VHDL output
+1. delete file
+2. delete file
+3. write file
    - Expected: result.is_success() is false
    - Expected: rt_file_exists(out_path) is false
+4. delete file
+5. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file rejects implicit-width cast targets before VHDL output")
 val src_path = "/tmp/sml_vhdl_source_facade_implicit_cast.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_implicit_cast.vhd"
 delete_file(src_path)
@@ -1160,18 +1400,23 @@ delete_file(out_path)
 
 #### aot_vhdl_file lowers conservative integer operators
 
-- aot_vhdl_file lowers conservative integer operators
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. delete file
+8. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file lowers conservative integer operators")
 val src_path = "/tmp/sml_vhdl_source_facade_integer_ops.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_integer_ops.vhd"
 delete_file(src_path)
@@ -1192,18 +1437,23 @@ delete_file(out_path)
 
 #### aot_vhdl_file lowers literal shifts
 
-- aot_vhdl_file lowers literal shifts
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. delete file
+8. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file lowers literal shifts")
 val src_path = "/tmp/sml_vhdl_source_facade_shift.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_shift.vhd"
 delete_file(src_path)
@@ -1224,18 +1474,26 @@ delete_file(out_path)
 
 #### aot_vhdl_file lowers single-level fixed-width bit slices
 
-- aot_vhdl_file lowers single-level fixed-width bit slices
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. check msg
+8. check msg
+9. check msg
+10. delete file
+11. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file lowers single-level fixed-width bit slices")
 val src_path = "/tmp/sml_vhdl_source_facade_slice.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_slice.vhd"
 delete_file(src_path)
@@ -1260,18 +1518,27 @@ delete_file(out_path)
 
 #### aot_vhdl_file lowers explicit fixed-width concat calls
 
-- aot_vhdl_file lowers explicit fixed-width concat calls
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. check msg
+8. check msg
+9. check msg
+10. check msg
+11. delete file
+12. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file lowers explicit fixed-width concat calls")
 val src_path = "/tmp/sml_vhdl_source_facade_concat.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_concat.vhd"
 delete_file(src_path)
@@ -1297,18 +1564,22 @@ delete_file(out_path)
 
 #### aot_vhdl_file rejects fixed-width bit slices with mismatched result width
 
-- aot_vhdl_file rejects fixed-width bit slices with mismatched result width
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. delete file
+7. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file rejects fixed-width bit slices with mismatched result width")
 val src_path = "/tmp/sml_vhdl_source_facade_slice_error.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_slice_error.vhd"
 delete_file(src_path)
@@ -1327,18 +1598,23 @@ delete_file(out_path)
 
 #### aot_vhdl_file lowers unary operators
 
-- aot_vhdl_file lowers unary operators
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. delete file
+8. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file lowers unary operators")
 val src_path = "/tmp/sml_vhdl_source_facade_unary.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_unary.vhd"
 delete_file(src_path)
@@ -1359,18 +1635,25 @@ delete_file(out_path)
 
 #### aot_vhdl_file generated VHDL passes GHDL analysis and elaboration
 
-- aot_vhdl_file generated VHDL passes GHDL analysis and elaboration
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. delete file
+7. delete file
+8. check msg
+9. delete file
+10. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file generated VHDL passes GHDL analysis and elaboration")
 val src_path = "/tmp/sml_vhdl_source_facade_ghdl.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_ghdl.vhd"
 delete_file(src_path)
@@ -1397,18 +1680,39 @@ delete_file(out_path)
 
 #### aot_vhdl_file writes deterministic source map sidecar
 
-- aot_vhdl_file writes deterministic source map sidecar
+1. delete file
+2. delete file
+3. delete file
+4. write file
+5. check msg
+6. check msg
+7. check msg
+8. check msg
+9. check msg
+10. check msg
+11. check msg
+12. check msg
+13. check msg
+14. check msg
+15. check msg
+16. check msg
+17. check msg
+18. check msg
+19. check msg
+20. check msg
+21. check msg
+22. delete file
+23. delete file
+24. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("aot_vhdl_file writes deterministic source map sidecar")
 val src_path = "/tmp/sml_vhdl_source_facade_map.spl"
 val out_path = "/tmp/sml_vhdl_source_facade_map.vhd"
 val map_path = out_path + ".map.json"
@@ -1455,12 +1759,12 @@ delete_file(map_path)
 | Category | Compiler |
 | Status | Active |
 | Source | `test/03_system/compiler/vhdl_source_facade_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering VHDL Source Facade.
+Tests covering:
 - VHDL Source Facade
 
 ## Scenario Summary
@@ -1475,51 +1779,3 @@ Tests covering VHDL Source Facade.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `430eaf2c0c02d7d3257d9904f0348fc31a276df46fc33a4fc65f6727d1bcc5c4`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `430eaf2c0c02d7d3257d9904f0348fc31a276df46fc33a4fc65f6727d1bcc5c4`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `430eaf2c0c02d7d3257d9904f0348fc31a276df46fc33a4fc65f6727d1bcc5c4`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/compiler/vhdl_source_facade_spec.spl
-mirror: doc/06_spec/03_system/compiler/vhdl_source_facade_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/compiler/vhdl_source_facade_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/compiler/vhdl_source_facade_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/compiler/vhdl_source_facade_spec.spl:44:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'aot_vhdl_file writes a typed add design unit from minimal source' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/compiler/vhdl_source_facade_spec.spl:67:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'aot_vhdl_file writes arithmetic with integer constants' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/compiler/vhdl_source_facade_spec.spl:85:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'aot_vhdl_file writes a boolean if expression as a result mux' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -1,6 +1,29 @@
 # Persistence Intensive Specification
 
-> Tests covering Bug Database Persistence - Intensive, Atomic Operations - Intensive.
+> <details>
+
+<!-- sdn-diagram:id=persistence_intensive_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=persistence_intensive_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+persistence_intensive_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=persistence_intensive_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -22,18 +45,30 @@
 
 #### handles save/load roundtrip with 100 bugs _(slow)_
 
-- handles save/load roundtrip with 100 bugs
+1. cleanup test file
+
+2. var bugdb = create bug database
+
+3. bugdb add bug
+
+4. check
+
+5. check
+
+6. check
+
+7. check
+
+8. cleanup test file
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("handles save/load roundtrip with 100 bugs")
 val test_file = "{_tmp}/test_bugdb_100.sdn"
 cleanup_test_file(test_file)
 
@@ -71,18 +106,26 @@ cleanup_test_file(test_file)
 
 #### handles save/load with 1K bugs _(slow)_
 
-- handles save/load with 1K bugs
+1. cleanup test file
+
+2. var bugdb = create bug database
+
+3. bugdb add bug
+
+4. check
+
+5. check
+
+6. cleanup test file
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("handles save/load with 1K bugs")
 val test_file = "{_tmp}/test_bugdb_1k.sdn"
 cleanup_test_file(test_file)
 
@@ -110,18 +153,34 @@ cleanup_test_file(test_file)
 
 #### handles bugs with unicode data _(slow)_
 
-- handles bugs with unicode data
+1. cleanup test file
+
+2. var bugdb = create bug database
+
+3. severity: BugSeverity P0
+
+4. status: BugStatus Open
+
+5. bugdb add bug
+
+6. check
+
+7. check
+
+8. check
+
+9. check
+
+10. cleanup test file
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("handles bugs with unicode data")
 val test_file = "{_tmp}/test_bugdb_unicode.sdn"
 cleanup_test_file(test_file)
 
@@ -171,18 +230,30 @@ cleanup_test_file(test_file)
 
 #### handles bugs with long descriptions _(slow)_
 
-- handles bugs with long descriptions
+1. cleanup test file
+
+2. var bugdb = create bug database
+
+3. severity: BugSeverity P1
+
+4. status: BugStatus Open
+
+5. bugdb add bug
+
+6. check
+
+7. check
+
+8. cleanup test file
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("handles bugs with long descriptions")
 val test_file = "{_tmp}/test_bugdb_long.sdn"
 cleanup_test_file(test_file)
 
@@ -227,18 +298,34 @@ cleanup_test_file(test_file)
 
 #### handles multiple save operations _(slow)_
 
-- handles multiple save operations
+1. cleanup test file
+
+2. var bugdb = create bug database
+
+3. bugdb add bug
+
+4. bugdb save
+
+5. bugdb add bug
+
+6. bugdb save
+
+7. bugdb add bug
+
+8. bugdb save
+
+9. check
+
+10. cleanup test file
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("handles multiple save operations")
 val test_file = "{_tmp}/test_bugdb_multi_save.sdn"
 cleanup_test_file(test_file)
 
@@ -279,18 +366,16 @@ cleanup_test_file(test_file)
 
 #### creates file if not exists _(slow)_
 
-- creates file if not exists
+1. print "SKIP: stub BugDatabase save
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("creates file if not exists")
 # SKIP: stub save() returns true but does not write to disk
 print "SKIP: stub BugDatabase.save() does not write files to disk"
 ```
@@ -305,18 +390,16 @@ print "SKIP: stub BugDatabase.save() does not write files to disk"
 
 #### overwrites existing file _(slow)_
 
-- overwrites existing file
+1. print "SKIP: stub BugDatabase save
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("overwrites existing file")
 # SKIP: stub save() does not write to disk, create_bug_database creates empty db
 print "SKIP: stub BugDatabase.save() does not write files to disk"
 ```
@@ -331,18 +414,16 @@ print "SKIP: stub BugDatabase.save() does not write files to disk"
 
 #### handles file deletion after save _(slow)_
 
-- handles file deletion after save
+1. print "SKIP: stub BugDatabase save
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("handles file deletion after save")
 # SKIP: stub save() does not write to disk so file_exists check fails
 print "SKIP: stub BugDatabase.save() does not write files to disk"
 ```
@@ -359,18 +440,20 @@ print "SKIP: stub BugDatabase.save() does not write files to disk"
 
 #### handles load of non-existent file _(slow)_
 
-- handles load of non-existent file
+1. cleanup test file
+
+2. var bugdb = create bug database
+
+3. check
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("handles load of non-existent file")
 val test_file = "{_tmp}/nonexistent_bugdb.sdn"
 cleanup_test_file(test_file)  # Ensure it doesn't exist
 
@@ -390,18 +473,24 @@ check(empty_bugs.len() == 0)
 
 #### handles empty file _(slow)_
 
-- handles empty file
+1. cleanup test file
+
+2. file write
+
+3. var bugdb = create bug database
+
+4. check
+
+5. cleanup test file
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("handles empty file")
 val test_file = "{_tmp}/test_bugdb_empty.sdn"
 cleanup_test_file(test_file)
 
@@ -426,19 +515,37 @@ cleanup_test_file(test_file)
 
 #### preserves data integrity across save/load _(slow)_
 
-- preserves data integrity across save/load
+1. cleanup test file
+
+2. var bugdb = create bug database
+
+3. bugdb add bug
+
+4. bugdb save
    - Expected: all_loaded.len() equals `40`
+
+5. check
+
+6. check
+
+7. check
+
+8. check
+
+9. check
+
+10. check
+
+11. cleanup test file
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 56 lines folded for reproduction.
+Runnable source: 54 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("preserves data integrity across save/load")
 val test_file = "{_tmp}/test_bugdb_integrity.sdn"
 cleanup_test_file(test_file)
 
@@ -509,18 +616,22 @@ cleanup_test_file(test_file)
 
 #### performs atomic write successfully _(slow)_
 
-- performs atomic write successfully
+1. cleanup test file
+
+2. check
+
+3. check
+
+4. cleanup test file
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("performs atomic write successfully")
 val test_file = "{_tmp}/test_atomic_write.txt"
 cleanup_test_file(test_file)
 
@@ -544,18 +655,22 @@ cleanup_test_file(test_file)
 
 #### handles multiple atomic writes _(slow)_
 
-- handles multiple atomic writes
+1. cleanup test file
+
+2. atomic write
+
+3. check
+
+4. cleanup test file
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("handles multiple atomic writes")
 val test_file = "{_tmp}/test_atomic_multi.txt"
 cleanup_test_file(test_file)
 
@@ -579,18 +694,22 @@ cleanup_test_file(test_file)
 
 #### handles atomic write with large content _(slow)_
 
-- handles atomic write with large content
+1. cleanup test file
+
+2. check
+
+3. check
+
+4. cleanup test file
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("handles atomic write with large content")
 val test_file = "{_tmp}/test_atomic_large.txt"
 cleanup_test_file(test_file)
 
@@ -614,18 +733,22 @@ cleanup_test_file(test_file)
 
 #### handles atomic write with unicode _(slow)_
 
-- handles atomic write with unicode
+1. cleanup test file
+
+2. check
+
+3. check
+
+4. cleanup test file
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("handles atomic write with unicode")
 val test_file = "{_tmp}/test_atomic_unicode.txt"
 cleanup_test_file(test_file)
 
@@ -651,18 +774,24 @@ cleanup_test_file(test_file)
 
 #### performs atomic append successfully _(slow)_
 
-- performs atomic append successfully
+1. cleanup test file
+
+2. file write
+
+3. check
+
+4. check
+
+5. cleanup test file
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("performs atomic append successfully")
 val test_file = "{_tmp}/test_atomic_append.txt"
 cleanup_test_file(test_file)
 
@@ -689,18 +818,30 @@ cleanup_test_file(test_file)
 
 #### handles multiple atomic appends _(slow)_
 
-- handles multiple atomic appends
+1. cleanup test file
+
+2. file write
+
+3. atomic append
+
+4. check
+
+5. check
+
+6. check
+
+7. check
+
+8. cleanup test file
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("handles multiple atomic appends")
 val test_file = "{_tmp}/test_atomic_multi_append.txt"
 cleanup_test_file(test_file)
 
@@ -730,18 +871,24 @@ cleanup_test_file(test_file)
 
 #### performs atomic read successfully _(slow)_
 
-- performs atomic read successfully
+1. cleanup test file
+
+2. file write
+
+3. check
+
+4. check
+
+5. cleanup test file
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("performs atomic read successfully")
 val test_file = "{_tmp}/test_atomic_read.txt"
 cleanup_test_file(test_file)
 
@@ -767,18 +914,18 @@ cleanup_test_file(test_file)
 
 #### handles atomic read of non-existent file _(slow)_
 
-- handles atomic read of non-existent file
+1. cleanup test file
+
+2. check
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("handles atomic read of non-existent file")
 val test_file = "{_tmp}/nonexistent_atomic.txt"
 cleanup_test_file(test_file)
 
@@ -798,18 +945,22 @@ check(not result.?)
 
 #### handles rapid lock/unlock cycles _(slow)_
 
-- handles rapid lock/unlock cycles
+1. cleanup test files
+
+2. atomic write
+
+3. check
+
+4. cleanup test files
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("handles rapid lock/unlock cycles")
 val test_file = "{_tmp}/test_lock_cycles.txt"
 val lock_file = "{test_file}.lock"
 cleanup_test_files([test_file, lock_file])
@@ -833,18 +984,20 @@ cleanup_test_files([test_file, lock_file])
 
 #### cleans up lock files after operations _(slow)_
 
-- cleans up lock files after operations
+1. cleanup test files
+
+2. atomic write
+
+3. cleanup test files
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("cleans up lock files after operations")
 val test_file = "{_tmp}/test_lock_cleanup.txt"
 val lock_file = "{test_file}.lock"
 cleanup_test_files([test_file, lock_file])
@@ -869,12 +1022,12 @@ cleanup_test_files([test_file, lock_file])
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/02_integration/lib/persistence_intensive_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Bug Database Persistence - Intensive, Atomic Operations - Intensive.
+Tests covering:
 - Bug Database Persistence - Intensive
 - Atomic Operations - Intensive
 
@@ -890,54 +1043,3 @@ Tests covering Bug Database Persistence - Intensive, Atomic Operations - Intensi
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-INTEGRATION`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `eb43703165cfc7effd9e6f0f2b714921dc6fd81c085da6ff7e0e1b525aa6cee4`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `eb43703165cfc7effd9e6f0f2b714921dc6fd81c085da6ff7e0e1b525aa6cee4`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `eb43703165cfc7effd9e6f0f2b714921dc6fd81c085da6ff7e0e1b525aa6cee4`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
-
-SSpec documentization score: 90/100
-source: test/02_integration/lib/persistence_intensive_spec.spl
-mirror: doc/06_spec/02_integration/lib/persistence_intensive_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=90
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/lib/persistence_intensive_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/lib/persistence_intensive_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/02_integration/lib/persistence_intensive_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/02_integration/lib/persistence_intensive_spec.spl:132:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles save/load roundtrip with 100 bugs' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/lib/persistence_intensive_spec.spl:161:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles save/load with 1K bugs' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/lib/persistence_intensive_spec.spl:180:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles bugs with unicode data' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -18,38 +18,12 @@ use compiler.frontend.core.ast.*
 use compiler.core.ast_expr.*
 use compiler.core.ast_stmt.*
 use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
-use compiler.frontend.core.flat_pool_codec.*
 
-@unsafe(reason: "raw nullable environment-read ABI", capabilities: [ffi])
-extern fn rt_env_get(key: text) -> text?
-@unsafe(reason: "raw environment integer-read ABI", capabilities: [ffi])
+extern fn rt_env_get(key: text) -> text
 extern fn rt_env_get_i64(key: text, default_value: i64) -> i64
-@unsafe(reason: "raw environment mutation ABI", capabilities: [ffi])
 extern fn rt_env_set(key: text, value: text) -> bool
 @unsafe(reason: "raw environment removal ABI", capabilities: [ffi])
 extern fn rt_env_remove(key: text) -> bool
-
-@always_inline
-fn _sffi_env_get(key: text) -> text?:
-    unsafe(capabilities: [ffi]):
-        rt_env_get(key)
-
-@always_inline
-fn _sffi_env_get_i64(key: text, default_value: i64) -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_env_get_i64(key, default_value)
-
-@always_inline
-fn _sffi_env_set_required(key: text, value: text):
-    unsafe(capabilities: [ffi]):
-        if not rt_env_set(key, value):
-            panic("declaration environment mirror write failed for {key}")
-
-@always_inline
-fn _sffi_env_remove_required(key: text):
-    unsafe(capabilities: [ffi]):
-        if not rt_env_remove(key):
-            panic("declaration environment mirror removal failed for {key}")
 
 # High-water marks of the largest decl / module-decl index ever mirrored into
 # the environment since the last ast_reset(). ast_reset() sets both counts back
@@ -111,33 +85,20 @@ fn ast_decl_count_get() -> i64:
     ast_count_slots_ensure()
     ast_decl_count_slot[0]
 
-fn ast_decl_mirror_high_ensure():
-    if ast_decl_mirror_high_slot == nil or ast_decl_mirror_high_slot.len() == 0:
-        ast_decl_mirror_high_slot = [0]
-    if ast_module_decl_mirror_high_slot == nil or ast_module_decl_mirror_high_slot.len() == 0:
-        ast_module_decl_mirror_high_slot = [0]
-
 fn ast_decl_count_set(value: i64):
     ast_count_slots_ensure()
     ast_decl_count_slot[0] = value
-    ast_decl_mirror_high_ensure()
-    if value > ast_decl_mirror_high_slot[0]:
-        ast_decl_mirror_high_slot[0] = value
     if ast_decl_env_mirror_enabled():
-        _sffi_env_set_required("SIMPLE_BOOTSTRAP_DECL_COUNT", int_to_str(value))
+        rt_env_set("SIMPLE_BOOTSTRAP_DECL_COUNT", int_to_str(value))
 
 fn ast_module_decl_count_get() -> i64:
-    ast_count_slots_ensure()
-    ast_module_decl_count_slot[0]
+    ast_parse_i64(rt_env_get("SIMPLE_BOOTSTRAP_MODULE_DECL_COUNT") ?? "")
 
 fn ast_module_decl_count_set(value: i64):
     ast_count_slots_ensure()
     ast_module_decl_count_slot[0] = value
-    ast_decl_mirror_high_ensure()
-    if value > ast_module_decl_mirror_high_slot[0]:
-        ast_module_decl_mirror_high_slot[0] = value
     if ast_decl_env_mirror_enabled():
-        _sffi_env_set_required("SIMPLE_BOOTSTRAP_MODULE_DECL_COUNT", int_to_str(value))
+        rt_env_set("SIMPLE_BOOTSTRAP_MODULE_DECL_COUNT", int_to_str(value))
 
 fn ast_decl_key(idx: i64, field: text) -> text:
     "SIMPLE_BOOTSTRAP_DECL_" + int_to_str(idx) + "_" + field
@@ -187,12 +148,12 @@ fn ast_decl_arena_default() -> i64:
     # stmt_env_mirror_enabled compatibility note). Non-bootstrap runs
     # (test/LSP/plain native-build) always execute compiled code where the
     # arenas persist — they default to arena-preferred.
-    if _sffi_env_get_i64("SIMPLE_BOOTSTRAP", 0) == 1:
+    if rt_env_get_i64("SIMPLE_BOOTSTRAP", 0) == 1:
         return 0
     1
 
 fn ast_decl_mode_slots_refresh():
-    ast_decl_mode_cached = _sffi_env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", ast_decl_arena_default())
+    ast_decl_mode_cached = rt_env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", ast_decl_arena_default())
     ast_decl_mode_ready = true
 
 fn ast_decl_prefer_arena() -> bool:
@@ -200,30 +161,31 @@ fn ast_decl_prefer_arena() -> bool:
         return ast_decl_mode_cached == 1
     # Interpreter module variables may not persist between calls — fall back
     # to a direct env read (same compatibility note as stmt_env_mirror_enabled).
-    _sffi_env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", ast_decl_arena_default()) == 1
+    rt_env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", ast_decl_arena_default()) == 1
 
 fn ast_decl_env_mirror_enabled() -> bool:
-    _sffi_env_get_i64("SIMPLE_BOOTSTRAP", 0) == 1 and not ast_decl_prefer_arena()
+    (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") != "1"
+
+fn ast_decl_prefer_arena() -> bool:
+    (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") == "1"
 
 fn ast_decl_direct_set(key: text, value: text):
-    if not ast_decl_prefer_arena():
-        _sffi_env_set_required(key, value)
+    if (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") != "1":
+        rt_env_set(key, value)
 
 fn ast_decl_i64_set(idx: i64, field: text, value: i64):
     if ast_decl_env_mirror_enabled():
-        _sffi_env_set_required(ast_decl_key(idx, field), int_to_str(value))
+        rt_env_set(ast_decl_key(idx, field), int_to_str(value))
 
 fn ast_decl_i64_get(idx: i64, field: text) -> i64:
-    ast_parse_i64(_sffi_env_get(ast_decl_key(idx, field)) ?? "")
+    ast_parse_i64(rt_env_get(ast_decl_key(idx, field)) ?? "")
 
 fn ast_decl_text_set(idx: i64, field: text, value: text):
-    if ast_decl_prefer_arena():
-        return
-    if field == "NAME" or field == "PARAM_NAMES" or field == "PARAM_TYPES" or field == "TYPE_PARAMS" or field == "BODY" or field == "IMPL_TRAIT" or ast_decl_env_mirror_enabled():
-        _sffi_env_set_required(ast_decl_key(idx, field), value)
+    if (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") != "1" and (field == "NAME" or field == "PARAM_NAMES" or field == "PARAM_TYPES" or field == "TYPE_PARAMS" or field == "BODY" or ast_decl_env_mirror_enabled()):
+        rt_env_set(ast_decl_key(idx, field), value)
 
 fn ast_decl_text_get(idx: i64, field: text) -> text:
-    _sffi_env_get(ast_decl_key(idx, field)) ?? ""
+    rt_env_get(ast_decl_key(idx, field)) ?? ""
 
 fn ast_text_list_join(values: [text]) -> text:
     values.join("\n")
@@ -263,8 +225,8 @@ const DECL_CE = 11         # ce NAME: computation expression invocation
 const DECL_LAZY_VAL = 12   # lazy val name = expr (module-level deferred init)
 const DECL_CLI = 13        # cli Name: declarative arg parsing block
 const DECL_AOP_ADVICE = 14 # on pc{...} use handler form [priority N]
+const DECL_DI_BINDING = 15 # @inject pc{...} implementation
 const DECL_ARCH_RULE = 16  # forbid/allow pc{...} "message"
-const DECL_TYPE_ALIAS = 17 # type X = Y (name + aliased-type tag only; TAL1 lane)
 
 # ===== Declaration Arena Pools =====
 var decl_tag: [i64] = []
@@ -275,17 +237,6 @@ var decl_param_names: [[text]] = []
 var decl_param_types: [[i64]] = []
 var decl_ret_type: [i64] = []
 var decl_body_stmts: [[i64]] = []
-# Flat mirror of decl_body_stmts: joined "a,b,c" text per decl. Same hazard and
-# same fix as arm_body_flat above (see that comment): decl_body_stmts is
-# [[i64]], and the native-build/cranelift-compiled runtime can corrupt/erase
-# the inner list across compilation units (stage3-self-hosted stage4 native-
-# build closure; see doc/08_tracking/bug/
-# stage3_selfhost_parser_case_multielem_pattern_2026-07-17.md), surfacing as
-# stale/OOB stmt-arena indices read back by decl_get_body() in a LATER file's
-# conversion. A flat [text] arena has no nested element to erase and, like
-# arm_body_flat, is index-aligned with decl_tag so it can never leak stale
-# bodies across compilations.
-var decl_body_stmts_flat: [text] = []
 var decl_field_names: [[text]] = []
 var decl_field_types: [[i64]] = []
 var decl_field_defaults: [[i64]] = []
@@ -299,19 +250,23 @@ var decl_type_param_constraints: [[[text]]] = []  # per-param constraint lists: 
 var decl_type_param_constraint_mode: [[text]] = []  # per-param mode: "limit", "candidate", ""
 var decl_is_lazy: [i64] = []
 var decl_is_gpu_kernel: [i64] = []   # 1 if @gpu_kernel decorated, 0 otherwise
-var decl_rt_hal_flags: [i64] = []    # bit 0 tag, bit 1 C, bit 2 Rust, bit 3 invalid
 var decl_gpu_target_text: [text] = []
 var decl_gpu_target_arg_name_text: [text] = []
 var decl_gpu_backends_text: [text] = []
 var decl_is_simd: [i64] = []         # 1 if @simd decorated, 0 otherwise
 var decl_is_packed: [i64] = []       # 1 if @packed decorated, 0 otherwise
 var decl_derives: [[text]] = []      # @derive(Eq, Hash, Debug) trait list
+var decl_attributes: [[text]] = []   # raw source decorators, in source order
 # Trait NAME implemented by an `impl Trait for Type:` block (#157). Empty for
 # inherent impls. Grown alongside the other pools (placeholder here, assigned
 # later via decl_set_impl_trait) so module_assembly can recover the trait link
 # that parse_impl_decl otherwise drops -- without it, un-overridden trait
 # default methods never resolve on the native build path.
 var decl_impl_trait: [text] = []
+# Source identity of a compiler-owned `facet impl`; empty for every ordinary
+# impl block. Kept separate from the target type so two adapters for the same
+# target/facet retain distinct HIR method symbols.
+var decl_facet_impl_name: [text] = []
 # 1 if this struct-shaped decl is actually a `trait` declaration (#157). A trait
 # is parsed via the struct-body path (parse_struct_or_trait_decl) and stored as a
 # DECL_STRUCT node; this marker lets module_assembly route it into module.traits
@@ -320,9 +275,12 @@ var decl_impl_trait: [text] = []
 var decl_is_trait: [i64] = []
 var decl_is_hardware: [i64] = []     # 1 if @hardware decorated, 0 otherwise
 var decl_clocked_args: [[text]] = [] # @clocked(clk, reset_n) signal names
-var decl_vhdl_generic_args: [[i64]] = [] # @generic(...) expression ids
-var decl_flatten_struct_output: [i64] = [] # 1 if @flatten_struct_output decorated
 var decl_is_value_type: [i64] = []   # 1 = struct (value semantics, copy on bind), 0 = class/actor (reference semantics)
+# Distinguishes an actor from an ordinary reference-semantic class. Actors use
+# the existing DECL_STRUCT payload so fields/types stay in the compact parallel
+# arenas; this one scalar sidecar preserves source identity through FlatAst.
+var decl_doc_comment: [text] = []
+var decl_raw_attributes: [[text]] = []
 # Per-parameter `mut` marker (native_freefn_mut_param_no_mutate fix), comma-joined
 # i64 list parallel to PARAM_NAMES/PARAM_TYPES (1 = declared `mut name: T`).
 # Grown alongside the other pools here (decl_push_default_slot/decl_ensure_slot)
@@ -346,99 +304,95 @@ var decl_empty_i64: [i64] = []
 var decl_empty_text: [text] = []
 var decl_empty_text_lists: [[text]] = []
 
-fn decl_count() -> i64:
-    ast_decl_count_get()
-
-fn decl_push_default_slot(tag: i64, span_id: i64):
+fn ast_decl_prepare_persistent_globals():
+    # Empty sentinels are first referenced by decl allocation.  Streaming parse
+    # must allocate their shells before the first transient scope.
     if decl_empty_i64 == nil:
         decl_empty_i64 = []
     if decl_empty_text == nil:
         decl_empty_text = []
     if decl_empty_text_lists == nil:
         decl_empty_text_lists = []
+    if decl_param_default_text == nil:
+        decl_param_default_text = []
+    if decl_facet_impl_name == nil:
+        decl_facet_impl_name = []
+
+fn decl_count() -> i64:
+    ast_decl_count_get()
+
+fn decl_push_default_slot(tag: i64, span_id: i64):
     decl_tag.push(tag)
     decl_span.push(span_id)
     decl_name.push("")
-    decl_params.push(decl_empty_i64)
-    decl_param_names.push(decl_empty_text)
-    decl_param_types.push(decl_empty_i64)
+    decl_params.push([])
+    decl_param_names.push([])
+    decl_param_types.push([])
     decl_ret_type.push(-1)
-    decl_body_stmts.push(decl_empty_i64)
-    decl_body_stmts_flat.push("")
-    decl_field_names.push(decl_empty_text)
-    decl_field_types.push(decl_empty_i64)
-    decl_field_defaults.push(decl_empty_i64)
-    decl_field_bits.push(decl_empty_i64)
-    decl_imports.push(decl_empty_text)
+    decl_body_stmts.push([])
+    decl_field_names.push([])
+    decl_field_types.push([])
+    decl_field_defaults.push([])
+    decl_field_bits.push([])
+    decl_imports.push([])
     decl_visibility.push("private")
     decl_is_async.push(0)
     decl_is_comptime.push(0)
-    decl_type_params.push(decl_empty_text)
-    decl_type_param_constraints.push(decl_empty_text_lists)
-    decl_type_param_constraint_mode.push(decl_empty_text)
+    decl_type_params.push([])
+    decl_type_param_constraints.push([])
+    decl_type_param_constraint_mode.push([])
     decl_is_lazy.push(0)
     decl_is_gpu_kernel.push(0)
-    decl_rt_hal_flags.push(0)
     decl_gpu_target_text.push("")
     decl_gpu_target_arg_name_text.push("")
     decl_gpu_backends_text.push("")
     decl_is_simd.push(0)
     decl_is_packed.push(0)
-    decl_derives.push(decl_empty_text)
+    decl_derives.push([])
     decl_impl_trait.push("")
+    decl_facet_impl_name.push("")
     decl_is_trait.push(0)
     decl_is_hardware.push(0)
-    decl_clocked_args.push(decl_empty_text)
-    decl_vhdl_generic_args.push(decl_empty_i64)
-    decl_flatten_struct_output.push(0)
+    decl_clocked_args.push([])
     decl_is_value_type.push(1)
     decl_param_mut_text.push("")
     decl_param_default_text.push("")
 
 fn decl_ensure_slot(idx: i64, tag: i64, span_id: i64):
-    if decl_empty_i64 == nil:
-        decl_empty_i64 = []
-    if decl_empty_text == nil:
-        decl_empty_text = []
-    if decl_empty_text_lists == nil:
-        decl_empty_text_lists = []
     while decl_tag.len() <= idx:
         decl_push_default_slot(0, 0)
     decl_tag[idx] = tag
     decl_span[idx] = span_id
     decl_name[idx] = ""
-    decl_params[idx] = decl_empty_i64
-    decl_param_names[idx] = decl_empty_text
-    decl_param_types[idx] = decl_empty_i64
+    decl_params[idx] = []
+    decl_param_names[idx] = []
+    decl_param_types[idx] = []
     decl_ret_type[idx] = -1
-    decl_body_stmts[idx] = decl_empty_i64
-    decl_body_stmts_flat[idx] = ""
-    decl_field_names[idx] = decl_empty_text
-    decl_field_types[idx] = decl_empty_i64
-    decl_field_defaults[idx] = decl_empty_i64
-    decl_field_bits[idx] = decl_empty_i64
-    decl_imports[idx] = decl_empty_text
+    decl_body_stmts[idx] = []
+    decl_field_names[idx] = []
+    decl_field_types[idx] = []
+    decl_field_defaults[idx] = []
+    decl_field_bits[idx] = []
+    decl_imports[idx] = []
     decl_visibility[idx] = "private"
     decl_is_async[idx] = 0
     decl_is_comptime[idx] = 0
-    decl_type_params[idx] = decl_empty_text
-    decl_type_param_constraints[idx] = decl_empty_text_lists
-    decl_type_param_constraint_mode[idx] = decl_empty_text
+    decl_type_params[idx] = []
+    decl_type_param_constraints[idx] = []
+    decl_type_param_constraint_mode[idx] = []
     decl_is_lazy[idx] = 0
     decl_is_gpu_kernel[idx] = 0
-    decl_rt_hal_flags[idx] = 0
     decl_gpu_target_text[idx] = ""
     decl_gpu_target_arg_name_text[idx] = ""
     decl_gpu_backends_text[idx] = ""
     decl_is_simd[idx] = 0
     decl_is_packed[idx] = 0
-    decl_derives[idx] = decl_empty_text
+    decl_derives[idx] = []
     decl_impl_trait[idx] = ""
+    decl_facet_impl_name[idx] = ""
     decl_is_trait[idx] = 0
     decl_is_hardware[idx] = 0
-    decl_clocked_args[idx] = decl_empty_text
-    decl_vhdl_generic_args[idx] = decl_empty_i64
-    decl_flatten_struct_output[idx] = 0
+    decl_clocked_args[idx] = []
     decl_is_value_type[idx] = 1
     decl_param_mut_text[idx] = ""
     decl_param_default_text[idx] = ""
@@ -448,11 +402,10 @@ fn decl_alloc(tag: i64, span_id: i64) -> i64:
         decl_tag = []
     val idx = ast_decl_count_get()
     decl_ensure_slot(idx, tag, span_id)
-    if not ast_decl_prefer_arena():
-        ast_decl_i64_set(idx, "TAG", tag)
-        ast_decl_direct_set(ast_decl_tag_key(idx), int_to_str(tag))
-        ast_decl_i64_set(idx, "SPAN", span_id)
-        ast_decl_text_set(idx, "VIS", "private")
+    ast_decl_i64_set(idx, "TAG", tag)
+    ast_decl_direct_set(ast_decl_tag_key(idx), int_to_str(tag))
+    ast_decl_i64_set(idx, "SPAN", span_id)
+    ast_decl_text_set(idx, "VIS", "private")
     ast_decl_count_set(idx + 1)
     idx
 
@@ -460,39 +413,36 @@ fn decl_alloc(tag: i64, span_id: i64) -> i64:
 
 fn decl_fn(name: text, param_names: [text], param_types: [i64], ret_type: i64, body: [i64], is_async: i64, type_params: [text], span_id: i64) -> i64:
     val idx = decl_alloc(1, span_id)
-    if not ast_decl_prefer_arena():
-        ast_decl_direct_set(ast_decl_tag_key(idx), "1")
-        ast_decl_text_set(idx, "NAME", name)
-        ast_decl_direct_set(ast_decl_name_key(idx), name)
-        ast_decl_text_set(idx, "PARAM_NAMES", ast_text_list_join(param_names))
-        ast_decl_text_set(idx, "PARAM_TYPES", ast_i64_list_join(param_types))
-        ast_decl_i64_set(idx, "RET", ret_type)
-        ast_decl_direct_set(ast_decl_ret_key(idx), int_to_str(ret_type))
-        ast_decl_text_set(idx, "BODY", ast_i64_list_join(body))
-        ast_decl_direct_set(ast_decl_body_key(idx), ast_i64_list_join(body))
-        ast_decl_i64_set(idx, "ASYNC", is_async)
-        ast_decl_text_set(idx, "TYPE_PARAMS", ast_text_list_join(type_params))
+    ast_decl_direct_set(ast_decl_tag_key(idx), "1")
+    ast_decl_text_set(idx, "NAME", name)
+    ast_decl_direct_set(ast_decl_name_key(idx), name)
+    ast_decl_text_set(idx, "PARAM_NAMES", ast_text_list_join(param_names))
+    ast_decl_text_set(idx, "PARAM_TYPES", ast_i64_list_join(param_types))
+    ast_decl_i64_set(idx, "RET", ret_type)
+    ast_decl_direct_set(ast_decl_ret_key(idx), int_to_str(ret_type))
+    ast_decl_text_set(idx, "BODY", ast_i64_list_join(body))
+    ast_decl_direct_set(ast_decl_body_key(idx), ast_i64_list_join(body))
+    ast_decl_i64_set(idx, "ASYNC", is_async)
+    ast_decl_text_set(idx, "TYPE_PARAMS", ast_text_list_join(type_params))
     decl_name[idx] = name
     decl_param_names[idx] = param_names
     decl_param_types[idx] = param_types
     decl_ret_type[idx] = ret_type
     decl_body_stmts[idx] = body
-    decl_body_stmts_flat[idx] = ast_i64_list_join(body)
     decl_is_async[idx] = is_async
     decl_type_params[idx] = type_params
     idx
 
 fn decl_extern_fn(name: text, param_names: [text], param_types: [i64], ret_type: i64, type_params: [text], span_id: i64) -> i64:
     val idx = decl_alloc(2, span_id)
-    if not ast_decl_prefer_arena():
-        ast_decl_direct_set(ast_decl_tag_key(idx), "2")
-        ast_decl_text_set(idx, "NAME", name)
-        ast_decl_direct_set(ast_decl_name_key(idx), name)
-        ast_decl_text_set(idx, "PARAM_NAMES", ast_text_list_join(param_names))
-        ast_decl_text_set(idx, "PARAM_TYPES", ast_i64_list_join(param_types))
-        ast_decl_i64_set(idx, "RET", ret_type)
-        ast_decl_direct_set(ast_decl_ret_key(idx), int_to_str(ret_type))
-        ast_decl_text_set(idx, "TYPE_PARAMS", ast_text_list_join(type_params))
+    ast_decl_direct_set(ast_decl_tag_key(idx), "2")
+    ast_decl_text_set(idx, "NAME", name)
+    ast_decl_direct_set(ast_decl_name_key(idx), name)
+    ast_decl_text_set(idx, "PARAM_NAMES", ast_text_list_join(param_names))
+    ast_decl_text_set(idx, "PARAM_TYPES", ast_i64_list_join(param_types))
+    ast_decl_i64_set(idx, "RET", ret_type)
+    ast_decl_direct_set(ast_decl_ret_key(idx), int_to_str(ret_type))
+    ast_decl_text_set(idx, "TYPE_PARAMS", ast_text_list_join(type_params))
     decl_name[idx] = name
     decl_param_names[idx] = param_names
     decl_param_types[idx] = param_types
@@ -502,16 +452,15 @@ fn decl_extern_fn(name: text, param_names: [text], param_types: [i64], ret_type:
 
 fn decl_struct_def(name: text, field_names: [text], field_types: [i64], field_defaults: [i64], field_bits: [i64], span_id: i64) -> i64:
     val idx = decl_alloc(DECL_STRUCT, span_id)
-    if not ast_decl_prefer_arena():
-        ast_decl_direct_set(ast_decl_tag_key(idx), "3")
-        ast_decl_text_set(idx, "NAME", name)
-        ast_decl_direct_set(ast_decl_name_key(idx), name)
-        ast_decl_text_set(idx, "FIELD_NAMES", ast_text_list_join(field_names))
-        ast_decl_direct_set(ast_decl_field_names_key(idx), ast_text_list_join(field_names))
-        ast_decl_text_set(idx, "FIELD_TYPES", ast_i64_list_join(field_types))
-        ast_decl_direct_set(ast_decl_field_types_key(idx), ast_i64_list_join(field_types))
-        ast_decl_text_set(idx, "FIELD_DEFAULTS", ast_i64_list_join(field_defaults))
-        ast_decl_text_set(idx, "FIELD_BITS", ast_i64_list_join(field_bits))
+    ast_decl_direct_set(ast_decl_tag_key(idx), "3")
+    ast_decl_text_set(idx, "NAME", name)
+    ast_decl_direct_set(ast_decl_name_key(idx), name)
+    ast_decl_text_set(idx, "FIELD_NAMES", ast_text_list_join(field_names))
+    ast_decl_direct_set(ast_decl_field_names_key(idx), ast_text_list_join(field_names))
+    ast_decl_text_set(idx, "FIELD_TYPES", ast_i64_list_join(field_types))
+    ast_decl_direct_set(ast_decl_field_types_key(idx), ast_i64_list_join(field_types))
+    ast_decl_text_set(idx, "FIELD_DEFAULTS", ast_i64_list_join(field_defaults))
+    ast_decl_text_set(idx, "FIELD_BITS", ast_i64_list_join(field_bits))
     decl_name[idx] = name
     decl_field_names[idx] = field_names
     decl_field_types[idx] = field_types
@@ -529,8 +478,68 @@ fn decl_set_is_value_type(idx: i64, value: i64):
 
 fn decl_get_is_value_type(idx: i64) -> i64:
     if idx >= 0 and idx < decl_is_value_type.len():
+        if decl_is_value_type[idx] == 2:
+            return 0
         return decl_is_value_type[idx]
     1
+
+fn decl_set_actor(idx: i64):
+    if idx < 0:
+        return
+    if not ast_decl_prefer_arena():
+        ast_decl_i64_set(idx, "IS_ACTOR", 1)
+    if idx < decl_is_value_type.len():
+        # Reuse the existing value/reference discriminator: 2 is actor and is
+        # exposed as reference semantics by decl_get_is_value_type. This avoids
+        # allocating another arena-wide scalar column for a rare declaration.
+        decl_is_value_type[idx] = 2
+
+fn decl_get_is_actor(idx: i64) -> i64:
+    if idx < 0:
+        return 0
+    if ast_decl_prefer_arena():
+        if idx < decl_is_value_type.len():
+            if decl_is_value_type[idx] == 2:
+                return 1
+        return 0
+    val stored = ast_decl_i64_get(idx, "IS_ACTOR")
+    if stored != 0:
+        return stored
+    if idx < decl_is_value_type.len() and decl_is_value_type[idx] == 2:
+        return 1
+    0
+
+fn decl_set_doc_comment(idx: i64, doc: text):
+    if idx >= 0 and idx < decl_doc_comment.len():
+        decl_doc_comment[idx] = doc
+
+fn decl_get_doc_comment(idx: i64) -> text:
+    if idx >= 0 and idx < decl_doc_comment.len():
+        return decl_doc_comment[idx]
+    ""
+
+fn decl_set_raw_attributes(idx: i64, attrs: [text]):
+    if idx >= 0 and idx < decl_raw_attributes.len():
+        decl_raw_attributes[idx] = attrs
+
+fn decl_set_typed_raw_attributes(idx: i64, attrs: [text], arg_rows: [text]):
+    if idx < 0 or idx >= decl_raw_attributes.len() or attrs.len() != arg_rows.len():
+        return
+    var encoded: [text] = []
+    var index = 0
+    while index < attrs.len():
+        # Length-prefix the bounded ASCII id row. Raw attribute spelling may
+        # contain arbitrary string-literal text, so delimiter-only framing is
+        # not lossless. Keeping both pieces in this existing sidecar avoids a
+        # new arena-wide parallel column.
+        encoded.push(int_to_str(arg_rows[index].len()) + ":" + arg_rows[index] + attrs[index])
+        index = index + 1
+    decl_raw_attributes[idx] = encoded
+
+fn decl_get_raw_attributes(idx: i64) -> [text]:
+    if idx >= 0 and idx < decl_raw_attributes.len():
+        return decl_raw_attributes[idx]
+    []
 
 fn decl_set_packed(idx: i64, value: i64):
     """Mark a struct-tagged decl as packed (bitfield). The flat-AST bridge
@@ -561,125 +570,68 @@ fn decl_get_clocked_args(idx: i64) -> [text]:
     else:
         []
 
-fn decl_set_vhdl_generic_args(idx: i64, args: [i64]):
-    """Record @generic(...) expression ids for a fn decl."""
-    if idx >= 0 and idx < decl_vhdl_generic_args.len():
-        decl_vhdl_generic_args[idx] = args
-
-fn decl_get_vhdl_generic_args(idx: i64) -> [i64]:
-    if idx >= 0 and idx < decl_vhdl_generic_args.len():
-        decl_vhdl_generic_args[idx]
-    else:
-        []
-
-fn decl_set_flatten_struct_output(idx: i64, value: i64):
-    """Mark a fn decl @flatten_struct_output for VHDL output ABI lowering."""
-    if idx >= 0 and idx < decl_flatten_struct_output.len():
-        decl_flatten_struct_output[idx] = value
-
-fn decl_get_flatten_struct_output(idx: i64) -> i64:
-    if idx >= 0 and idx < decl_flatten_struct_output.len():
-        decl_flatten_struct_output[idx]
-    else:
-        0
-
 fn decl_val_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
     val idx = decl_alloc(DECL_VAL, span_id)
-    if not ast_decl_prefer_arena():
-        ast_decl_direct_set(ast_decl_tag_key(idx), "4")
-        ast_decl_text_set(idx, "NAME", name)
-        ast_decl_direct_set(ast_decl_name_key(idx), name)
-        ast_decl_i64_set(idx, "RET", type_tag)
-        ast_decl_text_set(idx, "BODY", int_to_str(init_expr))
-        ast_decl_direct_set(ast_decl_body_key(idx), int_to_str(init_expr))
+    ast_decl_direct_set(ast_decl_tag_key(idx), "4")
+    ast_decl_text_set(idx, "NAME", name)
+    ast_decl_direct_set(ast_decl_name_key(idx), name)
+    ast_decl_i64_set(idx, "RET", type_tag)
+    ast_decl_text_set(idx, "BODY", int_to_str(init_expr))
+    ast_decl_direct_set(ast_decl_body_key(idx), int_to_str(init_expr))
     decl_name[idx] = name
     decl_ret_type[idx] = type_tag
     decl_body_stmts[idx] = [init_expr]
-    decl_body_stmts_flat[idx] = ast_i64_list_join([init_expr])
     idx
 
 fn decl_lazy_val_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
     val idx = decl_alloc(DECL_LAZY_VAL, span_id)
-    if not ast_decl_prefer_arena():
-        ast_decl_direct_set(ast_decl_tag_key(idx), "12")
-        ast_decl_text_set(idx, "NAME", name)
-        ast_decl_direct_set(ast_decl_name_key(idx), name)
-        ast_decl_i64_set(idx, "RET", type_tag)
-        ast_decl_text_set(idx, "BODY", int_to_str(init_expr))
-        ast_decl_direct_set(ast_decl_body_key(idx), int_to_str(init_expr))
-        ast_decl_i64_set(idx, "LAZY", 1)
+    ast_decl_direct_set(ast_decl_tag_key(idx), "12")
+    ast_decl_text_set(idx, "NAME", name)
+    ast_decl_direct_set(ast_decl_name_key(idx), name)
+    ast_decl_i64_set(idx, "RET", type_tag)
+    ast_decl_text_set(idx, "BODY", int_to_str(init_expr))
+    ast_decl_direct_set(ast_decl_body_key(idx), int_to_str(init_expr))
+    ast_decl_i64_set(idx, "LAZY", 1)
     decl_name[idx] = name
     decl_ret_type[idx] = type_tag
     decl_body_stmts[idx] = [init_expr]
-    decl_body_stmts_flat[idx] = ast_i64_list_join([init_expr])
     decl_is_lazy[idx] = 1
     idx
 
 fn decl_var_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
     val idx = decl_alloc(DECL_VAR, span_id)
-    if not ast_decl_prefer_arena():
-        ast_decl_direct_set(ast_decl_tag_key(idx), "5")
-        ast_decl_text_set(idx, "NAME", name)
-        ast_decl_direct_set(ast_decl_name_key(idx), name)
-        ast_decl_i64_set(idx, "RET", type_tag)
-        ast_decl_text_set(idx, "BODY", int_to_str(init_expr))
-        ast_decl_direct_set(ast_decl_body_key(idx), int_to_str(init_expr))
+    ast_decl_direct_set(ast_decl_tag_key(idx), "5")
+    ast_decl_text_set(idx, "NAME", name)
+    rt_env_set(ast_decl_name_key(idx), name)
+    ast_decl_i64_set(idx, "RET", type_tag)
+    ast_decl_text_set(idx, "BODY", int_to_str(init_expr))
+    ast_decl_direct_set(ast_decl_body_key(idx), int_to_str(init_expr))
     decl_name[idx] = name
     decl_ret_type[idx] = type_tag
     decl_body_stmts[idx] = [init_expr]
     decl_body_stmts_flat[idx] = ast_i64_list_join([init_expr])
     idx
 
-fn decl_type_alias(name: text, aliased_type_tag: i64, span_id: i64) -> i64:
-    """type NAME = TYPE -- name + aliased type tag only (TAL1 lane: pure
-    capture, no semantic alias registry). Modeled on decl_val_binding's
-    name/type_tag shape; there is no init expr so decl_body_stmts stays
-    empty."""
-    val idx = decl_alloc(DECL_TYPE_ALIAS, span_id)
-    if not ast_decl_prefer_arena():
-        ast_decl_direct_set(ast_decl_tag_key(idx), "17")
-        ast_decl_text_set(idx, "NAME", name)
-        ast_decl_direct_set(ast_decl_name_key(idx), name)
-        ast_decl_i64_set(idx, "RET", aliased_type_tag)
-        ast_decl_direct_set(ast_decl_ret_key(idx), int_to_str(aliased_type_tag))
-    decl_name[idx] = name
-    decl_ret_type[idx] = aliased_type_tag
-    idx
-
 fn decl_use_import(module_path: text, imported_names: [text], span_id: i64) -> i64:
     val idx = decl_alloc(DECL_USE, span_id)
-    if not ast_decl_prefer_arena():
-        ast_decl_direct_set(ast_decl_tag_key(idx), "6")
-        ast_decl_text_set(idx, "NAME", module_path)
-        ast_decl_direct_set(ast_decl_name_key(idx), module_path)
-        ast_decl_text_set(idx, "IMPORTS", ast_text_list_join(imported_names))
-        ast_decl_direct_set(ast_decl_imports_key(idx), ast_text_list_join(imported_names))
+    ast_decl_direct_set(ast_decl_tag_key(idx), "6")
+    ast_decl_text_set(idx, "NAME", module_path)
+    ast_decl_direct_set(ast_decl_name_key(idx), module_path)
+    ast_decl_text_set(idx, "IMPORTS", ast_text_list_join(imported_names))
+    ast_decl_direct_set(ast_decl_imports_key(idx), ast_text_list_join(imported_names))
     decl_name[idx] = module_path
     decl_imports[idx] = imported_names
     idx
 
 fn decl_export_names(names: [text], span_id: i64) -> i64:
     val idx = decl_alloc(7, span_id)
-    if not ast_decl_prefer_arena():
-        ast_decl_direct_set(ast_decl_tag_key(idx), "7")
-        ast_decl_text_set(idx, "IMPORTS", ast_text_list_join(names))
-        ast_decl_direct_set(ast_decl_imports_key(idx), ast_text_list_join(names))
+    ast_decl_direct_set(ast_decl_tag_key(idx), "7")
+    ast_decl_text_set(idx, "IMPORTS", ast_text_list_join(names))
+    ast_decl_direct_set(ast_decl_imports_key(idx), ast_text_list_join(names))
     decl_imports[idx] = names
     idx
 
-fn decl_enum_payload_unnamed_marker() -> text:
-    """Sentinel stored in the enum payload field-NAME list for a POSITIONAL
-    payload field (S1 lane, hardening plan §15 Phase 4).
-
-    Positional and named payload fields must stay distinguishable after the
-    flat list is joined and split back apart, so a positional field cannot be
-    recorded as the empty string: `ast_text_list_join(["", ""])` is a
-    separator-only string that no longer round-trips to two elements, which
-    would silently shift every later field's name by one. `#` is not a legal
-    identifier, so it can never collide with a real field name."""
-    "#"
-
-fn decl_enum_def(name: text, variant_names: [text], variant_discriminants: [i64], variant_payload_types_flat: [i64], variant_payload_counts: [i64], variant_payload_field_names_flat: [text], span_id: i64) -> i64:
+fn decl_enum_def(name: text, variant_names: [text], variant_discriminants: [i64], variant_payload_types_flat: [i64], variant_payload_counts: [i64], span_id: i64) -> i64:
     """EPA1 (bug enum_payload_multi_arity, extends EPC1's single-payload
     capture to full arity): `variant_payload_counts` is parallel to
     `variant_names` -- one entry per variant giving how many payload fields
@@ -695,21 +647,7 @@ fn decl_enum_def(name: text, variant_names: [text], variant_discriminants: [i64]
     `decl_field_bits` (unused by enum decls -- structs use it for bitfield
     widths) carries the per-variant counts. Superseded EPC1's
     single-payload-only `variant_payload_types: [i64]` (one tag per
-    variant, extra fields discarded).
-
-    S1 (hardening plan §15 Phase 4, "preserve enum payload metadata end to
-    end") adds `variant_payload_field_names_flat`, parallel ELEMENT-FOR-ELEMENT
-    to `variant_payload_types_flat` (same flat, cross-variant, source-order
-    concatenation, so the same running-offset slice recovers both). A named
-    payload field (`B(name: text)`) stores its identifier; a POSITIONAL payload
-    field (`A(i64, text)`) stores `decl_enum_payload_unnamed_marker()`. Without
-    it a named payload was indistinguishable from a positional one downstream
-    -- `_FlatAstBridge/module_assembly.spl` could only ever rebuild
-    `VariantKind.Tuple`, so `VariantKind.Struct`/`HirVariantKind.Struct`, which
-    both already existed, were never constructed from source text.
-
-    It is the LAST parameter before `span_id` on purpose: the Rust seed fills
-    partial constructions POSITIONALLY, so appending is the only safe edit."""
+    variant, extra fields discarded)."""
     val idx = decl_alloc(DECL_ENUM, span_id)
     if not ast_decl_prefer_arena():
         ast_decl_direct_set(ast_decl_tag_key(idx), "8")
@@ -721,11 +659,6 @@ fn decl_enum_def(name: text, variant_names: [text], variant_discriminants: [i64]
         ast_decl_text_set(idx, "FIELD_TYPES", ast_i64_list_join(variant_payload_types_flat))
         ast_decl_direct_set(ast_decl_field_types_key(idx), ast_i64_list_join(variant_payload_types_flat))
         ast_decl_text_set(idx, "FIELD_BITS", ast_i64_list_join(variant_payload_counts))
-        # S1: payload field NAMES reuse the per-decl PARAM_NAMES slot, which is
-        # written only by function decls (decl_fn_def) and left empty for every
-        # enum decl -- the same "reuse an otherwise-unused slot" pattern EPA1
-        # applied to FIELD_TYPES/FIELD_BITS, rather than growing the arena.
-        ast_decl_text_set(idx, "PARAM_NAMES", ast_text_list_join(variant_payload_field_names_flat))
     decl_name[idx] = name
     decl_field_names[idx] = variant_names
     decl_field_defaults[idx] = variant_discriminants
@@ -736,15 +669,13 @@ fn decl_enum_def(name: text, variant_names: [text], variant_discriminants: [i64]
 
 fn decl_impl_block(target_name: text, method_decl_ids: [i64], span_id: i64) -> i64:
     val idx = decl_alloc(DECL_IMPL, span_id)
-    if not ast_decl_prefer_arena():
-        ast_decl_direct_set(ast_decl_tag_key(idx), "9")
-        ast_decl_text_set(idx, "NAME", target_name)
-        ast_decl_direct_set(ast_decl_name_key(idx), target_name)
-        ast_decl_text_set(idx, "BODY", ast_i64_list_join(method_decl_ids))
-        ast_decl_direct_set(ast_decl_body_key(idx), ast_i64_list_join(method_decl_ids))
+    ast_decl_direct_set(ast_decl_tag_key(idx), "9")
+    ast_decl_text_set(idx, "NAME", target_name)
+    ast_decl_direct_set(ast_decl_name_key(idx), target_name)
+    ast_decl_text_set(idx, "BODY", ast_i64_list_join(method_decl_ids))
+    ast_decl_direct_set(ast_decl_body_key(idx), ast_i64_list_join(method_decl_ids))
     decl_name[idx] = target_name
     decl_body_stmts[idx] = method_decl_ids
-    decl_body_stmts_flat[idx] = ast_i64_list_join(method_decl_ids)
     idx
 
 # Record the trait NAME for an `impl Trait for Type:` block (#157). Called in a
@@ -753,8 +684,7 @@ fn decl_impl_block(target_name: text, method_decl_ids: [i64], span_id: i64) -> i
 fn decl_set_impl_trait(idx: i64, trait_name: text):
     if idx >= 0 and idx < decl_impl_trait.len():
         decl_impl_trait[idx] = trait_name
-    if not ast_decl_prefer_arena():
-        ast_decl_text_set(idx, "IMPL_TRAIT", trait_name)
+    ast_decl_text_set(idx, "IMPL_TRAIT", trait_name)
 
 fn decl_get_impl_trait(idx: i64) -> text:
     if ast_decl_prefer_arena():
@@ -768,20 +698,35 @@ fn decl_get_impl_trait(idx: i64) -> text:
         return ""
     decl_impl_trait[idx]
 
+fn decl_set_facet_impl_name(idx: i64, impl_name: text):
+    if idx >= 0 and idx < decl_facet_impl_name.len():
+        decl_facet_impl_name[idx] = impl_name
+    if not ast_decl_prefer_arena():
+        ast_decl_text_set(idx, "FACET_IMPL", impl_name)
+
+fn decl_get_facet_impl_name(idx: i64) -> text:
+    if ast_decl_prefer_arena():
+        if idx >= 0 and idx < decl_facet_impl_name.len():
+            return decl_facet_impl_name[idx]
+        return ""
+    val env_value = ast_decl_text_get(idx, "FACET_IMPL")
+    if env_value != "":
+        return env_value
+    if idx >= decl_facet_impl_name.len():
+        return ""
+    decl_facet_impl_name[idx]
+
 # Mark a struct-shaped decl as a `trait` (#157) and carry its method decl ids in
 # the shared BODY slot so module_assembly can rebuild the trait's method list
 # (including un-overridden default-method bodies) into module.traits.
 fn decl_set_trait(idx: i64, method_decl_ids: [i64]):
     if idx >= 0 and idx < decl_is_trait.len():
         decl_is_trait[idx] = 1
-    if not ast_decl_prefer_arena():
-        ast_decl_i64_set(idx, "IS_TRAIT", 1)
-        ast_decl_text_set(idx, "BODY", ast_i64_list_join(method_decl_ids))
-        ast_decl_direct_set(ast_decl_body_key(idx), ast_i64_list_join(method_decl_ids))
+    ast_decl_i64_set(idx, "IS_TRAIT", 1)
+    ast_decl_text_set(idx, "BODY", ast_i64_list_join(method_decl_ids))
+    ast_decl_direct_set(ast_decl_body_key(idx), ast_i64_list_join(method_decl_ids))
     if idx >= 0 and idx < decl_body_stmts.len():
         decl_body_stmts[idx] = method_decl_ids
-    if idx >= 0 and idx < decl_body_stmts_flat.len():
-        decl_body_stmts_flat[idx] = ast_i64_list_join(method_decl_ids)
 
 fn decl_get_is_trait(idx: i64) -> i64:
     if ast_decl_prefer_arena():
@@ -804,14 +749,12 @@ fn decl_cli_def(name: text, field_names: [text], field_types: [i64], field_defau
     # imports[0] = top-level docstring text (if any),
     # imports[1..] = directives like "default:.repl", "file:.spl", "prefetch:true"
     val idx = decl_alloc(DECL_CLI, span_id)
-    if not ast_decl_prefer_arena():
-        ast_decl_direct_set(ast_decl_tag_key(idx), "13")
+    ast_decl_direct_set(ast_decl_tag_key(idx), "13")
     decl_name[idx] = name
     decl_field_names[idx] = field_names
     decl_field_types[idx] = field_types
     decl_field_defaults[idx] = field_defaults
     decl_body_stmts[idx] = body_stmts
-    decl_body_stmts_flat[idx] = ast_i64_list_join(body_stmts)
     decl_imports[idx] = imports
     idx
 
@@ -819,19 +762,16 @@ fn decl_ce_block(builder_name: text, body_stmts: [i64], span_id: i64) -> i64:
     # ce NAME: block — builder_name = computation expression builder name,
     # body_stmts = list of statement indices in ce body
     val idx = decl_alloc(DECL_CE, span_id)
-    if not ast_decl_prefer_arena():
-        ast_decl_direct_set(ast_decl_tag_key(idx), "11")
+    ast_decl_direct_set(ast_decl_tag_key(idx), "11")
     decl_name[idx] = builder_name
     decl_body_stmts[idx] = body_stmts
-    decl_body_stmts_flat[idx] = ast_i64_list_join(body_stmts)
     idx
 
 fn decl_aop_advice(pointcut: text, handler: text, form: text, priority_text: text, span_id: i64) -> i64:
     # on pc{pointcut} use handler form [priority N]
     # name = handler, imports = [pointcut, form, priority_text]
     val idx = decl_alloc(DECL_AOP_ADVICE, span_id)
-    if not ast_decl_prefer_arena():
-        ast_decl_direct_set(ast_decl_tag_key(idx), "14")
+    ast_decl_direct_set(ast_decl_tag_key(idx), "14")
     decl_name[idx] = handler
     decl_imports[idx] = [pointcut, form, priority_text]
     idx
@@ -840,10 +780,96 @@ fn decl_arch_rule(kind: text, pointcut: text, message: text, span_id: i64) -> i6
     # forbid/allow pc{pointcut} "message"
     # name = kind ("forbid"|"allow"), imports[0] = pointcut, imports[1] = message
     val idx = decl_alloc(DECL_ARCH_RULE, span_id)
-    if not ast_decl_prefer_arena():
-        ast_decl_direct_set(ast_decl_tag_key(idx), "16")
+    ast_decl_direct_set(ast_decl_tag_key(idx), "16")
     decl_name[idx] = kind
     decl_imports[idx] = [pointcut, message]
+    idx
+
+fn decl_facet_interface(aspect_id: text, aspect_version: i64, name: text,
+        type_params: [text], composes: [i64], method_decl_ids: [i64],
+        visibility: text, is_public: i64, attributes: [text], span_id: i64) -> i64:
+    val idx = decl_alloc(DECL_FACET_INTERFACE, span_id)
+    decl_facet_aspect_id[idx] = aspect_id
+    decl_facet_aspect_version[idx] = aspect_version
+    decl_facet_name[idx] = name
+    decl_facet_type_params[idx] = type_params
+    decl_facet_composes[idx] = composes
+    decl_facet_methods[idx] = method_decl_ids
+    decl_facet_visibility[idx] = visibility
+    decl_facet_is_public[idx] = is_public
+    decl_facet_attributes[idx] = attributes
+    if not ast_decl_prefer_arena():
+        ast_decl_text_set(idx, "FACET_ASPECT_ID", aspect_id)
+        ast_decl_i64_set(idx, "FACET_ASPECT_VERSION", aspect_version)
+        ast_decl_text_set(idx, "FACET_NAME", name)
+        ast_decl_text_set(idx, "FACET_TYPE_PARAMS", ast_text_list_join(type_params))
+        ast_decl_text_set(idx, "FACET_COMPOSES", ast_i64_list_join(composes))
+        ast_decl_text_set(idx, "FACET_METHODS", ast_i64_list_join(method_decl_ids))
+        ast_decl_text_set(idx, "FACET_VISIBILITY", visibility)
+        ast_decl_i64_set(idx, "FACET_IS_PUBLIC", is_public)
+        ast_decl_text_set(idx, "FACET_ATTRIBUTES", ast_text_list_join(attributes))
+    idx
+
+fn decl_facet_impl(aspect_id: text, aspect_version: i64, name: text,
+        type_params: [text], base_type: i64, interfaces: [i64], access_mode: text,
+        method_decl_ids: [i64], attributes: [text], span_id: i64) -> i64:
+    val idx = decl_alloc(DECL_FACET_IMPL, span_id)
+    decl_facet_aspect_id[idx] = aspect_id
+    decl_facet_aspect_version[idx] = aspect_version
+    decl_facet_name[idx] = name
+    decl_facet_type_params[idx] = type_params
+    decl_facet_base_type[idx] = base_type
+    decl_facet_interfaces[idx] = interfaces
+    decl_facet_access_mode[idx] = access_mode
+    decl_facet_methods[idx] = method_decl_ids
+    decl_facet_attributes[idx] = attributes
+    if not ast_decl_prefer_arena():
+        ast_decl_text_set(idx, "FACET_ASPECT_ID", aspect_id)
+        ast_decl_i64_set(idx, "FACET_ASPECT_VERSION", aspect_version)
+        ast_decl_text_set(idx, "FACET_NAME", name)
+        ast_decl_text_set(idx, "FACET_TYPE_PARAMS", ast_text_list_join(type_params))
+        ast_decl_i64_set(idx, "FACET_BASE_TYPE", base_type)
+        ast_decl_text_set(idx, "FACET_INTERFACES", ast_i64_list_join(interfaces))
+        ast_decl_text_set(idx, "FACET_ACCESS_MODE", access_mode)
+        ast_decl_text_set(idx, "FACET_METHODS", ast_i64_list_join(method_decl_ids))
+        ast_decl_text_set(idx, "FACET_ATTRIBUTES", ast_text_list_join(attributes))
+    idx
+
+fn decl_facet_bind(aspect_id: text, aspect_version: i64, interface_type: i64,
+        pointcut_text: text, implementation_type: i64, mode: text,
+        priority: i64, provider_id: text, span_id: i64) -> i64:
+    val idx = decl_alloc(DECL_FACET_BIND, span_id)
+    decl_facet_aspect_id[idx] = aspect_id
+    decl_facet_aspect_version[idx] = aspect_version
+    decl_facet_interface_type[idx] = interface_type
+    decl_facet_pointcut_text[idx] = pointcut_text
+    decl_facet_implementation_type[idx] = implementation_type
+    decl_facet_binding_mode[idx] = mode
+    decl_facet_priority[idx] = priority
+    decl_facet_provider_id[idx] = provider_id
+    if not ast_decl_prefer_arena():
+        ast_decl_text_set(idx, "FACET_ASPECT_ID", aspect_id)
+        ast_decl_i64_set(idx, "FACET_ASPECT_VERSION", aspect_version)
+        ast_decl_i64_set(idx, "FACET_INTERFACE_TYPE", interface_type)
+        ast_decl_text_set(idx, "FACET_POINTCUT_TEXT", pointcut_text)
+        ast_decl_i64_set(idx, "FACET_IMPLEMENTATION_TYPE", implementation_type)
+        ast_decl_text_set(idx, "FACET_BINDING_MODE", mode)
+        ast_decl_i64_set(idx, "FACET_PRIORITY", priority)
+        ast_decl_text_set(idx, "FACET_PROVIDER_ID", provider_id)
+    idx
+
+fn decl_facet_require(aspect_id: text, aspect_version: i64, interface_type: i64,
+        pointcut_text: text, span_id: i64) -> i64:
+    val idx = decl_alloc(DECL_FACET_REQUIRE, span_id)
+    decl_facet_aspect_id[idx] = aspect_id
+    decl_facet_aspect_version[idx] = aspect_version
+    decl_facet_interface_type[idx] = interface_type
+    decl_facet_pointcut_text[idx] = pointcut_text
+    if not ast_decl_prefer_arena():
+        ast_decl_text_set(idx, "FACET_ASPECT_ID", aspect_id)
+        ast_decl_i64_set(idx, "FACET_ASPECT_VERSION", aspect_version)
+        ast_decl_i64_set(idx, "FACET_INTERFACE_TYPE", interface_type)
+        ast_decl_text_set(idx, "FACET_POINTCUT_TEXT", pointcut_text)
     idx
 
 # ===== Declaration Accessors =====
@@ -853,7 +879,7 @@ fn decl_get_tag(idx: i64) -> i64:
         if idx >= 0 and idx < decl_tag.len():
             return decl_tag[idx]
         return -1
-    val direct = _sffi_env_get(ast_decl_tag_key(idx)) ?? ""
+    val direct = rt_env_get(ast_decl_tag_key(idx)) ?? ""
     if direct != "":
         if direct == "1": return 1
         if direct == "2": return 2
@@ -871,17 +897,216 @@ fn decl_get_tag(idx: i64) -> i64:
         if direct == "14": return 14
         if direct == "15": return 15
         if direct == "16": return 16
+        if direct == "17": return 17
+        if direct == "18": return 18
+        if direct == "19": return 19
+        if direct == "20": return 20
+        if direct == "21": return 21
         return ast_parse_i64(direct)
     val env_value = ast_decl_i64_get(idx, "TAG")
     if env_value != 0:
         return env_value
     decl_tag[idx]
 
+fn decl_get_facet_aspect_id(idx: i64) -> text:
+    if not ast_decl_prefer_arena():
+        val value = ast_decl_text_get(idx, "FACET_ASPECT_ID")
+        if value != "": return value
+    if idx < 0 or idx >= decl_facet_aspect_id.len(): return ""
+    decl_facet_aspect_id[idx]
+
+fn decl_get_facet_aspect_version(idx: i64) -> i64:
+    if not ast_decl_prefer_arena():
+        val raw = ast_decl_text_get(idx, "FACET_ASPECT_VERSION")
+        if raw != "": return ast_parse_i64(raw)
+    if idx < 0 or idx >= decl_facet_aspect_version.len(): return 0
+    decl_facet_aspect_version[idx]
+
+fn decl_get_facet_name(idx: i64) -> text:
+    if not ast_decl_prefer_arena():
+        val value = ast_decl_text_get(idx, "FACET_NAME")
+        if value != "": return value
+    if idx < 0 or idx >= decl_facet_name.len(): return ""
+    decl_facet_name[idx]
+
+fn decl_get_facet_type_params(idx: i64) -> [text]:
+    if not ast_decl_prefer_arena():
+        val raw = ast_decl_text_get(idx, "FACET_TYPE_PARAMS")
+        if raw != "": return ast_text_list_split(raw)
+    if idx < 0 or idx >= decl_facet_type_params.len(): return []
+    decl_facet_type_params[idx]
+
+fn decl_get_facet_composes(idx: i64) -> [i64]:
+    if not ast_decl_prefer_arena():
+        val raw = ast_decl_text_get(idx, "FACET_COMPOSES")
+        if raw != "": return ast_i64_list_split(raw)
+    if idx < 0 or idx >= decl_facet_composes.len(): return []
+    decl_facet_composes[idx]
+
+fn decl_get_facet_methods(idx: i64) -> [i64]:
+    if not ast_decl_prefer_arena():
+        val raw = ast_decl_text_get(idx, "FACET_METHODS")
+        if raw != "": return ast_i64_list_split(raw)
+    if idx < 0 or idx >= decl_facet_methods.len(): return []
+    decl_facet_methods[idx]
+
+fn decl_get_facet_visibility(idx: i64) -> text:
+    if not ast_decl_prefer_arena():
+        val value = ast_decl_text_get(idx, "FACET_VISIBILITY")
+        if value != "": return value
+    if idx < 0 or idx >= decl_facet_visibility.len(): return "private"
+    decl_facet_visibility[idx]
+
+fn decl_get_facet_is_public(idx: i64) -> i64:
+    if not ast_decl_prefer_arena():
+        val raw = ast_decl_text_get(idx, "FACET_IS_PUBLIC")
+        if raw != "": return ast_parse_i64(raw)
+    if idx < 0 or idx >= decl_facet_is_public.len(): return 0
+    decl_facet_is_public[idx]
+
+fn decl_get_facet_attributes(idx: i64) -> [text]:
+    if not ast_decl_prefer_arena():
+        val raw = ast_decl_text_get(idx, "FACET_ATTRIBUTES")
+        if raw != "": return ast_text_list_split(raw)
+    if idx < 0 or idx >= decl_facet_attributes.len(): return []
+    decl_facet_attributes[idx]
+
+fn decl_get_facet_base_type(idx: i64) -> i64:
+    if not ast_decl_prefer_arena():
+        val raw = ast_decl_text_get(idx, "FACET_BASE_TYPE")
+        if raw != "": return ast_parse_i64(raw)
+    if idx < 0 or idx >= decl_facet_base_type.len(): return -1
+    decl_facet_base_type[idx]
+
+fn decl_get_facet_interfaces(idx: i64) -> [i64]:
+    if not ast_decl_prefer_arena():
+        val raw = ast_decl_text_get(idx, "FACET_INTERFACES")
+        if raw != "": return ast_i64_list_split(raw)
+    if idx < 0 or idx >= decl_facet_interfaces.len(): return []
+    decl_facet_interfaces[idx]
+
+fn decl_get_facet_access_mode(idx: i64) -> text:
+    if not ast_decl_prefer_arena():
+        val value = ast_decl_text_get(idx, "FACET_ACCESS_MODE")
+        if value != "": return value
+    if idx < 0 or idx >= decl_facet_access_mode.len(): return ""
+    decl_facet_access_mode[idx]
+
+fn decl_get_facet_interface_type(idx: i64) -> i64:
+    if not ast_decl_prefer_arena():
+        val raw = ast_decl_text_get(idx, "FACET_INTERFACE_TYPE")
+        if raw != "": return ast_parse_i64(raw)
+    if idx < 0 or idx >= decl_facet_interface_type.len(): return -1
+    decl_facet_interface_type[idx]
+
+fn decl_get_facet_pointcut_text(idx: i64) -> text:
+    if not ast_decl_prefer_arena():
+        val value = ast_decl_text_get(idx, "FACET_POINTCUT_TEXT")
+        if value != "": return value
+    if idx < 0 or idx >= decl_facet_pointcut_text.len(): return ""
+    decl_facet_pointcut_text[idx]
+
+fn decl_get_facet_implementation_type(idx: i64) -> i64:
+    if not ast_decl_prefer_arena():
+        val raw = ast_decl_text_get(idx, "FACET_IMPLEMENTATION_TYPE")
+        if raw != "": return ast_parse_i64(raw)
+    if idx < 0 or idx >= decl_facet_implementation_type.len(): return -1
+    decl_facet_implementation_type[idx]
+
+fn decl_get_facet_binding_mode(idx: i64) -> text:
+    if not ast_decl_prefer_arena():
+        val value = ast_decl_text_get(idx, "FACET_BINDING_MODE")
+        if value != "": return value
+    if idx < 0 or idx >= decl_facet_binding_mode.len(): return ""
+    decl_facet_binding_mode[idx]
+
+fn decl_get_facet_priority(idx: i64) -> i64:
+    if not ast_decl_prefer_arena():
+        val raw = ast_decl_text_get(idx, "FACET_PRIORITY")
+        if raw != "": return ast_parse_i64(raw)
+    if idx < 0 or idx >= decl_facet_priority.len(): return 0
+    decl_facet_priority[idx]
+
+fn decl_get_facet_provider_id(idx: i64) -> text:
+    if not ast_decl_prefer_arena():
+        val value = ast_decl_text_get(idx, "FACET_PROVIDER_ID")
+        if value != "": return value
+    if idx < 0 or idx >= decl_facet_provider_id.len(): return ""
+    decl_facet_provider_id[idx]
+
+fn decl_set_facet_aspect_id(idx: i64, value: text):
+    if idx >= 0 and idx < decl_facet_aspect_id.len(): decl_facet_aspect_id[idx] = value
+    if not ast_decl_prefer_arena(): ast_decl_text_set(idx, "FACET_ASPECT_ID", value)
+
+fn decl_set_facet_aspect_version(idx: i64, value: i64):
+    if idx >= 0 and idx < decl_facet_aspect_version.len(): decl_facet_aspect_version[idx] = value
+    if not ast_decl_prefer_arena(): ast_decl_i64_set(idx, "FACET_ASPECT_VERSION", value)
+
+fn decl_set_facet_name(idx: i64, value: text):
+    if idx >= 0 and idx < decl_facet_name.len(): decl_facet_name[idx] = value
+    if not ast_decl_prefer_arena(): ast_decl_text_set(idx, "FACET_NAME", value)
+
+fn decl_set_facet_type_params(idx: i64, value: [text]):
+    if idx >= 0 and idx < decl_facet_type_params.len(): decl_facet_type_params[idx] = value
+    if not ast_decl_prefer_arena(): ast_decl_text_set(idx, "FACET_TYPE_PARAMS", ast_text_list_join(value))
+
+fn decl_set_facet_composes(idx: i64, value: [i64]):
+    if idx >= 0 and idx < decl_facet_composes.len(): decl_facet_composes[idx] = value
+    if not ast_decl_prefer_arena(): ast_decl_text_set(idx, "FACET_COMPOSES", ast_i64_list_join(value))
+
+fn decl_set_facet_methods(idx: i64, value: [i64]):
+    if idx >= 0 and idx < decl_facet_methods.len(): decl_facet_methods[idx] = value
+    if not ast_decl_prefer_arena(): ast_decl_text_set(idx, "FACET_METHODS", ast_i64_list_join(value))
+
+fn decl_set_facet_visibility(idx: i64, value: text):
+    if idx >= 0 and idx < decl_facet_visibility.len(): decl_facet_visibility[idx] = value
+    if not ast_decl_prefer_arena(): ast_decl_text_set(idx, "FACET_VISIBILITY", value)
+
+fn decl_set_facet_is_public(idx: i64, value: i64):
+    if idx >= 0 and idx < decl_facet_is_public.len(): decl_facet_is_public[idx] = value
+    if not ast_decl_prefer_arena(): ast_decl_i64_set(idx, "FACET_IS_PUBLIC", value)
+
+fn decl_set_facet_attributes(idx: i64, value: [text]):
+    if idx >= 0 and idx < decl_facet_attributes.len(): decl_facet_attributes[idx] = value
+    if not ast_decl_prefer_arena(): ast_decl_text_set(idx, "FACET_ATTRIBUTES", ast_text_list_join(value))
+
+fn decl_set_facet_base_type(idx: i64, value: i64):
+    if idx >= 0 and idx < decl_facet_base_type.len(): decl_facet_base_type[idx] = value
+    if not ast_decl_prefer_arena(): ast_decl_i64_set(idx, "FACET_BASE_TYPE", value)
+
+fn decl_set_facet_interfaces(idx: i64, value: [i64]):
+    if idx >= 0 and idx < decl_facet_interfaces.len(): decl_facet_interfaces[idx] = value
+    if not ast_decl_prefer_arena(): ast_decl_text_set(idx, "FACET_INTERFACES", ast_i64_list_join(value))
+
+fn decl_set_facet_access_mode(idx: i64, value: text):
+    if idx >= 0 and idx < decl_facet_access_mode.len(): decl_facet_access_mode[idx] = value
+    if not ast_decl_prefer_arena(): ast_decl_text_set(idx, "FACET_ACCESS_MODE", value)
+
+fn decl_set_facet_interface_type(idx: i64, value: i64):
+    if idx >= 0 and idx < decl_facet_interface_type.len(): decl_facet_interface_type[idx] = value
+    if not ast_decl_prefer_arena(): ast_decl_i64_set(idx, "FACET_INTERFACE_TYPE", value)
+
+fn decl_set_facet_pointcut_text(idx: i64, value: text):
+    if idx >= 0 and idx < decl_facet_pointcut_text.len(): decl_facet_pointcut_text[idx] = value
+    if not ast_decl_prefer_arena(): ast_decl_text_set(idx, "FACET_POINTCUT_TEXT", value)
+
+fn decl_set_facet_implementation_type(idx: i64, value: i64):
+    if idx >= 0 and idx < decl_facet_implementation_type.len(): decl_facet_implementation_type[idx] = value
+    if not ast_decl_prefer_arena(): ast_decl_i64_set(idx, "FACET_IMPLEMENTATION_TYPE", value)
+
+fn decl_set_facet_binding_mode(idx: i64, value: text):
+    if idx >= 0 and idx < decl_facet_binding_mode.len(): decl_facet_binding_mode[idx] = value
+    if not ast_decl_prefer_arena(): ast_decl_text_set(idx, "FACET_BINDING_MODE", value)
+
+fn decl_set_facet_priority(idx: i64, value: i64):
+    if idx >= 0 and idx < decl_facet_priority.len(): decl_facet_priority[idx] = value
+    if not ast_decl_prefer_arena(): ast_decl_i64_set(idx, "FACET_PRIORITY", value)
+
+fn decl_set_facet_provider_id(idx: i64, value: text):
+    if idx >= 0 and idx < decl_facet_provider_id.len(): decl_facet_provider_id[idx] = value
+    if not ast_decl_prefer_arena(): ast_decl_text_set(idx, "FACET_PROVIDER_ID", value)
+
 fn decl_get_span(idx: i64) -> i64:
-    if ast_decl_prefer_arena():
-        if idx >= 0 and idx < decl_span.len():
-            return decl_span[idx]
-        return 0
     val env_value = ast_decl_i64_get(idx, "SPAN")
     if env_value != 0:
         return env_value
@@ -894,7 +1119,7 @@ fn decl_get_name(idx: i64) -> text:
         if idx >= 0 and idx < decl_name.len():
             return decl_name[idx]
         return ""
-    val direct = _sffi_env_get(ast_decl_name_key(idx)) ?? ""
+    val direct = rt_env_get(ast_decl_name_key(idx)) ?? ""
     if direct != "":
         return direct
     val env_value = ast_decl_text_get(idx, "NAME")
@@ -905,10 +1130,6 @@ fn decl_get_name(idx: i64) -> text:
     decl_name[idx]
 
 fn decl_get_param_names(idx: i64) -> [text]:
-    if ast_decl_prefer_arena():
-        if idx >= 0 and idx < decl_param_names.len():
-            return decl_param_names[idx]
-        return []
     val env_value = ast_decl_text_get(idx, "PARAM_NAMES")
     if env_value != "":
         return ast_text_list_split(env_value)
@@ -917,10 +1138,6 @@ fn decl_get_param_names(idx: i64) -> [text]:
     decl_param_names[idx]
 
 fn decl_get_param_types(idx: i64) -> [i64]:
-    if ast_decl_prefer_arena():
-        if idx >= 0 and idx < decl_param_types.len():
-            return decl_param_types[idx]
-        return []
     val env_value = ast_decl_text_get(idx, "PARAM_TYPES")
     if env_value != "":
         return ast_i64_list_split(env_value)
@@ -928,12 +1145,19 @@ fn decl_get_param_types(idx: i64) -> [i64]:
         return []
     decl_param_types[idx]
 
+fn decl_set_param_types(idx: i64, param_types: [i64]):
+    if idx < 0 or idx >= decl_param_types.len():
+        return
+    if not ast_decl_prefer_arena():
+        ast_decl_text_set(idx, "PARAM_TYPES", ast_i64_list_join(param_types))
+    decl_param_types[idx] = param_types
+
 fn decl_get_ret_type(idx: i64) -> i64:
     if ast_decl_prefer_arena():
         if idx >= 0 and idx < decl_ret_type.len():
             return decl_ret_type[idx]
         return -1
-    val direct = _sffi_env_get(ast_decl_ret_key(idx)) ?? ""
+    val direct = rt_env_get(ast_decl_ret_key(idx)) ?? ""
     if direct != "":
         return ast_parse_i64(direct)
     val env_value = ast_decl_i64_get(idx, "RET")
@@ -943,17 +1167,20 @@ fn decl_get_ret_type(idx: i64) -> i64:
         return -1
     decl_ret_type[idx]
 
+fn decl_set_ret_type(idx: i64, ret_type: i64):
+    if idx < 0 or idx >= decl_ret_type.len():
+        return
+    if not ast_decl_prefer_arena():
+        ast_decl_i64_set(idx, "RET", ret_type)
+        ast_decl_direct_set(ast_decl_ret_key(idx), int_to_str(ret_type))
+    decl_ret_type[idx] = ret_type
+
 fn decl_get_body(idx: i64) -> [i64]:
-    # Read from the flat [text] mirror (see decl_body_stmts_flat above), same
-    # treatment as arm_get_body: decoding a fresh [i64] from text sidesteps
-    # the native-build/cranelift-compiled runtime's nested-[[i64]] corruption
-    # of decl_body_stmts across compilation units in this exact
-    # (SIMPLE_NATIVE_ARENA_DECLS=1) code path.
     if ast_decl_prefer_arena():
-        if idx >= 0 and idx < decl_body_stmts_flat.len():
-            return ast_i64_list_split(decl_body_stmts_flat[idx])
+        if idx >= 0 and idx < decl_body_stmts.len():
+            return decl_body_stmts[idx]
         return []
-    val direct = _sffi_env_get(ast_decl_body_key(idx)) ?? ""
+    val direct = rt_env_get(ast_decl_body_key(idx)) ?? ""
     if direct != "":
         return ast_i64_list_split(direct)
     val env_value = ast_decl_text_get(idx, "BODY")
@@ -968,7 +1195,7 @@ fn decl_get_fields(idx: i64) -> [text]:
         if idx >= 0 and idx < decl_field_names.len():
             return decl_field_names[idx]
         return []
-    val direct = _sffi_env_get(ast_decl_field_names_key(idx)) ?? ""
+    val direct = rt_env_get(ast_decl_field_names_key(idx)) ?? ""
     if direct != "":
         return ast_text_list_split(direct)
     val env_value = ast_decl_text_get(idx, "FIELD_NAMES")
@@ -983,7 +1210,7 @@ fn decl_get_field_types(idx: i64) -> [i64]:
         if idx >= 0 and idx < decl_field_types.len():
             return decl_field_types[idx]
         return []
-    val direct = _sffi_env_get(ast_decl_field_types_key(idx)) ?? ""
+    val direct = rt_env_get(ast_decl_field_types_key(idx)) ?? ""
     if direct != "":
         return ast_i64_list_split(direct)
     val env_value = ast_decl_text_get(idx, "FIELD_TYPES")
@@ -993,11 +1220,15 @@ fn decl_get_field_types(idx: i64) -> [i64]:
         return []
     decl_field_types[idx]
 
+fn decl_set_field_types(idx: i64, field_types: [i64]):
+    if idx < 0 or idx >= decl_field_types.len():
+        return
+    if not ast_decl_prefer_arena():
+        ast_decl_text_set(idx, "FIELD_TYPES", ast_i64_list_join(field_types))
+        ast_decl_direct_set(ast_decl_field_types_key(idx), ast_i64_list_join(field_types))
+    decl_field_types[idx] = field_types
+
 fn decl_get_field_defaults(idx: i64) -> [i64]:
-    if ast_decl_prefer_arena():
-        if idx >= 0 and idx < decl_field_defaults.len():
-            return decl_field_defaults[idx]
-        return []
     val env_value = ast_decl_text_get(idx, "FIELD_DEFAULTS")
     if env_value != "":
         return ast_i64_list_split(env_value)
@@ -1027,44 +1258,7 @@ fn decl_get_param_defaults(idx: i64) -> [i64]:
         return ast_i64_list_split(env_value)
     []
 
-# Per-parameter `mut` marker (parallel to PARAM_NAMES; 1 = the parameter was
-# declared `mut name: T`, 0 = plain). native_freefn_mut_param_no_mutate fix:
-# a free function's `mut` param must reach MIR lowering (function_lowering.spl)
-# so it can bind by-reference instead of taking the Bug #167 defensive
-# struct-value-copy, mirroring how a `me` receiver's is_mutable flag already
-# reaches that same lowering step.
-#
-# NOTE: this does NOT reuse the ast_decl_text_set/get "PARAM_DEFAULTS"-style
-# text-field store used elsewhere in this file. Verified by construction: that
-# store's writer (`ast_decl_text_set`) only actually calls `rt_env_set` for a
-# fixed allowlist of field names (NAME/PARAM_NAMES/PARAM_TYPES/TYPE_PARAMS/
-# BODY) OR when `ast_decl_env_mirror_enabled()` (SIMPLE_BOOTSTRAP=1, no arena
-# mode) -- under a plain `native-build --entry` run (no SIMPLE_BOOTSTRAP, arena
-# mode ON) that condition is false for EVERY field including the allowlisted
-# ones, so `ast_decl_text_set` never calls `rt_env_set` at all in this mode;
-# `decl_get_param_defaults` above has never actually round-tripped a value
-# here. PARAM_MUTS instead uses `decl_param_mut_text` (declared with the other
-# arena pools above), grown alongside them in decl_push_default_slot/
-# decl_ensure_slot -- confirmed by construction that growing an array with
-# `.push()` and then index-assigning into that SAME freshly-grown slot inside
-# ONE function call does not reliably persist once that call returns, whereas
-# growing up front (in the slot-management functions) and assigning the real
-# value later in a separate call, with no preceding push in that call, is the
-# pattern every other pool here already relies on.
-fn decl_set_param_muts(idx: i64, muts: [i64]):
-    if idx >= 0 and idx < decl_param_mut_text.len():
-        decl_param_mut_text[idx] = ast_i64_list_join(muts)
-
-fn decl_get_param_muts(idx: i64) -> [i64]:
-    if idx >= 0 and idx < decl_param_mut_text.len():
-        return ast_i64_list_split(decl_param_mut_text[idx])
-    []
-
 fn decl_get_field_bits(idx: i64) -> [i64]:
-    if ast_decl_prefer_arena():
-        if idx >= 0 and idx < decl_field_bits.len():
-            return decl_field_bits[idx]
-        return []
     val env_value = ast_decl_text_get(idx, "FIELD_BITS")
     if env_value != "":
         return ast_i64_list_split(env_value)
@@ -1077,7 +1271,7 @@ fn decl_get_imports(idx: i64) -> [text]:
         if idx >= 0 and idx < decl_imports.len():
             return decl_imports[idx]
         return []
-    val direct = _sffi_env_get(ast_decl_imports_key(idx)) ?? ""
+    val direct = rt_env_get(ast_decl_imports_key(idx)) ?? ""
     if direct != "":
         return ast_text_list_split(direct)
     val env_value = ast_decl_text_get(idx, "IMPORTS")
@@ -1093,14 +1287,12 @@ fn decl_get_is_pub(idx: i64) -> bool:
 fn decl_get_visibility_text(idx: i64) -> text:
     if idx < 0:
         return "private"
-    if ast_decl_prefer_arena():
-        if idx < decl_visibility.len() and decl_visibility[idx] != "":
-            return decl_visibility[idx]
-        return "private"
     val env_value = ast_decl_text_get(idx, "VIS")
     if env_value != "":
         return env_value
     if idx >= decl_visibility.len():
+        if decl_get_is_pub(idx):
+            return "public"
         return "private"
     val stored = decl_visibility[idx]
     if stored == "":
@@ -1108,15 +1300,11 @@ fn decl_get_visibility_text(idx: i64) -> text:
     stored
 
 fn decl_set_visibility_text(idx: i64, visibility: text):
-    if not ast_decl_prefer_arena():
-        ast_decl_text_set(idx, "VIS", visibility)
+    ast_decl_text_set(idx, "VIS", visibility)
     decl_visibility[idx] = visibility
 
 fn decl_get_is_async(idx: i64) -> i64:
     if idx < 0: return 0
-    if ast_decl_prefer_arena():
-        if idx < decl_is_async.len(): return decl_is_async[idx]
-        return 0
     val env_value = ast_decl_i64_get(idx, "ASYNC")
     if env_value != 0:
         return env_value
@@ -1130,19 +1318,7 @@ fn decl_get_is_gpu_kernel(idx: i64) -> i64:
     if idx >= decl_is_gpu_kernel.len(): return 0
     decl_is_gpu_kernel[idx]
 
-fn decl_set_rt_hal_flags(idx: i64, flags: i64):
-    if idx >= 0 and idx < decl_rt_hal_flags.len():
-        decl_rt_hal_flags[idx] = flags
-
-fn decl_get_rt_hal_flags(idx: i64) -> i64:
-    if idx < 0 or decl_rt_hal_flags == nil or idx >= decl_rt_hal_flags.len(): return 0
-    decl_rt_hal_flags[idx]
-
 fn decl_get_type_params(idx: i64) -> [text]:
-    if ast_decl_prefer_arena():
-        if idx >= 0 and idx < decl_type_params.len():
-            return decl_type_params[idx]
-        return []
     val env_value = ast_decl_text_get(idx, "TYPE_PARAMS")
     if env_value != "":
         return ast_text_list_split(env_value)
@@ -1151,8 +1327,7 @@ fn decl_get_type_params(idx: i64) -> [text]:
     decl_type_params[idx]
 
 fn decl_set_type_params(idx: i64, params: [text]):
-    if not ast_decl_prefer_arena():
-        ast_decl_text_set(idx, "TYPE_PARAMS", ast_text_list_join(params))
+    ast_decl_text_set(idx, "TYPE_PARAMS", ast_text_list_join(params))
     decl_type_params[idx] = params
 
 fn decl_get_type_param_constraints(idx: i64) -> [[text]]:
@@ -1170,93 +1345,61 @@ fn decl_set_type_param_constraint_mode(idx: i64, modes: [text]):
     decl_type_param_constraint_mode[idx] = modes
 
 fn decl_set_comptime(idx: i64):
-    if not ast_decl_prefer_arena():
-        ast_decl_i64_set(idx, "COMPTIME", 1)
+    ast_decl_i64_set(idx, "COMPTIME", 1)
     decl_is_comptime[idx] = 1
 
 fn decl_get_is_comptime(idx: i64) -> bool:
     if idx < 0: return false
-    if ast_decl_prefer_arena():
-        if idx < decl_is_comptime.len(): return decl_is_comptime[idx] == 1
-        return false
     if ast_decl_i64_get(idx, "COMPTIME") != 0: return true
     if idx >= decl_is_comptime.len(): return false
     decl_is_comptime[idx] == 1
 
 fn decl_set_lazy(idx: i64):
-    if not ast_decl_prefer_arena():
-        ast_decl_i64_set(idx, "LAZY", 1)
+    ast_decl_i64_set(idx, "LAZY", 1)
     decl_is_lazy[idx] = 1
 
 fn decl_get_is_lazy(idx: i64) -> i64:
     if idx < 0: return 0
-    if ast_decl_prefer_arena():
-        if idx < decl_is_lazy.len(): return decl_is_lazy[idx]
-        return 0
     val env_value = ast_decl_i64_get(idx, "LAZY")
     if env_value != 0: return env_value
     if idx >= decl_is_lazy.len(): return 0
     decl_is_lazy[idx]
 
 fn decl_set_gpu_target_text(idx: i64, target: text):
-    if ast_decl_prefer_arena():
-        if idx >= 0 and idx < decl_gpu_target_text.len():
-            decl_gpu_target_text[idx] = target
-        return
-    ast_decl_text_set(idx, "GPU_TARGET", target)
+    if not ast_decl_prefer_arena():
+        ast_decl_text_set(idx, "GPU_TARGET", target)
 
 fn decl_get_gpu_target_text(idx: i64) -> text:
-    if ast_decl_prefer_arena():
-        if idx >= 0 and idx < decl_gpu_target_text.len():
-            return decl_gpu_target_text[idx]
-        return ""
     ast_decl_text_get(idx, "GPU_TARGET")
 
 fn decl_set_gpu_target_arg_name_text(idx: i64, arg_name: text):
-    if ast_decl_prefer_arena():
-        if idx >= 0 and idx < decl_gpu_target_arg_name_text.len():
-            decl_gpu_target_arg_name_text[idx] = arg_name
-        return
-    ast_decl_text_set(idx, "GPU_TARGET_ARG_NAME", arg_name)
+    if not ast_decl_prefer_arena():
+        ast_decl_text_set(idx, "GPU_TARGET_ARG_NAME", arg_name)
 
 fn decl_get_gpu_target_arg_name_text(idx: i64) -> text:
-    if ast_decl_prefer_arena():
-        if idx >= 0 and idx < decl_gpu_target_arg_name_text.len():
-            return decl_gpu_target_arg_name_text[idx]
-        return ""
     ast_decl_text_get(idx, "GPU_TARGET_ARG_NAME")
 
 fn decl_set_gpu_backends_text(idx: i64, backends: text):
-    if ast_decl_prefer_arena():
-        if idx >= 0 and idx < decl_gpu_backends_text.len():
-            decl_gpu_backends_text[idx] = backends
-        return
-    ast_decl_text_set(idx, "GPU_BACKENDS", backends)
+    if not ast_decl_prefer_arena():
+        ast_decl_text_set(idx, "GPU_BACKENDS", backends)
 
 fn decl_get_gpu_backends_text(idx: i64) -> text:
-    if ast_decl_prefer_arena():
-        if idx >= 0 and idx < decl_gpu_backends_text.len():
-            return decl_gpu_backends_text[idx]
-        return ""
     ast_decl_text_get(idx, "GPU_BACKENDS")
 
 fn decl_set_unroll_factor(idx: i64, n: i64):
-    if not ast_decl_prefer_arena():
-        ast_decl_i64_set(idx, "UNROLL_FACTOR", n)
+    ast_decl_i64_set(idx, "UNROLL_FACTOR", n)
 
 fn decl_get_unroll_factor(idx: i64) -> i64:
     ast_decl_i64_get(idx, "UNROLL_FACTOR")
 
 fn decl_set_pipeline_ii(idx: i64, n: i64):
-    if not ast_decl_prefer_arena():
-        ast_decl_i64_set(idx, "PIPELINE_II", n)
+    ast_decl_i64_set(idx, "PIPELINE_II", n)
 
 fn decl_get_pipeline_ii(idx: i64) -> i64:
     ast_decl_i64_get(idx, "PIPELINE_II")
 
 fn decl_set_memory_banks(idx: i64, n: i64):
-    if not ast_decl_prefer_arena():
-        ast_decl_i64_set(idx, "MEMORY_BANKS", n)
+    ast_decl_i64_set(idx, "MEMORY_BANKS", n)
 
 fn decl_get_memory_banks(idx: i64) -> i64:
     ast_decl_i64_get(idx, "MEMORY_BANKS")
@@ -1269,19 +1412,32 @@ fn decl_get_derives(idx: i64) -> [text]:
 fn decl_set_derives(idx: i64, derives: [text]):
     decl_derives[idx] = derives
 
+fn decl_facet_pools_clear():
+    decl_facet_aspect_id = []
+    decl_facet_aspect_version = []
+    decl_facet_name = []
+    decl_facet_type_params = []
+    decl_facet_composes = []
+    decl_facet_methods = []
+    decl_facet_visibility = []
+    decl_facet_is_public = []
+    decl_facet_attributes = []
+    decl_facet_base_type = []
+    decl_facet_interfaces = []
+    decl_facet_access_mode = []
+    decl_facet_interface_type = []
+    decl_facet_pointcut_text = []
+    decl_facet_implementation_type = []
+    decl_facet_binding_mode = []
+    decl_facet_priority = []
+    decl_facet_provider_id = []
+
 # ===== Match Arm Arena =====
 # A match arm is (pattern_expr, guard_expr, body_stmts, binding_name)
 
 var arm_pattern: [i64] = []
 var arm_guard: [i64] = []
 var arm_body: [[i64]] = []
-# Flat mirror of arm_body: joined "a,b,c" text per arm. The arm_body arena is
-# [[i64]] and the native-build seed erases the inner list to a boxed i64 handle,
-# so a direct arm_body[idx] read fails `.len()` with "len on i64". A flat [text]
-# arena has no nested element to erase, and unlike env dual-storage it is
-# per-process and index-aligned with arm_pattern, so it can never leak stale
-# bodies across compilations or into child processes.
-var arm_body_flat: [text] = []
 var arm_binding: [text] = []
 var arm_rationale: [text] = []
 
@@ -1290,7 +1446,6 @@ fn arm_new(pattern: i64, guard: i64, body: [i64]) -> i64:
     arm_pattern.push(pattern)
     arm_guard.push(guard)
     arm_body.push(body)
-    arm_body_flat.push(ast_i64_list_join(body))
     arm_binding.push("")
     arm_rationale.push("")
     idx
@@ -1300,7 +1455,6 @@ fn arm_new_with_binding(pattern: i64, guard: i64, body: [i64], binding: text) ->
     arm_pattern.push(pattern)
     arm_guard.push(guard)
     arm_body.push(body)
-    arm_body_flat.push(ast_i64_list_join(body))
     arm_binding.push(binding)
     arm_rationale.push("")
     idx
@@ -1310,7 +1464,6 @@ fn arm_new_with_binding_and_rationale(pattern: i64, guard: i64, body: [i64], bin
     arm_pattern.push(pattern)
     arm_guard.push(guard)
     arm_body.push(body)
-    arm_body_flat.push(ast_i64_list_join(body))
     arm_binding.push(binding)
     arm_rationale.push(rationale)
     idx
@@ -1322,10 +1475,6 @@ fn arm_get_guard(idx: i64) -> i64:
     arm_guard[idx]
 
 fn arm_get_body(idx: i64) -> [i64]:
-    # Read from the flat [text] mirror (see arm_body_flat above): decoding a
-    # fresh [i64] from text sidesteps the seed's nested-[[i64]] element erasure.
-    if idx >= 0 and idx < arm_body_flat.len():
-        return ast_i64_list_split(arm_body_flat[idx])
     arm_body[idx]
 
 fn arm_get_binding(idx: i64) -> text:
@@ -1346,32 +1495,12 @@ var elif_cond: [i64] = []
 var elif_body: [[i64]] = []
 var elif_else: [[i64]] = []
 
-# Clear the elif arena FROM ITS OWNING MODULE.
-#
-# ast_reset() used to clear these three arrays with a cross-module
-# `elif_cond.clear()` from _Ast/module_state.spl. That clear did not reach the
-# arena `elif_new` below appends to, so a second parse in the same process
-# appended after the first file's entries while the if-statement nodes were
-# numbered from 0 again: the interpreter then read the PREVIOUS file's
-# condition expression id out of elif_cond[0] and indexed the freshly reset
-# expr arena with it ("array index out of bounds: index is 19 but length is
-# 10"), or silently took the wrong branch when the stale id happened to be in
-# range. Same ownership rule as ast_module_decl_slots_clear() above.
-# doc/08_tracking/bug/pure_simple_interpreter_core_jit_interpret_not_reentrant_2026-08-20.md
-fn elif_arena_clear():
-    elif_cond = []
-    elif_body = []
-    elif_else = []
-
 fn elif_new(cond: i64, body: [i64], else_body: [i64]) -> i64:
     val idx = elif_cond.len()
     elif_cond.push(cond)
     elif_body.push(body)
     elif_else.push(else_body)
     idx
-
-fn elif_count() -> i64:
-    elif_cond.len()
 
 fn elif_get_cond(idx: i64) -> i64:
     elif_cond[idx]
@@ -1385,7 +1514,10 @@ fn elif_get_else(idx: i64) -> [i64]:
 # ===== Module (Top-Level AST) =====
 # A module is a list of declarations.
 
-var module_path_slot: [text] = [""]
+# The current module path is scalar owner state.  A one-element aggregate here
+# crossed ast_reset() boundaries during native multi-module parsing and could
+# become invalid before the next module updated it.
+var module_path_cached: text = ""
 var module_decls: [i64] = []
 var module_decl_slots: [i64] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -1419,7 +1551,9 @@ fn ast_module_decl_slot_push(value: i64):
     module_decl_slots.push(value)
 
 fn ast_module_decl_slots_clear():
-    module_decl_slots = []
+    # Same-module in-place mutation preserves the process-lifetime shell.  A
+    # replacement made during transient parser init dangles after scope_end.
+    module_decl_slots.clear()
 
 # Fields mirrored per decl index. Keep in sync with the ast_decl_*_set writers
 # above; a field missing here leaks its entry and can be read back stale.
@@ -1427,7 +1561,7 @@ fn ast_module_decl_slots_clear():
 # builds, which would make the clear silently inert.
 fn decl_mirror_fields() -> [text]:
     [
-        "TAG", "SPAN", "NAME", "RET", "VIS", "BODY", "IMPORTS", "IMPL_TRAIT",
+        "TAG", "SPAN", "NAME", "RET", "VIS", "BODY", "IMPORTS", "IMPL_TRAIT", "FACET_IMPL",
         "IS_TRAIT", "ASYNC", "COMPTIME", "LAZY",
         "PARAM_NAMES", "PARAM_TYPES", "PARAM_DEFAULTS", "TYPE_PARAMS",
         "FIELD_NAMES", "FIELD_TYPES", "FIELD_DEFAULTS", "FIELD_BITS",
@@ -1461,158 +1595,18 @@ fn ast_decl_env_mirror_clear():
     var i: i64 = 0
     while i < decl_upto:
         for field in fields:
-            _sffi_env_remove_required(ast_decl_key(i, field))
-        _sffi_env_remove_required(ast_decl_tag_key(i))
-        _sffi_env_remove_required(ast_decl_name_key(i))
-        _sffi_env_remove_required(ast_decl_ret_key(i))
+            rt_env_remove(ast_decl_key(i, field))
+        rt_env_remove(ast_decl_tag_key(i))
+        rt_env_remove(ast_decl_name_key(i))
+        rt_env_remove(ast_decl_ret_key(i))
         i = i + 1
     ast_decl_mirror_high_slot[0] = 0
     val mod_upto = ast_module_decl_mirror_high_slot[0]
     var j: i64 = 0
     while j < mod_upto:
-        _sffi_env_remove_required("SIMPLE_BOOTSTRAP_MODULE_DECL_" + int_to_str(j))
+        rt_env_remove("SIMPLE_BOOTSTRAP_MODULE_DECL_" + int_to_str(j))
         j = j + 1
     ast_module_decl_mirror_high_slot[0] = 0
 
 var lexer_state_core_pos_slot: [text] = ["0"]
 var lexer_state_core_line_slot: [text] = ["1"]
-
-# --- flat-AST pool codec: flat_decl ------------------------------
-#
-# Dump/restore for this file's 55 pools, in a FIXED SORTED ORDER that
-# dump and restore share. Order is the whole contract: the blob carries no
-# pool names, so a reordering on one side silently pairs each pool with its
-# neighbour's data. Sorting by name keeps the two sides in step without
-# anyone having to maintain a hand-written order.
-#
-# Completeness is enforced by scripts/check/check-flat-ast-codec-complete.shs,
-# which derives the pool list from this file and fails when one is not both
-# encoded and decoded. Do not add a pool here by hand without running it.
-
-pub fn flat_decl_pools_dump() -> text:
-    # Sub-blobs are collected and joined once. `out = out + <sub-blob>` across
-    # ~165 pools re-copied the whole growing multi-megabyte blob on every pool,
-    # which is quadratic in the pool count and paid on every cache-MISS store.
-    # The bytes emitted are unchanged: the same pieces, in the same order.
-    # doc/08_tracking/bug/frontend_shard_and_cache_hit_cost_2026-08-21.md
-    var parts: [text] = []
-    parts = parts.push(flat_pool_enc_text(arm_binding))
-    parts = parts.push(flat_pool_enc_i64_list(arm_body))
-    parts = parts.push(flat_pool_enc_text(arm_body_flat))
-    parts = parts.push(flat_pool_enc_i64(arm_guard))
-    parts = parts.push(flat_pool_enc_i64(arm_pattern))
-    parts = parts.push(flat_pool_enc_text(arm_rationale))
-    parts = parts.push(flat_pool_enc_i64(ast_decl_count_slot))
-    parts = parts.push(flat_pool_enc_i64(ast_decl_mirror_high_slot))
-    parts = parts.push(flat_pool_enc_i64(ast_module_decl_count_slot))
-    parts = parts.push(flat_pool_enc_i64(ast_module_decl_mirror_high_slot))
-    parts = parts.push(flat_pool_enc_i64_list(decl_body_stmts))
-    parts = parts.push(flat_pool_enc_text(decl_body_stmts_flat))
-    parts = parts.push(flat_pool_enc_text_list(decl_clocked_args))
-    parts = parts.push(flat_pool_enc_text_list(decl_derives))
-    parts = parts.push(flat_pool_enc_i64_list(decl_field_bits))
-    parts = parts.push(flat_pool_enc_i64_list(decl_field_defaults))
-    parts = parts.push(flat_pool_enc_text_list(decl_field_names))
-    parts = parts.push(flat_pool_enc_i64_list(decl_field_types))
-    parts = parts.push(flat_pool_enc_i64(decl_flatten_struct_output))
-    parts = parts.push(flat_pool_enc_text(decl_gpu_backends_text))
-    parts = parts.push(flat_pool_enc_text(decl_gpu_target_arg_name_text))
-    parts = parts.push(flat_pool_enc_text(decl_gpu_target_text))
-    parts = parts.push(flat_pool_enc_text(decl_impl_trait))
-    parts = parts.push(flat_pool_enc_text_list(decl_imports))
-    parts = parts.push(flat_pool_enc_i64(decl_is_async))
-    parts = parts.push(flat_pool_enc_i64(decl_is_comptime))
-    parts = parts.push(flat_pool_enc_i64(decl_is_gpu_kernel))
-    parts = parts.push(flat_pool_enc_i64(decl_rt_hal_flags))
-    parts = parts.push(flat_pool_enc_i64(decl_is_hardware))
-    parts = parts.push(flat_pool_enc_i64(decl_is_lazy))
-    parts = parts.push(flat_pool_enc_i64(decl_is_packed))
-    parts = parts.push(flat_pool_enc_i64(decl_is_simd))
-    parts = parts.push(flat_pool_enc_i64(decl_is_trait))
-    parts = parts.push(flat_pool_enc_i64(decl_is_value_type))
-    parts = parts.push(flat_pool_enc_text(decl_name))
-    parts = parts.push(flat_pool_enc_text(decl_param_default_text))
-    parts = parts.push(flat_pool_enc_text(decl_param_mut_text))
-    parts = parts.push(flat_pool_enc_text_list(decl_param_names))
-    parts = parts.push(flat_pool_enc_i64_list(decl_param_types))
-    parts = parts.push(flat_pool_enc_i64_list(decl_params))
-    parts = parts.push(flat_pool_enc_i64(decl_ret_type))
-    parts = parts.push(flat_pool_enc_i64(decl_span))
-    parts = parts.push(flat_pool_enc_i64(decl_tag))
-    parts = parts.push(flat_pool_enc_text_list(decl_type_param_constraint_mode))
-    parts = parts.push(flat_pool_enc_text_list_list(decl_type_param_constraints))
-    parts = parts.push(flat_pool_enc_text_list(decl_type_params))
-    parts = parts.push(flat_pool_enc_i64_list(decl_vhdl_generic_args))
-    parts = parts.push(flat_pool_enc_text(decl_visibility))
-    parts = parts.push(flat_pool_enc_i64_list(elif_body))
-    parts = parts.push(flat_pool_enc_i64(elif_cond))
-    parts = parts.push(flat_pool_enc_i64_list(elif_else))
-    parts = parts.push(flat_pool_enc_text(lexer_state_core_line_slot))
-    parts = parts.push(flat_pool_enc_text(lexer_state_core_pos_slot))
-    parts = parts.push(flat_pool_enc_i64(module_decl_slots))
-    parts = parts.push(flat_pool_enc_i64(module_decls))
-    parts = parts.push(flat_pool_enc_text(module_path_slot))
-    parts.join("")
-
-# Returns false when the blob ran short or was malformed; the caller must
-# treat that as a cache MISS and reparse, never as an empty parse.
-pub fn flat_decl_pools_restore(r: FlatPoolReader) -> bool:
-    arm_binding = flat_pool_dec_text(r)
-    arm_body = flat_pool_dec_i64_list(r)
-    arm_body_flat = flat_pool_dec_text(r)
-    arm_guard = flat_pool_dec_i64(r)
-    arm_pattern = flat_pool_dec_i64(r)
-    arm_rationale = flat_pool_dec_text(r)
-    ast_decl_count_slot = flat_pool_dec_i64(r)
-    ast_decl_mirror_high_slot = flat_pool_dec_i64(r)
-    ast_module_decl_count_slot = flat_pool_dec_i64(r)
-    ast_module_decl_mirror_high_slot = flat_pool_dec_i64(r)
-    decl_body_stmts = flat_pool_dec_i64_list(r)
-    decl_body_stmts_flat = flat_pool_dec_text(r)
-    decl_clocked_args = flat_pool_dec_text_list(r)
-    decl_derives = flat_pool_dec_text_list(r)
-    decl_field_bits = flat_pool_dec_i64_list(r)
-    decl_field_defaults = flat_pool_dec_i64_list(r)
-    decl_field_names = flat_pool_dec_text_list(r)
-    decl_field_types = flat_pool_dec_i64_list(r)
-    decl_flatten_struct_output = flat_pool_dec_i64(r)
-    decl_gpu_backends_text = flat_pool_dec_text(r)
-    decl_gpu_target_arg_name_text = flat_pool_dec_text(r)
-    decl_gpu_target_text = flat_pool_dec_text(r)
-    decl_impl_trait = flat_pool_dec_text(r)
-    decl_imports = flat_pool_dec_text_list(r)
-    decl_is_async = flat_pool_dec_i64(r)
-    decl_is_comptime = flat_pool_dec_i64(r)
-    decl_is_gpu_kernel = flat_pool_dec_i64(r)
-    decl_rt_hal_flags = flat_pool_dec_i64(r)
-    decl_is_hardware = flat_pool_dec_i64(r)
-    decl_is_lazy = flat_pool_dec_i64(r)
-    decl_is_packed = flat_pool_dec_i64(r)
-    decl_is_simd = flat_pool_dec_i64(r)
-    decl_is_trait = flat_pool_dec_i64(r)
-    decl_is_value_type = flat_pool_dec_i64(r)
-    decl_name = flat_pool_dec_text(r)
-    decl_param_default_text = flat_pool_dec_text(r)
-    decl_param_mut_text = flat_pool_dec_text(r)
-    decl_param_names = flat_pool_dec_text_list(r)
-    decl_param_types = flat_pool_dec_i64_list(r)
-    decl_params = flat_pool_dec_i64_list(r)
-    decl_ret_type = flat_pool_dec_i64(r)
-    decl_span = flat_pool_dec_i64(r)
-    decl_tag = flat_pool_dec_i64(r)
-    decl_type_param_constraint_mode = flat_pool_dec_text_list(r)
-    decl_type_param_constraints = flat_pool_dec_text_list_list(r)
-    decl_type_params = flat_pool_dec_text_list(r)
-    decl_vhdl_generic_args = flat_pool_dec_i64_list(r)
-    decl_visibility = flat_pool_dec_text(r)
-    elif_body = flat_pool_dec_i64_list(r)
-    elif_cond = flat_pool_dec_i64(r)
-    elif_else = flat_pool_dec_i64_list(r)
-    lexer_state_core_line_slot = flat_pool_dec_text(r)
-    lexer_state_core_pos_slot = flat_pool_dec_text(r)
-    module_decl_slots = flat_pool_dec_i64(r)
-    module_decls = flat_pool_dec_i64(r)
-    module_path_slot = flat_pool_dec_text(r)
-    r.ok
-
-export flat_decl_pools_dump, flat_decl_pools_restore

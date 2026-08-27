@@ -1,0 +1,213 @@
+#!/bin/sh
+# Frozen-oracle parity, decision coverage, and ABI/object guards for the
+# allocation-free Cosmos NVMe admin policy migration.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+SOURCE_DIR="$ROOT/src/os/kernel/arch/arm32/cosmos"
+TEST_DIR="$ROOT/test/02_integration/os/cosmos"
+SIMPLE_SOURCE="$SOURCE_DIR/cosmos_nvme_admin_policy.spl"
+C_OWNER="$SOURCE_DIR/cosmos_nvme_admin.c"
+ORACLE="$TEST_DIR/cosmos_nvme_admin_policy_oracle.c"
+PARITY="$TEST_DIR/cosmos_nvme_admin_policy_parity_test.c"
+SPEC="$ROOT/test/01_unit/os/arch/arm32/cosmos_nvme_admin_policy_spec.spl"
+SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/cosmos-nvme-admin-policy.XXXXXX")
+trap 'case ${SCRATCH:-} in /tmp/cosmos-nvme-admin-policy.*|${TMPDIR:-/tmp}/cosmos-nvme-admin-policy.*) [ ! -d "$SCRATCH" ] || rm -r -- "$SCRATCH" ;; esac' EXIT HUP INT TERM
+
+fail() {
+    echo "FAIL cosmos-nvme-admin-policy: $*" >&2
+    exit 1
+}
+
+blocked() {
+    echo "BLOCKED cosmos-nvme-admin-policy: $*" >&2
+    exit 2
+}
+
+expected_exports='cosmos_nvme_admin_policy_abort_result
+cosmos_nvme_admin_policy_abort_status
+cosmos_nvme_admin_policy_adapter_failure_status
+cosmos_nvme_admin_policy_async_event_status
+cosmos_nvme_admin_policy_controller_namespace_valid
+cosmos_nvme_admin_policy_create_cq_status
+cosmos_nvme_admin_policy_create_sq_status
+cosmos_nvme_admin_policy_delete_cq_status
+cosmos_nvme_admin_policy_delete_sq_status
+cosmos_nvme_admin_policy_envelope_status
+cosmos_nvme_admin_policy_get_features_status
+cosmos_nvme_admin_policy_get_log_status
+cosmos_nvme_admin_policy_identify_status
+cosmos_nvme_admin_policy_init_values_valid
+cosmos_nvme_admin_policy_log2
+cosmos_nvme_admin_policy_min
+cosmos_nvme_admin_policy_no_payload
+cosmos_nvme_admin_policy_opcode_supported
+cosmos_nvme_admin_policy_payload_status
+cosmos_nvme_admin_policy_payload_valid
+cosmos_nvme_admin_policy_power_of_two
+cosmos_nvme_admin_policy_publish_result
+cosmos_nvme_admin_policy_publish_state
+cosmos_nvme_admin_policy_queue_base_valid
+cosmos_nvme_admin_policy_queue_count
+cosmos_nvme_admin_policy_queue_id_allowed
+cosmos_nvme_admin_policy_queue_index_valid
+cosmos_nvme_admin_policy_queue_result
+cosmos_nvme_admin_policy_set_features_status
+cosmos_nvme_admin_policy_smart_namespace_valid
+cosmos_nvme_admin_policy_status_generic
+cosmos_nvme_admin_policy_status_specific
+cosmos_nvme_admin_policy_status_success'
+
+expected_imports='cosmos_nvme_admin_policy_abort_result
+cosmos_nvme_admin_policy_abort_status
+cosmos_nvme_admin_policy_adapter_failure_status
+cosmos_nvme_admin_policy_async_event_status
+cosmos_nvme_admin_policy_create_cq_status
+cosmos_nvme_admin_policy_create_sq_status
+cosmos_nvme_admin_policy_delete_cq_status
+cosmos_nvme_admin_policy_delete_sq_status
+cosmos_nvme_admin_policy_envelope_status
+cosmos_nvme_admin_policy_get_features_status
+cosmos_nvme_admin_policy_get_log_status
+cosmos_nvme_admin_policy_identify_status
+cosmos_nvme_admin_policy_init_values_valid
+cosmos_nvme_admin_policy_log2
+cosmos_nvme_admin_policy_payload_status
+cosmos_nvme_admin_policy_payload_valid
+cosmos_nvme_admin_policy_publish_result
+cosmos_nvme_admin_policy_publish_state
+cosmos_nvme_admin_policy_queue_count
+cosmos_nvme_admin_policy_queue_result
+cosmos_nvme_admin_policy_set_features_status
+cosmos_nvme_admin_policy_status_generic
+cosmos_nvme_admin_policy_status_success'
+
+expected_admin_abi='cosmos_nvme_admin_accept
+cosmos_nvme_admin_init
+cosmos_nvme_admin_poll'
+
+CLANG=${CLANG:-clang}
+READELF=${READELF:-readelf}
+
+source_exports=$(sed -n \
+    's/^[[:space:]]*@export("C", name: "\([^"]*\)").*/\1/p' \
+    "$SIMPLE_SOURCE" | LC_ALL=C sort -u)
+[ "$source_exports" = "$expected_exports" ] ||
+    fail "Simple source export manifest is not the exact 33-symbol ABI"
+
+"$CLANG" -std=c11 -O2 -Wall -Wextra -Werror -Wpedantic -Wshadow \
+    -Wstrict-prototypes -Wformat=2 -I"$SOURCE_DIR" -I"$TEST_DIR" \
+    -c "$ORACLE" -o "$SCRATCH/oracle.o"
+oracle_policy_symbols=$(
+    "$READELF" -sW "$SCRATCH/oracle.o" |
+        awk '$4 == "FUNC" && $8 ~ /^cosmos_nvme_admin_policy_/ { print $8 }'
+)
+[ -z "$oracle_policy_symbols" ] ||
+    fail "frozen oracle aliases production policy symbols"
+
+"$CLANG" --target=armv7-none-eabi -mcpu=cortex-a9 -marm \
+    -ffreestanding -nostdlib -fno-builtin -O2 -Wall -Wextra -Werror \
+    -Wno-int-to-pointer-cast -I"$SOURCE_DIR" -c "$C_OWNER" \
+    -o "$SCRATCH/admin-bridge.o"
+c_imports=$(
+    "$READELF" -sW "$SCRATCH/admin-bridge.o" |
+        awk '$7 == "UND" && $8 ~ /^cosmos_nvme_admin_policy_/ { print $8 }' |
+        LC_ALL=C sort -u
+)
+[ "$c_imports" = "$expected_imports" ] ||
+    fail "C bridge does not import the exact 23-symbol policy closure"
+c_abi=$(
+    "$READELF" -sW "$SCRATCH/admin-bridge.o" |
+        awk '$4 == "FUNC" && $5 == "GLOBAL" && $7 != "UND" &&
+             $8 ~ /^cosmos_nvme_admin_/ { print $8 }' | LC_ALL=C sort -u
+)
+[ "$c_abi" = "$expected_admin_abi" ] ||
+    fail "C bridge public ABI changed from init/accept/poll"
+
+echo "cosmos_nvme_admin_static_abi_exports=33/33"
+echo "cosmos_nvme_admin_c_bridge_imports=23/23"
+echo "cosmos_nvme_admin_c_public_abi=3/3"
+echo "cosmos_nvme_admin_frozen_oracle=independent"
+
+SIMPLE_BIN=${SIMPLE_BIN:-$ROOT/bin/simple}
+[ -x "$SIMPLE_BIN" ] || blocked "pure-Simple compiler is missing"
+BOOTSTRAP_STAGE3_FACADE_PATH="$ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$ROOT/scripts/check/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+SIMPLE_CANONICAL=$(bootstrap_stage3_canonical_file "$SIMPLE_BIN") ||
+    blocked "cannot resolve the compiler through admitted provenance"
+SIMPLE_PROVENANCE=${SIMPLE_PROVENANCE:-${SIMPLE_CANONICAL}.provenance.env}
+stage4_verify_candidate_provenance \
+    "$SIMPLE_PROVENANCE" "$SIMPLE_CANONICAL" "$ROOT" ||
+    blocked "admitted Stage 4 is required; seed/Stage 2/Stage 3 fallback is forbidden"
+case $($SIMPLE_CANONICAL --version 2>&1 || true) in
+    *"Rust-built Simple binary is a bootstrap seed"*)
+        blocked "Rust seed cannot produce policy evidence" ;;
+esac
+
+SIMPLE_LIB="$ROOT/src" "$SIMPLE_CANONICAL" native-build \
+    --backend llvm --source "$SOURCE_DIR" --entry-closure \
+    --entry "$SIMPLE_SOURCE" --target x86_64-unknown-linux-gnu \
+    --emit-object --no-mangle --cache-dir "$SCRATCH/host-cache" \
+    -o "$SCRATCH/admin-policy-host.o"
+host_symbols=$($READELF -sW "$SCRATCH/admin-policy-host.o")
+printf '%s\n' "$expected_exports" | while IFS= read -r symbol; do
+    printf '%s\n' "$host_symbols" | awk -v symbol="$symbol" \
+        '$4 == "FUNC" && $5 == "GLOBAL" && $7 != "UND" && $8 == symbol {
+            count++
+         } END { exit count != 1 }' ||
+        fail "missing or duplicate Simple object export: $symbol"
+done
+host_undefined=$(printf '%s\n' "$host_symbols" |
+    awk '$7 == "UND" && $8 != "" { print $8 }' | LC_ALL=C sort -u)
+[ -z "$host_undefined" ] ||
+    fail "policy object has runtime/allocation dependencies: $host_undefined"
+printf '%s\n' "$host_symbols" |
+    awk 'tolower($8) ~ /(malloc|calloc|realloc|alloc_object|gc_alloc)/ {
+        bad = bad " " $8
+    } END { if (bad != "") { print bad; exit 1 } }' >/dev/null ||
+    fail "policy object exposes an allocation path"
+
+"$CLANG" -std=c11 -O2 -Wall -Wextra -Werror -Wpedantic -Wshadow \
+    -Wstrict-prototypes -Wformat=2 -I"$SOURCE_DIR" -I"$TEST_DIR" \
+    "$ORACLE" "$PARITY" "$SCRATCH/admin-policy-host.o" \
+    -o "$SCRATCH/parity"
+parity_output=$($SCRATCH/parity)
+printf '%s\n' "$parity_output" |
+    grep -Fqx 'COSMOS_NVME_ADMIN_C_ORACLE_PARITY_CASES 460' ||
+    fail "independent C-oracle parity did not cover 460 cases"
+
+SIMPLE_LIB="$ROOT/src" "$SIMPLE_CANONICAL" test "$SPEC" \
+    --quick --no-limits > "$SCRATCH/simple-decisions.out" 2>&1 ||
+    fail "pure-Simple decision spec failed"
+grep -Fq 'COSMOS_NVME_ADMIN_SIMPLE_DECISIONS 35/35 outcomes=70/70' \
+    "$SCRATCH/simple-decisions.out" ||
+    fail "pure-Simple decision outcomes are incomplete"
+
+SIMPLE_LIB="$ROOT/src" "$SIMPLE_CANONICAL" native-build \
+    --backend llvm --source "$SOURCE_DIR" --entry-closure \
+    --entry "$SIMPLE_SOURCE" --target armv7-unknown-none-eabi \
+    --emit-object --no-mangle --cache-dir "$SCRATCH/arm-cache" \
+    -o "$SCRATCH/admin-policy-arm.o"
+arm_header=$($READELF -hW "$SCRATCH/admin-policy-arm.o")
+printf '%s\n' "$arm_header" | grep -Eq 'Class:[[:space:]]+ELF32' &&
+    printf '%s\n' "$arm_header" | grep -Eq 'Machine:[[:space:]]+ARM' ||
+    fail "policy object is not ELF32 ARM"
+arm_undefined=$($READELF -sW "$SCRATCH/admin-policy-arm.o" |
+    awk '$7 == "UND" && $8 != "" { print $8 }' | LC_ALL=C sort -u)
+[ -z "$arm_undefined" ] ||
+    fail "ARM policy object has runtime/allocation dependencies: $arm_undefined"
+ld.lld -r "$SCRATCH/admin-bridge.o" "$SCRATCH/admin-policy-arm.o" \
+    -o "$SCRATCH/admin-linked.o"
+linked_policy_undefined=$($READELF -sW "$SCRATCH/admin-linked.o" |
+    awk '$7 == "UND" && $8 ~ /^cosmos_nvme_admin_policy_/ { print $8 }')
+[ -z "$linked_policy_undefined" ] ||
+    fail "C-to-Simple ARM policy link remains unresolved"
+
+echo "cosmos_nvme_admin_c_oracle_parity_cases=460"
+echo "cosmos_nvme_admin_simple_decisions=35/35 outcomes=70/70"
+echo "cosmos_nvme_admin_hot_path_allocations=0"
+echo "cosmos_nvme_admin_native_link=pass"
+echo "STATUS: PASS cosmos-nvme-admin pure-policy migration"

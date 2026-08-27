@@ -18,7 +18,6 @@
 # phase after HIR type resolution. See the module report for the wiring point.
 
 use compiler.hir.hir_definitions.*
-use compiler.common.assurance.unsafe_capabilities.{UnsafeCapability, unsafe_capability_set_contains}
 use compiler.hir.hir_types.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.semantics.any_escape.types.{
@@ -49,9 +48,6 @@ class AnyEscapeState:
     function_name: text
     # Lexical `unsafe:` nesting depth of the node being visited.
     unsafe_depth: i64
-    # Nesting depth of enclosing `unsafe(capabilities: [type_erasure]):` blocks
-    # — the grant read off `HirBlock.unsafe_caps`, not off the profile.
-    te_block_depth: i64
     # True when the CURRENT function's unsafe blocks carry `type_erasure`.
     te_granted: bool
     any_symbols: [i64]
@@ -72,7 +68,6 @@ fn any_escape_state_new(symbols: SymbolTable, module_name: text) -> AnyEscapeSta
         module_name: module_name,
         function_name: "",
         unsafe_depth: 0,
-        te_block_depth: 0,
         te_granted: false,
         any_symbols: [],
         live_any: 0,
@@ -86,18 +81,9 @@ fn any_escape_state_new(symbols: SymbolTable, module_name: text) -> AnyEscapeSta
 fn any_type_is_any(t: HirType) -> bool:
     """True when `t` IS the erased top type, through transparent wrappers.
 
-    `&Any` and `iso Any` are still an erased value with a wrapper around it,
-    so they are `Any` for the purposes of §8.1. A container OF `Any` is a
-    different question -- see `any_type_mentions_any`.
-
-    `Optional<Any>` IS `Any`: a written `Any?` holds an erased value exactly as
-    a bare `Any` does. This used to be excluded as a workaround, because the
-    parser collapsed every IMPORTED `T?` to a bare `Option` that HIR lowered as
-    `Optional(Any)` (8 false positives in `formal_delivery_gates.spl`,
-    2026-08-21). That was fixed at the source -- the postfix-`?` branch in
-    `parser.spl` now registers the payload name, so `T?` reaches HIR as
-    `Optional(Named(T))` regardless of where `T` is declared -- and the
-    exclusion, whose cost was that a written `Any?` was invisible, is gone.
+    `Optional<Any>`, `&Any` and `iso Any` are all still an erased value with a
+    wrapper around it, so they are `Any` for the purposes of §8.1. A container
+    OF `Any` is a different question -- see `any_type_mentions_any`.
     """
     match t.kind:
         case Any: true
@@ -147,14 +133,8 @@ fn any_expr_is_any(self: AnyEscapeState, e: HirExpr) -> bool:
     and the tracked-symbol set for a bare variable reference whose node type
     was never filled in.
     """
-    # `has_type_` is documented as the presence bit, but it can be true while
-    # `type_` is still absent -- reading it then trapped with "unknown property
-    # or method 'kind' on Option". Unwrap with if-val so presence is decided by
-    # the slot itself. Same semantics: only an ACTUAL `Any` type returns true.
-    if e.has_type_:
-        if val resolved_type = e.type_:
-            if any_type_is_any(resolved_type):
-                return true
+    if e.has_type_ and any_type_is_any(e.type_):
+        return true
     match e.kind:
         case Var(symbol): symbol != nil and any_state_tracks(self, symbol.id)
         case NamedVar(symbol, name): symbol != nil and any_state_tracks(self, symbol.id)
@@ -171,7 +151,7 @@ fn any_in_type_erasure_region(self: AnyEscapeState) -> bool:
     `type_erasure` capability on it. An `unsafe:` block that only asked for
     `raw_ptr` does not license erasure (§8.1).
     """
-    self.unsafe_depth > 0 and (self.te_granted or self.te_block_depth > 0)
+    self.unsafe_depth > 0 and self.te_granted
 
 # ============================================================================
 # Diagnostic emission
@@ -244,16 +224,8 @@ fn any_check_expr(self: AnyEscapeState, profile: AnyEscapeProfile, e: HirExpr):
 
     match e.kind:
         case UnsafeBlock(body):
-            # The block form carries its own grant on the HIR node (§8.1):
-            # `unsafe(capabilities: [type_erasure]):`. Only that capability
-            # licenses erasure; `raw_ptr` alone does not.
-            val te_here = unsafe_capability_set_contains(body.unsafe_caps, UnsafeCapability.TypeErasure)
             self.unsafe_depth = self.unsafe_depth + 1
-            if te_here:
-                self.te_block_depth = self.te_block_depth + 1
             any_check_block(self, profile, body)
-            if te_here:
-                self.te_block_depth = self.te_block_depth - 1
             self.unsafe_depth = self.unsafe_depth - 1
 
         case Return(value):
@@ -293,9 +265,8 @@ fn any_check_expr(self: AnyEscapeState, profile: AnyEscapeProfile, e: HirExpr):
                     any_emit_002(self, profile, AnyEscapeKind.EscapeCapture,
                                  "a closure captures an erased value", e.span)
             for p in params:
-                if val param_type = p.type_:
-                    if any_type_is_any(param_type):
-                        any_emit_001(self, profile, "closure parameter `{p.name}` is typed `Any`", p.span)
+                if any_type_is_any(p.type_):
+                    any_emit_001(self, profile, "closure parameter `{p.name}` is typed `Any`", p.span)
             any_check_expr(self, profile, body)
 
         case Binary(op, left, right):
@@ -316,7 +287,7 @@ fn any_check_expr(self: AnyEscapeState, profile: AnyEscapeProfile, e: HirExpr):
             any_check_call_args(self, profile, callee_name, args)
             any_check_expr(self, profile, callee)
 
-        case MethodCall(receiver, method, args, resolution):
+        case MethodCall(receiver, method, args, resolution, _):
             any_check_call_args(self, profile, method, args)
             if any_expr_is_any(self, receiver) and not any_is_checked_boundary_callee(method):
                 any_emit_002(self, profile, AnyEscapeKind.EscapeCallArg,
@@ -584,26 +555,15 @@ fn any_check_block(self: AnyEscapeState, profile: AnyEscapeProfile, b: HirBlock)
 fn any_check_stmt(self: AnyEscapeState, profile: AnyEscapeProfile, st: HirStmt):
     match st.kind:
         case Let(symbol, type_, init):
-            # `type_` is nil for an inferred binding (`val x = e` with no
-            # annotation) -- the same way `symbol` can be nil just below.
-            # `any_type_is_any` takes a non-nil `HirType` and reads `t.kind`,
-            # so calling it on an untyped Let trapped with a span-less
-            # "undefined field 'kind' ... type 'nil'". Both predicates here ask
-            # about the DECLARED type, and an inferred binding has none;
-            # inference-side erasure is covered by `any_expr_is_any` on `init`.
-            # if-val, not `.unwrap()`: unwrap is box-assuming and breaks flat
-            # optionals on the stage4 native lane (see the same note in
-            # 20.hir/hir_lowering/_Items/module_callable_types.spl).
-            if val declared_type = type_:
-                if any_type_is_any(declared_type):
-                    if not any_in_type_erasure_region(self):
-                        any_emit_001(self, profile, "this binding is declared `Any`", st.span)
-                    if symbol != nil:
-                        self.any_symbols = self.any_symbols.push(symbol.id)
-                    self.live_any = self.live_any + 1
-                elif any_type_mentions_any(declared_type):
-                    any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
-                                 "an erased value is stored in a container-typed binding", st.span)
+            if any_type_is_any(type_):
+                if not any_in_type_erasure_region(self):
+                    any_emit_001(self, profile, "this binding is declared `Any`", st.span)
+                if symbol != nil:
+                    self.any_symbols = self.any_symbols.push(symbol.id)
+                self.live_any = self.live_any + 1
+            elif any_type_mentions_any(type_):
+                any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
+                             "an erased value is stored in a container-typed binding", st.span)
             any_check_expr(self, profile, init)
 
         case Assign(target, op, value):
@@ -624,6 +584,44 @@ fn any_check_stmt(self: AnyEscapeState, profile: AnyEscapeProfile, st: HirStmt):
         # Named explicitly so a new HirStmtKind variant fails to compile here.
         case AsmAssert(spec):
             pass_dn
+
+        case SharedVal(symbol, type_, has_init, init):
+            any_check_shared_binding(self, profile, symbol, type_, has_init, init, st.span)
+
+        case SharedVar(symbol, type_, has_init, init):
+            any_check_shared_binding(self, profile, symbol, type_, has_init, init, st.span)
+
+        case GpuLaunch(config, body):
+            for dim in config.grid:
+                any_check_expr(self, profile, dim)
+            for dim in config.block:
+                any_check_expr(self, profile, dim)
+            any_check_block(self, profile, body)
+
+fn any_check_shared_binding(
+    self: AnyEscapeState,
+    profile: AnyEscapeProfile,
+    symbol: SymbolId,
+    type_: HirType,
+    has_init: bool,
+    init: HirExpr,
+    span: Span
+):
+    # Shared storage crosses an execution-domain boundary. Treat both an
+    # explicitly erased declaration and an erased initializer as escapes.
+    if any_type_is_any(type_):
+        if not any_in_type_erasure_region(self):
+            any_emit_001(self, profile, "this shared binding is declared `Any`", span)
+        self.any_symbols = self.any_symbols.push(symbol.id)
+        self.live_any = self.live_any + 1
+    elif any_type_mentions_any(type_):
+        any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
+                     "an erased value is stored in shared container storage", span)
+    if has_init:
+        if any_expr_is_any(self, init):
+            any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
+                         "an erased value is stored in shared storage", span)
+        any_check_expr(self, profile, init)
 
 fn any_target_is_storage(target: HirExpr) -> bool:
     """True when the assignment target outlives the current region.
@@ -648,32 +646,29 @@ fn any_check_function(self: AnyEscapeState, profile: AnyEscapeProfile, f: HirFun
     self.any_symbols = []
     self.live_any = 0
     self.unsafe_depth = 0
-    self.te_block_depth = 0
     self.depth = 0
 
     # A public signature that mentions Any is an origin AND a guaranteed
     # escape: the value crosses the function boundary by definition.
     for p in f.params:
-        if val param_type = p.type_:
-            if any_type_is_any(param_type):
-                # A function that itself carries `type_erasure` IS the
-                # representation boundary (§8.6 `checked_downcast(value: Any)`),
-                # so an `Any` parameter on it is the contract, not a violation.
-                if not self.te_granted:
-                    any_emit_001(self, profile, "parameter `{p.name}` is typed `Any`", p.span)
-                if p.symbol != nil:
-                    self.any_symbols = self.any_symbols.push(p.symbol.id)
-            elif any_type_mentions_any(param_type):
-                any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
-                             "parameter `{p.name}` carries erased values in a container type", p.span)
+        if any_type_is_any(p.type_):
+            # A function that itself carries `type_erasure` IS the
+            # representation boundary (§8.6 `checked_downcast(value: Any)`),
+            # so an `Any` parameter on it is the contract, not a violation.
+            if not self.te_granted:
+                any_emit_001(self, profile, "parameter `{p.name}` is typed `Any`", p.span)
+            if p.symbol != nil:
+                self.any_symbols = self.any_symbols.push(p.symbol.id)
+        elif any_type_mentions_any(p.type_):
+            any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
+                         "parameter `{p.name}` carries erased values in a container type", p.span)
 
-    if val return_type = f.return_type:
-        if any_type_is_any(return_type):
-            any_emit_002(self, profile, AnyEscapeKind.EscapeReturn,
-                         "function `{f.name}` returns `Any`", f.span)
-        elif any_type_mentions_any(return_type):
-            any_emit_002(self, profile, AnyEscapeKind.EscapeReturn,
-                         "function `{f.name}` returns a container of `Any`", f.span)
+    if any_type_is_any(f.return_type):
+        any_emit_002(self, profile, AnyEscapeKind.EscapeReturn,
+                     "function `{f.name}` returns `Any`", f.span)
+    elif any_type_mentions_any(f.return_type):
+        any_emit_002(self, profile, AnyEscapeKind.EscapeReturn,
+                     "function `{f.name}` returns a container of `Any`", f.span)
 
     any_check_block(self, profile, f.body)
 
@@ -683,13 +678,12 @@ fn any_check_fields(self: AnyEscapeState, profile: AnyEscapeProfile,
     self.te_granted = false
     self.unsafe_depth = 0
     for fl in fields:
-        if val field_type = fl.type_:
-            if any_type_is_any(field_type):
-                any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
-                             "field `{owner}.{fl.name}` is typed `Any`", fl.span)
-            elif any_type_mentions_any(field_type):
-                any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
-                             "field `{owner}.{fl.name}` is a container of `Any`", fl.span)
+        if any_type_is_any(fl.type_):
+            any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
+                         "field `{owner}.{fl.name}` is typed `Any`", fl.span)
+        elif any_type_mentions_any(fl.type_):
+            any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
+                         "field `{owner}.{fl.name}` is a container of `Any`", fl.span)
 
 # ============================================================================
 # Entry point
@@ -725,15 +719,15 @@ pub fn any_escape_check(module: HirModule, profile: AnyEscapeProfile) -> [AnyEsc
             state.function_name = cn.name
             state.te_granted = false
             state.unsafe_depth = 0
-            if val global_type = cn.type_:
-                if any_type_is_any(global_type):
-                    any_emit_002(state, profile, AnyEscapeKind.EscapeStore,
-                                 "global `{cn.name}` is typed `Any`", cn.span)
-                elif any_type_mentions_any(global_type):
-                    any_emit_002(state, profile, AnyEscapeKind.EscapeStore,
-                                 "global `{cn.name}` is a container of `Any`", cn.span)
+            if any_type_is_any(cn.type_):
+                any_emit_002(state, profile, AnyEscapeKind.EscapeStore,
+                             "global `{cn.name}` is typed `Any`", cn.span)
+            elif any_type_mentions_any(cn.type_):
+                any_emit_002(state, profile, AnyEscapeKind.EscapeStore,
+                             "global `{cn.name}` is a container of `Any`", cn.span)
 
     state.diags
 
 export AnyEscapeState, any_escape_check
 export any_type_is_any, any_type_mentions_any, any_is_checked_boundary_callee
+use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection

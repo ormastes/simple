@@ -1,6 +1,29 @@
-# Cache Specification
+# Cache Unit Tests
 
-> Tests covering Cache Operations, Cache Key Types, Cache Strategies, Build Cache.
+> 1. check
+
+<!-- sdn-diagram:id=cache_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=cache_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+cache_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=cache_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +32,18 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Cache Specification
+# Cache Unit Tests
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Feature IDs | #APP-CACHE-001 |
+| Category | App \| Cache |
+| Status | Implemented |
+| Source | `test/01_unit/app/cache/cache_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
 
 ## Scenarios
 
@@ -17,22 +51,16 @@
 
 #### cache hit returns cached value
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- cache hit returns cached value
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("cache hit returns cached value")
 val hit = true
 check(hit)
 ```
@@ -41,18 +69,16 @@ check(hit)
 
 #### cache miss computes value
 
-- cache miss computes value
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("cache miss computes value")
 val miss = true
 check(miss)
 ```
@@ -61,18 +87,16 @@ check(miss)
 
 #### cache put stores value
 
-- cache put stores value
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("cache put stores value")
 val stored = true
 check(stored)
 ```
@@ -81,18 +105,16 @@ check(stored)
 
 #### cache invalidation
 
-- cache invalidation
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("cache invalidation")
 val invalidated = true
 check(invalidated)
 ```
@@ -101,18 +123,16 @@ check(invalidated)
 
 #### cache eviction on full
 
-- cache eviction on full
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("cache eviction on full")
 val evicted = true
 check(evicted)
 ```
@@ -123,18 +143,16 @@ check(evicted)
 
 #### file path as key
 
-- file path as key
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("file path as key")
 val key = "src/main.spl"
 check(key.ends_with(".spl"))
 ```
@@ -143,18 +161,16 @@ check(key.ends_with(".spl"))
 
 #### content hash as key
 
-- content hash as key
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("content hash as key")
 val key = "sha256:abc123"
 check(key.starts_with("sha256"))
 ```
@@ -163,18 +179,16 @@ check(key.starts_with("sha256"))
 
 #### module path as key
 
-- module path as key
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("module path as key")
 val key = "std.io"
 check(key.contains("."))
 ```
@@ -183,18 +197,16 @@ check(key.contains("."))
 
 #### composite key
 
-- composite key
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("composite key")
 val key = "src/main.spl:v2:opt2"
 check(key.contains(":"))
 ```
@@ -205,18 +217,16 @@ check(key.contains(":"))
 
 #### LRU eviction
 
-- LRU eviction
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("LRU eviction")
 val strategy = "lru"
 check(strategy == "lru")
 ```
@@ -225,18 +235,16 @@ check(strategy == "lru")
 
 #### TTL-based expiration
 
-- TTL-based expiration
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("TTL-based expiration")
 val ttl_ms = 60000
 check(ttl_ms > 0)
 ```
@@ -245,18 +253,16 @@ check(ttl_ms > 0)
 
 #### size-based limit
 
-- size-based limit
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("size-based limit")
 val max_size = 1024 * 1024
 check(max_size > 0)
 ```
@@ -265,18 +271,16 @@ check(max_size > 0)
 
 #### content-addressed cache
 
-- content-addressed cache
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("content-addressed cache")
 val is_content_addressed = true
 check(is_content_addressed)
 ```
@@ -287,18 +291,16 @@ check(is_content_addressed)
 
 #### cache compiled modules
 
-- cache compiled modules
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("cache compiled modules")
 val cached_ext = ".smf"
 check(cached_ext == ".smf")
 ```
@@ -307,18 +309,16 @@ check(cached_ext == ".smf")
 
 #### cache incremental results
 
-- cache incremental results
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("cache incremental results")
 val has_incremental = true
 check(has_incremental)
 ```
@@ -327,18 +327,16 @@ check(has_incremental)
 
 #### cache invalidation on source change
 
-- cache invalidation on source change
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("cache invalidation on source change")
 val source_hash_changed = true
 check(source_hash_changed)
 ```
@@ -347,18 +345,16 @@ check(source_hash_changed)
 
 #### cache directory location
 
-- cache directory location
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("cache directory location")
 val dir = ".simple/build"
 check(dir.starts_with(".simple"))
 ```
@@ -367,41 +363,21 @@ check(dir.starts_with(".simple"))
 
 #### clean cache
 
-- clean cache
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("clean cache")
 val cleaned = true
 check(cleaned)
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/01_unit/app/cache/cache_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering Cache Operations, Cache Key Types, Cache Strategies, Build Cache.
-- Cache Operations
-- Cache Key Types
-- Cache Strategies
-- Build Cache
 
 ## Scenario Summary
 
@@ -415,51 +391,3 @@ Tests covering Cache Operations, Cache Key Types, Cache Strategies, Build Cache.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `291f5faf5e71faac3de2b1e40f8164c6bc0893dc9f147f4e565b642d444e7008`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `291f5faf5e71faac3de2b1e40f8164c6bc0893dc9f147f4e565b642d444e7008`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `291f5faf5e71faac3de2b1e40f8164c6bc0893dc9f147f4e565b642d444e7008`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/cache/cache_spec.spl
-mirror: doc/06_spec/01_unit/app/cache/cache_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/cache/cache_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/cache/cache_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/cache/cache_spec.spl:20:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'cache hit returns cached value' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/cache/cache_spec.spl:26:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'cache miss computes value' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/cache/cache_spec.spl:32:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'cache put stores value' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

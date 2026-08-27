@@ -1,3 +1,4 @@
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
 
 # CSS Layout — M14 Public API Types
 #
@@ -71,3 +72,306 @@ pub fn collapse_margins_signed(a: i32, b: i32) -> i32:
         if b < min_neg:
             min_neg = b
     max_pos + min_neg
+
+# =========================================================================
+# M14 spec-facing layout functions (block + table)
+# =========================================================================
+
+val _M14_LINE_HEIGHT = 20
+
+fn _m14_digit_val(c: text) -> i32:
+    if c == "0": return 0
+    if c == "1": return 1
+    if c == "2": return 2
+    if c == "3": return 3
+    if c == "4": return 4
+    if c == "5": return 5
+    if c == "6": return 6
+    if c == "7": return 7
+    if c == "8": return 8
+    if c == "9": return 9
+    -1
+
+fn _m14_parse_positive_int(s: text) -> i32:
+    var v = 0
+    var any = false
+    var i = 0
+    while i < s.len():
+        val c = s.char_at(i)
+        val d = _m14_digit_val(c)
+        if d >= 0:
+            v = v * 10 + d
+            any = true
+        else:
+            if any:
+                break
+        i = i + 1
+    if any and v > 0: v else: 1
+
+fn _m14_is_container_tag(tag: text) -> bool:
+    tag == "#document" or tag == "html" or tag == "body"
+
+fn _m14_unwrap(doc: BeDomNode) -> BeDomNode:
+    """Descend past #document/html/body wrappers to the content element."""
+    var cur = doc
+    var descending = true
+    while descending:
+        descending = false
+        if _m14_is_container_tag(cur.tag_name):
+            var i = 0
+            while i < cur.children.len():
+                val child = cur.children[i]
+                if not child.is_text() and child.tag_name != "head":
+                    cur = child
+                    descending = true
+                    break
+                i = i + 1
+    cur
+
+fn _m14_find_tag(node: BeDomNode, tag: text) -> BeDomNode?:
+    if not node.is_text() and node.tag_name == tag:
+        return Some(node)
+    var i = 0
+    while i < node.children.len():
+        val found = _m14_find_tag(node.children[i], tag)
+        if found.?:
+            return found
+        i = i + 1
+    nil
+
+fn _m14_is_inline_child(node: BeDomNode) -> bool:
+    if node.is_text():
+        return true
+    node.style.display == "inline"
+
+fn _m14_leaf(x: i32, y: i32, w: i32, h: i32, anon: bool) -> LayoutBox:
+    LayoutBox(x: x, y: y, width: w, height: h, is_anonymous: anon, line_boxes: [], children: [])
+
+pub fn layout_block(doc: BeDomNode, ctx: LayoutContext) -> LayoutBox:
+    """Block layout with anonymous-block generation (CSS 2.1 §9.2.1.1).
+
+    Consecutive inline children mixed with block siblings are wrapped in an
+    anonymous block box; block-only content produces no anonymous boxes.
+    """
+    val target = _m14_unwrap(doc)
+    val w = ctx.available_width
+    val kids = target.children
+    var has_block = false
+    var i = 0
+    while i < kids.len():
+        if not _m14_is_inline_child(kids[i]):
+            has_block = true
+        i = i + 1
+    var out: [LayoutBox] = []
+    var y = 0
+    var run_len = 0
+    i = 0
+    while i < kids.len():
+        val child = kids[i]
+        if _m14_is_inline_child(child):
+            run_len = run_len + 1
+        else:
+            if run_len > 0 and has_block:
+                out.push(_m14_leaf(0, y, w, _M14_LINE_HEIGHT, true))
+                y = y + _M14_LINE_HEIGHT
+            run_len = 0
+            out.push(_m14_leaf(0, y, w, _M14_LINE_HEIGHT, false))
+            y = y + _M14_LINE_HEIGHT
+        i = i + 1
+    if run_len > 0:
+        # trailing inline run: anonymous only when a block sibling exists
+        out.push(_m14_leaf(0, y, w, _M14_LINE_HEIGHT, has_block))
+        y = y + _M14_LINE_HEIGHT
+    LayoutBox(x: 0, y: 0, width: w, height: y, is_anonymous: false, line_boxes: [], children: out)
+
+val _M14_CHAR_WIDTH = 8
+val _M14_BASELINE = 15
+
+fn _m14_subtree_text(node: BeDomNode) -> text:
+    if node.is_text():
+        return node.data
+    var out = ""
+    var i = 0
+    while i < node.children.len():
+        out = out + _m14_subtree_text(node.children[i])
+        i = i + 1
+    out
+
+fn _m14_style_attr(node: BeDomNode) -> text:
+    node.attributes.get("style") ?? ""
+
+fn _m14_split_words(s: text) -> [text]:
+    var words: [text] = []
+    var current = ""
+    var i = 0
+    while i < s.len():
+        val c = s.char_at(i)
+        if c == " " or c == "\t" or c == "\n" or c == "\r":
+            if current != "":
+                words.push(current)
+                current = ""
+        else:
+            current = current + c
+        i = i + 1
+    if current != "":
+        words.push(current)
+    words
+
+pub fn layout_inline(doc: BeDomNode, ctx: LayoutContext) -> LayoutBox:
+    """Inline formatting context: greedy word wrap into line boxes (AC-4).
+
+    Fixed-width text metrics; honors word-break:break-all /
+    overflow-wrap:break-word (oversized-token splitting) and
+    text-align:center on the content element's inline style.
+    """
+    val target = _m14_unwrap(doc)
+    val style_text = _m14_style_attr(target)
+    val break_tokens = (
+        style_text.contains("break-all") or style_text.contains("break-word")
+    )
+    val center = style_text.contains("text-align:center")
+    val avail = ctx.available_width
+    var chars_per_line = avail / _M14_CHAR_WIDTH
+    if chars_per_line < 1:
+        chars_per_line = 1
+    var words = _m14_split_words(_m14_subtree_text(target))
+    # Oversized-token splitting when the authored style opts in
+    if break_tokens:
+        var chunked: [text] = []
+        var wi = 0
+        while wi < words.len():
+            var word = words[wi]
+            while word.len() > chars_per_line:
+                chunked.push(word.substring(0, chars_per_line))
+                word = word.substring(chars_per_line, word.len())
+            if word != "":
+                chunked.push(word)
+            wi = wi + 1
+        words = chunked
+    # Greedy line fill
+    var lines: [LineBox] = []
+    var line_words: [text] = []
+    var line_chars = 0
+    var y = 0
+    var wi2 = 0
+    while wi2 <= words.len():
+        val flush = wi2 == words.len()
+        var take = false
+        if not flush:
+            val wl = words[wi2].len()
+            val needed = if line_chars == 0: wl else: line_chars + 1 + wl
+            if line_words.len() == 0 or needed <= chars_per_line:
+                take = true
+        if take:
+            line_chars = if line_chars == 0:
+                words[wi2].len()
+            else:
+                line_chars + 1 + words[wi2].len()
+            line_words.push(words[wi2])
+            wi2 = wi2 + 1
+            continue
+        if line_words.len() > 0:
+            val line_w = line_chars * _M14_CHAR_WIDTH
+            val line_x = if center and line_w < avail: (avail - line_w) / 2 else: 0
+            var fragments: [InlineFragment] = []
+            var fx = line_x
+            var fi = 0
+            while fi < line_words.len():
+                val fw = line_words[fi].len() * _M14_CHAR_WIDTH
+                fragments.push(InlineFragment(
+                    x: fx, y: y, width: fw, height: _M14_LINE_HEIGHT,
+                    baseline_offset: _M14_BASELINE, text_run: line_words[fi]
+                ))
+                fx = fx + fw + _M14_CHAR_WIDTH
+                fi = fi + 1
+            # A single unbreakable token may overflow the container; the line
+            # reports its true width in that case.
+            lines.push(LineBox(
+                x: line_x, y: y, width: line_w, height: _M14_LINE_HEIGHT,
+                baseline: _M14_BASELINE, fragments: fragments
+            ))
+            y = y + _M14_LINE_HEIGHT
+            line_words = []
+            line_chars = 0
+        if flush:
+            break
+    if lines.len() == 0:
+        lines.push(LineBox(
+            x: 0, y: 0, width: 0, height: _M14_LINE_HEIGHT,
+            baseline: _M14_BASELINE, fragments: []
+        ))
+        y = _M14_LINE_HEIGHT
+    LayoutBox(
+        x: 0, y: 0, width: avail, height: y, is_anonymous: false,
+        line_boxes: lines, children: []
+    )
+
+fn _m14_table_rows(table: BeDomNode) -> [BeDomNode]:
+    var rows: [BeDomNode] = []
+    var i = 0
+    while i < table.children.len():
+        val child = table.children[i]
+        if not child.is_text():
+            if child.tag_name == "tr":
+                rows.push(child)
+            elif child.tag_name == "tbody" or child.tag_name == "thead" or child.tag_name == "tfoot":
+                var j = 0
+                while j < child.children.len():
+                    val row = child.children[j]
+                    if not row.is_text() and row.tag_name == "tr":
+                        rows.push(row)
+                    j = j + 1
+        i = i + 1
+    rows
+
+fn _m14_cell_span(cell: BeDomNode) -> i32:
+    _m14_parse_positive_int(cell.attributes.get("colspan") ?? "1")
+
+pub fn layout_table(doc: BeDomNode, ctx: LayoutContext) -> LayoutBox:
+    """Basic auto table layout: equal column widths, colspan-aware (AC-5)."""
+    val found = _m14_find_tag(doc, "table")
+    var table = _m14_unwrap(doc)
+    if val Some(t) = found:
+        table = t
+    val rows = _m14_table_rows(table)
+    # column count = max total span across rows
+    var ncols = 0
+    var r = 0
+    while r < rows.len():
+        var span_sum = 0
+        var c = 0
+        while c < rows[r].children.len():
+            val cell = rows[r].children[c]
+            if not cell.is_text() and (cell.tag_name == "td" or cell.tag_name == "th"):
+                span_sum = span_sum + _m14_cell_span(cell)
+            c = c + 1
+        if span_sum > ncols:
+            ncols = span_sum
+        r = r + 1
+    if ncols == 0:
+        return _m14_leaf(0, 0, 0, 0, false)
+    val col_w = ctx.available_width / ncols
+    val table_w = col_w * ncols
+    var row_boxes: [LayoutBox] = []
+    var y = 0
+    r = 0
+    while r < rows.len():
+        var cells: [LayoutBox] = []
+        var x = 0
+        var c = 0
+        while c < rows[r].children.len():
+            val cell = rows[r].children[c]
+            if not cell.is_text() and (cell.tag_name == "td" or cell.tag_name == "th"):
+                val cw = col_w * _m14_cell_span(cell)
+                cells.push(_m14_leaf(x, y, cw, _M14_LINE_HEIGHT, false))
+                x = x + cw
+            c = c + 1
+        # pad the last cell so column widths sum to the table width
+        if cells.len() > 0 and x < table_w:
+            var last = cells[cells.len() - 1]
+            last.width = last.width + (table_w - x)
+            cells[cells.len() - 1] = last
+        row_boxes.push(LayoutBox(x: 0, y: y, width: table_w, height: _M14_LINE_HEIGHT, is_anonymous: false, line_boxes: [], children: cells))
+        y = y + _M14_LINE_HEIGHT
+        r = r + 1
+    LayoutBox(x: 0, y: 0, width: table_w, height: y, is_anonymous: false, line_boxes: [], children: row_boxes)

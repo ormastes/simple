@@ -4,8 +4,7 @@
  * Called by the kernel's process loader after mapping the ELF.
  * Stack is already set up by the kernel. BSS must be zeroed.
  *
- * Calls main(argc, argv) then exit(retval). SimpleOS kernels that do not
- * provide an argc/argv stack still fall back to argc=0, argv=NULL.
+ * Calls main(argc=0, argv=NULL) then exit(retval).
  */
 
 .intel_syntax noprefix
@@ -17,35 +16,9 @@ _start:
     /* Clear direction flag (ABI requirement) */
     cld
 
-    /*
-     * Preserve a conventional process entry stack when present:
-     *   rsp[0] = argc, rsp[1...] = argv, then envp.
-     * This lets the Linux-host smoke artifact run LLVM's InitLLVM path while
-     * retaining the SimpleOS no-arguments fallback for early kernels.
-     */
-    mov     r12, qword ptr [rsp]        /* argc */
-    lea     r13, [rsp + 8]              /* argv */
-    xor     r14d, r14d                  /* envp */
-    test    r12, r12
-    jz      .Lno_initial_args
-    cmp     r12, 4096
-    ja      .Lno_initial_args
-    cmp     qword ptr [r13], 0
-    je      .Lno_initial_args
-    lea     r14, [r13 + r12*8 + 8]
-    jmp     .Largs_done
-.Lno_initial_args:
-    xor     r12d, r12d
-    xor     r13d, r13d
-.Largs_done:
-
     /* Zero BSS segment */
     lea     rdi, [rip + __bss_start]
     lea     rcx, [rip + __bss_end]
-    test    rcx, rcx
-    jz      .Lbss_done          /* generic links may leave weak end undefined */
-    cmp     rdi, rcx
-    jae     .Lbss_done          /* reject missing/reversed linker boundaries */
     sub     rcx, rdi
     jz      .Lbss_done          /* skip if BSS is empty */
     xor     eax, eax
@@ -55,9 +28,12 @@ _start:
     /* Align stack to 16 bytes (ABI requirement) */
     and     rsp, -16
 
-    /* Publish environ before constructors; host smoke has envp, SimpleOS may not. */
+    /* Initialize C++ constructors and libc (.init_array) */
+    call    __libc_init_array
+
+    /* Set environ to NULL (no initial environment from kernel yet) */
     lea     rdi, [rip + environ]
-    mov     qword ptr [rdi], r14
+    mov     qword ptr [rdi], 0
 
     /* Publish argc/argv for SimpleCore's rt_cli_get_args when linked. */
     lea     rax, [rip + rt_set_args]
@@ -116,6 +92,25 @@ _start:
     /* Should never reach here */
     hlt
     jmp     _start
+
+    /*
+     * No libc call is safe before the initial stack has been admitted.
+     * Syscall 0 is the always-authorized SimpleOS process exit operation;
+     * issue it directly so malformed input cannot reach constructors.
+     */
+.Lmalformed_initial_stack:
+    mov     edi, 127
+.Lraw_exit:
+    xor     eax, eax
+    syscall
+.Lmalformed_hang:
+    hlt
+    jmp     .Lmalformed_hang
+
+    /* Manifest startup admission rejected the otherwise valid image. */
+.Lstartup_rejected:
+    mov     edi, 125
+    jmp     .Lraw_exit
 
 .size _start, . - _start
 

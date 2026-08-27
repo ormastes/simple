@@ -75,6 +75,10 @@ pub fn bytes_to_hex_u8(bytes: [u8]) -> text:
 # failure: missing symbol, allocation failure, or a return value of 0 (which
 # `DynLib.call_n` reports when dlsym itself fails inside the call).
 pub fn dynlib_call_digest3(lib: DynLib, symbol: text, input_bytes: [u8], out_len: i64) -> text:
+    # Generic [i64] WFFI has no typed byte binding/readback contract. Refuse in
+    # the interpreter; only native may use the raw pointer and owned output.
+    if rt_is_interpreter_runtime():
+        return ""
     val out_ptr = rt_alloc(out_len)
     if out_ptr == 0:
         return ""
@@ -155,7 +159,10 @@ fn dynlib_outcome_unavailable(provider_id: text, detail: text) -> DynlibDigestOu
 # never a placeholder, and never computed from anything but the actual file
 # that was actually dlopen'd for this call.
 fn dynlib_library_digest(lib: DynLib, symbol: text, lib_path: text) -> text:
-    val file_bytes = rt_file_read_bytes(lib_path)
+    val maybe_bytes = rt_file_read_bytes(lib_path)
+    if not maybe_bytes.?:
+        return ""
+    val file_bytes = maybe_bytes.unwrap()
     if file_bytes.len() == 0:
         return ""
     dynlib_call_digest3(lib, symbol, file_bytes, DYNLIB_SHA256_LEN)

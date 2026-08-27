@@ -33,7 +33,7 @@ cranelift), generics erasure (#158 Phase B), Option ABI full implementation.
 - Native output must equal the oracle, **or** be correct-by-construction where the
   oracle is provably broken. A loud build failure is **never** silently converted
   to a wrong answer.
-- Gates: `native-smoke-matrix.shs` = `native_smoke_matrix=true`;
+- Gates: `native-smoke-matrix.shs` = `15/15 codegen_fallback_hits=0`;
   `check-native-seed-parity.shs` = `native_seed_parity=true`. Every fix adds a
   parity case (inline, not via a sub-lane).
 - Land via FF-replay onto the `ls-remote` tip; verify with `ls-remote` +
@@ -58,7 +58,7 @@ source fixes from executable proof.
 | 5 | Subject-enum variant precedence implemented for expression and statement match; focused Rust tests pending execution. |
 | 6 | Old two-slot `Any` premise is superseded by the one-word ABI; strict default-LLVM + explicit-Cranelift wrapper-to-extern forwarding proof added, execution pending. |
 | 7 | Source implemented at the contained MIR enum-bind owner; the cross-module `Result<[u8], E>` fixture now routes both Ok and Err through `?`, with LLVM and Cranelift execution scheduled on FreeBSD x86_64 plus AArch64/RISC-V64 QEMU and a flagless-LLVM RV32 bare-metal correctness object gate. Execution is pending. |
-| 8 | Source-implemented; typed local/direct-call Option `?`, resolved/unresolved-method provenance, enum-id-1 typed-boundary promotion, function-valued calls, control-flow merges, and early-`?` absence are covered by the mandatory strict-dual exact ABI fixture. Hosted Linux/macOS/Windows and FreeBSD x86_64 schedule annotated/direct/unresolved-method native-authoritative checks under flagless LLVM and explicit Cranelift; ARM32 LLVM and Windows ARM64 LLVM/Cranelift require successful nonempty target objects without the retired diagnostic. Current-source strict ABI execution is pending and genuinely unknown late dispatch remains unguessed; flat text unwrap is separately covered. |
+| 8 | Open/partial; typed local/direct-call Option `?` support, resolved/unresolved-method provenance, and additive `rt_enum_id` surfaces are source-implemented. Hosted Linux/macOS/Windows and FreeBSD x86_64 schedule annotated/direct/unresolved-method native-authoritative checks under flagless LLVM and explicit Cranelift; ARM32 LLVM and Windows ARM64 LLVM/Cranelift require successful nonempty target objects without the retired diagnostic. Execution is pending and genuinely unknown late dispatch remains unguessed. The flat payload-3 collision and uniform tagged Option ABI remain open; flat text unwrap is implemented but unexecuted. |
 | 9 | Capturing and non-capturing stored/passed lambda values implemented with a membership-checked closure ABI; strict hosted/simple-core default-LLVM + explicit-Cranelift proof added, execution pending. |
 | 10 | Captured scalar/struct closure storage implemented through the same closure ABI; strict dual-runtime/backend proof added, execution pending. |
 | 11 | Fixed by Unit-arm merge suppression and backend void-spill protection. |
@@ -69,7 +69,7 @@ source fixes from executable proof.
 | 16 | Target-aware global cfg selection implemented across native, driver/JIT, imports, and module loading; AArch64/RISC-V LLVM object regressions added, execution pending. |
 | 17 | Module+owner-qualified method identity implemented through imports, HIR, MIR, bootstrap, trait defaults, and static methods; the empirically resolved strict LLVM+Cranelift dispatch case is scheduled on Linux, macOS arm64/x64, Windows x64, and FreeBSD x86_64. First staged non-Linux execution is pending. |
 | 18 | Pure-Simple Cranelift dynload globals now declare, initialize, load, and store writable scalar data; strict LLVM+Cranelift init/mutation proof pending. |
-| 19 | Open/partial; dispatch/spin, compiler backfill/provider slices, private vendored font symbols, conditional pure-C dynamic-loader ownership with shared LLVM/Cranelift hosted-platform regression, target-explicit dynamic-loader archive/symbol policy, pure-Simple aggregate final-request derivation, deterministic unique-owner archive selection, canonical link-profile fingerprint input, cross-platform candidate-path/native-all discovery and hosted transitive link policy, explicit-entry dispatch, exact requested-root projection and strict final-link routing, fail-fast rejection of Stage4 emit-object bypass, native-host-only compiler-capsule admission, deterministic exact-ABI production staging for dynload, font, memtrack, time/progress, POSIX fork isolation, and process/editor transport, plus localized runtime-native dependency ownership and transitive requested-owner resolution are source-implemented. The fork provider requires the exact three memtrack dependencies on Linux/macOS/FreeBSD; Windows fork stubs are rejected as non-providers. Hosted Windows candidate validation now case-normalizes relative `.a`/`.lib` paths while Unix remains case-sensitive. Windows provider object ABI is now derived from the once-resolved C driver, kept separate from linker/archive flavor and path semantics, with contradictory or unknown Stage4 toolchains rejected. Hosted Linux+macOS arm64/x64+FreeBSD x86_64+Windows MSVC x64+MinGW x64 dynamic-loader compile/archive/scan proof is source-scheduled; first execution is pending. It checks independent rebuild determinism, exact one-member composition, forbidden sections, and measured ELF/Mach-O/COFF-MSVC/COFF-MinGW symbols through the existing pure-Simple validators. All current hosted formats are source-scheduled but pending first execution; none remains unscheduled. Remaining duplicate-free core/CLI owners, production hash/cache wiring, cross-target compiler capsules, and strict execution remain. The existing strict LLVM/Cranelift `dynload_tagged_text` proof is selected on macOS arm64/x64, Windows x64, and FreeBSD x86_64, with backend XFAIL forbidden; first staged execution is pending. |
+| 19 | Open/partial; dispatch/spin, compiler backfill/provider slices, POSIX/macOS/BSD and Windows core-C process-timeout ownership, canonical core-C HTTP tuple ownership, private vendored font symbols, conditional pure-C dynamic-loader ownership with shared LLVM/Cranelift hosted-platform regression, target-explicit dynamic-loader archive/symbol policy, pure-Simple aggregate final-request derivation, deterministic unique-owner archive selection, canonical link-profile fingerprint input, cross-platform candidate-path/native-all discovery and hosted transitive link policy, explicit-entry dispatch, a fail-closed barrier against ordinary-link fallthrough, fail-fast rejection of Stage4 emit-object bypass, native-host-only compiler-capsule admission, deterministic exact-ABI production staging for dynload, font, memtrack, time/progress, and POSIX fork isolation, and localized runtime-native dependency ownership plus transitive requested-owner resolution are source-implemented. The fork provider requires the exact three memtrack dependencies on Linux/macOS/FreeBSD; Windows fork stubs are rejected as non-providers. Hosted Windows candidate validation now case-normalizes relative `.a`/`.lib` paths while Unix remains case-sensitive. Windows provider object ABI is now derived from the once-resolved C driver, kept separate from linker/archive flavor and path semantics, with contradictory or unknown Stage4 toolchains rejected. Hosted Linux+macOS arm64/x64+FreeBSD x86_64+Windows MSVC x64+MinGW x64 dynamic-loader compile/archive/scan proof is source-scheduled; first execution is pending. It checks independent rebuild determinism, exact one-member composition, forbidden sections, and measured ELF/Mach-O/COFF-MSVC/COFF-MinGW symbols through the existing pure-Simple validators. All current hosted formats are source-scheduled but pending first execution; none remains unscheduled. Remaining duplicate-free core/CLI owners, projected-capsule linking, production hash/cache wiring, cross-target compiler capsules, and strict execution remain. The existing strict LLVM/Cranelift `dynload_tagged_text` proof is selected on macOS arm64/x64, Windows x64, and FreeBSD x86_64, with backend XFAIL forbidden; first staged execution is pending. |
 | 20 | C-owned host-GPU queue facade and fail-closed archive ownership checks implemented; native queue execution proof remains. |
 | 21 | Rust-seed inline-continuation fix and focused chained-inline regression are verified (`simple-parser` control-flow test: 19 passed); real inspector execution remains pending behind the unrelated pure-Simple `rt_cli_arg_count` bootstrap failure. |
 
@@ -102,11 +102,11 @@ asm fails diagnostically instead of comparing against a fabricated version. Runt
   verification contract above; the historical exit 139 has no retained current
   reproducer.
 
-FreeBSD QEMU `--full` now runs the complete default-LLVM native-entry matrix
-after the focused explicit-Cranelift probe and requires its count-independent
-`native_smoke_matrix=true` receipt. Its cross-module Result control now covers
-Ok payload extraction and Err propagation through `?` under both backends. The
-same fixture is wired for AArch64/RISC-V QEMU; execution is pending.
+FreeBSD QEMU `--full` now runs the complete 15-case default-LLVM native-entry
+matrix after the focused explicit-Cranelift probe and requires zero codegen
+fallback hits. Its cross-module Result control now covers Ok payload extraction
+and Err propagation through `?` under both backends. The same fixture is wired
+for AArch64/RISC-V QEMU; execution is pending.
 
 The existing Linux x86_64 LLVM bootstrap CI leg now enables canonical Stage 5,
 which builds both pure-Simple MCP servers and runs their fresh-artifact
@@ -230,43 +230,12 @@ path now stages, inventories, and exact-ABI validates the dedicated font archive
 with vendored STB exports held translation-unit-local and the dedicated
 memtrack archive with its 15-global ABI. It also compiles and stages the
 dedicated 14-export time/progress archive with target-specific core clock
-dependencies; execution proof remains pending. GPU, window,
-remaining HTTP helper/server, thread, SMF/CUDA, and other CLI owners remain. The remaining
-core-C split has 31 runtime/runtime-native overlaps plus the thread-sleep weak
-fallback and cannot use raw aggregate linking. Raw
+dependencies; execution proof and selection remain pending. GPU, window, HTTP, remaining process/thread,
+SMF/CUDA, and other CLI owners remain. Core-C currently overlaps memtrack, raw
 `libsimple_native_all.a` selection and allow-multiple-definition are still
 invalid for the strict profile, and provider ownership needs a separate link
 profile digest/cache namespace from the canonical input rather than changing
 per-module object keys.
-
-As of 2026-07-19, the production strict path hashes ordered Simple-object
-content, selected archive content, target, effective backend (default LLVM or
-explicit Cranelift), link options, compiler identity, and resolved owner rows.
-After a successful strict link it writes the canonical input and output-hash
-receipt under a separate `stage4-link-profiles/<digest>` namespace. These
-receipts are evidence only: cache-hit reuse is deliberately disabled until the
-resolved linker executable, CRT, dynamic linker, SDK/system libraries, and
-executable mode are also part of an atomic cache identity. Thus the remaining
-"production hash/cache wiring" work is cache reuse and invalidation proof, not
-the canonical profile or receipt production path.
-
-Raw `runtime_legacy_core.o` is also rejected even though it names current
-missing symbols: its legacy array/split ABI and no-op dictionary exports are
-not valid canonical owners. The reachable `rt_bytes_from_raw` and `rt_strsplit`
-bridges now build tagged arrays directly; a future compatibility capsule must
-localize every legacy array/dictionary/split export before admission. That
-exact localized compatibility capsule is now source-implemented: strict Stage4 compiles the
-fresh legacy object, localizes it to the audited 18-symbol runtime-native
-closure, validates the exact raw and localized envelopes for every hosted
-object-format contract, and admits only those exact names for direct or
-transitive ownership.
-Exact selected-archive projection/linking is now source-implemented for native
-Linux/macOS: selected one-member archives are partial-linked cycle-safely, all
-non-root globals are localized, the deterministic capsule is rescanned, and
-strict final linking disables duplicate forgiveness and cc fallback. Execution
-and complete requested-owner evidence remain pending. Strict execution therefore
-requires successful direct-linker and CRT discovery; it does not silently
-change semantics through the compiler-driver fallback.
 
 Windows bootstrap artifact discovery now distinguishes MSVC `.lib` from MinGW
 `lib*.a`: explicit linker flavor wins, then canonical `PLATFORM_ABI` preserves
@@ -278,28 +247,11 @@ read-only input. Pure-Simple derives its manifest without a hardcoded count,
 uses the portable `objcopy` resolver, and builds a transaction-owned localized
 Linux ELF or macOS Mach-O one-member capsule. Final inventory checks exact
 localized-object/archive global symbol-table equality and canonical disjointness
-from every staged exact C provider and the localized runtime-native dependency
-owner. The process provider uses one exact platform-specific ABI archive while
-transitive resolution validates its actual runtime dependencies. Requested-owner
-resolution now runs over the current
+from all five staged providers and the localized runtime-native dependency
+owner. Transitive requested-owner resolution now runs over the current
 candidate inventory and reports the first still-missing owner; Windows omits
-the invalid fork-stub candidate. The POSIX process slice now uses the canonical
-tagged array/string API and resolves through runtime-native, fork, and memtrack.
-Bounded process execution is owned by hosted C on every supported host, with a
-native tuple facade and an exact Stage4 provider symbol; POSIX reuses the
-parameterized fork capture and Windows reuses the Job Object capture path. The
-Windows process slice now calls the same quoting algorithm through a private
-static helper while preserving the public runtime.c-only wrapper. Broader
-closure is not yet claimed complete. The strict flow now projects the selected
-archives to an exact requested-root capsule and routes that capsule to the
-final link without raw runtime objects. Executable proof and evidence that the
-full compiler request closure has an owner remain pending.
-
-Runtime-native admission also requires the sole canonical
-`rt_http_get`/`rt_http_request`/`rt_http_download` tuple-handle owner. The legacy
-raw-C-string collision was already removed and remains covered by the focused
-HTTP ABI source contract; this Stage4 gate prevents a stale or incompatible
-runtime-native capsule from silently reopening it.
+the invalid fork-stub candidate. The selected archives are not yet projected or
+linked; executable proof remains pending.
 
 ---
 
@@ -308,7 +260,7 @@ runtime-native capsule from silently reopening it.
 | # | Bug | Note |
 |---|-----|------|
 | 20 | `native_engine2d_runtime_queue_symbols` | Runtime SFFI now registers `rt_host_gpu_queue_emit_payload_text` with a focused ABI regression; end-to-end native Engine2D queue execution remains pending. |
-| 21 | `native_renderdoc_inspector_else_parse` | **Resolved and focused-parser verified:** inline/block/repeated `else if` chains and the real RenderDoc inspector source parse. App bootstrap execution remains a separate receipt. |
+| 21 | `native_renderdoc_inspector_else_parse` | `Else` parse failure in the RenderDoc inspector source — parser edge case. |
 
 ---
 
@@ -319,11 +271,9 @@ runtime-native capsule from silently reopening it.
   Do NOT implement an orchestration fix against this premise.
 - `native_project_cache_hit_miss_mix_link_input_loss` — status **NOT REPRODUCED**;
   needs a reliable repro before any fix. Park until reproduced.
-- `native_sspec_expect_step_stub_host_gpu_lane` — **source-fixed; execution
-  pending**. A prevention audit found and fixed an expect-only helper false-green
-  gap in both pure-Simple and seed preprocessors. Run
-  `scripts/check/check-native-sspec-expect-helper.shs` with a rebuilt
-  pure-Simple compiler before marking Resolved.
+- `native_sspec_expect_step_stub_host_gpu_lane` — self-reports **fixed** (native
+  preprocessed specs link without `expect`/`SIMPLE_DUMP_STUBS` empty). Verify and
+  mark Resolved, or reopen with a fresh repro.
 
 ---
 
@@ -333,7 +283,7 @@ The original wave tables above preserve root-cause history; this list supersedes
 their implementation order.
 
 1. Run each row's recorded focused/native/parity gate for execution-proof-only
-   rows #2–#7, #9–#10, #12–#18, and #20. Native/parity gates wait for a
+   rows #2–#7, #9–#10, #12–#18, and #20–#21. Native/parity gates wait for a
    valid pure-Simple executable; do not reimplement landed source fixes.
 2. Implement #8 as one atomic uniform tagged Option ABI change, including every
    producer/consumer boundary and the full Result-preservation matrix. Do not

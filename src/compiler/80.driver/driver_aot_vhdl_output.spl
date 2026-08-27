@@ -23,22 +23,10 @@ use compiler.driver.driver_vhdl_artifacts.{
     vhdl_write_production_artifacts
 }
 use std.nogc_sync_mut.io.process_ops.{eprint}
-use std.io_runtime.{env_get_opt}
 
-@unsafe(reason: "raw enum discriminant bridge", capabilities: [ffi])
+extern fn rt_env_get(key: text) -> text
 extern fn rt_enum_discriminant(value: Any) -> i64
-@unsafe(reason: "raw enum payload bridge; caller must validate discriminant first", capabilities: [ffi])
 extern fn rt_enum_payload(value: Any) -> i64
-
-@always_inline
-fn _driver_vhdl_enum_discriminant_raw(value: Any) -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_enum_discriminant(value)
-
-@always_inline
-fn _driver_vhdl_enum_payload_raw(value: Any) -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_enum_payload(value)
 
 fn vhdl_log_debug(log: Logger, message: text):
     if log.level >= 10:
@@ -90,15 +78,11 @@ impl CompilerDriver:
         val ok_disc = _driver_vhdl_enum_discriminant_raw(ok_probe)
         val err_disc = _driver_vhdl_enum_discriminant_raw(err_probe)
         val entry_result = driver_vhdl_entry_module(ctx)
-        val entry_disc = _driver_vhdl_enum_discriminant_raw(entry_result)
-        if entry_disc == err_disc:
-            val entry_error: text = _driver_vhdl_enum_payload_raw(entry_result)
+        if rt_enum_discriminant(entry_result) == rt_enum_discriminant(Err("")):
+            val entry_error: text = rt_enum_payload(entry_result)
             return CompileResult.CodegenError(entry_error)
-        if entry_disc != ok_disc:
-            return CompileResult.CodegenError(
-                "E-SFFI-017: corrupt VHDL entry-result discriminant {entry_disc}")
-        val entry_module: text = _driver_vhdl_enum_payload_raw(entry_result)
-        val trace_enabled = (env_get_opt("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+        val entry_module: text = rt_enum_payload(entry_result)
+        val trace_enabled = (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
         if trace_enabled:
             val root_mir = ctx.mir_modules[entry_module]
             eprint(
@@ -109,7 +93,7 @@ impl CompilerDriver:
             eprint(
                 "[vhdl-driver] sidecar-metadata={ctx.vhdl_hardware_metadata_rows.len()}")
         for metadata in ctx.vhdl_hardware_metadata_rows:
-            if trace_enabled and metadata.function_name.starts_with("core32_"):
+            if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" and metadata.function_name.starts_with("core32_"):
                 eprint(
                     "[vhdl-driver] metadata-row module={metadata.module_name} function={metadata.function_name} clocked={metadata.has_clocked} valid={metadata.clocked_is_valid} flatten={metadata.flatten_struct_output}")
 
@@ -120,18 +104,16 @@ impl CompilerDriver:
             [entry_module],
             "simple_vhdl_design"
         )
-        val catalog_disc = _driver_vhdl_enum_discriminant_raw(catalog_result)
+        val catalog_disc = rt_enum_discriminant(catalog_result)
+        val catalog_err_disc = rt_enum_discriminant(Err(""))
         if trace_enabled:
             eprint(
-                "[vhdl-driver] catalog_disc={catalog_disc} err_disc={err_disc}")
-        if catalog_disc == err_disc:
-            val catalog_error: text = _driver_vhdl_enum_payload_raw(catalog_result)
+                "[vhdl-driver] catalog_disc={catalog_disc} err_disc={catalog_err_disc}")
+        if catalog_disc == catalog_err_disc:
+            val catalog_error: text = rt_enum_payload(catalog_result)
             return CompileResult.CodegenError(
                 "VHDL design catalog error: {catalog_error}")
-        if catalog_disc != ok_disc:
-            return CompileResult.CodegenError(
-                "E-SFFI-017: corrupt VHDL catalog-result discriminant {catalog_disc}")
-        val catalog: VhdlDesignCatalog = _driver_vhdl_enum_payload_raw(catalog_result)
+        val catalog: VhdlDesignCatalog = rt_enum_payload(catalog_result)
         if trace_enabled:
             eprint("[vhdl-driver] catalog payload extracted")
 
@@ -221,4 +203,3 @@ impl CompilerDriver:
                 return CompileResult.CodegenError(err)
         vhdl_log_info(log, "VHDL source written to {output}")
         CompileResult.Success(output)
-use compiler.common.diagnostics.span.{Span}

@@ -12,12 +12,17 @@
 #   increment()
 #   print count  # Prints 0, not 1!
 
-use compiler.core.ast.{DECL_FN, STMT_VAR_DECL, STMT_ASSIGN, EXPR_ASSIGN}
-use compiler.core.ast.{EXPR_IDENT, EXPR_COMPOUND_ASSIGN}
+use compiler.core.ast.{DECL_FN, STMT_VAR_DECL, STMT_ASSIGN, STMT_IF_CHAIN, EXPR_ASSIGN}
+use compiler.core.ast.{EXPR_IDENT, EXPR_CALL, EXPR_METHOD_CALL, EXPR_COMPOUND_ASSIGN, EXPR_IF_CHAIN}
 use compiler.core.ast.{decl_count, decl_get_tag, decl_get_name, decl_get_param_names, decl_get_body}
-use compiler.core.ast.{stmt_get_tag, stmt_get_name, stmt_get_expr, stmt_get_body}
+use compiler.core.ast.{stmt_get_tag, stmt_get_name, stmt_get_expr, stmt_get_type, stmt_get_body}
 use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left, expr_get_right, expr_get_extra}
 use compiler.core.ast.{expr_get_args, expr_get_stmts}
+use compiler.frontend.core.if_chain_nodes.{ARM_CONDITION}
+use compiler.frontend.core.if_chain_nodes.{flat_if_chain_first_arm_get, flat_if_chain_arm_count_get}
+use compiler.frontend.core.if_chain_nodes.{flat_if_chain_else_expr_get, flat_if_chain_else_stmt_count_get, flat_if_chain_else_stmt_at}
+use compiler.frontend.core.if_chain_nodes.{flat_if_arm_next_get, flat_if_arm_kind_get, flat_if_arm_head_get, flat_if_arm_init_get}
+use compiler.frontend.core.if_chain_nodes.{flat_if_arm_then_expr_get, flat_if_arm_body_count_get, flat_if_arm_body_at}
 
 # Warning messages collected during analysis
 var closure_warnings: [text] = []
@@ -33,25 +38,25 @@ fn closure_warnings_has() -> bool:
 
 # ===== Scope Tracking =====
 # Track variable declarations and their scope depth
-# scope_vars[closure_scope_depth] = list of var names declared at that depth
+# scope_vars[scope_depth] = list of var names declared at that depth
 # var_depth_map: Dict for O(1) lookup of variable name -> scope depth
 
-var closure_scope_depth: i64 = 0
+var scope_depth: i64 = 0
 var scope_vars: [[text]] = []
 var var_depth_map = {}
 
 fn scope_enter():
     scope_vars.push([])
-    closure_scope_depth = closure_scope_depth + 1
+    scope_depth = scope_depth + 1
 
 fn scope_exit():
-    if closure_scope_depth > 0:
+    if scope_depth > 0:
         # Remove vars declared in the exiting scope from the depth map
         val idx = scope_vars.len() - 1
         val exiting_vars = scope_vars[idx]
         for var_name in exiting_vars:
             var_depth_map[var_name] = -1
-        closure_scope_depth = closure_scope_depth - 1
+        scope_depth = scope_depth - 1
         # O(1) slice instead of O(n) array reconstruction
         scope_vars = scope_vars[0:scope_vars.len() - 1]
 
@@ -85,7 +90,7 @@ fn scope_is_outer_var(name: text) -> bool:
 fn analyze_closure_capture():
     # Entry point: analyze all functions in the AST
     closure_warnings_clear()
-    closure_scope_depth = 0
+    scope_depth = 0
     scope_vars = []
     var_depth_map = {}
 
@@ -118,6 +123,9 @@ fn analyze_function_decl(decl_idx: i64):
 
 fn analyze_stmt(stmt_idx: i64, containing_fn: text):
     val tag = stmt_get_tag(stmt_idx)
+    if tag == STMT_IF_CHAIN:
+        analyze_if_chain_for_capture(stmt_get_type(stmt_idx), containing_fn)
+        return
     val name = stmt_get_name(stmt_idx)
     val expr_idx = stmt_get_expr(stmt_idx)
     val body = stmt_get_body(stmt_idx)
@@ -136,7 +144,12 @@ fn analyze_stmt(stmt_idx: i64, containing_fn: text):
         analyze_stmt(nested_stmt_idx, containing_fn)
 
 fn analyze_expr_for_capture(expr_idx: i64, containing_fn: text):
+    if expr_idx < 0:
+        return
     val tag = expr_get_tag(expr_idx)
+    if tag == EXPR_IF_CHAIN:
+        analyze_if_chain_for_capture(expr_get_extra(expr_idx), containing_fn)
+        return
     val left = expr_get_left(expr_idx)
     val right = expr_get_right(expr_idx)
     val extra = expr_get_extra(expr_idx)
@@ -177,6 +190,50 @@ fn analyze_expr_for_capture(expr_idx: i64, containing_fn: text):
     for stmt_idx in stmts:
         analyze_stmt(stmt_idx, containing_fn)
 
+fn scope_add_if_pattern_bindings(pattern_idx: i64):
+    if pattern_idx < 0:
+        return
+    val tag = expr_get_tag(pattern_idx)
+    if tag == EXPR_IDENT:
+        val name = expr_get_str(pattern_idx)
+        if name != "_":
+            scope_add_var(name)
+        return
+    # Constructor/qualified-constructor names are not bindings. Only their
+    # pattern arguments can introduce branch-local names.
+    if tag == EXPR_CALL or tag == EXPR_METHOD_CALL:
+        for arg_idx in expr_get_args(pattern_idx):
+            scope_add_if_pattern_bindings(arg_idx)
+
+fn analyze_if_chain_for_capture(chain_id: i64, containing_fn: text):
+    var arm_id = flat_if_chain_first_arm_get(chain_id)
+    var remaining = flat_if_chain_arm_count_get(chain_id)
+    while arm_id >= 0 and remaining > 0:
+        val kind = flat_if_arm_kind_get(arm_id)
+        if kind == ARM_CONDITION:
+            analyze_expr_for_capture(flat_if_arm_head_get(arm_id), containing_fn)
+        else:
+            # Initializers run outside the successful arm's binding scope.
+            analyze_expr_for_capture(flat_if_arm_init_get(arm_id), containing_fn)
+        scope_enter()
+        if kind != ARM_CONDITION:
+            scope_add_if_pattern_bindings(flat_if_arm_head_get(arm_id))
+        analyze_expr_for_capture(flat_if_arm_then_expr_get(arm_id), containing_fn)
+        var body_i = 0
+        while body_i < flat_if_arm_body_count_get(arm_id):
+            analyze_stmt(flat_if_arm_body_at(arm_id, body_i), containing_fn)
+            body_i = body_i + 1
+        scope_exit()
+        arm_id = flat_if_arm_next_get(arm_id)
+        remaining = remaining - 1
+    scope_enter()
+    analyze_expr_for_capture(flat_if_chain_else_expr_get(chain_id), containing_fn)
+    var else_i = 0
+    while else_i < flat_if_chain_else_stmt_count_get(chain_id):
+        analyze_stmt(flat_if_chain_else_stmt_at(chain_id, else_i), containing_fn)
+        else_i = else_i + 1
+    scope_exit()
+
 fn emit_closure_warning(var_name: text, fn_name: text):
     val msg1 = "WARN: Closure in '" + fn_name + "' modifies outer variable '" + var_name + "'"
     val msg2 = "      Changes won't persist - use return value or class state instead"
@@ -184,3 +241,4 @@ fn emit_closure_warning(var_name: text, fn_name: text):
     closure_warnings.push(msg2)
 
 # ===== Exports =====
+

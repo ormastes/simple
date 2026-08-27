@@ -54,16 +54,11 @@ fn detect_cycles(metadata: NoteSdnMetadata) -> CycleDetectionResult:
     # Find all cycles using DFS
     val cycles = find_all_cycles(graph)
 
-    # Classification used to scan every dependency for every edge in every
-    # cycle. Build the qualifying indirection edges once so classification is
-    # linear in the reported cycle paths rather than O(total_cycle_length * E).
-    val soft_edges = build_soft_edge_index(metadata.dependencies)
-
     # Classify each cycle as hard error or soft warning
     for cycle in cycles:
         val cycle_path = cycle.join("->")
 
-        if is_hard_cycle(cycle, soft_edges):
+        if is_hard_cycle(cycle, metadata.dependencies):
             result.errors.push(CircularError(
                 cycle_path: cycle_path.clone(),
                 error_code: "E0420"
@@ -90,7 +85,7 @@ fn build_graph(dependencies: [DependencyEdge]) -> {text: [text]}:
     var graph: {text: [text]} = {}
 
     for dep in dependencies:
-        if not graph.contains_key(dep.from_inst):
+        if not graph_contains_key(graph, dep.from_inst):
             graph[dep.from_inst] = []
 
         # ADR-004: dict-index mutation needs write-back.
@@ -116,10 +111,10 @@ fn find_all_cycles(graph: {text: [text]}) -> [[text]]:
 
     # Get all nodes (both keys and values)
     var all_nodes: {text: bool} = {}
-    for node in graph.keys():
+    for node in graph_keys(graph):
         all_nodes[node] = true
 
-    for edges in graph.values():
+    for edges in graph_values(graph):
         for edge in edges:
             all_nodes[edge] = true
 
@@ -148,9 +143,9 @@ fn find_cycles_dfs(
     """
     visited[node] = true
     rec_stack[node] = true
-    path.push(node.clone())
+    path_push(path, node.clone())
 
-    if val neighbors = graph.get(node):
+    if val neighbors = graph_get(graph, node):
         for neighbor in neighbors:
             val neighbor_visited = if visited.contains_key(neighbor): visited[neighbor] else: false
             val neighbor_in_stack = if rec_stack.contains_key(neighbor): rec_stack[neighbor] else: false
@@ -171,45 +166,16 @@ fn find_cycles_dfs(
                     cycle.push(path[i].clone())
                 cycle.push(neighbor.clone())  # Complete the cycle
 
-                cycles.push(cycle)
+                cycles_push(cycles, cycle)
 
-    path.pop()
-    rec_stack.remove(node)
+    path_pop(path)
+    rec_stack_remove(rec_stack, node)
 
 # ============================================================================
 # Cycle Classification
 # ============================================================================
 
-class SoftEdgeIndex:
-    entries: {text: bool}
-
-    static fn create() -> SoftEdgeIndex:
-        SoftEdgeIndex(entries: {})
-
-    me add(from: text, to: text):
-        self.entries[soft_edge_key(from, to)] = true
-
-    fn contains(from: text, to: text) -> bool:
-        self.entries.contains_key(soft_edge_key(from, to))
-
-fn soft_edge_key(from: text, to: text) -> text:
-    # The source byte length makes the concatenation injective even when type
-    # names contain punctuation or one another.
-    "{from.len()}:{from}{to}"
-
-fn build_soft_edge_index(dependencies: [DependencyEdge]) -> SoftEdgeIndex:
-    """Index edges whose indirection makes a dependency cycle soft."""
-    val soft_edges = SoftEdgeIndex.create()
-
-    for dep in dependencies:
-        if dep.dep_kind == DependencyKind.InnerType:
-            val from = dep.from_inst
-            if from.contains("Option") or from.contains("Result") or from.contains("Nullable"):
-                soft_edges.add(from, dep.to_inst)
-
-    soft_edges
-
-fn is_hard_cycle(cycle: [text], soft_edges: SoftEdgeIndex) -> bool:
+fn is_hard_cycle(cycle: [text], dependencies: [DependencyEdge]) -> bool:
     """Determine if a cycle is a "hard" cycle (error) or "soft" cycle (warning).
 
     A cycle is "soft" if it's broken by an indirection type like Option<T>,
@@ -218,12 +184,18 @@ fn is_hard_cycle(cycle: [text], soft_edges: SoftEdgeIndex) -> bool:
     ROBUSTNESS: Checks each edge in the cycle for indirection types.
     """
     # Check if any edge in the cycle goes through an indirection type
-    for i in 0..(cycle.len() - 1):
+    for i in 0..(cycle_len(cycle) - 1):
         val from = cycle[i]
         val to = cycle[i + 1]
 
-        if soft_edges.contains(from, to):
-            return false  # Soft cycle
+        # Find the dependency edge
+        for dep in dependencies:
+            if dep.from_inst == from and dep.to_inst == to:
+                # InnerType dependency through Option/Result breaks the cycle
+                if dep.dep_kind == DependencyKind.InnerType:
+                    # Check if it's through an Option or similar nullable type
+                    if from.contains("Option") or from.contains("Result") or from.contains("Nullable"):
+                        return false  # Soft cycle
 
     # No indirection found - hard cycle
     true
@@ -250,7 +222,7 @@ fn detect_type_inference_cycles(inference_deps: [(text, text)]) -> [CircularErro
     for _item_0 in inference_deps:
         val from = _item_0[0]
         val to = _item_0[1]
-        if not graph.contains_key(from):
+        if not graph_contains_key(graph, from):
             graph[from] = []
         var bucket = graph[from]
         bucket.push(to.clone())
@@ -311,7 +283,7 @@ fn would_create_cycle(metadata: NoteSdnMetadata, new_from: text, new_to: text) -
     """
     # Build graph with the new edge
     var graph = build_graph(metadata.dependencies)
-    if not graph.contains_key(new_from):
+    if not graph_contains_key(graph, new_from):
         graph[new_from] = []
     var bucket = graph[new_from]
     bucket.push(new_to.clone())
@@ -346,12 +318,12 @@ fn has_path_dfs(
 
     visited[current] = true
 
-    if val neighbors = graph.get(current):
+    if val neighbors = graph_get(graph, current):
         for neighbor in neighbors:
-            path.push(neighbor.clone())
+            path_push(path, neighbor.clone())
             if has_path_dfs(neighbor, target, graph, visited, path):
                 return true
-            path.pop()
+            path_pop(path)
 
     false
 
@@ -377,18 +349,18 @@ fn topological_sort(metadata: NoteSdnMetadata) -> [text]?:
     var all_nodes: {text: bool} = {}
 
     # Collect all nodes
-    for node in graph.keys():
+    for node in graph_keys(graph):
         all_nodes[node] = true
 
-    for edges in graph.values():
+    for edges in graph_values(graph):
         for edge in edges:
             all_nodes[edge] = true
             val current = if in_degree.contains_key(edge): in_degree[edge] else: 0
             in_degree[edge] = current + 1
 
     # Initialize in-degrees for nodes with no incoming edges
-    for node in all_nodes.keys():
-        if not in_degree.contains_key(node):
+    for node in all_nodes_keys(all_nodes):
+        if not in_degree_contains_key(in_degree, node):
             in_degree[node] = 0
 
     # Kahn's algorithm
@@ -396,7 +368,7 @@ fn topological_sort(metadata: NoteSdnMetadata) -> [text]?:
     for node in in_degree.keys():
         val deg = in_degree[node]
         if deg == 0:
-            queue.push(node.clone())
+            queue_push(queue, node.clone())
 
     var result: [text] = []
 
@@ -406,17 +378,17 @@ fn topological_sort(metadata: NoteSdnMetadata) -> [text]?:
                 value
             None:
                 break
-        result.push(node.clone())
+        result_push(result, node.clone())
 
-        if val neighbors = graph.get(node):
+        if val neighbors = graph_get(graph, node):
             for neighbor in neighbors:
-                if val deg = in_degree.get(neighbor):
+                if val deg = in_degree_get(in_degree, neighbor):
                     in_degree[neighbor] = deg - 1
                     if deg - 1 == 0:
-                        queue.push(neighbor.clone())
+                        queue_push(queue, neighbor.clone())
 
     # If we processed all nodes, no cycle exists
-    if result.len() == all_nodes.keys().len():
+    if result_len(result) == all_nodes_keys(all_nodes).len():
         result
     else:
         nil  # Cycle detected
@@ -427,7 +399,7 @@ fn topological_sort(metadata: NoteSdnMetadata) -> [text]?:
 #
 # - build_graph: O(E) where E = number of edges
 # - find_all_cycles: O(V + E) DFS traversal, V = nodes, E = edges
-# - cycle classification: O(E + total cycle path length) via soft-edge index
+# - is_hard_cycle: O(cycle_length * E) - can be optimized with edge map
 # - would_create_cycle: O(V + E) DFS path search
 # - topological_sort: O(V + E) Kahn's algorithm
 #

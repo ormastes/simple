@@ -2,6 +2,30 @@
 
 > Executable trace for the historical RV64 Linux platform contract that now feeds the dual-arch generated Linux truth model.
 
+<!-- sdn-diagram:id=rv64_linux_rtl_pipeline_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=rv64_linux_rtl_pipeline_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+rv64_linux_rtl_pipeline_spec -> hardware
+rv64_linux_rtl_pipeline_spec -> compiler
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=rv64_linux_rtl_pipeline_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 5 | 5 | 0 | 0 |

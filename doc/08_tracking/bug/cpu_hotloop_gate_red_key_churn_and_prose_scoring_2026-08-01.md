@@ -1,8 +1,5 @@
 # CPU hot-loop idiom gate: red at new=158, and the number is key churn, not new debt
 
-Status: FIXED (2026-08-26; required-gate baseline convergence)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
-
 - **Date:** 2026-08-01
 - **Guard:** `scripts/check/check-cpu-hotloop-idiom.shs`
 - **Baseline:** `scripts/check/cpu_lane_hotloop_baseline.txt`
@@ -394,29 +391,3 @@ numbers describe the pure-Simple self-hosted tool.
   "ratchets clean on the real designated file set", asserts `new=0` and is
   therefore RED for as long as §6's paydown is open. That is the gate working as
   designed, not a spec defect — do not relax the assertion to make it pass.
-
-## Lane J re-verification 2026-08-17 (classified by CONTENT, not SHA ancestry)
-
-**Verdict: STILL-OPEN.** `scripts/check/cpu_lane_hotloop_baseline.txt` and
-`scripts/check/check-cpu-hotloop-idiom.shs` are both still present and no rekeying commit
-exists in current content. The date-attribution poisoning argument in the doc stands; the
-baseline still needs rekeying so new=158 stops being reported as new debt.
-
-## Required-gate convergence — 2026-08-26
-
-The first required-lane run after later renderer/compositor refactors exposed
-another content-key churn: 65 current keys were unmatched and 71 baseline keys
-were stale. The baseline held 207 occurrences while the current detector found
-186, so this was not blanket debt growth; it was an obsolete identity map over
-a tree whose total detected debt had fallen by 21.
-
-The checked-in baseline is now the exact `--update-baseline` output from clean
-`origin/main` commit `2b35049f8d70d7c5af93adf3de2c6e3be36a419b`:
-137 keys and 186 occurrences. No source annotation, detector pattern, hot-path
-file-list entry, or runtime code was changed to make the gate green.
-
-Baseline drift now fails in both directions. A current count above baseline is
-new debt; a baseline count above current is a stale contract and independently
-returns exit 1. The stale-only adversarial fixture covers the important case
-where every current hit is already baselined (`new=0`) but an obsolete extra
-key remains (`stale=1`): the gate must report `cpu_lane_hotloop_ok=false`.

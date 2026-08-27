@@ -18,6 +18,12 @@ LLVM llc by default; JIT is opt-in via `SIMPLE_BOOTSTRAP_REAL_LLVM` env var).
 Tracks redeploy gate (`scripts/check/cert/redeploy_gate/redeploy_gate.shs`), smoke-matrix
 verification, and all bootstrap-blocking regressions.
 
+Bootstrap ledger pushes use a shared Git hook directory across linked
+worktrees. The installed hook is `scripts/hooks/pre-push-worktree-launcher`, a
+stable launcher that resolves the active worktree before entering its tracked
+must-check dispatcher. An absolute dispatcher symlink is invalid across
+worktrees and must not be restored during bootstrap setup.
+
 ## Pipeline Links
 
 ## SimpleOS 32-bit cross-target boundary
@@ -174,33 +180,6 @@ the env var points to the correct seed target.
    stage2/stage3 round-trip + test subset). Gate failures are hard stops.
 3. **stage2 binary is ephemeral:** only used during bootstrap. After stage3
    succeeds, discard it — no production reliance on stage2 artifacts.
-4. **Deployed `simple` is a frontend; SSpec needs its `simple_seed` sibling.**
-   The release CLI delegates `test` to a `simple_seed` in the SAME directory
-   (`seed sibling not found, skipping delegation` = it's missing → in-process
-   fallback fails `unresolved name: describe`). Every deploy must ship the
-   pair. Recovery: copy a known-good `{simple, simple_seed}` pair from a clean
-   worktree's `build/bootstrap/full/<triple>/` to a scratch dir.
-   See `cli_symlink_argv0_seed_sibling_lookup_2026-07-24.md`.
-   **Exe identity must be resolved IN-PROCESS.** `_cli_current_exe_path` now
-   canonicalizes `/proc/self/exe` via `rt_path_absolute`
-   (`std::fs::canonicalize`). Never shell out for it: a `/proc/self` read done
-   by a spawned helper describes the HELPER, so `readlink -f /proc/self/exe`
-   returned `/usr/bin/readlink` — its seed sibling `/usr/bin/simple_seed` never
-   exists, so the CLI fell through to delegate to `bin/simple` = itself and
-   `bin/simple run` became an unbounded fork bomb (2026-07-25, `0531ca8ce266`).
-   The same commit restored `_cli_resolve_symlink` on the *candidate* side of
-   `_cli_is_current_exe`: `bin/simple` is a symlink, so an unresolved candidate
-   never matches our real exe and the fork-bomb guard silently passes.
-   **Binaries deployed before `0531ca8ce266` self-delegate no matter which path
-   invokes them** — identity does not depend on argv[0] in those builds, so the
-   old "invoke the REAL path, not the symlink" workaround does not help. Drive
-   `simple_seed` directly until redeploy.
-5. **Stale untracked `.smf` stubs poison module resolution tree-wide** —
-   symptom is identical to a deploy clobber (every spec fails
-   `unresolved name: describe`). `find src test -name '*.smf'` must be empty;
-   quarantine hits. See
-   `doc/08_tracking/bug/smf_stub_shadowing_unresolved_describe_2026-07-24.md`
-   and `doc/07_guide/infra/testing.md` § Troubleshooting.
 
 ## Multi-Error Recovery Strategy
 
@@ -606,6 +585,11 @@ Stage-3/4 run; never substitute the seed or bypass must-check.
 ## Must-check ledger handoff
 
 The bootstrap owner is the only producer of must-check ledger PASS state.
+It retains commit-ready logs under
+`doc/08_tracking/check/evidence/<source-fingerprint>/`, refuses fingerprinted
+input drift from `HEAD`, and records external TODO receipts only through
+`--record-gate-pass <id> --evidence <repo-relative-committed-receipt>`. The
+push consumer validates evidence blobs from the exact pushed revision.
 Schema v3 requires a named owner on every row, actionable unblock text for
 TODO/blocked rows, and `unblock_condition=none` for PASS. A bootstrap wrapper
 must not publish a phase PASS until its exact receipt has been validated and

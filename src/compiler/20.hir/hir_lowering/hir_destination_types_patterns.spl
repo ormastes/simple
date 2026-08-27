@@ -1,0 +1,280 @@
+# Lossless HirType/HirPattern/Effect/Dim rows.
+# Generic writers accept only their closed fixed-shape ranges. Payload mapping:
+# i0/i1/i2 = scalar or child indices, b0/b1 = presence/mutability/sign,
+# t0/t1 = names, r0/r1 = pre-reserved typed ranges.
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_lowering.hir_destination_graph.*
+
+impl HirDestinationGraph:
+    me ensure_type_capacity(required: i64):
+        if required <= self.type_capacity: return
+        val target = self.next_capacity(self.type_capacity, required)
+        while self.type_ready.len() < target:
+            self.type_ready.push(false); self.type_shape.push(0); self.type_span.push(-1)
+            self.type_i0.push(-1); self.type_i1.push(-1); self.type_i2.push(-1); self.type_b0.push(false); self.type_b1.push(false); self.type_t0.push("")
+            self.type_r0_start.push(-1); self.type_r0_len.push(0); self.type_r1_start.push(-1); self.type_r1_len.push(0)
+        self.type_capacity = target
+
+    me ensure_pattern_capacity(required: i64):
+        if required <= self.pattern_capacity: return
+        val target = self.next_capacity(self.pattern_capacity, required)
+        while self.pattern_ready.len() < target:
+            self.pattern_ready.push(false); self.pattern_shape.push(0); self.pattern_span.push(-1)
+            self.pattern_has_type.push(false); self.pattern_type.push(-1); self.pattern_i0.push(-1); self.pattern_i1.push(-1)
+            self.pattern_b0.push(false); self.pattern_b1.push(false); self.pattern_b2.push(false); self.pattern_t0.push(""); self.pattern_t1.push(""); self.pattern_r0_start.push(-1); self.pattern_r0_len.push(0)
+        self.pattern_capacity = target
+
+    me reserve_type(span: Span) -> i64:
+        if not self.mutable(): self.fail("HIR type reservation after freeze"); return -1
+        val s = self.reserve_span(span); if s < 0: return -1
+        val i = self.type_count
+        self.ensure_type_capacity(i + 1)
+        self.type_ready[i] = false; self.type_shape[i] = 0; self.type_span[i] = s
+        self.type_i0[i] = -1; self.type_i1[i] = -1; self.type_i2[i] = -1
+        self.type_b0[i] = false; self.type_b1[i] = false; self.type_t0[i] = ""
+        self.type_r0_start[i] = -1; self.type_r0_len[i] = 0; self.type_r1_start[i] = -1; self.type_r1_len[i] = 0
+        self.type_count = i + 1
+        i
+
+    # Internal closed publisher; public lowering uses only fixed-shape wrappers below.
+    me publish_type_row(i: i64, shape: i64, i0: i64, i1: i64, i2: i64, b0: bool, b1: bool, t0: text, range0_start: i64, range0_len: i64, range1_start: i64, range1_len: i64) -> bool:
+        if not self.mutable() or i < 0 or i >= self.type_count or self.type_ready[i]: return self.fail("HIR type row is not writable")
+        if shape < HD_TYPE_INT or shape > HD_TYPE_QUALIFIED_DYN_TRAIT: return self.fail("HIR type shape is invalid")
+        if range0_len > 0 and not self.range_is_ready(if shape == HD_TYPE_TENSOR or shape == HD_TYPE_LAYER: HD_RANGE_DIM else: HD_RANGE_TYPE, range0_start, range0_len): return self.fail("HIR type primary range is not ready")
+        if range1_len > 0 and not self.range_is_ready(if shape == HD_TYPE_FUNCTION: HD_RANGE_EFFECT else: HD_RANGE_DIM, range1_start, range1_len): return self.fail("HIR type secondary range is not ready")
+        if (shape == HD_TYPE_ARRAY or shape == HD_TYPE_SLICE or shape == HD_TYPE_REF or shape == HD_TYPE_PTR or shape == HD_TYPE_OPTIONAL or shape == HD_TYPE_ISOLATED or shape == HD_TYPE_WEAK or shape == HD_TYPE_ATOMIC or shape == HD_TYPE_PROJECTION or shape == HD_TYPE_TENSOR) and not self.index_ready(HD_RANGE_TYPE, i0): return self.fail("HIR unary type child is not ready")
+        if (shape == HD_TYPE_DICT or shape == HD_TYPE_RESULT) and (not self.index_ready(HD_RANGE_TYPE, i0) or not self.index_ready(HD_RANGE_TYPE, i1)): return self.fail("HIR binary type child is not ready")
+        if shape == HD_TYPE_FUNCTION and not self.index_ready(HD_RANGE_TYPE, i0): return self.fail("HIR function return type is not ready")
+        if range0_len == 0 and range0_start != -1: return self.fail("HIR empty primary type range is not inert")
+        if range1_len == 0 and range1_start != -1: return self.fail("HIR empty secondary type range is not inert")
+        if shape == HD_TYPE_INT and (i0 <= 0 or i1 != -1 or i2 != -1 or t0 != ""): return self.fail("HIR integer type payload is invalid")
+        if shape == HD_TYPE_FLOAT and (i0 <= 0 or i1 != -1 or i2 != -1 or b0 or t0 != ""): return self.fail("HIR float type payload is invalid")
+        if (shape == HD_TYPE_BOOL or shape == HD_TYPE_CHAR or shape == HD_TYPE_STR or shape == HD_TYPE_UNIT or shape == HD_TYPE_ERROR or shape == HD_TYPE_NEVER or shape == HD_TYPE_ANY) and (i0 != -1 or i1 != -1 or i2 != -1 or b0 or b1 or t0 != "" or range0_len != 0 or range1_len != 0): return self.fail("HIR leaf type payload is not inert")
+        if b1: return self.fail("HIR reserved type presence bit is not inert")
+        if shape == HD_TYPE_ARRAY and ((not b0 and i1 != -1) or (b0 and i1 < 0)): return self.fail("HIR array size presence is not canonical")
+        if shape != HD_TYPE_INT and shape != HD_TYPE_ARRAY and shape != HD_TYPE_REF and shape != HD_TYPE_PTR and shape != HD_TYPE_TENSOR and b0: return self.fail("HIR type boolean payload is not valid for shape")
+        if shape != HD_TYPE_PARAM and shape != HD_TYPE_PROJECTION and t0 != "": return self.fail("HIR type text payload is not valid for shape")
+        if shape == HD_TYPE_NAMED and (i0 < 0 or i1 < 0 or i1 >= self.module_count): return self.fail("HIR named type authority is invalid")
+        if shape == HD_TYPE_DYN_TRAIT and (i0 < 0 or i1 != -1 or i2 != -1): return self.fail("HIR dyn-trait symbol is invalid")
+        if shape == HD_TYPE_QUALIFIED_DYN_TRAIT and (i0 < 0 or i1 < 0 or i1 >= self.module_count or self.module_generation[i1] != self.generation or i2 != -1): return self.fail("HIR qualified dyn-trait authority is invalid")
+        if shape == HD_TYPE_INFER and (i0 < 0 or i1 < 0): return self.fail("HIR inference type payload is invalid")
+        if shape == HD_TYPE_TENSOR and b0 and (i1 < 0 or i1 > 2 or (i1 == 0 and i2 != -1)): return self.fail("HIR tensor device payload is invalid")
+        if shape == HD_TYPE_TENSOR and not b0 and (i1 != -1 or i2 != -1): return self.fail("HIR absent tensor device is not inert")
+        if shape == HD_TYPE_TUPLE and (i0 != -1 or i1 != -1 or i2 != -1 or b0 or t0 != "" or range1_len != 0): return self.fail("HIR tuple type payload is invalid")
+        if shape == HD_TYPE_ARRAY and (i2 != -1 or t0 != "" or range0_len != 0 or range1_len != 0): return self.fail("HIR array type payload is invalid")
+        if (shape == HD_TYPE_SLICE or shape == HD_TYPE_OPTIONAL or shape == HD_TYPE_ISOLATED or shape == HD_TYPE_WEAK or shape == HD_TYPE_ATOMIC) and (i1 != -1 or i2 != -1 or b0 or t0 != "" or range0_len != 0 or range1_len != 0): return self.fail("HIR unary immutable type payload is invalid")
+        if (shape == HD_TYPE_REF or shape == HD_TYPE_PTR) and (i1 != -1 or i2 != -1 or t0 != "" or range0_len != 0 or range1_len != 0): return self.fail("HIR reference type payload is invalid")
+        if (shape == HD_TYPE_DICT or shape == HD_TYPE_RESULT) and (i2 != -1 or b0 or t0 != "" or range0_len != 0 or range1_len != 0): return self.fail("HIR binary type payload is invalid")
+        if shape == HD_TYPE_NAMED and (i2 != -1 or b0 or t0 != "" or range1_len != 0): return self.fail("HIR named type payload is invalid")
+        if shape == HD_TYPE_PARAM and (i0 != -1 or i1 != -1 or i2 != -1 or b0 or t0 == "" or range1_len != 0): return self.fail("HIR type-parameter payload is invalid")
+        if shape == HD_TYPE_UNION and (i0 != -1 or i1 != -1 or i2 != -1 or b0 or t0 != "" or range1_len != 0): return self.fail("HIR union type payload is invalid")
+        if shape == HD_TYPE_FUNCTION and (i1 != -1 or i2 != -1 or b0 or t0 != ""): return self.fail("HIR function type payload is invalid")
+        if shape == HD_TYPE_PROJECTION and (i1 != -1 or i2 != -1 or b0 or t0 == "" or range0_len != 0 or range1_len != 0): return self.fail("HIR projection type payload is invalid")
+        if shape == HD_TYPE_INFER and (i2 != -1 or b0 or t0 != "" or range0_len != 0 or range1_len != 0): return self.fail("HIR inference type trailing payload is invalid")
+        if shape == HD_TYPE_TENSOR and (t0 != "" or range1_len != 0): return self.fail("HIR tensor type trailing payload is invalid")
+        if shape == HD_TYPE_LAYER and (i0 != -1 or i1 != -1 or i2 != -1 or b0 or t0 != ""): return self.fail("HIR layer type payload is invalid")
+        val allows_type_range = shape == HD_TYPE_TUPLE or shape == HD_TYPE_NAMED or shape == HD_TYPE_PARAM or shape == HD_TYPE_UNION or shape == HD_TYPE_FUNCTION
+        val allows_dim_range = shape == HD_TYPE_TENSOR or shape == HD_TYPE_LAYER
+        if range0_len > 0 and not allows_type_range and not allows_dim_range: return self.fail("HIR type primary range is not valid for shape")
+        if range1_len > 0 and shape != HD_TYPE_FUNCTION and shape != HD_TYPE_LAYER: return self.fail("HIR type secondary range is not valid for shape")
+        self.type_i0[i] = i0; self.type_i1[i] = i1; self.type_i2[i] = i2
+        self.type_b0[i] = b0; self.type_b1[i] = b1; self.type_t0[i] = t0
+        self.type_r0_start[i] = range0_start; self.type_r0_len[i] = range0_len
+        self.type_r1_start[i] = range1_start; self.type_r1_len[i] = range1_len
+        self.type_shape[i] = shape; self.type_ready[i] = true
+        true
+
+    me write_type_int(i: i64, bits: i64, signed: bool) -> bool: self.publish_type_row(i, HD_TYPE_INT, bits, -1, -1, signed, false, "", -1, 0, -1, 0)
+    me write_type_float(i: i64, bits: i64) -> bool: self.publish_type_row(i, HD_TYPE_FLOAT, bits, -1, -1, false, false, "", -1, 0, -1, 0)
+    me write_type_leaf(i: i64, shape: i64) -> bool:
+        if shape != HD_TYPE_BOOL and shape != HD_TYPE_CHAR and shape != HD_TYPE_STR and shape != HD_TYPE_UNIT and shape != HD_TYPE_ERROR and shape != HD_TYPE_NEVER and shape != HD_TYPE_ANY: return self.fail("HIR leaf type shape is invalid")
+        self.publish_type_row(i, shape, -1, -1, -1, false, false, "", -1, 0, -1, 0)
+    me write_type_tuple(i: i64, elements: i64, count: i64) -> bool: self.publish_type_row(i, HD_TYPE_TUPLE, -1, -1, -1, false, false, "", elements, count, -1, 0)
+    me write_type_array(i: i64, element: i64, has_size: bool, size: i64) -> bool: self.publish_type_row(i, HD_TYPE_ARRAY, element, size, -1, has_size, false, "", -1, 0, -1, 0)
+    me write_type_unary(i: i64, shape: i64, child: i64, mutable: bool) -> bool:
+        if shape != HD_TYPE_SLICE and shape != HD_TYPE_REF and shape != HD_TYPE_PTR and shape != HD_TYPE_OPTIONAL and shape != HD_TYPE_ISOLATED and shape != HD_TYPE_WEAK and shape != HD_TYPE_ATOMIC: return self.fail("HIR unary type shape is invalid")
+        self.publish_type_row(i, shape, child, -1, -1, mutable, false, "", -1, 0, -1, 0)
+    me write_type_atomic(i: i64, child: i64) -> bool:
+        self.publish_type_row(i, HD_TYPE_ATOMIC, child, -1, -1, false, false, "", -1, 0, -1, 0)
+    me write_type_dict(i: i64, key: i64, value: i64) -> bool: self.publish_type_row(i, HD_TYPE_DICT, key, value, -1, false, false, "", -1, 0, -1, 0)
+    me write_type_result(i: i64, ok: i64, error_type: i64) -> bool: self.publish_type_row(i, HD_TYPE_RESULT, ok, error_type, -1, false, false, "", -1, 0, -1, 0)
+    # Named identities are always (defining module, symbol). Symbol ids restart
+    # in each module, so accepting requester-relative raw ids is unsound.
+    me write_type_named(i: i64, defining_module: i64, symbol: i64, args: i64, count: i64) -> bool: self.publish_type_row(i, HD_TYPE_NAMED, symbol, defining_module, -1, false, false, "", args, count, -1, 0)
+    me write_type_param(i: i64, name: text, bounds: i64, count: i64) -> bool: self.publish_type_row(i, HD_TYPE_PARAM, -1, -1, -1, false, false, name, bounds, count, -1, 0)
+    me write_type_union(i: i64, members: i64, count: i64) -> bool: self.publish_type_row(i, HD_TYPE_UNION, -1, -1, -1, false, false, "", members, count, -1, 0)
+    me write_type_dyn_trait(i: i64, symbol: i64) -> bool: self.publish_type_row(i, HD_TYPE_DYN_TRAIT, symbol, -1, -1, false, false, "", -1, 0, -1, 0)
+    me write_type_qualified_dyn_trait(i: i64, defining_module: i64, symbol: i64) -> bool: self.publish_type_row(i, HD_TYPE_QUALIFIED_DYN_TRAIT, symbol, defining_module, -1, false, false, "", -1, 0, -1, 0)
+    me write_type_function(i: i64, params: i64, param_count: i64, ret: i64, effects: i64, effect_count: i64) -> bool: self.publish_type_row(i, HD_TYPE_FUNCTION, ret, -1, -1, false, false, "", params, param_count, effects, effect_count)
+    me write_type_projection(i: i64, base: i64, assoc_name: text) -> bool: self.publish_type_row(i, HD_TYPE_PROJECTION, base, -1, -1, false, false, assoc_name, -1, 0, -1, 0)
+    me write_type_infer(i: i64, id: i64, level: i64) -> bool: self.publish_type_row(i, HD_TYPE_INFER, id, level, -1, false, false, "", -1, 0, -1, 0)
+    me write_type_tensor(i: i64, element: i64, dims: i64, dim_count: i64, has_device: bool, device_shape: i64, device_id: i64) -> bool:
+        if has_device and (device_shape < 0 or device_shape > 2): return self.fail("HIR tensor device domain is invalid")
+        if has_device and device_shape == 0 and device_id != -1: return self.fail("HIR CPU device id is not inert")
+        if not has_device and (device_shape != -1 or device_id != -1): return self.fail("HIR absent tensor device is not inert")
+        self.publish_type_row(i, HD_TYPE_TENSOR, element, device_shape, device_id, has_device, false, "", dims, dim_count, -1, 0)
+    me write_type_layer(i: i64, input_dims: i64, input_count: i64, output_dims: i64, output_count: i64) -> bool: self.publish_type_row(i, HD_TYPE_LAYER, -1, -1, -1, false, false, "", input_dims, input_count, output_dims, output_count)
+
+    me reserve_pattern(span: Span) -> i64:
+        if not self.mutable(): self.fail("HIR pattern reservation after freeze"); return -1
+        val s = self.reserve_span(span); if s < 0: return -1
+        val i = self.pattern_count
+        self.ensure_pattern_capacity(i + 1)
+        self.pattern_ready[i] = false; self.pattern_shape[i] = 0; self.pattern_span[i] = s
+        self.pattern_has_type[i] = false; self.pattern_type[i] = -1; self.pattern_i0[i] = -1; self.pattern_i1[i] = -1
+        self.pattern_b0[i] = false; self.pattern_b1[i] = false; self.pattern_b2[i] = false; self.pattern_t0[i] = ""; self.pattern_t1[i] = ""
+        self.pattern_r0_start[i] = -1; self.pattern_r0_len[i] = 0; self.pattern_count = i + 1
+        i
+
+    me publish_pattern_row(i: i64, shape: i64, has_type: bool, type_index: i64, i0: i64, i1: i64, b0: bool, t0: text, t1: text, start: i64, count: i64) -> bool:
+        if not self.mutable() or i < 0 or i >= self.pattern_count or self.pattern_ready[i]: return self.fail("HIR pattern row is not writable")
+        if shape < HD_PATTERN_WILDCARD or shape > HD_PATTERN_AS: return self.fail("HIR pattern shape is invalid")
+        if has_type and not self.index_ready(HD_RANGE_TYPE, type_index): return self.fail("HIR pattern type is not ready")
+        if not has_type and type_index != -1: return self.fail("HIR absent pattern type is not inert")
+        if count == 0 and start != -1: return self.fail("HIR empty pattern range is not inert")
+        if count > 0 and shape == HD_PATTERN_STRUCT and not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_NAMED_PATTERN, start, count): return self.fail("HIR struct pattern range is not ready")
+        if count > 0 and shape != HD_PATTERN_STRUCT and shape != HD_PATTERN_ENUM and not self.range_is_ready(HD_RANGE_PATTERN, start, count): return self.fail("HIR pattern range is not ready")
+        if shape == HD_PATTERN_LITERAL and not self.index_ready(HD_RANGE_EXPR, i0): return self.fail("HIR literal pattern value is not ready")
+        if shape == HD_PATTERN_LITERAL and (i1 != -1 or b0 or t0 != "" or t1 != "" or count != 0): return self.fail("HIR literal pattern irrelevant payload is not inert")
+        if shape == HD_PATTERN_RANGE and (t0 != "" or t1 != "" or count != 0): return self.fail("HIR range pattern irrelevant payload is not inert")
+        if (shape == HD_PATTERN_STRUCT or shape == HD_PATTERN_ENUM) and not self.index_ready(HD_RANGE_TYPE, i0): return self.fail("HIR structured pattern type is not ready")
+        if shape == HD_PATTERN_ENUM and b0 and not self.index_ready(HD_RANGE_AUX, i1): return self.fail("HIR enum pattern payload is not ready")
+        if shape == HD_PATTERN_ENUM and b0 and self.aux_shape[i1] != HD_AUX_PATTERN_TUPLE and self.aux_shape[i1] != HD_AUX_PATTERN_STRUCT: return self.fail("HIR enum pattern payload shape is invalid")
+        if shape == HD_PATTERN_ENUM and not b0 and i1 != -1: return self.fail("HIR absent enum pattern payload is not inert")
+        if shape == HD_PATTERN_WILDCARD and (i0 != -1 or i1 != -1 or b0 or t0 != "" or t1 != "" or count != 0): return self.fail("HIR wildcard pattern payload is not inert")
+        if shape == HD_PATTERN_BINDING and (i0 < 0 or i1 != -1 or t0 != "" or t1 != "" or count != 0): return self.fail("HIR binding pattern payload is invalid")
+        if (shape == HD_PATTERN_TUPLE or shape == HD_PATTERN_OR) and (b0 or i0 != -1 or i1 != -1 or t0 != "" or t1 != ""): return self.fail("HIR tuple/or pattern payload is invalid")
+        if shape == HD_PATTERN_ARRAY and ((not b0 and i0 != -1) or (b0 and i0 < 0) or i1 != -1 or t0 != "" or t1 != ""): return self.fail("HIR array pattern rest presence is invalid")
+        if shape == HD_PATTERN_STRUCT and (i0 < 0 or i1 != -1 or b0 or t0 != "" or t1 != ""): return self.fail("HIR struct pattern payload is invalid")
+        if shape == HD_PATTERN_ENUM and (i0 < 0 or t0 == "" or t1 != "" or count != 0): return self.fail("HIR enum pattern payload is invalid")
+        if shape == HD_PATTERN_ERROR and (i0 != -1 or i1 != -1 or b0 or t0 != "" or t1 != "" or count != 0): return self.fail("HIR error pattern payload is not inert")
+        if (shape == HD_PATTERN_COMPLETE or shape == HD_PATTERN_DYN) and (t0 == "" or i0 != -1 or i1 != -1 or b0 or t1 != "" or count != 0): return self.fail("HIR region pattern payload is invalid")
+        if shape == HD_PATTERN_TYPE_TEST and (t0 == "" or t1 == "" or i0 != -1 or i1 != -1 or b0 or count != 0): return self.fail("HIR type-test pattern payload is invalid")
+        if shape == HD_PATTERN_AS and (not self.index_ready(HD_RANGE_PATTERN, i0) or i1 < 0 or b0 or t0 != "" or t1 != "" or count != 0): return self.fail("HIR as-pattern payload is invalid")
+        if shape == HD_PATTERN_RANGE and ((self.pattern_b1[i] and not self.index_ready(HD_RANGE_EXPR, i0)) or (not self.pattern_b1[i] and i0 != -1) or (self.pattern_b2[i] and not self.index_ready(HD_RANGE_EXPR, i1)) or (not self.pattern_b2[i] and i1 != -1)): return self.fail("HIR optional range pattern endpoint is invalid")
+        self.pattern_has_type[i] = has_type; self.pattern_type[i] = if has_type: type_index else: -1
+        self.pattern_i0[i] = i0; self.pattern_i1[i] = i1; self.pattern_b0[i] = b0
+        self.pattern_t0[i] = t0; self.pattern_t1[i] = t1; self.pattern_r0_start[i] = start; self.pattern_r0_len[i] = count
+        self.pattern_shape[i] = shape; self.pattern_ready[i] = true
+        true
+
+    me write_pattern_wildcard(i: i64, has_type: bool, type_index: i64) -> bool: self.publish_pattern_row(i, HD_PATTERN_WILDCARD, has_type, type_index, -1, -1, false, "", "", -1, 0)
+    me write_pattern_literal(i: i64, value: i64, has_type: bool, type_index: i64) -> bool: self.publish_pattern_row(i, HD_PATTERN_LITERAL, has_type, type_index, value, -1, false, "", "", -1, 0)
+    me write_pattern_binding(i: i64, symbol: i64, mutable: bool, has_type: bool, type_index: i64) -> bool: self.publish_pattern_row(i, HD_PATTERN_BINDING, has_type, type_index, symbol, -1, mutable, "", "", -1, 0)
+    me write_pattern_sequence(i: i64, shape: i64, values: i64, count: i64, has_rest: bool, rest: i64, has_type: bool, type_index: i64) -> bool:
+        if shape != HD_PATTERN_TUPLE and shape != HD_PATTERN_ARRAY and shape != HD_PATTERN_OR: return self.fail("HIR sequence pattern shape is invalid")
+        if shape != HD_PATTERN_ARRAY and (has_rest or rest != -1): return self.fail("HIR tuple/or pattern cannot retain an array rest binding")
+        if shape == HD_PATTERN_ARRAY and not has_rest and rest != -1: return self.fail("HIR array pattern rest absence is not inert")
+        self.publish_pattern_row(i, shape, has_type, type_index, rest, -1, has_rest, "", "", values, count)
+    me write_pattern_struct(i: i64, struct_type: i64, fields: i64, count: i64, has_type: bool, type_index: i64) -> bool: self.publish_pattern_row(i, HD_PATTERN_STRUCT, has_type, type_index, struct_type, -1, false, "", "", fields, count)
+    me write_pattern_enum(i: i64, enum_type: i64, variant: text, has_payload: bool, payload: i64, has_type: bool, type_index: i64) -> bool: self.publish_pattern_row(i, HD_PATTERN_ENUM, has_type, type_index, enum_type, payload, has_payload, variant, "", -1, 0)
+    me write_pattern_range(i: i64, start_expr: i64, end_expr: i64, inclusive: bool, has_type: bool, type_index: i64) -> bool:
+        if i < 0 or i >= self.pattern_count or self.pattern_ready[i]: return self.fail("HIR range pattern row is not writable")
+        self.pattern_b1[i] = true; self.pattern_b2[i] = true; self.publish_pattern_row(i, HD_PATTERN_RANGE, has_type, type_index, start_expr, end_expr, inclusive, "", "", -1, 0)
+    me write_pattern_optional_range(i: i64, has_start: bool, start_expr: i64, has_end: bool, end_expr: i64, inclusive: bool, has_type: bool, type_index: i64) -> bool:
+        if i < 0 or i >= self.pattern_count or self.pattern_ready[i]: return self.fail("HIR optional range pattern row is not writable")
+        self.pattern_b1[i] = has_start; self.pattern_b2[i] = has_end
+        self.publish_pattern_row(i, HD_PATTERN_RANGE, has_type, type_index, if has_start: start_expr else: -1, if has_end: end_expr else: -1, inclusive, "", "", -1, 0)
+    me write_pattern_error(i: i64) -> bool: self.publish_pattern_row(i, HD_PATTERN_ERROR, false, -1, -1, -1, false, "", "", -1, 0)
+    me write_pattern_region(i: i64, dynamic: bool, binder: text) -> bool: self.publish_pattern_row(i, if dynamic: HD_PATTERN_DYN else: HD_PATTERN_COMPLETE, false, -1, -1, -1, false, binder, "", -1, 0)
+    me write_pattern_type_test(i: i64, type_name: text, binder: text) -> bool: self.publish_pattern_row(i, HD_PATTERN_TYPE_TEST, false, -1, -1, -1, false, type_name, binder, -1, 0)
+    me write_pattern_as(i: i64, inner: i64, alias_symbol: i64, has_type: bool, type_index: i64) -> bool: self.publish_pattern_row(i, HD_PATTERN_AS, has_type, type_index, inner, alias_symbol, false, "", "", -1, 0)
+
+    me reserve_effect(span: Span) -> i64:
+        if not self.mutable(): self.fail("HIR effect reservation after freeze"); return -1
+        val s = self.reserve_span(span); if s < 0: return -1
+        val i = self.effect_count
+        if i + 1 > self.effect_capacity:
+            val target = self.next_capacity(self.effect_capacity, i + 1)
+            while self.effect_ready.len() < target:
+                self.effect_ready.push(false); self.effect_shape.push(0); self.effect_span.push(-1); self.effect_i0.push(-1); self.effect_t0.push("")
+            self.effect_capacity = target
+        self.effect_ready[i] = false; self.effect_shape[i] = 0; self.effect_span[i] = s; self.effect_i0[i] = -1; self.effect_t0[i] = ""
+        self.effect_count = i + 1
+        i
+
+    me publish_effect_row(i: i64, shape: i64, type_index: i64, custom_name: text) -> bool:
+        if not self.mutable() or i < 0 or i >= self.effect_count or self.effect_ready[i]: return self.fail("HIR effect row is not writable")
+        if shape < HD_EFFECT_PURE or shape > HD_EFFECT_CUSTOM: return self.fail("HIR effect shape is invalid")
+        if shape == HD_EFFECT_THROWS and not self.index_ready(HD_RANGE_TYPE, type_index): return self.fail("HIR Throws type is not ready")
+        if shape != HD_EFFECT_THROWS and type_index != -1: return self.fail("HIR non-Throws type payload is not inert")
+        if shape == HD_EFFECT_CUSTOM and custom_name == "": return self.fail("HIR custom effect name is empty")
+        if shape != HD_EFFECT_CUSTOM and custom_name != "": return self.fail("HIR non-custom effect name is not inert")
+        self.effect_i0[i] = if shape == HD_EFFECT_THROWS: type_index else: -1
+        self.effect_t0[i] = if shape == HD_EFFECT_CUSTOM: custom_name else: ""
+        self.effect_shape[i] = shape; self.effect_ready[i] = true
+        true
+
+    me write_effect_pure(i: i64) -> bool: self.publish_effect_row(i, HD_EFFECT_PURE, -1, "")
+    me write_effect_io(i: i64) -> bool: self.publish_effect_row(i, HD_EFFECT_IO, -1, "")
+    me write_effect_async(i: i64) -> bool: self.publish_effect_row(i, HD_EFFECT_ASYNC, -1, "")
+    me write_effect_throws(i: i64, type_index: i64) -> bool: self.publish_effect_row(i, HD_EFFECT_THROWS, type_index, "")
+    me write_effect_mutates(i: i64) -> bool: self.publish_effect_row(i, HD_EFFECT_MUTATES, -1, "")
+    me write_effect_allocates(i: i64) -> bool: self.publish_effect_row(i, HD_EFFECT_ALLOCATES, -1, "")
+    me write_effect_custom(i: i64, name: text) -> bool: self.publish_effect_row(i, HD_EFFECT_CUSTOM, -1, name)
+
+    me reserve_dim(span: Span) -> i64:
+        if not self.mutable(): self.fail("HIR dimension reservation after freeze"); return -1
+        val s = self.reserve_span(span); if s < 0: return -1
+        val i = self.dim_count
+        if i + 1 > self.dim_capacity:
+            val target = self.next_capacity(self.dim_capacity, i + 1)
+            while self.dim_ready.len() < target:
+                self.dim_ready.push(false); self.dim_shape.push(0); self.dim_span.push(-1)
+                self.dim_i0.push(-1); self.dim_i1.push(-1); self.dim_i2.push(-1); self.dim_t0.push("")
+                self.dim_has0.push(false); self.dim_has1.push(false)
+            self.dim_capacity = target
+        self.dim_ready[i] = false; self.dim_shape[i] = 0; self.dim_span[i] = s
+        self.dim_i0[i] = -1; self.dim_i1[i] = -1; self.dim_i2[i] = -1; self.dim_t0[i] = ""
+        self.dim_has0[i] = false; self.dim_has1[i] = false; self.dim_count = i + 1
+        i
+
+    me publish_dim_row(i: i64, shape: i64, i0: i64, has0: bool, i1: i64, has1: bool, i2: i64, t0: text) -> bool:
+        if not self.mutable() or i < 0 or i >= self.dim_count or self.dim_ready[i]: return self.fail("HIR dimension row is not writable")
+        if shape < HD_DIM_LITERAL or shape > HD_DIM_DIV: return self.fail("HIR dimension shape is invalid")
+        if (shape == HD_DIM_ADD or shape == HD_DIM_MUL or shape == HD_DIM_DIV) and (not self.index_ready(HD_RANGE_DIM, i0) or not self.index_ready(HD_RANGE_DIM, i1)): return self.fail("HIR dimension child is not ready")
+        if i2 != -1: return self.fail("HIR reserved dimension payload is not inert")
+        if shape == HD_DIM_NAMED and (t0 == "" or (not has0 and i0 != -1) or (not has1 and i1 != -1)): return self.fail("HIR named dimension presence is invalid")
+        if shape == HD_DIM_CONST_PARAM and (t0 == "" or i0 != -1 or i1 != -1 or has0 or has1): return self.fail("HIR const dimension payload is invalid")
+        if (shape == HD_DIM_DYNAMIC or shape == HD_DIM_BROADCAST) and (i0 != -1 or i1 != -1 or has0 or has1 or t0 != ""): return self.fail("HIR marker dimension payload is not inert")
+        if (shape == HD_DIM_LITERAL or shape == HD_DIM_VAR) and (has0 or has1 or i1 != -1 or t0 != ""): return self.fail("HIR scalar dimension payload is invalid")
+        if (shape == HD_DIM_ADD or shape == HD_DIM_MUL or shape == HD_DIM_DIV) and (has0 or has1 or t0 != ""): return self.fail("HIR arithmetic dimension payload is invalid")
+        self.dim_i0[i] = i0; self.dim_has0[i] = has0; self.dim_i1[i] = i1; self.dim_has1[i] = has1
+        self.dim_i2[i] = i2; self.dim_t0[i] = t0; self.dim_shape[i] = shape; self.dim_ready[i] = true
+        true
+
+    me write_dim_literal(i: i64, value: i64) -> bool: self.publish_dim_row(i, HD_DIM_LITERAL, value, false, -1, false, -1, "")
+    me write_dim_named(i: i64, name: text, has_lo: bool, lo: i64, has_hi: bool, hi: i64) -> bool: self.publish_dim_row(i, HD_DIM_NAMED, lo, has_lo, hi, has_hi, -1, name)
+    me write_dim_var(i: i64, id: i64) -> bool: self.publish_dim_row(i, HD_DIM_VAR, id, false, -1, false, -1, "")
+    me write_dim_dynamic(i: i64) -> bool: self.publish_dim_row(i, HD_DIM_DYNAMIC, -1, false, -1, false, -1, "")
+    me write_dim_broadcast(i: i64) -> bool: self.publish_dim_row(i, HD_DIM_BROADCAST, -1, false, -1, false, -1, "")
+    me write_dim_const_param(i: i64, name: text) -> bool: self.publish_dim_row(i, HD_DIM_CONST_PARAM, -1, false, -1, false, -1, name)
+    me write_dim_add(i: i64, left: i64, right: i64) -> bool: self.publish_dim_row(i, HD_DIM_ADD, left, false, right, false, -1, "")
+    me write_dim_mul(i: i64, left: i64, right: i64) -> bool: self.publish_dim_row(i, HD_DIM_MUL, left, false, right, false, -1, "")
+    me write_dim_div(i: i64, left: i64, right: i64) -> bool: self.publish_dim_row(i, HD_DIM_DIV, left, false, right, false, -1, "")
+
+    me type_shape_at(i: i64) -> i64: if self.index_ready(HD_RANGE_TYPE, i): self.type_shape[i] else: 0
+    me type_i64_at(i: i64, column: i64) -> i64: if not self.index_ready(HD_RANGE_TYPE, i): -1 else if column == 0: self.type_i0[i] else if column == 1: self.type_i1[i] else if column == 2: self.type_i2[i] else: -1
+    me type_bool_at(i: i64, column: i64) -> bool: self.index_ready(HD_RANGE_TYPE, i) and (if column == 0: self.type_b0[i] else if column == 1: self.type_b1[i] else: false)
+    me type_text_at(i: i64) -> text: if self.index_ready(HD_RANGE_TYPE, i): self.type_t0[i] else: ""
+    me type_range_at(i: i64, secondary: bool) -> i64: if not self.index_ready(HD_RANGE_TYPE, i): -1 else if secondary: self.type_r1_start[i] else: self.type_r0_start[i]
+    me type_span_at(i: i64) -> i64: if self.index_ready(HD_RANGE_TYPE, i): self.type_span[i] else: -1
+    me pattern_shape_at(i: i64) -> i64: if self.index_ready(HD_RANGE_PATTERN, i): self.pattern_shape[i] else: 0
+    me pattern_i64_at(i: i64, column: i64) -> i64: if not self.index_ready(HD_RANGE_PATTERN, i): -1 else if column == 0: self.pattern_i0[i] else if column == 1: self.pattern_i1[i] else: -1
+    me pattern_bool_at(i: i64) -> bool: self.index_ready(HD_RANGE_PATTERN, i) and self.pattern_b0[i]
+    me pattern_endpoint_present_at(i: i64, end: bool) -> bool: self.index_ready(HD_RANGE_PATTERN, i) and self.pattern_shape[i] == HD_PATTERN_RANGE and (if end: self.pattern_b2[i] else: self.pattern_b1[i])
+    me pattern_text_at(i: i64, column: i64) -> text: if not self.index_ready(HD_RANGE_PATTERN, i): "" else if column == 0: self.pattern_t0[i] else if column == 1: self.pattern_t1[i] else: ""
+    me pattern_range_at(i: i64) -> i64: if self.index_ready(HD_RANGE_PATTERN, i): self.pattern_r0_start[i] else: -1
+    me pattern_type_at(i: i64) -> i64: if self.index_ready(HD_RANGE_PATTERN, i) and self.pattern_has_type[i]: self.pattern_type[i] else: -1
+    me pattern_span_at(i: i64) -> i64: if self.index_ready(HD_RANGE_PATTERN, i): self.pattern_span[i] else: -1
+    me effect_shape_at(i: i64) -> i64: if self.index_ready(HD_RANGE_EFFECT, i): self.effect_shape[i] else: 0
+    me effect_type_at(i: i64) -> i64: if self.index_ready(HD_RANGE_EFFECT, i) and self.effect_shape[i] == HD_EFFECT_THROWS: self.effect_i0[i] else: -1
+    me effect_name_at(i: i64) -> text: if self.index_ready(HD_RANGE_EFFECT, i) and self.effect_shape[i] == HD_EFFECT_CUSTOM: self.effect_t0[i] else: ""
+    me effect_span_at(i: i64) -> i64: if self.index_ready(HD_RANGE_EFFECT, i): self.effect_span[i] else: -1
+    me dim_shape_at(i: i64) -> i64: if self.index_ready(HD_RANGE_DIM, i): self.dim_shape[i] else: 0
+    me dim_i64_at(i: i64, column: i64) -> i64: if not self.index_ready(HD_RANGE_DIM, i): -1 else if column == 0: self.dim_i0[i] else if column == 1: self.dim_i1[i] else if column == 2: self.dim_i2[i] else: -1
+    me dim_has_at(i: i64, column: i64) -> bool: self.index_ready(HD_RANGE_DIM, i) and (if column == 0: self.dim_has0[i] else if column == 1: self.dim_has1[i] else: false)
+    me dim_text_at(i: i64) -> text: if self.index_ready(HD_RANGE_DIM, i): self.dim_t0[i] else: ""
+    me dim_span_at(i: i64) -> i64: if self.index_ready(HD_RANGE_DIM, i): self.dim_span[i] else: -1
+
+export HirDestinationGraph

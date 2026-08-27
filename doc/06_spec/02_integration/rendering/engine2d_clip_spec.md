@@ -1,6 +1,29 @@
 # Engine2d Clip Specification
 
-> Tests covering Engine2D Clipping.
+> 1. var engine = Engine2D create with backend
+
+<!-- sdn-diagram:id=engine2d_clip_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=engine2d_clip_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+engine2d_clip_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=engine2d_clip_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,20 +42,22 @@
 
 #### set_clip restricts draw_rect_filled
 
-- set_clip restricts draw_rect_filled
+1. var engine = Engine2D create with backend
+2. engine clear
+3. engine set clip
+4. engine draw rect filled
    - Expected: color_r(outside) equals `0`
    - Expected: color_r(inside) equals `255`
+5. engine shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("set_clip restricts draw_rect_filled")
 var engine = Engine2D.create_with_backend(10, 10, "cpu")
 engine.clear(rgb(0, 0, 0))
 engine.set_clip(5, 5, 5, 5)
@@ -49,19 +74,22 @@ engine.shutdown()
 
 #### clear_clip restores full drawing area
 
-- clear_clip restores full drawing area
+1. var engine = Engine2D create with backend
+2. engine clear
+3. engine set clip
+4. engine clear clip
+5. engine draw rect filled
    - Expected: color_g(p) equals `255`
+6. engine shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("clear_clip restores full drawing area")
 var engine = Engine2D.create_with_backend(10, 10, "cpu")
 engine.clear(rgb(0, 0, 0))
 engine.set_clip(5, 5, 5, 5)
@@ -77,19 +105,20 @@ engine.shutdown()
 
 #### clip does not affect clear
 
-- clip does not affect clear
+1. var engine = Engine2D create with backend
+2. engine set clip
+3. engine clear
    - Expected: color_b(p) equals `255`
+4. engine shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("clip does not affect clear")
 var engine = Engine2D.create_with_backend(10, 10, "cpu")
 engine.set_clip(5, 5, 5, 5)
 engine.clear(rgb(0, 0, 255))
@@ -108,12 +137,12 @@ engine.shutdown()
 | Category | Other |
 | Status | Active |
 | Source | `test/02_integration/rendering/engine2d_clip_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Engine2D Clipping.
+Tests covering:
 - Engine2D Clipping
 
 ## Scenario Summary
@@ -128,54 +157,3 @@ Tests covering Engine2D Clipping.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-INTEGRATION`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `f3e9f2851711b175af278159c9897e93cd0e01490c727e1c26590c4e68192047`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `f3e9f2851711b175af278159c9897e93cd0e01490c727e1c26590c4e68192047`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `f3e9f2851711b175af278159c9897e93cd0e01490c727e1c26590c4e68192047`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/02_integration/rendering/engine2d_clip_spec.spl
-mirror: doc/06_spec/02_integration/rendering/engine2d_clip_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/rendering/engine2d_clip_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/rendering/engine2d_clip_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/02_integration/rendering/engine2d_clip_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 4 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/02_integration/rendering/engine2d_clip_spec.spl:19:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'set_clip restricts draw_rect_filled' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/rendering/engine2d_clip_spec.spl:33:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'clear_clip restores full drawing area' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/rendering/engine2d_clip_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'clip does not affect clear' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

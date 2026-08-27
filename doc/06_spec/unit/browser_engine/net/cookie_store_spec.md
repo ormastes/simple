@@ -22,7 +22,7 @@ Verifies RFC 6265 cookie domain/path matching, SameSite enum, Set-Cookie parsing
 | Difficulty | 3/5 |
 | Status | Draft |
 | Source | `test/unit/browser_engine/net/cookie_store_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-07-29 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -36,7 +36,6 @@ and CookieStore storage/retrieval. No network calls — pure logic.
 
 #### AC-6: parses simple name=value
 
-- AC-6: parses simple name=value
 - Parse a simple name-value cookie
    - Expected: c.name equals `session`
    - Expected: c.value equals `abc123`
@@ -45,12 +44,10 @@ and CookieStore storage/retrieval. No network calls — pure logic.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: parses simple name=value")
 step("Parse a simple name-value cookie")
 val c = parse_simple_cookie()
 expect(c.name).to_equal("session")
@@ -61,7 +58,6 @@ expect(c.value).to_equal("abc123")
 
 #### AC-6: parses Domain attribute
 
-- AC-6: parses Domain attribute
 - Parse a cookie with a Domain attribute
    - Expected: c.domain equals `example.com`
 
@@ -69,12 +65,10 @@ expect(c.value).to_equal("abc123")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: parses Domain attribute")
 step("Parse a cookie with a Domain attribute")
 val c = parse_cookie_with_domain()
 expect(c.domain).to_equal("example.com")
@@ -84,7 +78,6 @@ expect(c.domain).to_equal("example.com")
 
 #### AC-6: parses Path attribute
 
-- AC-6: parses Path attribute
 - Parse a cookie with a Path attribute
    - Expected: c.path equals `/api`
 
@@ -92,12 +85,10 @@ expect(c.domain).to_equal("example.com")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: parses Path attribute")
 step("Parse a cookie with a Path attribute")
 val c = parse_cookie_with_path()
 expect(c.path).to_equal("/api")
@@ -107,7 +98,6 @@ expect(c.path).to_equal("/api")
 
 #### AC-6: parses Secure flag
 
-- AC-6: parses Secure flag
 - Parse a cookie with the Secure flag
    - Expected: c.secure is true
 
@@ -115,12 +105,10 @@ expect(c.path).to_equal("/api")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: parses Secure flag")
 step("Parse a cookie with the Secure flag")
 val c = parse_secure_cookie()
 expect(c.secure).to_equal(true)
@@ -130,7 +118,6 @@ expect(c.secure).to_equal(true)
 
 #### AC-6: parses HttpOnly flag
 
-- AC-6: parses HttpOnly flag
 - Parse a cookie with the HttpOnly flag
    - Expected: c.http_only is true
 
@@ -138,12 +125,10 @@ expect(c.secure).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: parses HttpOnly flag")
 step("Parse a cookie with the HttpOnly flag")
 val c = parse_httponly_cookie()
 expect(c.http_only).to_equal(true)
@@ -153,7 +138,6 @@ expect(c.http_only).to_equal(true)
 
 #### AC-6: parses SameSite=Strict
 
-- AC-6: parses SameSite=Strict
 - Parse a SameSite Strict cookie
    - Expected: is_strict is true
 
@@ -161,12 +145,10 @@ expect(c.http_only).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: parses SameSite=Strict")
 step("Parse a SameSite Strict cookie")
 val c = parse_samesite_strict_cookie()
 val is_strict = (c.same_site == SameSite.Strict)
@@ -177,7 +159,6 @@ expect(is_strict).to_equal(true)
 
 #### AC-6: parses SameSite=Lax
 
-- AC-6: parses SameSite=Lax
 - Parse a SameSite Lax cookie
    - Expected: is_lax is true
 
@@ -185,12 +166,10 @@ expect(is_strict).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: parses SameSite=Lax")
 step("Parse a SameSite Lax cookie")
 val c = parse_samesite_lax_cookie()
 val is_lax = (c.same_site == SameSite.Lax)
@@ -201,7 +180,6 @@ expect(is_lax).to_equal(true)
 
 #### AC-6: parses SameSite=None
 
-- AC-6: parses SameSite=None
 - Parse a SameSite None cookie
    - Expected: is_none is true
 
@@ -209,12 +187,10 @@ expect(is_lax).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: parses SameSite=None")
 step("Parse a SameSite None cookie")
 val c = parse_samesite_none_cookie()
 val is_none = (c.same_site == SameSite.None)
@@ -225,7 +201,6 @@ expect(is_none).to_equal(true)
 
 #### AC-6: cookie without SameSite defaults to Lax
 
-- AC-6: cookie without SameSite defaults to Lax
 - Parse a cookie without a SameSite attribute
    - Expected: is_lax is true
 
@@ -233,12 +208,10 @@ expect(is_none).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: cookie without SameSite defaults to Lax")
 step("Parse a cookie without a SameSite attribute")
 val c = parse_simple_cookie()
 val is_lax = (c.same_site == SameSite.Lax)
@@ -249,7 +222,6 @@ expect(is_lax).to_equal(true)
 
 #### AC-6: attribute names and values are case-insensitive
 
-- AC-6: attribute names and values are case-insensitive
 - Parse mixed-case cookie attributes
    - Expected: c.domain equals `example.com`
    - Expected: c.secure is true
@@ -259,12 +231,10 @@ expect(is_lax).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: attribute names and values are case-insensitive")
 step("Parse mixed-case cookie attributes")
 val c = parse_set_cookie("token=x; dOmAiN=example.com; sAmEsItE=sTrIcT; SeCuRe")
 expect(c.domain).to_equal("example.com")
@@ -276,7 +246,6 @@ expect(c.same_site == SameSite.Strict).to_equal(true)
 
 #### AC-6: derives default path and preserves an explicit absolute Path
 
-- AC-6: derives default path and preserves an explicit absolute Path
 - Apply default and explicit cookie paths
    - Expected: absent.path equals `/account`
    - Expected: explicit.path equals `/chosen`
@@ -285,12 +254,10 @@ expect(c.same_site == SameSite.Strict).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: derives default path and preserves an explicit absolute Path")
 step("Apply default and explicit cookie paths")
 val absent = apply_default_path(parse_set_cookie("a=1"), "a=1", "/account/login")
 val explicit = apply_default_path(parse_set_cookie("a=1; Path=/chosen"), "a=1; Path=/chosen", "/account/login")
@@ -302,7 +269,6 @@ expect(explicit.path).to_equal("/chosen")
 
 #### AC-6: parses RFC1123 Expires and gives valid Max-Age precedence
 
-- AC-6: parses RFC1123 Expires and gives valid Max-Age precedence
 - Apply valid and malformed cookie expiration attributes
    - Expected: expires.expires_at equals `1445412480`
    - Expected: malformed.expires_at equals `0`
@@ -313,12 +279,10 @@ expect(explicit.path).to_equal("/chosen")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: parses RFC1123 Expires and gives valid Max-Age precedence")
 step("Apply valid and malformed cookie expiration attributes")
 val expires = apply_max_age(parse_set_cookie("a=1"), "a=1; Expires=Wed, 21 Oct 2015 07:28:00 GMT", 100)
 val malformed = apply_max_age(parse_set_cookie("a=1"), "a=1; Expires=not-a-date", 100)
@@ -336,7 +300,6 @@ expect(epoch.expires_at).to_equal(-1)
 
 #### AC-6: exact domain match succeeds
 
-- AC-6: exact domain match succeeds
 - Match a cookie against its exact domain
    - Expected: matches is true
 
@@ -344,12 +307,10 @@ expect(epoch.expires_at).to_equal(-1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: exact domain match succeeds")
 step("Match a cookie against its exact domain")
 val c = make_cookie_for_domain("example.com")
 val matches = cookie_matches_domain(c, "example.com")
@@ -360,7 +321,6 @@ expect(matches).to_equal(true)
 
 #### AC-6: subdomain matches dot-prefixed domain
 
-- AC-6: subdomain matches dot-prefixed domain
 - Match a subdomain against a dot-prefixed cookie domain
    - Expected: matches is true
 
@@ -368,12 +328,10 @@ expect(matches).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: subdomain matches dot-prefixed domain")
 step("Match a subdomain against a dot-prefixed cookie domain")
 val c = make_cookie_for_domain(".example.com")
 val matches = cookie_matches_domain(c, "sub.example.com")
@@ -384,7 +342,6 @@ expect(matches).to_equal(true)
 
 #### AC-6: parent domain does not match subdomain-scoped cookie
 
-- AC-6: parent domain does not match subdomain-scoped cookie
 - Match a parent domain against a subdomain-scoped cookie
    - Expected: matches is false
 
@@ -392,12 +349,10 @@ expect(matches).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: parent domain does not match subdomain-scoped cookie")
 step("Match a parent domain against a subdomain-scoped cookie")
 val c = make_cookie_for_domain("sub.example.com")
 val matches = cookie_matches_domain(c, "example.com")
@@ -408,7 +363,6 @@ expect(matches).to_equal(false)
 
 #### AC-6: unrelated domain does not match
 
-- AC-6: unrelated domain does not match
 - Match an unrelated domain against the cookie domain
    - Expected: matches is false
 
@@ -416,12 +370,10 @@ expect(matches).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: unrelated domain does not match")
 step("Match an unrelated domain against the cookie domain")
 val c = make_cookie_for_domain("example.com")
 val matches = cookie_matches_domain(c, "other.com")
@@ -434,7 +386,6 @@ expect(matches).to_equal(false)
 
 #### AC-6: exact path match succeeds
 
-- AC-6: exact path match succeeds
 - Match a cookie against its exact path
    - Expected: matches is true
 
@@ -442,12 +393,10 @@ expect(matches).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: exact path match succeeds")
 step("Match a cookie against its exact path")
 val c = make_cookie_for_path("/api")
 val matches = cookie_matches_path(c, "/api")
@@ -458,7 +407,6 @@ expect(matches).to_equal(true)
 
 #### AC-6: longer path with slash prefix matches
 
-- AC-6: longer path with slash prefix matches
 - Match a descendant request path at a slash boundary
    - Expected: matches is true
 
@@ -466,12 +414,10 @@ expect(matches).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: longer path with slash prefix matches")
 step("Match a descendant request path at a slash boundary")
 val c = make_cookie_for_path("/api")
 val matches = cookie_matches_path(c, "/api/resource")
@@ -482,7 +428,6 @@ expect(matches).to_equal(true)
 
 #### AC-6: root path matches everything
 
-- AC-6: root path matches everything
 - Match the root cookie path against a nested request path
    - Expected: matches is true
 
@@ -490,12 +435,10 @@ expect(matches).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: root path matches everything")
 step("Match the root cookie path against a nested request path")
 val c = make_cookie_for_path("/")
 val matches = cookie_matches_path(c, "/any/path/here")
@@ -506,7 +449,6 @@ expect(matches).to_equal(true)
 
 #### AC-6: path prefix without slash boundary does not match
 
-- AC-6: path prefix without slash boundary does not match
 - Match a request path without the required slash boundary
    - Expected: matches is false
 
@@ -514,12 +456,10 @@ expect(matches).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: path prefix without slash boundary does not match")
 step("Match a request path without the required slash boundary")
 val c = make_cookie_for_path("/api")
 val matches = cookie_matches_path(c, "/apiother")
@@ -532,19 +472,16 @@ expect(matches).to_equal(false)
 
 #### AC-6: stored cookie is returned for matching request
 
-- AC-6: stored cookie is returned for matching request
 - Store a cookie and request its matching path
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: stored cookie is returned for matching request")
 step("Store a cookie and request its matching path")
 val store = make_store_with_cookie("session", "tok1", "example.com", "/")
 val cookies = get_cookies_for(store, "example.com", "/page")
@@ -555,7 +492,6 @@ expect(cookies).to_contain("session=tok1")
 
 #### AC-6: cookie is not returned for non-matching domain
 
-- AC-6: cookie is not returned for non-matching domain
 - Request a stored cookie from a different domain
    - Expected: has_cookie is false
 
@@ -563,12 +499,10 @@ expect(cookies).to_contain("session=tok1")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: cookie is not returned for non-matching domain")
 step("Request a stored cookie from a different domain")
 val store = make_store_with_cookie("session", "tok1", "example.com", "/")
 val cookies = get_cookies_for(store, "other.com", "/page")
@@ -580,7 +514,6 @@ expect(has_cookie).to_equal(false)
 
 #### AC-6: cookie is not returned for non-matching path
 
-- AC-6: cookie is not returned for non-matching path
 - Request a stored cookie from a different path
    - Expected: has_cookie is false
 
@@ -588,12 +521,10 @@ expect(has_cookie).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: cookie is not returned for non-matching path")
 step("Request a stored cookie from a different path")
 val store = make_store_with_cookie("api_key", "k1", "example.com", "/api")
 val cookies = get_cookies_for(store, "example.com", "/other")
@@ -605,19 +536,18 @@ expect(has_cookie).to_equal(false)
 
 #### AC-6: newer cookie with same name replaces older one
 
-- AC-6: newer cookie with same name replaces older one
 - Store two values under the same cookie identity
+- store cookie
+- store cookie
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: newer cookie with same name replaces older one")
 step("Store two values under the same cookie identity")
 val store = make_empty_store()
 store_cookie(store, make_named_cookie("token", "v1", "example.com", "/"))
@@ -630,19 +560,16 @@ expect(cookies).to_contain("token=v2")
 
 #### AC-6: per-domain cap is enforced (max 50)
 
-- AC-6: per-domain cap is enforced (max 50)
 - Fill one cookie domain beyond its storage cap
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: per-domain cap is enforced (max 50)")
 step("Fill one cookie domain beyond its storage cap")
 val store = make_empty_store()
 val count = fill_domain_to_cap(store, "example.com", 51)
@@ -654,20 +581,18 @@ expect(stored).to_be_less_than(52)
 
 #### AC-6: total cookie count is bounded
 
-- AC-6: total cookie count is bounded
 - Fill the cookie store beyond its total cap
+- store store
    - Expected: store.count() equals `3000`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: total cookie count is bounded")
 step("Fill the cookie store beyond its total cap")
 val store = make_empty_store()
 var i = 0
@@ -681,8 +606,9 @@ expect(store.count()).to_equal(3000)
 
 #### AC-6: Max-Age zero removes the matching cookie
 
-- AC-6: Max-Age zero removes the matching cookie
 - Replace a live cookie with Max-Age zero
+- store store from origin
+- store store from origin
    - Expected: store.get_header_for_origin(origin, "/", Some(origin), "GET", false, 101) equals ``
    - Expected: store.count() equals `0`
 
@@ -690,12 +616,10 @@ expect(store.count()).to_equal(3000)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: Max-Age zero removes the matching cookie")
 step("Replace a live cookie with Max-Age zero")
 val store = make_empty_store()
 val origin = Origin(scheme: "https", host: "example.com", port: 443)
@@ -711,8 +635,8 @@ expect(store.count()).to_equal(0)
 
 #### AC-6: script cannot set or replace HttpOnly cookies
 
-- AC-6: script cannot set or replace HttpOnly cookies
 - Attempt to set and replace HttpOnly cookies from script
+- store store from origin
    - Expected: set_result.accepted is false
    - Expected: replace_result.accepted is false
 
@@ -720,12 +644,10 @@ expect(store.count()).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: script cannot set or replace HttpOnly cookies")
 step("Attempt to set and replace HttpOnly cookies from script")
 val store = make_empty_store()
 val origin = Origin(scheme: "https", host: "example.com", port: 443)
@@ -741,20 +663,18 @@ expect(store.get_header_for_origin(origin, "/", Some(origin), "GET", false, 101)
 
 #### AC-6: insecure origin cannot shadow a Secure cookie
 
-- AC-6: insecure origin cannot shadow a Secure cookie
 - Attempt to shadow a Secure cookie from an insecure origin
+- store store from origin
    - Expected: verdict.accepted is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: insecure origin cannot shadow a Secure cookie")
 step("Attempt to shadow a Secure cookie from an insecure origin")
 val store = make_empty_store()
 val secure_origin = Origin(scheme: "https", host: "example.com", port: 443)
@@ -771,21 +691,19 @@ expect(store.get_header_for_origin(target, "/login/admin", Some(target), "GET", 
 
 #### AC-6: applies the 4096-byte limit to UTF-8 name=value
 
-- AC-6: applies the 4096-byte limit to UTF-8 name=value
 - Store UTF-8 cookies at and beyond the serialized size limit
    - Expected: store.count() equals `1`
+- origin, "/", Some
    - Expected: header equals `"edge=" + accepted_value`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: applies the 4096-byte limit to UTF-8 name=value")
 step("Store UTF-8 cookies at and beyond the serialized size limit")
 val store = make_empty_store()
 val origin = Origin(scheme: "https", host: "example.com", port: 443)
@@ -825,19 +743,21 @@ expect(header.contains(rejected_value)).to_be(false)
 
 #### AC-6: orders request and script cookies by path then creation
 
-- AC-6: orders request and script cookies by path then creation
 - Store cookies across paths, partitions, and creation times
+- parse set cookie
+- parse set cookie
+- parse set cookie
+- parse set cookie
+- origin, "/app/admin/settings/page", Some
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 54 lines folded for reproduction.
+Runnable source: 52 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: orders request and script cookies by path then creation")
 step("Store cookies across paths, partitions, and creation times")
 val store = make_empty_store()
 val origin = Origin(scheme: "https", host: "example.com", port: 443)
@@ -896,19 +816,20 @@ expect(script).to_equal(
 
 #### AC-6: preserves global creation order across jars and replacement
 
-- AC-6: preserves global creation order across jars and replacement
 - Store and replace same-path cookies across domain jars
+- parse set cookie
+- parse set cookie
+- parse set cookie
+- child, "/", Some
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-6: preserves global creation order across jars and replacement")
 step("Store and replace same-path cookies across domain jars")
 val store = make_empty_store()
 val parent = Origin(
@@ -956,54 +877,3 @@ expect(store.get_header_for_origin(
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `42e7c5e0a6203551031410771ab1066d7390777c256263394df2d50e1ea75dec`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `42e7c5e0a6203551031410771ab1066d7390777c256263394df2d50e1ea75dec`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `42e7c5e0a6203551031410771ab1066d7390777c256263394df2d50e1ea75dec`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/unit/browser_engine/net/cookie_store_spec.spl
-mirror: doc/06_spec/unit/browser_engine/net/cookie_store_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/unit/browser_engine/net/cookie_store_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/unit/browser_engine/net/cookie_store_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/unit/browser_engine/net/cookie_store_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 7 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/unit/browser_engine/net/cookie_store_spec.spl:44:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-6: parses simple name=value' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/unit/browser_engine/net/cookie_store_spec.spl:52:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-6: parses Domain attribute' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/unit/browser_engine/net/cookie_store_spec.spl:59:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-6: parses Path attribute' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

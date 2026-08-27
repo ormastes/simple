@@ -1,0 +1,118 @@
+# Atomic persistence for one evidence manifest per executable spec.
+
+use std.io.{dir_create_all, file_atomic_write}
+use std.spec.scenario_evidence_manifest.{
+    ScenarioEvidenceManifest,
+    scenario_evidence_manifest_to_sdn,
+    validate_scenario_evidence_manifest
+}
+
+pub fn scenario_evidence_manifest_path_for_spec(spec_path: text) -> text:
+    var relative = spec_path.replace("\\", "/")
+    if relative.starts_with("test/"):
+        relative = relative["test/".len():]
+    if relative.ends_with("_spec.spl"):
+        relative = relative[0:relative.len() - "_spec.spl".len()]
+    "build/test-artifacts/" + relative + "/evidence.sdn"
+
+fn _scenario_evidence_manual_path(spec_path: text) -> text:
+    var relative = spec_path.replace("\\", "/")
+    if relative.starts_with("test/"):
+        relative = relative["test/".len():]
+    if relative.ends_with(".spl"):
+        relative = relative[0:relative.len() - ".spl".len()] + ".md"
+    "doc/06_spec/" + relative
+
+pub fn scenario_evidence_status_manifest(
+    feature_id: text,
+    requirement_ids: [text],
+    spec_path: text,
+    result: text,
+    reason: text,
+    target: text,
+    backend: text,
+    resume_command: text
+) -> ScenarioEvidenceManifest:
+    val normalized = result.lower()
+    val stored_result = if normalized == "captured":
+        "historical-pass"
+    else:
+        normalized
+    val status = if normalized == "blocked":
+        "blocked"
+    elif normalized == "unsupported":
+        "unsupported"
+    elif normalized == "planned":
+        "planned"
+    elif normalized == "captured" or normalized == "pass":
+        "historical-pass"
+    else:
+        "contract-only"
+    ScenarioEvidenceManifest(
+        schema_major: 1,
+        schema_minor: 0,
+        feature_id: feature_id,
+        requirement_ids: requirement_ids,
+        spec_path: spec_path,
+        generated_manual_path: _scenario_evidence_manual_path(spec_path),
+        scenario_id: feature_id,
+        step_id: "publish",
+        required: true,
+        result: stored_result,
+        showcase_status: status,
+        reason: reason,
+        source_revision: "",
+        source_digest: "",
+        command: "bin/simple test " + spec_path + " --mode=interpreter",
+        producer: "std.spec.scenario_evidence_manifest_io",
+        producer_version: "1",
+        host: "unrecorded",
+        target: target,
+        backend: backend,
+        start_time: 0,
+        duration_ms: 0,
+        artifacts: [],
+        artifact_integrity: [],
+        text_results: [],
+        motion_evidence: [],
+        protocol_fields: [],
+        html_checks: [],
+        blocker_prerequisite: if status == "blocked": reason else: "",
+        resume_command: resume_command,
+        owner: feature_id,
+        final_reviewer: feature_id
+    )
+
+pub fn write_scenario_evidence_manifest(
+    manifest: ScenarioEvidenceManifest
+) -> Result<text, text>:
+    val validated = validate_scenario_evidence_manifest(manifest)?
+    val path = scenario_evidence_manifest_path_for_spec(validated.spec_path)
+    val parts = path.split("/")
+    val directory = parts[0:parts.len() - 1].join("/")
+    if not dir_create_all(directory):
+        return Err("failed to create evidence manifest directory: " + directory)
+    if not file_atomic_write(path, scenario_evidence_manifest_to_sdn(validated)):
+        return Err("failed to atomically write evidence manifest: " + path)
+    Ok(path)
+
+pub fn publish_scenario_evidence_status(
+    feature_id: text,
+    requirement_ids: [text],
+    spec_path: text,
+    result: text,
+    reason: text,
+    target: text,
+    backend: text,
+    resume_command: text
+) -> Result<text, text>:
+    write_scenario_evidence_manifest(scenario_evidence_status_manifest(
+        feature_id,
+        requirement_ids,
+        spec_path,
+        result,
+        reason,
+        target,
+        backend,
+        resume_command
+    ))

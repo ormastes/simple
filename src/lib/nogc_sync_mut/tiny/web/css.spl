@@ -17,10 +17,109 @@ class TinyCssDeclaration:
     property_name: text
     property_value: text
 
+    static fn empty() -> TinyCssDeclaration:
+        TinyCssDeclaration(selector_kind: 0, selector_value: "", property_name: "", property_value: "")
+
 class TinyCssReceipt:
     status: TinyStatus
     declarations: [TinyCssDeclaration]
+    declaration_count: i32
     unsupported_count: i32
+
+class TinyCssArena:
+    declarations: [TinyCssDeclaration]
+    declaration_count: i32
+    capacity: i32
+    allocation_count: i32
+    reuse_count: i32
+
+    static fn bounded(capacity: i32) -> TinyCssArena:
+        var slots: [TinyCssDeclaration] = []
+        var index = 0
+        while index < capacity:
+            slots.push(TinyCssDeclaration.empty())
+            index = index + 1
+        TinyCssArena(
+            declarations: slots, declaration_count: 0, capacity: capacity,
+            allocation_count: 1, reuse_count: 0,
+        )
+
+    me reset():
+        self.declaration_count = 0
+        self.reuse_count = self.reuse_count + 1
+
+    me append(declaration: TinyCssDeclaration) -> TinyStatus:
+        if self.declaration_count >= self.capacity:
+            return TinyStatus.error(TINY_ERR_CAPACITY, self.declaration_count)
+        self.declarations[self.declaration_count] = declaration
+        self.declaration_count = self.declaration_count + 1
+        TinyStatus.ok()
+
+    fn receipt(status: TinyStatus, unsupported: i32) -> TinyCssReceipt:
+        TinyCssReceipt(
+            status: status, declarations: self.declarations,
+            declaration_count: self.declaration_count,
+            unsupported_count: unsupported,
+        )
+
+    me parse(source: text, max_rules: i32) -> TinyCssReceipt:
+        self.reset()
+        var unsupported = 0
+        var rule_count = 0
+        var cursor = 0
+        while cursor < source.len():
+            while cursor < source.len() and (source.slice(cursor, cursor + 1) == " " or source.slice(cursor, cursor + 1) == "\t" or source.slice(cursor, cursor + 1) == "\n" or source.slice(cursor, cursor + 1) == ";"):
+                cursor = cursor + 1
+            if cursor >= source.len(): break
+            val selector_start = cursor
+            while cursor < source.len() and source.slice(cursor, cursor + 1) != "{": cursor = cursor + 1
+            if cursor >= source.len():
+                return self.receipt(TinyStatus.error(TINY_ERR_MALFORMED, rule_count + 1), unsupported)
+            val selector = source.slice(selector_start, cursor).trim()
+            rule_count = rule_count + 1
+            if rule_count > max_rules:
+                return self.receipt(TinyStatus.error(TINY_ERR_CAPACITY, rule_count), unsupported)
+            cursor = cursor + 1
+            val body_start = cursor
+            while cursor < source.len() and source.slice(cursor, cursor + 1) != "}": cursor = cursor + 1
+            if cursor >= source.len():
+                return self.receipt(TinyStatus.error(TINY_ERR_MALFORMED, rule_count), unsupported)
+            val body_end = cursor
+            cursor = cursor + 1
+            if selector.len() == 0 or selector.contains(" ") or selector.contains(">") or selector.contains(","):
+                unsupported = unsupported + 1
+                continue
+            var declaration_cursor = body_start
+            while declaration_cursor < body_end:
+                while declaration_cursor < body_end and (source.slice(declaration_cursor, declaration_cursor + 1) == " " or source.slice(declaration_cursor, declaration_cursor + 1) == "\t" or source.slice(declaration_cursor, declaration_cursor + 1) == "\n" or source.slice(declaration_cursor, declaration_cursor + 1) == ";"):
+                    declaration_cursor = declaration_cursor + 1
+                if declaration_cursor >= body_end: break
+                val property_start = declaration_cursor
+                while declaration_cursor < body_end and source.slice(declaration_cursor, declaration_cursor + 1) != ":" and source.slice(declaration_cursor, declaration_cursor + 1) != ";":
+                    declaration_cursor = declaration_cursor + 1
+                if declaration_cursor >= body_end or source.slice(declaration_cursor, declaration_cursor + 1) != ":":
+                    return self.receipt(TinyStatus.error(TINY_ERR_MALFORMED, rule_count), unsupported)
+                val property_name = source.slice(property_start, declaration_cursor).trim().lower()
+                declaration_cursor = declaration_cursor + 1
+                val value_start = declaration_cursor
+                while declaration_cursor < body_end and source.slice(declaration_cursor, declaration_cursor + 1) != ";":
+                    declaration_cursor = declaration_cursor + 1
+                val property_value = source.slice(value_start, declaration_cursor).trim().lower()
+                if declaration_cursor < body_end: declaration_cursor = declaration_cursor + 1
+                if not tiny_css_property_supported(property_name):
+                    unsupported = unsupported + 1
+                    continue
+                if not _tiny_css_value_supported(property_name, property_value):
+                    unsupported = unsupported + 1
+                    continue
+                val appended = self.append(TinyCssDeclaration(
+                    selector_kind: _tiny_css_selector_kind(selector),
+                    selector_value: _tiny_css_selector_value(selector),
+                    property_name: property_name, property_value: property_value,
+                ))
+                if not appended.is_ok(): return self.receipt(appended, unsupported)
+        val status = if unsupported > 0: TinyStatus.error(TINY_ERR_UNSUPPORTED, unsupported) else: TinyStatus.ok()
+        self.receipt(status, unsupported)
 
 class TinyWebComputedStyle:
     display: i32
@@ -33,6 +132,13 @@ class TinyWebComputedStyle:
     color: text
     font_size: i32
     line_height: i32
+
+    static fn empty() -> TinyWebComputedStyle:
+        TinyWebComputedStyle(
+            display: TINY_CSS_DISPLAY_NONE, width: 0, height: 0, margin: 0,
+            padding: 0, border: 0, background_color: "", color: "",
+            font_size: 0, line_height: 0,
+        )
 
     static fn for_node(node: TinyWebNode) -> TinyWebComputedStyle:
         var display = TINY_CSS_DISPLAY_BLOCK
@@ -81,8 +187,14 @@ fn _tiny_css_value_supported(name: text, value: text) -> bool:
     value.len() > 0
 
 fn _tiny_css_class_matches(classes: text, wanted: text) -> bool:
-    for item in classes.split_whitespace():
-        if item == wanted: return true
+    var cursor = 0
+    while cursor < classes.len():
+        while cursor < classes.len() and (classes.slice(cursor, cursor + 1) == " " or classes.slice(cursor, cursor + 1) == "\t" or classes.slice(cursor, cursor + 1) == "\n"):
+            cursor = cursor + 1
+        val start = cursor
+        while cursor < classes.len() and classes.slice(cursor, cursor + 1) != " " and classes.slice(cursor, cursor + 1) != "\t" and classes.slice(cursor, cursor + 1) != "\n":
+            cursor = cursor + 1
+        if cursor > start and classes.slice(start, cursor) == wanted: return true
     false
 
 fn _tiny_css_matches(node: TinyWebNode, declaration: TinyCssDeclaration) -> bool:
@@ -93,7 +205,10 @@ fn _tiny_css_matches(node: TinyWebNode, declaration: TinyCssDeclaration) -> bool
 
 fn tiny_css_apply(node: TinyWebNode, receipt: TinyCssReceipt, base: TinyWebComputedStyle) -> TinyWebComputedStyle:
     var style = base
-    for declaration in receipt.declarations:
+    var declaration_index = 0
+    while declaration_index < receipt.declaration_count:
+        val declaration = receipt.declarations[declaration_index]
+        declaration_index = declaration_index + 1
         if not _tiny_css_matches(node, declaration): continue
         val name = declaration.property_name
         val value = declaration.property_value
@@ -116,35 +231,5 @@ fn tiny_css_compute(node: TinyWebNode, receipt: TinyCssReceipt) -> TinyWebComput
     tiny_css_apply(node, receipt, TinyWebComputedStyle.for_node(node))
 
 fn tiny_css_parse(source: text, max_rules: i32, max_declarations: i32) -> TinyCssReceipt:
-    var declarations: [TinyCssDeclaration] = []
-    var unsupported = 0
-    val rules = source.split("}")
-    var rule_count = 0
-    for raw_rule in rules:
-        val rule = raw_rule.trim()
-        if rule.len() == 0: continue
-        rule_count = rule_count + 1
-        if rule_count > max_rules: return TinyCssReceipt(status: TinyStatus.error(TINY_ERR_CAPACITY, rule_count), declarations: declarations, unsupported_count: unsupported)
-        val halves = rule.split("{")
-        if halves.len() != 2: return TinyCssReceipt(status: TinyStatus.error(TINY_ERR_MALFORMED, rule_count), declarations: declarations, unsupported_count: unsupported)
-        val selector = halves[0].trim()
-        if selector.len() == 0 or selector.contains(" ") or selector.contains(">") or selector.contains(","):
-            unsupported = unsupported + 1
-            continue
-        for raw_declaration in halves[1].split(";"):
-            val declaration = raw_declaration.trim()
-            if declaration.len() == 0: continue
-            val pair = declaration.split(":")
-            if pair.len() != 2: return TinyCssReceipt(status: TinyStatus.error(TINY_ERR_MALFORMED, rule_count), declarations: declarations, unsupported_count: unsupported)
-            val property_name = pair[0].trim().lower()
-            val property_value = pair[1].trim().lower()
-            if not tiny_css_property_supported(property_name):
-                unsupported = unsupported + 1
-                continue
-            if not _tiny_css_value_supported(property_name, property_value):
-                unsupported = unsupported + 1
-                continue
-            if declarations.len() >= max_declarations: return TinyCssReceipt(status: TinyStatus.error(TINY_ERR_CAPACITY, declarations.len()), declarations: declarations, unsupported_count: unsupported)
-            declarations.push(TinyCssDeclaration(selector_kind: _tiny_css_selector_kind(selector), selector_value: _tiny_css_selector_value(selector), property_name: property_name, property_value: property_value))
-    val status = if unsupported > 0: TinyStatus.error(TINY_ERR_UNSUPPORTED, unsupported) else: TinyStatus.ok()
-    TinyCssReceipt(status: status, declarations: declarations, unsupported_count: unsupported)
+    var arena = TinyCssArena.bounded(max_declarations)
+    arena.parse(source, max_rules)

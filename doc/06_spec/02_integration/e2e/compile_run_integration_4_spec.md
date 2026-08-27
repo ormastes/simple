@@ -1,5 +1,30 @@
 # Integration & E2E Test
 
+> <details>
+
+<!-- sdn-diagram:id=compile_run_integration_4_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=compile_run_integration_4_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+compile_run_integration_4_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=compile_run_integration_4_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 10 | 10 | 0 | 0 |
@@ -17,7 +42,7 @@
 | Category | End-to-End Testing |
 | Status | Implemented |
 | Source | `test/02_integration/e2e/compile_run_integration_4_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Scenarios
@@ -29,22 +54,16 @@
 
 #### e2e workflow 1 _(slow)_
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- e2e workflow 1
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("e2e workflow 1")
 val input = "source code"
 val stage1 = input + " -> parsed"
 val stage2 = stage1 + " -> typed"
@@ -62,18 +81,17 @@ check(stage3.contains("compiled"))
 
 #### e2e workflow 2 _(slow)_
 
-- e2e workflow 2
+1. processed = processed append
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("e2e workflow 2")
 val data = [1, 2, 3, 4, 5]
 var processed = []
 for x in data:
@@ -94,18 +112,17 @@ check(sum == 30)
 
 #### e2e workflow 3 _(slow)_
 
-- e2e workflow 3
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("e2e workflow 3")
 val config = {"input": "test.spl", "output": "test.out"}
 val input_file = config["input"]
 val output_file = config["output"]
@@ -123,18 +140,17 @@ check(output_file.ends_with(".out"))
 
 #### error propagation _(slow)_
 
-- error propagation
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("error propagation")
 var error = nil
 if error == nil:
     check(true)
@@ -152,18 +168,16 @@ else:
 
 #### state transitions _(slow)_
 
-- state transitions
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("state transitions")
 var state = "init"
 if state == "init":
     state = "processing"
@@ -182,18 +196,18 @@ check(state == "complete")
 
 #### data pipeline _(slow)_
 
-- data pipeline
+1. filtered = filtered append
+2. transformed = transformed append
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("data pipeline")
 val raw = [1, 2, 3, 4, 5]
 var filtered = []
 for x in raw:
@@ -215,18 +229,16 @@ check(transformed.len() == 2)
 
 #### module interaction _(slow)_
 
-- module interaction
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("module interaction")
 val module_a = {"export": "value_a"}
 val module_b = {"import": module_a["export"]}
 check(module_b["import"] == "value_a")
@@ -242,18 +254,17 @@ check(module_b["import"] == "value_a")
 
 #### nested processing _(slow)_
 
-- nested processing
+1. flattened = flattened append
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("nested processing")
 val outer = [[1, 2], [3, 4], [5, 6]]
 var flattened = []
 for inner in outer:
@@ -272,18 +283,16 @@ check(flattened.len() == 6)
 
 #### error recovery flow _(slow)_
 
-- error recovery flow
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("error recovery flow")
 val opt = nil
 val result = opt ?? "default"
 check(result == "default")
@@ -299,18 +308,16 @@ check(result == "default")
 
 #### full validation _(slow)_
 
-- full validation
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("full validation")
 val input = [1, 2, 3, 4, 5]
 var validated = true
 for x in input:
@@ -336,51 +343,3 @@ check(validated)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-INTEGRATION`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `20ff915d673d442bbaffcf6e3b7c5bbf9d7128181d156ccee6ad3420598b636a`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `20ff915d673d442bbaffcf6e3b7c5bbf9d7128181d156ccee6ad3420598b636a`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `20ff915d673d442bbaffcf6e3b7c5bbf9d7128181d156ccee6ad3420598b636a`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/02_integration/e2e/compile_run_integration_4_spec.spl
-mirror: doc/06_spec/02_integration/e2e/compile_run_integration_4_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/e2e/compile_run_integration_4_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/e2e/compile_run_integration_4_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, unsupported/limitations
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/02_integration/e2e/compile_run_integration_4_spec.spl:24:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'e2e workflow 1' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/e2e/compile_run_integration_4_spec.spl:33:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'e2e workflow 2' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/e2e/compile_run_integration_4_spec.spl:45:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'e2e workflow 3' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

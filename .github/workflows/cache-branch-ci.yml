@@ -1,0 +1,87 @@
+# OPTIONAL trusted-branch-CI cache namespace. TTL'd, separately quota'd, and
+# structurally unable to write main.
+#
+# Why it cannot reach main:
+#   - `on: push` excludes main, so this workflow never runs there.
+#   - cache-preflight refuses `trusted_main_ci` off refs/heads/main.
+#   - the branch credential is a DIFFERENT secret whose enrolled role is
+#     trusted_branch_ci; `policy_may_write_remote_main` is false for that role
+#     with no parameter that widens it.
+#   - the gateway derives the storage path from the credential, so this job
+#     cannot address main even by asking for it.
+name: cache-branch-ci
+
+on:
+  push:
+    branches-ignore: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Per-branch, and cancellable: a superseded branch build's cache entries are
+# worthless, unlike main's.
+concurrency:
+  group: cache-branch-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Fork PRs get no secrets from GitHub, but state it anyway so the
+    # read-only property does not depend on that behaviour alone.
+    if: github.repository == 'ormastes/simple'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Preflight (fail closed; branch namespace is opt-in)
+        id: preflight
+        env:
+          CACHE_GATEWAY_URL: ${{ secrets.CACHE_GATEWAY_URL }}
+          CACHE_GATEWAY_TOKEN_ID: ${{ secrets.CACHE_BRANCH_TOKEN_ID }}
+          CACHE_GATEWAY_SECRET: ${{ secrets.CACHE_BRANCH_SECRET }}
+          PROMOTION_SIGNING_KEY: ${{ secrets.PROMOTION_SIGNING_KEY }}
+          CACHE_BRANCH_NAMESPACE_ENABLED: ${{ vars.CACHE_BRANCH_NAMESPACE_ENABLED }}
+        run: |
+          set -eu
+          OUT="$(sh scripts/ci/cache-preflight.shs trusted_branch_ci)"
+          printf '%s\n' "$OUT"
+          VERDICT="$(printf '%s\n' "$OUT" | tail -1)"
+          if [ "$VERDICT" = "VERDICT: write-branch" ]; then
+            echo "writer=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "writer=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::branch cache publishing disabled: $VERDICT"
+          fi
+
+      - name: Record the workflow digest
+        id: wf
+        run: |
+          set -eu
+          echo "digest=$(git hash-object .github/workflows/cache-branch-ci.yml)" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          SIMPLE_CACHE_MAPPINGS_OUT: ${{ runner.temp }}/cache-mappings.txt
+        run: |
+          set -eu
+          bin/simple build
+
+      - name: Publish branch action mappings (TTL, branch quota)
+        if: steps.preflight.outputs.writer == 'true'
+        continue-on-error: true
+        env:
+          CACHE_GATEWAY_URL: ${{ secrets.CACHE_GATEWAY_URL }}
+          CACHE_GATEWAY_TOKEN_ID: ${{ secrets.CACHE_BRANCH_TOKEN_ID }}
+          CACHE_GATEWAY_SECRET: ${{ secrets.CACHE_BRANCH_SECRET }}
+          CACHE_GATEWAY_ROOT: ${{ secrets.CACHE_GATEWAY_ROOT }}
+          PROMOTION_SIGNING_KEY: ${{ secrets.PROMOTION_SIGNING_KEY }}
+          CACHE_WORKFLOW_DIGEST: ${{ steps.wf.outputs.digest }}
+          CACHE_REPOSITORY_ID: ${{ secrets.CACHE_REPOSITORY_ID }}
+          CACHE_TARGET_PROFILE: ${{ secrets.CACHE_TARGET_PROFILE }}
+          CACHE_BRANCH_NAMESPACE_ENABLED: ${{ vars.CACHE_BRANCH_NAMESPACE_ENABLED }}
+        run: |
+          set -eu
+          sh scripts/ci/cache-publish-branch.shs "${{ runner.temp }}/cache-mappings.txt"

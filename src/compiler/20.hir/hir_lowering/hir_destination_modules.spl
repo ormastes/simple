@@ -1,0 +1,219 @@
+# Compile-owned module rows. One graph generation spans every source module;
+# module rows contain scalar identities and typed range handles only.
+use compiler.hir.hir_lowering.hir_destination_graph.*
+
+impl HirDestinationGraph:
+    me ensure_module_capacity(required: i64):
+        if required <= self.module_capacity: return
+        val target = self.next_capacity(self.module_capacity, required)
+        while self.module_ready.len() < target:
+            self.module_ready.push(false); self.module_diagnostic.push(-1); self.module_generation.push(-1)
+            self.module_identity.push(-1); self.module_name.push(""); self.module_path.push("")
+            self.module_function_roots.push(-1); self.module_function_tokens.push(-1)
+            self.module_imports.push(-1); self.module_exports.push(-1); self.module_surface_refs.push(-1)
+            self.module_declaration_start.push(-1); self.module_declaration_count.push(0)
+            self.module_extension_start.push(-1); self.module_extension_count.push(0)
+            self.module_reserved_function_count.push(0)
+        self.module_capacity = target
+
+    me reserve_module(identity: i64, name: text, path: text) -> i64:
+        if not self.mutable() or identity < 0 or name == "" or path == "": self.fail("HIR compile module identity is invalid"); return -1
+        val i = self.module_count; self.ensure_module_capacity(i + 1)
+        self.module_ready[i] = false; self.module_diagnostic[i] = -1; self.module_generation[i] = self.generation
+        self.module_identity[i] = identity; self.module_name[i] = name; self.module_path[i] = path
+        self.module_function_roots[i] = -1; self.module_function_tokens[i] = -1
+        self.module_imports[i] = -1; self.module_exports[i] = -1; self.module_surface_refs[i] = -1
+        self.module_declaration_start[i] = -1
+        self.module_declaration_count[i] = 0
+        self.module_extension_start[i] = -1
+        self.module_extension_count[i] = 0
+        self.module_reserved_function_count[i] = 0
+        self.module_count = i + 1; i
+
+    me begin_module_declarations(i: i64) -> bool:
+        if (not self.mutable() or i < 0 or i >= self.module_count or
+                self.module_ready[i] or self.module_generation[i] != self.generation):
+            return self.fail("HIR module declaration range is not writable")
+        val declaration_start = self.destination_declarations.declaration_count
+        val extension_start = self.destination_declarations.enum_extension_count
+        if ((self.module_declaration_start[i] >= 0 and
+                self.module_declaration_start[i] != declaration_start) or
+                (self.module_extension_start[i] >= 0 and
+                    self.module_extension_start[i] != extension_start)):
+            return self.fail_module(i, "HIR module declaration range was begun twice")
+        self.module_declaration_start[i] = declaration_start
+        self.module_extension_start[i] = extension_start
+        true
+
+    me fail_module(i: i64, message: text) -> bool:
+        if self.ready or i < 0 or i >= self.module_count: return false
+        if self.module_diagnostic[i] < 0: self.module_diagnostic[i] = self.record_diagnostic(message)
+        self.fail(message)
+
+    me finalize_module(i: i64, function_roots: i64, root_count: i64, function_tokens: i64, token_count: i64, imports: i64, import_count: i64, exports: i64, export_count: i64, surfaces: i64, surface_count: i64) -> bool:
+        if not self.mutable() or i < 0 or i >= self.module_count or self.module_ready[i] or self.module_generation[i] != self.generation: return self.fail("HIR compile module row is not writable")
+        if self.checkpoint_count <= 0: return self.fail_module(i, "HIR module finalize requires an enclosing checkpoint")
+        val checkpoint = self.checkpoint_count - 1
+        if self.checkpoint_finalized_module[checkpoint] >= 0: return self.fail_module(i, "HIR checkpoint already finalized a module")
+        self.checkpoint_finalized_module[checkpoint] = i
+        self.checkpoint_module_ready[checkpoint] = self.module_ready[i]
+        self.checkpoint_module_function_roots[checkpoint] = self.module_function_roots[i]
+        self.checkpoint_module_function_tokens[checkpoint] = self.module_function_tokens[i]
+        self.checkpoint_module_imports[checkpoint] = self.module_imports[i]
+        self.checkpoint_module_exports[checkpoint] = self.module_exports[i]
+        self.checkpoint_module_surface_refs[checkpoint] = self.module_surface_refs[i]
+        self.checkpoint_module_declaration_count[checkpoint] = self.module_declaration_count[i]
+        self.checkpoint_module_extension_count[checkpoint] = self.module_extension_count[i]
+        if root_count != token_count or root_count != self.module_reserved_function_count[i] or not self.range_is_ready(HD_RANGE_BLOCK, function_roots, root_count) or not self.range_is_ready(HD_RANGE_TOKEN, function_tokens, token_count): return self.fail_module(i, "HIR module function authority ranges are invalid")
+        if not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_MODULE_IMPORT, imports, import_count): return self.fail_module(i, "HIR module imports are invalid")
+        if not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_MODULE_EXPORT, exports, export_count): return self.fail_module(i, "HIR module exports are invalid")
+        if not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_MODULE_SURFACE, surfaces, surface_count): return self.fail_module(i, "HIR module surfaces are invalid")
+        val declaration_start = self.module_declaration_start[i]
+        val declaration_count = self.destination_declarations.declaration_count - declaration_start
+        val extension_start = self.module_extension_start[i]
+        val extension_count = self.destination_declarations.enum_extension_count - extension_start
+        if declaration_start < 0 or declaration_count < 0 or extension_start < 0 or extension_count < 0:
+            return self.fail_module(i, "HIR module declaration ranges are invalid")
+        var declaration_row = declaration_start
+        while declaration_row < declaration_start + declaration_count:
+            if (not self.destination_declarations.declaration_ready[declaration_row] or
+                    self.destination_declarations.declaration_module[declaration_row] != i):
+                return self.fail_module(i, "HIR module declaration range ownership is invalid")
+            declaration_row = declaration_row + 1
+        var extension_row = extension_start
+        while extension_row < extension_start + extension_count:
+            if (not self.destination_declarations.enum_extension_ready[extension_row] or
+                    self.destination_declarations.enum_extension_module[extension_row] != i):
+                return self.fail_module(i, "HIR module extension range ownership is invalid")
+            extension_row = extension_row + 1
+        val validation_epoch = self.module_validation_epoch + 1
+        if validation_epoch <= self.module_validation_epoch: return self.fail_module(i, "HIR module validation epoch exhausted")
+        self.module_validation_epoch = validation_epoch
+        var offset = 0
+        while offset < root_count:
+            val root = self.range_value_at(function_roots, HD_AUX_RANGE_NONE, offset)
+            val token = self.range_value_at(function_tokens, HD_AUX_RANGE_NONE, offset)
+            if token < 0 or token >= self.pending_count or self.pending_root[token] != root: return self.fail_module(i, "HIR module function token/root mismatch")
+            val function_index = self.pending_function[token]
+            if function_index < 0 or function_index >= self.function_count or self.function_token[function_index] != token or self.function_root[function_index] != root or self.function_module[function_index] != i or self.function_module_published[function_index] or self.function_module_validation_epoch[function_index] == validation_epoch: return self.fail_module(i, "HIR module function does not belong to module or is duplicated")
+            self.function_module_validation_epoch[function_index] = validation_epoch
+            offset = offset + 1
+        offset = 0
+        while offset < token_count:
+            self.function_module_published[self.pending_function[self.range_value_at(function_tokens, HD_AUX_RANGE_NONE, offset)]] = true
+            offset = offset + 1
+        self.module_function_roots[i] = function_roots; self.module_function_tokens[i] = function_tokens
+        self.module_imports[i] = imports; self.module_exports[i] = exports; self.module_surface_refs[i] = surfaces
+        self.module_declaration_count[i] = declaration_count
+        self.module_extension_count[i] = extension_count
+        self.module_ready[i] = true; true
+
+    me module_receipt_matches(i: i64, generation: i64) -> bool: self.ready and generation == self.generation and i >= 0 and i < self.module_count and self.module_generation[i] == generation and self.module_ready[i]
+    me module_building_matches(i: i64, generation: i64) -> bool: self.mutable() and generation == self.generation and i >= 0 and i < self.module_count and self.module_generation[i] == generation and self.module_ready[i]
+    me module_name_building_at(i: i64, generation: i64) -> text: if self.module_building_matches(i, generation): self.module_name[i] else: ""
+    me module_function_count_building_at(i: i64, generation: i64) -> i64: if self.module_building_matches(i, generation): self.module_reserved_function_count[i] else: -1
+    me module_count_building_at(generation: i64) -> i64: if self.mutable() and generation == self.generation: self.module_count else: -1
+    me module_has_function(module_index: i64, token: i64, root: i64) -> bool:
+        if module_index < 0 or module_index >= self.module_count or not self.module_ready[module_index]: return false
+        if token < 0 or token >= self.pending_count: return false
+        val function_index = self.pending_function[token]
+        function_index >= 0 and function_index < self.function_count and self.function_module_published[function_index] and self.function_module[function_index] == module_index and self.function_root[function_index] == root
+    me module_declaration_ranges_valid() -> bool:
+        var declaration_total = 0
+        var extension_total = 0
+        var module_index = 0
+        while module_index < self.module_count:
+            val declaration_count = self.module_declaration_count[module_index]
+            val extension_count = self.module_extension_count[module_index]
+            if (not self.module_ready[module_index] or
+                    self.module_declaration_start[module_index] != declaration_total or
+                    declaration_count < 0 or
+                    self.module_declaration_start[module_index] + declaration_count > self.destination_declarations.declaration_count or
+                    self.module_extension_start[module_index] != extension_total or
+                    extension_count < 0):
+                return false
+            if self.module_extension_start[module_index] + extension_count > self.destination_declarations.enum_extension_count: return false
+            declaration_total = declaration_total + declaration_count
+            extension_total = extension_total + extension_count
+            module_index = module_index + 1
+        declaration_total == self.destination_declarations.declaration_count and
+            extension_total == self.destination_declarations.enum_extension_count
+    me module_identity_at(i: i64, generation: i64) -> i64: if self.module_receipt_matches(i, generation): self.module_identity[i] else: -1
+    me module_name_at(i: i64, generation: i64) -> text: if self.module_receipt_matches(i, generation): self.module_name[i] else: ""
+    me module_path_at(i: i64, generation: i64) -> text: if self.module_receipt_matches(i, generation): self.module_path[i] else: ""
+    me module_function_roots_at(i: i64, generation: i64) -> i64: if self.module_receipt_matches(i, generation): self.module_function_roots[i] else: -1
+    me module_function_tokens_at(i: i64, generation: i64) -> i64: if self.module_receipt_matches(i, generation): self.module_function_tokens[i] else: -1
+    me module_imports_at(i: i64, generation: i64) -> i64: if self.module_receipt_matches(i, generation): self.module_imports[i] else: -1
+    me module_exports_at(i: i64, generation: i64) -> i64: if self.module_receipt_matches(i, generation): self.module_exports[i] else: -1
+    me module_surfaces_at(i: i64, generation: i64) -> i64: if self.module_receipt_matches(i, generation): self.module_surface_refs[i] else: -1
+    me module_declaration_start_at(i: i64, generation: i64) -> i64: if self.module_receipt_matches(i, generation): self.module_declaration_start[i] else: -1
+    me module_declaration_count_at(i: i64, generation: i64) -> i64: if self.module_receipt_matches(i, generation): self.module_declaration_count[i] else: -1
+    me module_extension_start_at(i: i64, generation: i64) -> i64: if self.module_receipt_matches(i, generation): self.module_extension_start[i] else: -1
+    me module_extension_count_at(i: i64, generation: i64) -> i64: if self.module_receipt_matches(i, generation): self.module_extension_count[i] else: -1
+
+    # Conservative schema-based structural-capacity estimate; text/reference
+    # columns are charged 16 bytes and every pool includes spare capacity and
+    # lazy cold f64/bits. This is neither a budget nor allocator/RSS evidence.
+    me structural_capacity_bytes_estimate() -> i64:
+        self.module_capacity * 160 + self.span_capacity * 64 + self.expr_capacity * 160 + self.block_capacity * 80 +
+            self.stmt_capacity * 88 + self.type_capacity * 120 + self.pattern_capacity * 112 + self.effect_capacity * 48 +
+            self.dim_capacity * 80 + self.aux_capacity * 176 + self.range_capacity * 56 + self.range_slot_capacity * 16 +
+            self.pending_capacity * 40 + self.function_capacity * 168 + self.checkpoint_capacity * 192 +
+            self.diagnostic_capacity * 16 + self.float_payload_capacity * 32 + self.block_values.capacity_bytes_estimate() + self.destination_symbols.capacity_bytes_estimate() +
+            self.destination_members.capacity_bytes_estimate() + self.destination_module_authority.capacity_bytes_estimate() +
+            self.destination_declarations.structural_capacity_bytes_estimate() +
+            self.declaration_metadata.capacity_bytes_estimate()
+
+    # Exact byte length of text payloads reachable from every initialized
+    # backing slot, including suffix rows retained after checkpoint rollback.
+    # This is not allocator overhead, structural capacity, heap RSS, or process
+    # RSS. Freeze computes it in O(total initialized capacity) without allocation.
+    me measure_owned_text_payload_bytes() -> i64:
+        var total = 0; var i = 0
+        while i < self.module_name.len(): total = total + self.module_name[i].len() + self.module_path[i].len(); i = i + 1
+        i = 0; while i < self.diagnostic_text.len(): total = total + self.diagnostic_text[i].len(); i = i + 1
+        i = 0; while i < self.span_file.len(): total = total + self.span_file[i].len(); i = i + 1
+        i = 0; while i < self.expr_t0.len(): total = total + self.expr_t0[i].len() + self.expr_t1[i].len(); i = i + 1
+        i = 0; while i < self.stmt_t0.len(): total = total + self.stmt_t0[i].len(); i = i + 1
+        i = 0; while i < self.type_t0.len(): total = total + self.type_t0[i].len(); i = i + 1
+        i = 0; while i < self.pattern_t0.len(): total = total + self.pattern_t0[i].len() + self.pattern_t1[i].len(); i = i + 1
+        i = 0; while i < self.effect_t0.len(): total = total + self.effect_t0[i].len(); i = i + 1
+        i = 0; while i < self.dim_t0.len(): total = total + self.dim_t0[i].len(); i = i + 1
+        i = 0; while i < self.aux_t0.len(): total = total + self.aux_t0[i].len() + self.aux_t1[i].len(); i = i + 1
+        i = 0; while i < self.function_name.len(): total = total + self.function_name[i].len(); i = i + 1
+        total = total + self.block_values.text_payload_bytes()
+        total = total + self.destination_symbols.text_payload_bytes()
+        total = total + self.destination_members.text_payload_bytes()
+        total = total + self.destination_module_authority.text_payload_bytes()
+        total = total + self.destination_declarations.text_payload_bytes()
+        total = total + self.declaration_metadata.text_payload_bytes()
+        self.owned_text_payload_bytes = total
+        if total > self.owned_text_payload_high_water: self.owned_text_payload_high_water = total
+        total
+
+    me live_module_count() -> i64: self.module_count
+    me live_function_count() -> i64: self.function_count
+    me live_expr_count() -> i64: self.expr_count
+    me live_range_count() -> i64: self.range_count
+    me live_block_count() -> i64: self.block_count
+    me live_stmt_count() -> i64: self.stmt_count
+    me live_type_count() -> i64: self.type_count
+    me live_pattern_count() -> i64: self.pattern_count
+    me live_effect_count() -> i64: self.effect_count
+    me live_dim_count() -> i64: self.dim_count
+    me live_aux_count() -> i64: self.aux_count
+    me live_token_count() -> i64: self.pending_count
+    me module_capacity_count() -> i64: self.module_capacity
+    me function_capacity_count() -> i64: self.function_capacity
+    me expr_capacity_count() -> i64: self.expr_capacity
+    me range_capacity_count() -> i64: self.range_capacity
+    me block_capacity_count() -> i64: self.block_capacity
+    me stmt_capacity_count() -> i64: self.stmt_capacity
+    me type_capacity_count() -> i64: self.type_capacity
+    me pattern_capacity_count() -> i64: self.pattern_capacity
+    me effect_capacity_count() -> i64: self.effect_capacity
+    me dim_capacity_count() -> i64: self.dim_capacity
+    me aux_capacity_count() -> i64: self.aux_capacity
+    me token_capacity_count() -> i64: self.pending_capacity
+
+export HirDestinationGraph

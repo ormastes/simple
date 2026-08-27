@@ -275,17 +275,6 @@ fn _js_parser_expression(raw: text) -> JsExpression:
             target: _js_parser_expression(expr.slice(0, assign)),
             value: _js_parser_expression(expr.slice(assign + 1, expr.len()))
         )
-    # Conditional (ternary) sits just above assignment and below `||` in JS
-    # precedence, so it must be matched before every binary/unary production.
-    val question = _js_parser_find_ternary_question(expr)
-    if question >= 0:
-        val colon = _js_parser_find_ternary_colon(expr, question)
-        if colon > question:
-            return JsExpression.Ternary(
-                condition: _js_parser_expression(expr.slice(0, question)),
-                consequent: _js_parser_expression(expr.slice(question + 1, colon)),
-                alternate: _js_parser_expression(expr.slice(colon + 1, expr.len()))
-            )
     if expr.starts_with("-") and expr.len() > 1:
         return JsExpression.Unary(op: "-", operand: _js_parser_expression(expr.slice(1, expr.len())))
     if expr.starts_with("!") and expr.len() > 1:
@@ -553,71 +542,6 @@ fn _js_parser_skip_spaces(expr: text, pos: i64) -> i64:
             break
     i
 
-# Index of the `?` that opens a top-level conditional expression, or -1.
-# `??` (nullish coalescing) and `?.` (optional chaining) are NOT ternaries.
-fn _js_parser_find_ternary_question(expr: text) -> i64:
-    var depth = 0
-    var quote = ""
-    var i = 0
-    while i < expr.len():
-        val ch = expr.slice(i, i + 1)
-        if quote != "":
-            if ch == "\\":
-                i = i + 1
-            else if ch == quote:
-                quote = ""
-        else:
-            if ch == "'" or ch == "\"":
-                quote = ch
-            else if ch == "(" or ch == "[" or ch == "{":
-                depth = depth + 1
-            else if ch == ")" or ch == "]" or ch == "}":
-                depth = depth - 1
-            else if ch == "?":
-                val nxt = expr.slice(i + 1, i + 2)
-                if nxt == "?":
-                    i = i + 1
-                else if nxt != ".":
-                    if depth == 0:
-                        return i
-        i = i + 1
-    -1
-
-# Index of the `:` matching the ternary `?` at `question`, or -1.
-# Nested ternaries in the consequent consume their own colon first.
-fn _js_parser_find_ternary_colon(expr: text, question: i64) -> i64:
-    var depth = 0
-    var quote = ""
-    var pending = 0
-    var i = question + 1
-    while i < expr.len():
-        val ch = expr.slice(i, i + 1)
-        if quote != "":
-            if ch == "\\":
-                i = i + 1
-            else if ch == quote:
-                quote = ""
-        else:
-            if ch == "'" or ch == "\"":
-                quote = ch
-            else if ch == "(" or ch == "[" or ch == "{":
-                depth = depth + 1
-            else if ch == ")" or ch == "]" or ch == "}":
-                depth = depth - 1
-            else if ch == "?":
-                val nxt = expr.slice(i + 1, i + 2)
-                if nxt == "?":
-                    i = i + 1
-                else if nxt != ".":
-                    if depth == 0:
-                        pending = pending + 1
-            else if ch == ":" and depth == 0:
-                if pending == 0:
-                    return i
-                pending = pending - 1
-        i = i + 1
-    -1
-
 fn _js_parser_find_top_level(expr: text, needle: text) -> i64:
     var depth = 0
     var quote = ""
@@ -805,21 +729,14 @@ fn _js_parser_hex_digit(ch: text) -> i64:
     -1
 
 fn _js_parser_decode_string_literal(raw: text) -> text:
-    # slice() is byte-indexed: accumulating one raw byte at a time (the old
-    # `out = out + ch`) shreds multi-byte UTF-8 characters in the JS string
-    # literal into separate U+FFFD replacement characters. Escape markers
-    # are always the single ASCII byte '\\', so byte-stepping to find them
-    # is safe; copy whole runs via slice() between escapes instead of
-    # rebuilding byte-by-byte.
     var out = ""
-    var seg_start = 0
     var i = 0
     while i < raw.len():
         val ch = raw.slice(i, i + 1)
         if ch != "\\" or i + 1 >= raw.len():
+            out = out + ch
             i = i + 1
             continue
-        out = out + raw.slice(seg_start, i)
         val esc = raw.slice(i + 1, i + 2)
         if esc == "n":
             out = out + "\n"
@@ -847,29 +764,10 @@ fn _js_parser_decode_string_literal(raw: text) -> text:
             else:
                 out = out + esc
                 i = i + 2
-        else if esc == "x" and i + 3 < raw.len():
-            val h0 = _js_parser_hex_digit(raw.slice(i + 2, i + 3))
-            val h1 = _js_parser_hex_digit(raw.slice(i + 3, i + 4))
-            if h0 >= 0 and h1 >= 0:
-                out = out + ((h0 << 4) | h1).chr()
-                i = i + 4
-            else:
-                out = out + esc
-                i = i + 2
-        else if esc == "b":
-            out = out + 8.chr()
-            i = i + 2
-        else if esc == "f":
-            out = out + 12.chr()
-            i = i + 2
-        else if esc == "v":
-            out = out + 11.chr()
-            i = i + 2
         else:
             out = out + esc
             i = i + 2
-        seg_start = i
-    out + raw.slice(seg_start, raw.len())
+    out
 
 fn _js_parser_matching_paren(expr: text, start: i64) -> i64:
     var depth = 0
@@ -964,131 +862,8 @@ impl JsParser:
     static fn new(source: text, logger: Logger) -> JsParser:
         JsParser.create(source, logger)
 
-    me parse_program() -> Result<[JsStatement], JsError>:
-        # Result-returning, like `parse_assignment` below and like the full
-        # parser in src/lib/common/js/engine/parser.spl. Every caller
-        # (src/app/js/main.spl, the three js/conformance runners, the js specs)
-        # matches `Ok(stmts)` / `Err(e)`; a bare `[JsStatement]` return matched
-        # NEITHER arm, so the whole match silently evaluated to nil.
-        Ok(js_parse_program_subset(self.source))
+    me parse_program() -> [JsStatement]:
+        js_parse_program_subset(self.source)
 
     me parse_assignment() -> Result<JsExpression, JsError>:
         Ok(_js_parser_expression(self.source))
-
-fn _js_bal_is_ident_char(c: text) -> bool:
-    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_" or c == "$"
-
-# Returns true if a `/` at the current position begins a regex literal rather
-# than a division operator, based on the previous significant (non-space,
-# non-comment) character `prev` and any trailing keyword captured in `prev_word`.
-fn _js_regex_context(prev: text, prev_word: text) -> bool:
-    if prev == "":
-        return true
-    # A regex may begin after an operator, an opening delimiter, or certain
-    # punctuation — but not after a value (identifier, number, string, `)`, `]`).
-    if (prev == "(" or prev == "," or prev == "=" or prev == ":" or prev == "["
-        or prev == "!" or prev == "&" or prev == "|" or prev == "?"
-        or prev == "{" or prev == "}" or prev == ";" or prev == "+"
-        or prev == "-" or prev == "*" or prev == "%" or prev == "<"
-        or prev == ">" or prev == "~" or prev == "^" or prev == "/"):
-        return true
-    # Keywords that expect an expression next (so `/` starts a regex).
-    if (prev_word == "return" or prev_word == "typeof" or prev_word == "instanceof"
-        or prev_word == "in" or prev_word == "of" or prev_word == "new"
-        or prev_word == "delete" or prev_word == "void" or prev_word == "do"
-        or prev_word == "else" or prev_word == "yield" or prev_word == "case"
-        or prev_word == "throw"):
-        return true
-    false
-
-# Fail-fast structural gate for eval: the subset expression parser recurses on
-# malformed input and unbalanced delimiters can make it effectively hang.
-# Scans outside string literals ('..' ".." `..`), // and /* */ comments, and
-# regex literals (/.../ — whose parens/brackets are not structural).
-pub fn js_source_delimiters_balanced(source: text) -> bool:
-    # char-array scan: source.len() is BYTES but source[i] is CHAR-indexed, so a
-    # byte-bounded loop OOB-crashes on multibyte JS source. Iterate cs = chars().
-    val cs = source.chars()
-    val n = cs.len()
-    var paren = 0
-    var bracket = 0
-    var brace = 0
-    var i = 0
-    # Previous significant character and, when it terminates an identifier, the
-    # word itself (for keyword-preceded regex literals like `return /re/`).
-    var prev = ""
-    var prev_word = ""
-    while i < n:
-        val c = cs[i]
-        if c == "'" or c == "\"" or c == "`":
-            val quote = c
-            i = i + 1
-            while i < n:
-                if cs[i] == "\\":
-                    i = i + 2
-                    continue
-                if cs[i] == quote:
-                    break
-                i = i + 1
-            prev = quote
-            prev_word = ""
-            i = i + 1
-            continue
-        elif c == "/" and i + 1 < n and cs[i + 1] == "/":
-            while i < n and cs[i] != "\n":
-                i = i + 1
-            continue
-        elif c == "/" and i + 1 < n and cs[i + 1] == "*":
-            i = i + 2
-            while i + 1 < n and not (cs[i] == "*" and cs[i + 1] == "/"):
-                i = i + 1
-            i = i + 2
-            continue
-        elif c == "/" and _js_regex_context(prev, prev_word):
-            # Regex literal: skip to the unescaped closing `/`, treating `[...]`
-            # character classes as regions where `/` does not close the literal.
-            i = i + 1
-            var in_class = false
-            while i < n:
-                val rc = cs[i]
-                if rc == "\\":
-                    i = i + 2
-                    continue
-                if rc == "[":
-                    in_class = true
-                elif rc == "]":
-                    in_class = false
-                elif rc == "/" and not in_class:
-                    break
-                elif rc == "\n":
-                    break  # Unterminated regex — stop regex scan.
-                i = i + 1
-            prev = "/"
-            prev_word = ""
-            i = i + 1
-            continue
-        elif c == " " or c == "\t" or c == "\n" or c == "\r":
-            i = i + 1
-            continue
-        elif c == "(":
-            paren = paren + 1
-        elif c == ")":
-            paren = paren - 1
-        elif c == "[":
-            bracket = bracket + 1
-        elif c == "]":
-            bracket = bracket - 1
-        elif c == "{":
-            brace = brace + 1
-        elif c == "}":
-            brace = brace - 1
-        if paren < 0 or bracket < 0 or brace < 0:
-            return false
-        # Track the previous significant char / identifier word.
-        prev = c
-        if _js_bal_is_ident_char(c):
-            prev_word = prev_word + c
-        else:
-            prev_word = ""
-        i = i + 1
-    paren == 0 and bracket == 0 and brace == 0

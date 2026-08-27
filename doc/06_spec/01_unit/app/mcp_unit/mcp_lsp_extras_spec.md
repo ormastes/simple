@@ -1,6 +1,29 @@
-# Mcp Lsp Extras Specification
+# mcp_lsp_extras_spec
 
-> Tests covering simple_document_highlight tool, simple_type_definition tool, simple_implementation tool, simple_folding_range tool, MCP tool registration for new LSP tools, LSP extras cross-tool consistency.
+> Tests for 4 new MCP LSP tools: document-highlight, type-definition, implementation, folding-range. Validates parameter handling, command construction, and output format.
+
+<!-- sdn-diagram:id=mcp_lsp_extras_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=mcp_lsp_extras_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+mcp_lsp_extras_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=mcp_lsp_extras_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +32,26 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Mcp Lsp Extras Specification
+# mcp_lsp_extras_spec
+
+Tests for 4 new MCP LSP tools: document-highlight, type-definition, implementation, folding-range. Validates parameter handling, command construction, and output format.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Feature IDs | #MCP-LSP-011 to #MCP-LSP-014 |
+| Category | Tooling |
+| Difficulty | 3/5 |
+| Status | Implemented |
+| Source | `test/01_unit/app/mcp_unit/mcp_lsp_extras_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+Tests for 4 new MCP LSP tools: document-highlight, type-definition,
+implementation, folding-range. Validates parameter handling, command
+construction, and output format.
 
 ## Scenarios
 
@@ -17,23 +59,13 @@
 
 #### requires file parameter
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- requires file parameter
-   - Expected: is_missing is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("requires file parameter")
 val file = ""
 val is_missing = file == ""
 expect(is_missing).to_equal(true)
@@ -43,19 +75,13 @@ expect(is_missing).to_equal(true)
 
 #### requires line parameter
 
-- requires line parameter
-   - Expected: is_missing is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("requires line parameter")
 val line = ""
 val is_missing = line == ""
 expect(is_missing).to_equal(true)
@@ -65,18 +91,13 @@ expect(is_missing).to_equal(true)
 
 #### builds correct command
 
-- builds correct command
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("builds correct command")
 val file = "src/app/cli/query.spl"
 val line = "42"
 var cmd = "timeout 30 bin/simple query document-highlight " + file + " " + line
@@ -89,18 +110,13 @@ expect(cmd).to_contain(file)
 
 #### appends column when provided
 
-- appends column when provided
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("appends column when provided")
 val file = "test.spl"
 val line = "10"
 val column = "5"
@@ -113,20 +129,13 @@ expect(cmd).to_contain("10 5")
 
 #### output format is line:col:length:kind
 
-- output format is line:col:length:kind
-   - Expected: parts.len() equals `4`
-   - Expected: parts[3] equals `Read`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("output format is line:col:length:kind")
 val output = "5:10:8:Read"
 val parts = output.split(":")
 expect(parts.len()).to_equal(4)
@@ -137,18 +146,13 @@ expect(parts[3]).to_equal("Read")
 
 #### kind is Read or Write
 
-- kind is Read or Write
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("kind is Read or Write")
 val kinds = ["Read", "Write"]
 expect(kinds).to_contain("Read")
 expect(kinds).to_contain("Write")
@@ -158,19 +162,13 @@ expect(kinds).to_contain("Write")
 
 #### classifies declaration as Write
 
-- classifies declaration as Write
-   - Expected: is_decl is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("classifies declaration as Write")
 val line = "val count = 0"
 val is_decl = line.starts_with("val ") or line.starts_with("var ")
 expect(is_decl).to_equal(true)
@@ -180,19 +178,13 @@ expect(is_decl).to_equal(true)
 
 #### classifies usage as Read
 
-- classifies usage as Read
-   - Expected: is_decl is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("classifies usage as Read")
 val line = "print count"
 val is_decl = line.starts_with("val ") or line.starts_with("var ")
 expect(is_decl).to_equal(false)
@@ -202,19 +194,13 @@ expect(is_decl).to_equal(false)
 
 #### classifies assignment LHS as Write
 
-- classifies assignment LHS as Write
-   - Expected: has_assign is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("classifies assignment LHS as Write")
 val line = "count = count + 1"
 # count on LHS of = is Write, count on RHS is Read
 val has_assign = line.contains(" = ")
@@ -227,60 +213,43 @@ expect(has_assign).to_equal(true)
 
 #### requires file parameter
 
-- requires file parameter
-   - Expected: file equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("requires file parameter")
 val file = ""
-expect(file).to_equal("")
+expect(file == "").to_equal(true)
 ```
 
 </details>
 
 #### requires line parameter
 
-- requires line parameter
-   - Expected: line equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("requires line parameter")
 val line = ""
-expect(line).to_equal("")
+expect(line == "").to_equal(true)
 ```
 
 </details>
 
 #### builds correct command
 
-- builds correct command
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("builds correct command")
 val file = "src/app/cli/query.spl"
 val line = "42"
 var cmd = "timeout 30 bin/simple query type-definition " + file + " " + line
@@ -292,18 +261,13 @@ expect(cmd).to_contain("query type-definition")
 
 #### appends column when provided
 
-- appends column when provided
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("appends column when provided")
 val file = "test.spl"
 val line = "10"
 val column = "5"
@@ -316,19 +280,13 @@ expect(cmd).to_contain("10 5")
 
 #### extracts type from val annotation
 
-- extracts type from val annotation
-   - Expected: type_name equals `Server`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("extracts type from val annotation")
 val line = "val server: Server = Server.new()"
 val after_colon = line.split(":")[1].trim()
 val type_name = after_colon.split(" ")[0]
@@ -339,19 +297,13 @@ expect(type_name).to_equal("Server")
 
 #### extracts type from function return
 
-- extracts type from function return
-   - Expected: has_arrow is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("extracts type from function return")
 val line = "fn get_server() -> Server:"
 val has_arrow = line.contains("->")
 expect(has_arrow).to_equal(true)
@@ -361,20 +313,13 @@ expect(has_arrow).to_equal(true)
 
 #### searches for class/struct/enum/trait definition
 
-- searches for class/struct/enum/trait definition
-   - Expected: patterns.len() equals `4`
-   - Expected: patterns[0] equals `class Server`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("searches for class/struct/enum/trait definition")
 val type_name = "Server"
 val patterns = ["class " + type_name, "struct " + type_name, "enum " + type_name, "trait " + type_name]
 expect(patterns.len()).to_equal(4)
@@ -387,60 +332,43 @@ expect(patterns[0]).to_equal("class Server")
 
 #### requires file parameter
 
-- requires file parameter
-   - Expected: file equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("requires file parameter")
 val file = ""
-expect(file).to_equal("")
+expect(file == "").to_equal(true)
 ```
 
 </details>
 
 #### requires line parameter
 
-- requires line parameter
-   - Expected: line equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("requires line parameter")
 val line = ""
-expect(line).to_equal("")
+expect(line == "").to_equal(true)
 ```
 
 </details>
 
 #### builds correct command
 
-- builds correct command
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("builds correct command")
 val file = "src/test.spl"
 val line = "5"
 var cmd = "timeout 30 bin/simple query implementation " + file + " " + line
@@ -452,18 +380,13 @@ expect(cmd).to_contain("query implementation")
 
 #### appends column when provided
 
-- appends column when provided
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("appends column when provided")
 val file = "test.spl"
 val line = "10"
 val column = "3"
@@ -476,19 +399,13 @@ expect(cmd).to_contain("10 3")
 
 #### finds trait implementations via impl pattern
 
-- finds trait implementations via impl pattern
-   - Expected: pattern equals `impl Printable`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("finds trait implementations via impl pattern")
 val trait_name = "Printable"
 val pattern = "impl " + trait_name
 expect(pattern).to_equal("impl Printable")
@@ -498,18 +415,13 @@ expect(pattern).to_equal("impl Printable")
 
 #### finds type implementations via impl.*Type pattern
 
-- finds type implementations via impl.*Type pattern
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("finds type implementations via impl.*Type pattern")
 val type_name = "Server"
 val pattern = "impl.*" + type_name
 expect(pattern).to_contain("impl")
@@ -520,19 +432,13 @@ expect(pattern).to_contain("Server")
 
 #### distinguishes traits from types
 
-- distinguishes traits from types
-   - Expected: is_trait is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("distinguishes traits from types")
 val trait_line = "trait Printable:"
 val is_trait = trait_line.starts_with("trait ")
 expect(is_trait).to_equal(true)
@@ -542,19 +448,13 @@ expect(is_trait).to_equal(true)
 
 #### struct is not a trait
 
-- struct is not a trait
-   - Expected: is_trait is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("struct is not a trait")
 val struct_line = "struct Point:"
 val is_trait = struct_line.starts_with("trait ")
 expect(is_trait).to_equal(false)
@@ -566,9 +466,20 @@ expect(is_trait).to_equal(false)
 
 #### requires file parameter
 
-- requires file parameter
-   - Expected: file equals ``
+<details>
+<summary>Executable SSpec</summary>
 
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val file = ""
+expect(file == "").to_equal(true)
+```
+
+</details>
+
+#### builds correct command
 
 <details>
 <summary>Executable SSpec</summary>
@@ -577,28 +488,6 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("requires file parameter")
-val file = ""
-expect(file).to_equal("")
-```
-
-</details>
-
-#### builds correct command
-
-- builds correct command
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-APP
-step("builds correct command")
 val file = "src/app/cli/query.spl"
 var cmd = "timeout 30 bin/simple query folding-range " + file + " 2>&1"
 expect(cmd).to_contain("query folding-range")
@@ -609,18 +498,13 @@ expect(cmd).to_contain(file)
 
 #### does not require line parameter
 
-- does not require line parameter
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("does not require line parameter")
 val file = "test.spl"
 var cmd = "timeout 30 bin/simple query folding-range " + file
 # No positional line number
@@ -631,20 +515,13 @@ expect(cmd).to_contain("folding-range test.spl")
 
 #### output format is start_line:end_line:kind
 
-- output format is start_line:end_line:kind
-   - Expected: parts.len() equals `3`
-   - Expected: parts[2] equals `imports`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("output format is start_line:end_line:kind")
 val output = "1:5:imports"
 val parts = output.split(":")
 expect(parts.len()).to_equal(3)
@@ -655,18 +532,13 @@ expect(parts[2]).to_equal("imports")
 
 #### detects import folding regions
 
-- detects import folding regions
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects import folding regions")
 val kind = "imports"
 val valid_kinds = ["imports", "comment", "function", "class", "struct", "enum", "trait", "impl"]
 expect(valid_kinds).to_contain(kind)
@@ -676,18 +548,13 @@ expect(valid_kinds).to_contain(kind)
 
 #### detects comment folding regions
 
-- detects comment folding regions
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects comment folding regions")
 val kind = "comment"
 val valid_kinds = ["imports", "comment", "function", "class", "struct", "enum", "trait", "impl"]
 expect(valid_kinds).to_contain(kind)
@@ -697,18 +564,13 @@ expect(valid_kinds).to_contain(kind)
 
 #### detects function folding regions
 
-- detects function folding regions
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects function folding regions")
 val kind = "function"
 val valid_kinds = ["imports", "comment", "function", "class", "struct", "enum", "trait", "impl"]
 expect(valid_kinds).to_contain(kind)
@@ -718,19 +580,13 @@ expect(valid_kinds).to_contain(kind)
 
 #### detects class/struct/enum/trait regions
 
-- detects class/struct/enum/trait regions
-   - Expected: block_kinds.len() equals `5`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects class/struct/enum/trait regions")
 val block_kinds = ["class", "struct", "enum", "trait", "impl"]
 expect(block_kinds.len()).to_equal(5)
 ```
@@ -739,19 +595,13 @@ expect(block_kinds.len()).to_equal(5)
 
 #### folding ends when indent returns to zero
 
-- folding ends when indent returns to zero
-   - Expected: is_block_start is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("folding ends when indent returns to zero")
 # Block start at indent 0, block ends when next line at indent 0
 val indent_0 = "fn hello():"
 val indent_4 = "    print 'hello'"
@@ -765,19 +615,13 @@ expect(is_block_start).to_equal(true)
 
 #### total tool count is 63
 
-- total tool count is 63
-   - Expected: tool_count equals `63`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("total tool count is 63")
 val tool_count = 63
 expect(tool_count).to_equal(63)
 ```
@@ -786,19 +630,13 @@ expect(tool_count).to_equal(63)
 
 #### all 4 new tools registered in protocol
 
-- all 4 new tools registered in protocol
-   - Expected: new_tools.len() equals `4`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("all 4 new tools registered in protocol")
 val new_tools = ["simple_document_highlight", "simple_type_definition", "simple_implementation", "simple_folding_range"]
 expect(new_tools.len()).to_equal(4)
 ```
@@ -807,19 +645,13 @@ expect(new_tools.len()).to_equal(4)
 
 #### all new tools are read-only
 
-- all new tools are read-only
-   - Expected: read_only is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("all new tools are read-only")
 val read_only = true
 expect(read_only).to_equal(true)
 ```
@@ -828,18 +660,13 @@ expect(read_only).to_equal(true)
 
 #### document-highlight schema has file+line+column
 
-- document-highlight schema has file+line+column
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("document-highlight schema has file+line+column")
 val params = ["file", "line", "column"]
 expect(params).to_contain("file")
 expect(params).to_contain("line")
@@ -850,20 +677,13 @@ expect(params).to_contain("column")
 
 #### folding-range schema has file only
 
-- folding-range schema has file only
-   - Expected: params.len() equals `1`
-   - Expected: params[0] equals `file`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("folding-range schema has file only")
 val params = ["file"]
 expect(params.len()).to_equal(1)
 expect(params[0]).to_equal("file")
@@ -873,19 +693,13 @@ expect(params[0]).to_equal("file")
 
 #### dispatch entries added for all 4 tools
 
-- dispatch entries added for all 4 tools
-   - Expected: tool_names.len() equals `4`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("dispatch entries added for all 4 tools")
 val tool_names = ["simple_document_highlight", "simple_type_definition", "simple_implementation", "simple_folding_range"]
 expect(tool_names.len()).to_equal(4)
 ```
@@ -896,19 +710,13 @@ expect(tool_names.len()).to_equal(4)
 
 #### all position tools accept file and line
 
-- all position tools accept file and line
-   - Expected: position_tools.len() equals `3`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("all position tools accept file and line")
 val position_tools = ["document-highlight", "type-definition", "implementation"]
 expect(position_tools.len()).to_equal(3)
 ```
@@ -917,19 +725,13 @@ expect(position_tools.len()).to_equal(3)
 
 #### folding-range is file-only
 
-- folding-range is file-only
-   - Expected: file_only.len() equals `1`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("folding-range is file-only")
 val file_only = ["folding-range"]
 expect(file_only.len()).to_equal(1)
 ```
@@ -938,18 +740,13 @@ expect(file_only.len()).to_equal(1)
 
 #### all tools use 30 second timeout
 
-- all tools use 30 second timeout
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("all tools use 30 second timeout")
 val timeout = "timeout 30"
 val cmd1 = "timeout 30 bin/simple query document-highlight f.spl 1"
 val cmd2 = "timeout 30 bin/simple query folding-range f.spl"
@@ -961,44 +758,19 @@ expect(cmd2).to_start_with(timeout)
 
 #### all tools use bin/simple query prefix
 
-- all tools use bin/simple query prefix
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("all tools use bin/simple query prefix")
 val prefix = "bin/simple query"
 val cmd = "timeout 30 bin/simple query document-highlight test.spl 1"
 expect(cmd).to_contain(prefix)
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/01_unit/app/mcp_unit/mcp_lsp_extras_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering simple_document_highlight tool, simple_type_definition tool, simple_implementation tool, simple_folding_range tool, MCP tool registration for new LSP tools, LSP extras cross-tool consistency.
-- simple_document_highlight tool
-- simple_type_definition tool
-- simple_implementation tool
-- simple_folding_range tool
-- MCP tool registration for new LSP tools
-- LSP extras cross-tool consistency
 
 ## Scenario Summary
 
@@ -1012,54 +784,3 @@ Tests covering simple_document_highlight tool, simple_type_definition tool, simp
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-APP`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `dd6afd0b0ef197509ec29ad717961aebfb01ae1c0c6e73d6e17c7fcba15e3683`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `dd6afd0b0ef197509ec29ad717961aebfb01ae1c0c6e73d6e17c7fcba15e3683`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `dd6afd0b0ef197509ec29ad717961aebfb01ae1c0c6e73d6e17c7fcba15e3683`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/01_unit/app/mcp_unit/mcp_lsp_extras_spec.spl
-mirror: doc/06_spec/01_unit/app/mcp_unit/mcp_lsp_extras_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/mcp_unit/mcp_lsp_extras_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/mcp_unit/mcp_lsp_extras_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/mcp_unit/mcp_lsp_extras_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 10 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/app/mcp_unit/mcp_lsp_extras_spec.spl:34:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'requires file parameter' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/mcp_unit/mcp_lsp_extras_spec.spl:41:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'requires line parameter' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/mcp_unit/mcp_lsp_extras_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'builds correct command' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

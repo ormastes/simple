@@ -112,7 +112,7 @@ fn _crd_unmut_params(t: text) -> [text]:
     val inner = t.substring(open_idx + 1, close_idx)
     # Split on top-level commas (ignore commas nested in (), [], <>).
     var parts: [text] = []
-    var part_start = 0
+    var cur = ""
     var d = 0
     var j = 0
     val ilen = inner.len()
@@ -120,16 +120,19 @@ fn _crd_unmut_params(t: text) -> [text]:
         val ch = inner.substring(j, j + 1)
         if ch == "(" or ch == "[" or ch == "<":
             d = d + 1
+            cur = cur + ch
         elif ch == ")" or ch == "]" or ch == ">":
             if d > 0:
                 d = d - 1
+            cur = cur + ch
         elif ch == "," and d == 0:
-            parts.push(inner.substring(part_start, j))
-            part_start = j + 1
+            parts.push(cur)
+            cur = ""
+        else:
+            cur = cur + ch
         j = j + 1
-    val final_part = inner.substring(part_start, ilen)
-    if final_part.trim() != "":
-        parts.push(final_part)
+    if cur.trim() != "":
+        parts.push(cur)
     for part in parts:
         val p = part.trim()
         if p == "":
@@ -137,14 +140,16 @@ fn _crd_unmut_params(t: text) -> [text]:
         if p.starts_with("mut "):
             continue
         # Leading identifier characters form the param name.
+        var name = ""
         var k = 0
         val plen = p.len()
         while k < plen:
             val ch = p.substring(k, k + 1)
-            if not _crd_is_ident_char(ch):
+            if _crd_is_ident_char(ch):
+                name = name + ch
+            else:
                 break
             k = k + 1
-        val name = p.substring(0, k)
         if name == "" or name == "self" or name == "me":
             continue
         if name.starts_with("_"):
@@ -238,9 +243,7 @@ fn _crd_mutates(t: text, p: text) -> bool:
 # Main Entry Point
 # ============================================================================
 
-pub fn check_const_ref_default_lines(
-    lines: [text], file_path: text
-) -> [ConstRefFinding]:
+pub fn check_const_ref_default(source: text, file_path: text) -> [ConstRefFinding]:
     """Text-based heuristic for W-MC-REF-001 (const_ref_default).
 
     Emits one WARNING per (function, parameter) for the first mutation of a
@@ -248,6 +251,7 @@ pub fn check_const_ref_default_lines(
     var findings: [ConstRefFinding] = []
     if file_path.contains("src/compiler_rust/vendor") or file_path.contains("src/runtime/vendor"):
         return findings
+    val lines = source.split("\n")
     val n = lines.len()
     var i = 0
     while i < n:
@@ -288,7 +292,3 @@ pub fn check_const_ref_default_lines(
             j = j + 1
         i = i + 1
     findings
-
-pub fn check_const_ref_default(source: text, file_path: text) -> [ConstRefFinding]:
-    """Compatibility entrypoint for callers that do not own a line snapshot."""
-    check_const_ref_default_lines(source.split("\n"), file_path)

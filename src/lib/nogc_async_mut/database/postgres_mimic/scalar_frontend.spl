@@ -1,0 +1,203 @@
+"""Socket-worker pgwire frontend over the scalar dispatch port.
+
+The socket worker owns this state machine, its parser, and local response
+bytes.  The database owner is deliberately absent: every database request is
+published through ``PgScalarFrontendAdapter`` as scalar handle/pointer-length
+arguments and every completion is copied from a scalar blob receipt.
+
+This is the replacement for the aggregate-gate frontend.  It is intentionally
+not wired into ``PgWireParallelLinuxServer`` until the descriptor/config path
+is scalar too.
+"""
+
+use std.database.postgres_mimic.server.{PgResponse, PgResponseKind}
+use std.database.postgres_mimic.connection.{PgWireSslPolicy}
+use std.database.postgres_mimic.transport.{
+    PgWireTransportDriver, PgWireTransportEvent, PgWireTransportEventKind,
+    pgwire_transport_driver
+}
+use std.database.postgres_mimic.wire_encode.{pgwire_encode_query}
+use std.database.postgres_mimic.scalar_dispatch_adapter.{
+    PgScalarFrontendAdapter
+}
+
+enum PgScalarFrontendActionKind:
+    Write
+    WaitOwner
+    Close
+
+struct PgScalarFrontendAction:
+    kind: PgScalarFrontendActionKind
+    bytes: [u8]
+    request_id: i64
+
+fn pg_scalar_frontend_action(kind: PgScalarFrontendActionKind) -> PgScalarFrontendAction:
+    PgScalarFrontendAction(kind: kind, bytes: [], request_id: 0)
+
+fn pg_scalar_frontend_write(bytes: [u8]) -> PgScalarFrontendAction:
+    PgScalarFrontendAction(kind: PgScalarFrontendActionKind.Write,
+        bytes: bytes, request_id: 0)
+
+fn pg_scalar_frontend_error(sqlstate: text, message: text) -> [u8]:
+    val response = PgResponse(kind: PgResponseKind.ErrorResponse, tag: "ERROR",
+        columns: [], rows: [], sqlstate: sqlstate, message: message,
+        transaction_status: "I")
+    match pgwire_encode_query(response):
+        Ok(bytes): bytes
+        Err(_): []
+
+class PgWireScalarFrontend:
+    connection_id: i64
+    session_id: i64
+    pending_request_id: i64
+    pending_operation: i64
+    driver: PgWireTransportDriver
+    deferred: [PgWireTransportEvent]
+    port: PgScalarFrontendAdapter
+    closed: bool
+    termination_submitted: bool
+
+    static fn create(connection_id: i64, port: PgScalarFrontendAdapter,
+            ssl_policy: PgWireSslPolicy, max_frame: i64,
+            max_parameters: i64, max_buffer: i64) -> PgWireScalarFrontend:
+        PgWireScalarFrontend(connection_id: connection_id, session_id: 0,
+            pending_request_id: 0, pending_operation: 0,
+            driver: pgwire_transport_driver(ssl_policy, max_frame,
+                max_parameters, max_buffer), deferred: [], port: port,
+            closed: false, termination_submitted: false)
+
+    me enqueue_driver_events():
+        val events = self.driver.drain_events()
+        for event in events:
+            self.deferred.push(event)
+
+    me reject_and_close(sqlstate: text, message: text) -> [PgScalarFrontendAction]:
+        self.closed = true
+        self.driver.cancel(message)
+        val _ = self.port.cancel()
+        [pg_scalar_frontend_write(pg_scalar_frontend_error(sqlstate, message)),
+            pg_scalar_frontend_action(PgScalarFrontendActionKind.Close)]
+
+    me submit_event(event: PgWireTransportEvent,
+            allowed_user: text, allowed_database: text,
+            now_ms: i64, timeout_ms: i64) -> [PgScalarFrontendAction]:
+        if event.kind == PgWireTransportEventKind.SendSslUnsupported:
+            return [pg_scalar_frontend_write([78])]
+        if event.kind == PgWireTransportEventKind.SendSslSupported:
+            return self.reject_and_close("08004", "TLS stream owner unavailable")
+        if event.kind == PgWireTransportEventKind.Authenticate:
+            if event.user != allowed_user or event.database != allowed_database:
+                self.driver.authentication_failed()
+                return self.reject_and_close("28P01", "authentication failed")
+            val request = self.port.publish_startup(event.user, event.database,
+                event.application_name, now_ms + timeout_ms)
+            if request <= 0:
+                return self.reject_and_close("53300", "database queue full")
+            self.pending_request_id = request
+            self.pending_operation = 4
+            return [PgScalarFrontendAction(kind: PgScalarFrontendActionKind.WaitOwner,
+                bytes: [], request_id: request)]
+        if event.kind == PgWireTransportEventKind.ExecuteQuery:
+            if self.session_id <= 0:
+                return self.reject_and_close("08003", "session is not established")
+            val request = self.port.publish_query(self.session_id, event.query,
+                now_ms + timeout_ms)
+            if request <= 0:
+                return [pg_scalar_frontend_write(pg_scalar_frontend_error(
+                    "53300", "database queue full"))]
+            self.pending_request_id = request
+            self.pending_operation = 1
+            return [PgScalarFrontendAction(kind: PgScalarFrontendActionKind.WaitOwner,
+                bytes: [], request_id: request)]
+        if event.kind == PgWireTransportEventKind.CancelRequest:
+            return self.reject_and_close("57014", "remote cancellation unsupported")
+        if event.kind == PgWireTransportEventKind.Close:
+            self.closed = true
+            val _ = self.port.cancel()
+            return [pg_scalar_frontend_action(PgScalarFrontendActionKind.Close)]
+        []
+
+    me advance(allowed_user: text, allowed_database: text,
+            now_ms: i64, timeout_ms: i64) -> [PgScalarFrontendAction]:
+        var actions: [PgScalarFrontendAction] = []
+        while self.pending_request_id == 0 and self.deferred.len() > 0 and
+                not self.closed:
+            val event = self.deferred[0]
+            self.deferred = self.deferred.slice(1, self.deferred.len())
+            val produced = self.submit_event(event, allowed_user,
+                allowed_database, now_ms, timeout_ms)
+            for action in produced: actions.push(action)
+        actions
+
+    me feed(bytes: [i64], allowed_user: text, allowed_database: text,
+            now_ms: i64, timeout_ms: i64) -> [PgScalarFrontendAction]:
+        if self.closed:
+            return [pg_scalar_frontend_action(PgScalarFrontendActionKind.Close)]
+        self.driver.feed(bytes)
+        self.enqueue_driver_events()
+        self.advance(allowed_user, allowed_database, now_ms, timeout_ms)
+
+    me poll_port(allowed_user: text, allowed_database: text,
+            now_ms: i64, timeout_ms: i64) -> [PgScalarFrontendAction]:
+        if self.closed:
+            return [pg_scalar_frontend_action(PgScalarFrontendActionKind.Close)]
+        if self.pending_request_id == 0:
+            return self.advance(allowed_user, allowed_database, now_ms, timeout_ms)
+        val request = self.pending_request_id
+        val receipt = self.port.poll_receipt(request)
+        if receipt <= 0:
+            return [PgScalarFrontendAction(kind: PgScalarFrontendActionKind.WaitOwner,
+                bytes: [], request_id: request)]
+        val status = self.port.result_status(receipt)
+        val blob = self.port.result_blob(receipt)
+        self.pending_request_id = 0
+        if status != 0 or blob <= 0:
+            val _ = self.port.release_result(receipt)
+            return self.reject_and_close("57014", "database command cancelled or timed out")
+        val result_operation = self.port.blob_operation(blob)
+        val result_session = self.port.blob_session(blob)
+        val close_connection = self.port.blob_close(blob) != 0
+        val length = self.port.blob_length(blob)
+        if length < 0:
+            val _ = self.port.release_blob(blob)
+            val _ = self.port.release_result(receipt)
+            return self.reject_and_close("XX000", "invalid database completion")
+        var bytes: [u8] = []
+        var index = 0
+        while index < length:
+            val octet = self.port.blob_byte(blob, index)
+            if octet < 0:
+                val _ = self.port.release_blob(blob)
+                val _ = self.port.release_result(receipt)
+                return self.reject_and_close("XX000", "invalid database completion")
+            bytes.push(octet as u8)
+            index = index + 1
+        val _ = self.port.release_blob(blob)
+        val _ = self.port.release_result(receipt)
+        if result_operation != self.pending_operation:
+            return self.reject_and_close("XX000", "database completion operation mismatch")
+        var actions: [PgScalarFrontendAction] = []
+        if self.pending_operation == 4:
+            if close_connection or result_session <= 0:
+                self.driver.authentication_failed()
+                self.closed = true
+                actions.push(pg_scalar_frontend_write(bytes))
+                actions.push(pg_scalar_frontend_action(PgScalarFrontendActionKind.Close))
+                return actions
+            self.session_id = result_session
+            self.driver.authentication_succeeded()
+        actions.push(pg_scalar_frontend_write(bytes))
+        val more = self.advance(allowed_user, allowed_database, now_ms, timeout_ms)
+        for action in more: actions.push(action)
+        actions
+
+    me disconnect(now_ms: i64 = 0, timeout_ms: i64 = 1000):
+        if not self.closed:
+            self.closed = true
+            val _ = self.port.cancel()
+        if self.session_id > 0 and not self.termination_submitted:
+            self.termination_submitted = true
+            val _ = self.port.terminate(self.session_id)
+
+export PgScalarFrontendActionKind, PgScalarFrontendAction
+export PgWireScalarFrontend

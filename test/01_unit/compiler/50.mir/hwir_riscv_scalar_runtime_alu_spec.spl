@@ -1,0 +1,138 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.host_evaluator.{HwHostInput, evaluate_strict_comb_hwir}
+use compiler.mir.hwir.riscv_scalar_runtime_alu.{strict_riscv_scalar_runtime_alu_hwir}
+use compiler.backend.backend.hwir_to_vhdl.{render_strict_hwir_vhdl}
+use lib.hardware.riscv_common.isa.scalar_database.{RiscvScalarDecoderPlan,
+    riscv_scalar_decoder_plan}
+use lib.hardware.riscv_common.isa.scalar_database.{riscv_scalar_semantic_opcode}
+
+fn row_for(plan: RiscvScalarDecoderPlan, instruction: i64) -> i64:
+    var index = 0
+    for entry in plan.entries:
+        if entry.matches(instruction as u32, plan.xlen): return index + 1
+        index = index + 1
+    0
+
+fn runtime_alu_inputs(instruction: i64, row_index: i64, semantic: i64, width32: i64,
+    rs1: i64, rs2: i64, pc: i64) -> [HwHostInput]:
+    val rd = (instruction >> 7) & 31
+    val rs1_field = (instruction >> 15) & 31
+    val rs2_field = (instruction >> 20) & 31
+    [HwHostInput.bits("uop_valid", 1), HwHostInput.bits("decode_legal", 1),
+        HwHostInput.bits("decoded_execution_class", 1),
+        HwHostInput.bits("decoded_memory_effect", 0),
+        HwHostInput.bits("decoded_row_index", row_index),
+        HwHostInput.bits("decoded_semantic_opcode", semantic),
+        HwHostInput.bits("decoded_declared_operand_width_is_32", width32),
+        HwHostInput.bits("canonical_instruction", instruction),
+        HwHostInput.bits("original_instruction", instruction),
+        HwHostInput.bits("instruction_length_bytes", 4),
+        HwHostInput.bits("instruction_rd_field", rd),
+        HwHostInput.bits("instruction_rs1_field", rs1_field),
+        HwHostInput.bits("instruction_rs2_field", rs2_field),
+        HwHostInput.bits("rs1_value", rs1), HwHostInput.bits("rs2_value", rs2),
+        HwHostInput.bits("pc_before", pc), HwHostInput.bits("fallthrough_pc", pc + 4),
+        HwHostInput.bits("privilege", 3), HwHostInput.bits("provider_event_id", 7),
+        HwHostInput.bits("decode_event_id", 7), HwHostInput.bits("lineage_valid", 1)]
+
+describe "runtime-parameterized scalar integer provider":
+    it "admits every declared integer row in both concrete products":
+        for product in [(CoreConfig.rv32(), "rv32i"), (CoreConfig.rv64(), "rv64i")]:
+            val plan = riscv_scalar_decoder_plan(product[1]).unwrap()
+            val module = strict_riscv_scalar_runtime_alu_hwir(
+                "runtime_alu_all_" + product[1], product[0], plan).unwrap()
+            var entry_index = 0
+            for entry in plan.entries:
+                val integer = entry.execution_class == "integer" or
+                    entry.execution_class == "integer-word"
+                if integer:
+                    val result = evaluate_strict_comb_hwir(module, runtime_alu_inputs(
+                        entry.encoding_value as i64, entry_index + 1,
+                        riscv_scalar_semantic_opcode(entry.semantic_operation),
+                        if entry.operand_width_bits == 32: 1 else: 0,
+                        0, 0, 0)).unwrap()
+                    expect(result.value_of("retire_valid").unwrap()).to_equal(1)
+                    expect(result.value_of("protocol_fault").unwrap()).to_equal(0)
+                entry_index = entry_index + 1
+
+    it "executes RV32 register and immediate rows through one graph":
+        val module = strict_riscv_scalar_runtime_alu_hwir("runtime_alu_rv32",
+            CoreConfig.rv32(), riscv_scalar_decoder_plan("rv32i").unwrap()).unwrap()
+        val add = evaluate_strict_comb_hwir(module,
+            runtime_alu_inputs(0x002081B3, row_for(riscv_scalar_decoder_plan("rv32i").unwrap(), 0x002081B3), 1, 0, 0xFFFFFFFF, 1, 0x100)).unwrap()
+        expect(add.value_of("retire_valid").unwrap()).to_equal(1)
+        expect(add.value_of("retire_rd_value").unwrap()).to_equal(0)
+        val addi = evaluate_strict_comb_hwir(module,
+            runtime_alu_inputs(0xFFF08193, row_for(riscv_scalar_decoder_plan("rv32i").unwrap(), 0xFFF08193), 1, 0, 0, 0, 0x100)).unwrap()
+        expect(addi.value_of("retire_rd_value").unwrap()).to_equal(0xFFFFFFFF)
+        val slt = evaluate_strict_comb_hwir(module,
+            runtime_alu_inputs(0x0020A1B3, row_for(riscv_scalar_decoder_plan("rv32i").unwrap(), 0x0020A1B3), 39, 0, 0xFFFFFFFF, 1, 0x100)).unwrap()
+        expect(slt.value_of("retire_rd_value").unwrap()).to_equal(1)
+
+    it "executes RV64 word add and sign extends once":
+        val module = strict_riscv_scalar_runtime_alu_hwir("runtime_alu_rv64",
+            CoreConfig.rv64(), riscv_scalar_decoder_plan("rv64i").unwrap()).unwrap()
+        val addiw = evaluate_strict_comb_hwir(module,
+            runtime_alu_inputs(0x0010819B, row_for(riscv_scalar_decoder_plan("rv64i").unwrap(), 0x0010819B), 1, 1, 0x7FFFFFFF, 0, 0x100)).unwrap()
+        expect(addiw.value_of("retire_valid").unwrap()).to_equal(1)
+        expect(addiw.value_of("retire_rd_value").unwrap()).to_equal(-2147483648)
+
+    it "masks RV64 and word shift counts and distinguishes logical from arithmetic":
+        val plan = riscv_scalar_decoder_plan("rv64i").unwrap()
+        val module = strict_riscv_scalar_runtime_alu_hwir("runtime_alu_shift_rv64",
+            CoreConfig.rv64(), plan).unwrap()
+        val slli63 = evaluate_strict_comb_hwir(module,
+            runtime_alu_inputs(0x03F09293, row_for(plan, 0x03F09293), 42, 0,
+                1, 0, 0x100)).unwrap()
+        expect(slli63.value_of("retire_rd_value").unwrap()).to_equal(-9223372036854775808)
+        val srl = evaluate_strict_comb_hwir(module,
+            runtime_alu_inputs(0x02835293, row_for(plan, 0x02835293), 46, 0,
+                -9223372036854775808, 0, 0x100)).unwrap()
+        expect(srl.value_of("retire_rd_value").unwrap()).to_equal(8388608)
+        val sra = evaluate_strict_comb_hwir(module,
+            runtime_alu_inputs(0x42835293, row_for(plan, 0x42835293), 44, 0,
+                -9223372036854775808, 0, 0x100)).unwrap()
+        expect(sra.value_of("retire_rd_value").unwrap()).to_equal(-8388608)
+        val sllw = evaluate_strict_comb_hwir(module,
+            runtime_alu_inputs(0x007312BB, row_for(plan, 0x007312BB), 41, 1,
+                1, 31, 0x100)).unwrap()
+        expect(sllw.value_of("retire_rd_value").unwrap()).to_equal(-2147483648)
+
+    it "normalizes x0 sources and destination without suppressing retirement":
+        val plan = riscv_scalar_decoder_plan("rv32i").unwrap()
+        val module = strict_riscv_scalar_runtime_alu_hwir("runtime_alu_x0",
+            CoreConfig.rv32(), plan).unwrap()
+        val source_x0 = evaluate_strict_comb_hwir(module,
+            runtime_alu_inputs(0x002001B3, row_for(plan, 0x002001B3), 1, 0,
+                0x7fffffff, 7, 0x100)).unwrap()
+        expect(source_x0.value_of("retire_rd_value").unwrap()).to_equal(7)
+        val destination_x0 = evaluate_strict_comb_hwir(module,
+            runtime_alu_inputs(0x00208033, row_for(plan, 0x00208033), 1, 0,
+                1, 2, 0x100)).unwrap()
+        expect(destination_x0.value_of("retire_valid").unwrap()).to_equal(1)
+        expect(destination_x0.value_of("retire_rd_write").unwrap()).to_equal(0)
+        expect(destination_x0.value_of("retire_rd_value").unwrap()).to_equal(0)
+
+    it "executes masked shifts and fails closed on semantic mismatch":
+        val module = strict_riscv_scalar_runtime_alu_hwir("runtime_alu_reject",
+            CoreConfig.rv32(), riscv_scalar_decoder_plan("rv32i").unwrap()).unwrap()
+        val wrong_semantic = evaluate_strict_comb_hwir(module,
+            runtime_alu_inputs(0x002081B3, row_for(riscv_scalar_decoder_plan("rv32i").unwrap(), 0x002081B3), 2, 0, 1, 2, 0)).unwrap()
+        expect(wrong_semantic.value_of("retire_valid").unwrap()).to_equal(0)
+        expect(wrong_semantic.value_of("protocol_fault").unwrap()).to_equal(1)
+        val shift = evaluate_strict_comb_hwir(module,
+            runtime_alu_inputs(0x00409193, row_for(riscv_scalar_decoder_plan("rv32i").unwrap(), 0x00409193), 42, 0, 1, 0, 0)).unwrap()
+        expect(shift.value_of("retire_valid").unwrap()).to_equal(1)
+        expect(shift.value_of("retire_rd_value").unwrap()).to_equal(16)
+        expect(shift.value_of("protocol_fault").unwrap()).to_equal(0)
+
+    it "emits one runtime ALU without instruction or XLEN generics":
+        val module = strict_riscv_scalar_runtime_alu_hwir("runtime_alu_emit",
+            CoreConfig.rv64(), riscv_scalar_decoder_plan("rv64i").unwrap()).unwrap()
+        val emitted = render_strict_hwir_vhdl(module)
+        expect(emitted.is_success()).to_be(true)
+        expect(emitted.vhdl.contains("generic(")).to_be(false)
+        expect(emitted.vhdl).to_contain("canonical_instruction : in std_logic_vector(31 downto 0)")
+        expect(module.origins.any(_.source_name == "rv.i.add")).to_be(true)
+        expect(module.origins.any(_.source_name == "rv.i.addi")).to_be(true)

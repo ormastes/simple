@@ -1,0 +1,103 @@
+# Exact progressive slicing of an over-budget retained damage plan.
+# Rectangles are half-open, overlap-free planner output. The current and
+# deferred arrays partition them exactly; no pixels are widened or omitted.
+
+use common.ui.render_opt.damage_plan.{DamageFramePlan, DAMAGE_PLAN_NONE}
+
+class DamageBudgetSlice:
+    valid: bool
+    current_rects: [i64]
+    deferred_rects: [i64]
+    current_pixels: i64
+    deferred_pixels: i64
+    source_pixels: i64
+    complete: bool
+    reason: text
+
+fn slice_damage_plan_budget(plan: DamageFramePlan,
+                            maximum_pixels: i64) -> DamageBudgetSlice:
+    if maximum_pixels < 0 or plan.rects.len() % 4 != 0:
+        return DamageBudgetSlice(
+            valid: false, current_rects: [], deferred_rects: [],
+            current_pixels: 0, deferred_pixels: 0,
+            source_pixels: plan.planned_pixels, complete: false,
+            reason: "invalid-plan-or-budget")
+    if plan.mode == DAMAGE_PLAN_NONE:
+        return DamageBudgetSlice(
+            valid: true, current_rects: [], deferred_rects: [],
+            current_pixels: 0, deferred_pixels: 0,
+            source_pixels: 0, complete: true, reason: "idle")
+    var current: [i64] = []
+    var deferred: [i64] = []
+    var current_pixels: i64 = 0
+    var deferred_pixels: i64 = 0
+    var source_pixels: i64 = 0
+    var offset: i64 = 0
+    val rect_len = plan.rects.len()
+    while offset < rect_len:
+        val x = plan.rects[offset]
+        val y = plan.rects[offset + 1]
+        val w = plan.rects[offset + 2]
+        val h = plan.rects[offset + 3]
+        if w <= 0 or h <= 0:
+            return DamageBudgetSlice(
+                valid: false, current_rects: [], deferred_rects: [],
+                current_pixels: 0, deferred_pixels: 0,
+                source_pixels: plan.planned_pixels, complete: false,
+                reason: "invalid-rect")
+        val area = w * h
+        source_pixels = source_pixels + area
+        val available = maximum_pixels - current_pixels
+        if available <= 0:
+            deferred.push(x)
+            deferred.push(y)
+            deferred.push(w)
+            deferred.push(h)
+            deferred_pixels = deferred_pixels + area
+        elif area <= available:
+            current.push(x)
+            current.push(y)
+            current.push(w)
+            current.push(h)
+            current_pixels = current_pixels + area
+        else:
+            val full_rows = available / w
+            val partial_width = available % w
+            if full_rows > 0:
+                current.push(x)
+                current.push(y)
+                current.push(w)
+                current.push(full_rows)
+                current_pixels = current_pixels + w * full_rows
+            if partial_width > 0 and full_rows < h:
+                current.push(x)
+                current.push(y + full_rows)
+                current.push(partial_width)
+                current.push(1)
+                current_pixels = current_pixels + partial_width
+                deferred.push(x + partial_width)
+                deferred.push(y + full_rows)
+                deferred.push(w - partial_width)
+                deferred.push(1)
+                deferred_pixels = deferred_pixels + w - partial_width
+                if full_rows + 1 < h:
+                    deferred.push(x)
+                    deferred.push(y + full_rows + 1)
+                    deferred.push(w)
+                    deferred.push(h - full_rows - 1)
+                    deferred_pixels = deferred_pixels + w * (h - full_rows - 1)
+            elif full_rows < h:
+                deferred.push(x)
+                deferred.push(y + full_rows)
+                deferred.push(w)
+                deferred.push(h - full_rows)
+                deferred_pixels = deferred_pixels + w * (h - full_rows)
+        offset = offset + 4
+    DamageBudgetSlice(
+        valid: source_pixels == current_pixels + deferred_pixels,
+        current_rects: current, deferred_rects: deferred,
+        current_pixels: current_pixels, deferred_pixels: deferred_pixels,
+        source_pixels: source_pixels, complete: deferred_pixels == 0,
+        reason: if deferred_pixels == 0: "complete" else: "progressive")
+
+export DamageBudgetSlice, slice_damage_plan_budget

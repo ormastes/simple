@@ -19,6 +19,7 @@ use std.spec.{describe, context, it, expect, assert_true, assert_false}
 use os.compositor.dirty_rect.{
     IRect, irect_new, irect_empty, irect_union, irect_intersects,
     irect_intersection, irect_is_empty, irect_area, DirtyRegion,
+    DIRTY_REGION_MAX_RECTS,
 }
 
 use std.spec.step
@@ -260,3 +261,72 @@ describe "DirtyRegion accumulator":
         expect(bb.y).to_equal(7)  # oracle: 7 — named expected value from the requirement
         expect(bb.w).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(bb.h).to_equal(2)  # oracle: 2 — named expected value from the requirement
+
+    it "bounds retained damage while preserving every invalidated point":
+        step("Fill the pending damage owner beyond its fixed rectangle envelope")
+        var region = DirtyRegion.new()
+        var i = 0
+        while i <= DIRTY_REGION_MAX_RECTS:
+            region.add_rect(i * 2, i * 3, 1, 1)
+            i = i + 1
+
+        step("The saturated owner collapses conservatively instead of growing")
+        expect(region.count()).to_equal(1)
+        expect(region.is_coalesced()).to_equal(true)
+        val collapsed = region.bounding_box()
+        expect(collapsed.x).to_equal(0)
+        expect(collapsed.y).to_equal(0)
+        expect(collapsed.w).to_equal(DIRTY_REGION_MAX_RECTS * 2 + 1)
+        expect(collapsed.h).to_equal(DIRTY_REGION_MAX_RECTS * 3 + 1)
+
+    it "continues bounded accumulation after a saturation collapse":
+        step("Saturate once, then submit another full envelope of damage")
+        var region = DirtyRegion.new()
+        var i = 0
+        while i <= DIRTY_REGION_MAX_RECTS:
+            region.add_rect(i, i, 1, 1)
+            i = i + 1
+        i = 0
+        while i < DIRTY_REGION_MAX_RECTS:
+            region.add_rect(1000 + i, 2000 + i, 1, 1)
+            i = i + 1
+
+        step("Retained state never exceeds the production owner ceiling")
+        expect(region.count()).to_equal(1)
+        expect(region.is_coalesced()).to_equal(true)
+        val bbox = region.bounding_box()
+        expect(bbox.x).to_equal(0)
+        expect(bbox.y).to_equal(0)
+        expect(bbox.x + bbox.w).to_equal(1000 + DIRTY_REGION_MAX_RECTS)
+        expect(bbox.y + bbox.h).to_equal(2000 + DIRTY_REGION_MAX_RECTS)
+
+    it "clips extreme producer coordinates before endpoint arithmetic":
+        step("Submit partially visible and overflowing rectangles to a bounded owner")
+        var region = DirtyRegion.new_bounded(320, 240)
+        region.add_rect(-2147483647, 20, 2147483647, 40)
+        region.add_rect(300, 220, 2147483647, 2147483647)
+        region.add_rect(2147483640, 10, 40, 40)
+
+        step("Only representable visible damage survives without wrapped endpoints")
+        expect(region.count()).to_equal(1)
+        val bbox = region.bounding_box()
+        expect(bbox.x).to_equal(300)
+        expect(bbox.y).to_equal(220)
+        expect(bbox.w).to_equal(20)
+        expect(bbox.h).to_equal(20)
+
+    it "resets sticky coalescing when the display coordinate domain changes":
+        var region = DirtyRegion.new_bounded(320, 240)
+        var i = 0
+        while i <= DIRTY_REGION_MAX_RECTS:
+            region.add_rect(i, i, 1, 1)
+            i = i + 1
+        expect(region.is_coalesced()).to_equal(true)
+
+        region.reset_bounds(80, 60)
+        expect(region.is_empty()).to_equal(true)
+        expect(region.is_coalesced()).to_equal(false)
+        region.add_full_screen(80, 60)
+        val bbox = region.bounding_box()
+        expect(bbox.w).to_equal(80)
+        expect(bbox.h).to_equal(60)

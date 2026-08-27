@@ -2,6 +2,29 @@
 
 > Fixed-size arrays use the `[T; N]` syntax to declare arrays whose length is known at declaration time and enforced at runtime. Unlike dynamic arrays, fixed-size arrays carry their size as part of the type annotation, enabling stronger guarantees about buffer lengths. This spec validates creation, indexing (including negative indices), read operations like `first()`/`last()`/`contains()`, iteration with `for`, and functional methods (`map`, `filter`, `reduce`) that return dynamic arrays.
 
+<!-- sdn-diagram:id=fixed_size_arrays_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=fixed_size_arrays_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+fixed_size_arrays_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=fixed_size_arrays_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 13 | 13 | 0 | 0 |
@@ -21,7 +44,7 @@ Fixed-size arrays use the `[T; N]` syntax to declare arrays whose length is know
 | Category | Language |
 | Status | Active |
 | Source | `test/03_system/feature/usage/fixed_size_arrays_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -36,8 +59,6 @@ methods (`map`, `filter`, `reduce`) that return dynamic arrays.
 ## Syntax
 
 ```simple
-use std.spec.step
-
 val vec3: [f64; 3] = [1.0, 2.0, 3.0]
 val arr: [i64; 5] = [1, 2, 3, 4, 5]
 expect arr[-1] == 5
@@ -62,18 +83,16 @@ val sum = arr.reduce(0, \acc, x: acc + x)
 
 #### creates fixed-size array with type annotation
 
-- creates fixed-size array with type annotation
+1. expect vec3 len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates fixed-size array with type annotation")
 val vec3: [f64; 3] = [1.0, 2.0, 3.0]
 expect vec3.len() == 3
 ```
@@ -82,18 +101,16 @@ expect vec3.len() == 3
 
 #### creates fixed-size int array
 
-- creates fixed-size int array
+1. expect arr len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates fixed-size int array")
 val arr: [i64; 5] = [1, 2, 3, 4, 5]
 expect arr.len() == 5
 ```
@@ -102,18 +119,16 @@ expect arr.len() == 5
 
 #### creates single element fixed-size array
 
-- creates single element fixed-size array
+1. expect arr len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates single element fixed-size array")
 val arr: [i64; 1] = [42]
 expect arr[0] == 42
 expect arr.len() == 1
@@ -125,18 +140,13 @@ expect arr.len() == 1
 
 #### allows indexing read
 
-- allows indexing read
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("allows indexing read")
 val vec3: [f64; 3] = [1.0, 2.0, 3.0]
 expect vec3[0] == 1.0
 expect vec3[1] == 2.0
@@ -147,18 +157,13 @@ expect vec3[2] == 3.0
 
 #### allows negative indexing
 
-- allows negative indexing
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("allows negative indexing")
 val arr: [i64; 3] = [10, 20, 30]
 expect arr[-1] == 30
 expect arr[-2] == 20
@@ -171,18 +176,16 @@ expect arr[-3] == 10
 
 #### allows len
 
-- allows len
+1. expect vec3 len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("allows len")
 val vec3: [f64; 3] = [1.0, 2.0, 3.0]
 expect vec3.len() == 3
 ```
@@ -191,18 +194,17 @@ expect vec3.len() == 3
 
 #### allows first and last
 
-- allows first and last
+1. expect arr first
+2. expect arr last
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("allows first and last")
 val arr: [i64; 4] = [10, 20, 30, 40]
 expect arr.first() == 10
 expect arr.last() == 40
@@ -212,18 +214,17 @@ expect arr.last() == 40
 
 #### allows contains
 
-- allows contains
+1. expect arr contains
+2. expect not arr contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("allows contains")
 val arr: [i64; 3] = [1, 2, 3]
 expect arr.contains(2)
 expect not arr.contains(5)
@@ -233,18 +234,13 @@ expect not arr.contains(5)
 
 #### allows iteration
 
-- allows iteration
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("allows iteration")
 val vec3: [i64; 3] = [1, 2, 3]
 var sum = 0
 for x in vec3:
@@ -258,18 +254,13 @@ expect sum == 6
 
 #### allows map (returns dynamic array)
 
-- allows map (returns dynamic array)
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("allows map (returns dynamic array)")
 val vec3: [i64; 3] = [1, 2, 3]
 val doubled = vec3.map(_ * 2)
 expect doubled[0] == 2
@@ -281,18 +272,16 @@ expect doubled[2] == 6
 
 #### allows filter (returns dynamic array)
 
-- allows filter (returns dynamic array)
+1. expect evens len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("allows filter (returns dynamic array)")
 val arr: [i64; 5] = [1, 2, 3, 4, 5]
 val evens = arr.filter(_ % 2 == 0)
 expect evens[0] == 2
@@ -303,18 +292,13 @@ expect evens.len() == 2
 
 #### allows reduce
 
-- allows reduce
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("allows reduce")
 val arr: [i64; 4] = [1, 2, 3, 4]
 val sum = arr.reduce(0, \acc, x: acc + x)
 expect sum == 10
@@ -326,18 +310,16 @@ expect sum == 10
 
 #### displays with size annotation
 
-- displays with size annotation
+1. expect vec3 len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("displays with size annotation")
 val vec3: [i64; 3] = [1, 2, 3]
 # FixedSizeArray displays as [items; size]
 expect vec3.len() == 3
@@ -357,51 +339,3 @@ expect vec3.len() == 3
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `28b00e51a04a7e550f3722413bf96bf34a2250ff8b5cb9218acc26c70bf680f4`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `28b00e51a04a7e550f3722413bf96bf34a2250ff8b5cb9218acc26c70bf680f4`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `28b00e51a04a7e550f3722413bf96bf34a2250ff8b5cb9218acc26c70bf680f4`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/fixed_size_arrays_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/fixed_size_arrays_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/fixed_size_arrays_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/fixed_size_arrays_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/fixed_size_arrays_spec.spl:47:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates fixed-size array with type annotation' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/fixed_size_arrays_spec.spl:53:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates fixed-size int array' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/fixed_size_arrays_spec.spl:59:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates single element fixed-size array' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -1,0 +1,85 @@
+# @req REQ-001 REQ-003 REQ-004 REQ-010 NFR-001 NFR-002 NFR-003
+# @cover src/os/drivers/virtio/virtio_gpu_venus_protocol.spl 80%
+# @tag: unit, simpleos, virtio-gpu, venus, vulkan
+
+"""Fail-closed admission tests for the device-independent Venus transport plan."""
+
+use std.spec.*
+use os.drivers.virtio.virtio_gpu_venus_protocol.*
+
+fn ready_features() -> VenusFeatureSet:
+    VenusFeatureSet(virgl: true, resource_blob: true, context_init: true,
+        capset_query_fix: true, host_visible: true)
+
+fn venus_capset() -> VenusCapsetInfo:
+    VenusCapsetInfo(id: VIRTIO_GPU_CAPSET_VENUS, max_version: 1, max_size: 4096)
+
+describe "VirtIO-GPU Venus protocol admission":
+    it "requires every negotiated Venus transport feature":
+        # @covers VN_FEATURES:true VN_FEATURES:false
+        expect(venus_features_ready(ready_features())).to_equal(true)
+        expect(venus_features_ready(VenusFeatureSet(
+            virgl: false, resource_blob: true, context_init: true,
+            capset_query_fix: true, host_visible: true))).to_equal(false)
+        expect(venus_features_ready(VenusFeatureSet(
+            virgl: true, resource_blob: false, context_init: true,
+            capset_query_fix: true, host_visible: true))).to_equal(false)
+        expect(venus_features_ready(VenusFeatureSet(
+            virgl: true, resource_blob: true, context_init: false,
+            capset_query_fix: true, host_visible: true))).to_equal(false)
+        expect(venus_features_ready(VenusFeatureSet(
+            virgl: true, resource_blob: true, context_init: true,
+            capset_query_fix: false, host_visible: true))).to_equal(false)
+        expect(venus_features_ready(VenusFeatureSet(
+            virgl: true, resource_blob: true, context_init: true,
+            capset_query_fix: true, host_visible: false))).to_equal(false)
+
+    it "admits only the Venus capset within advertised version and size bounds":
+        # @covers VN_CAPSET:true VN_CAPSET:false
+        expect(venus_capset_valid(venus_capset(), 1, 4096)).to_equal(true)
+        expect(venus_capset_valid(VenusCapsetInfo(id: 1, max_version: 1,
+            max_size: 4096), 1, 4096)).to_equal(false)
+        expect(venus_capset_valid(venus_capset(), 2, 4096)).to_equal(false)
+        expect(venus_capset_valid(venus_capset(), 1, 4095)).to_equal(false)
+        expect(venus_capset_valid(venus_capset(), 0, 4096)).to_equal(false)
+        expect(venus_capset_valid(venus_capset(), 1, 0)).to_equal(false)
+
+    it "rejects reserved context and blob identities and empty resources":
+        # @covers VN_CONTEXT:true VN_CONTEXT:false
+        # @covers VN_BLOB:true VN_BLOB:false
+        expect(venus_context_valid(7, "simpleos-vulkan")).to_equal(true)
+        expect(venus_context_valid(0, "simpleos-vulkan")).to_equal(false)
+        expect(venus_context_valid(7, "")).to_equal(false)
+        expect(venus_blob_valid(9, 11u64, 4096u64)).to_equal(true)
+        expect(venus_blob_valid(0, 11u64, 4096u64)).to_equal(false)
+        expect(venus_blob_valid(9, 0u64, 4096u64)).to_equal(false)
+        expect(venus_blob_valid(9, 11u64, 0u64)).to_equal(false)
+
+    it "builds a bounded command plan only after every prerequisite passes":
+        # @covers VN_PLAN_FEATURES:true VN_PLAN_FEATURES:false
+        # @covers VN_PLAN_CAPSET:true VN_PLAN_CAPSET:false
+        # @covers VN_PLAN_CONTEXT:true VN_PLAN_CONTEXT:false
+        # @covers VN_PLAN_BLOB:true VN_PLAN_BLOB:false
+        # @covers VN_PLAN_SUBMIT:true VN_PLAN_SUBMIT:false
+        # @covers VN_PLAN_FENCE:true VN_PLAN_FENCE:false
+        val missing_features = VenusFeatureSet(virgl: true, resource_blob: true,
+            context_init: true, capset_query_fix: true, host_visible: false)
+        expect(venus_command_plan(missing_features, venus_capset(), 7, 9,
+            11u64, 4096u64, 64u64, 13u64).reason).to_equal("blocked:venus-features-missing")
+        expect(venus_command_plan(ready_features(), VenusCapsetInfo(id: 1,
+            max_version: 1, max_size: 4096), 7, 9, 11u64, 4096u64,
+            64u64, 13u64).reason).to_equal("blocked:venus-capset-invalid")
+        expect(venus_command_plan(ready_features(), venus_capset(), 0, 9,
+            11u64, 4096u64, 64u64, 13u64).reason).to_equal("blocked:venus-context-invalid")
+        expect(venus_command_plan(ready_features(), venus_capset(), 7, 0,
+            11u64, 4096u64, 64u64, 13u64).reason).to_equal("blocked:venus-blob-invalid")
+        expect(venus_command_plan(ready_features(), venus_capset(), 7, 9,
+            11u64, 4096u64, 0u64, 13u64).reason).to_equal("blocked:venus-submit-empty")
+        expect(venus_command_plan(ready_features(), venus_capset(), 7, 9,
+            11u64, 4096u64, 64u64, 0u64).reason).to_equal("blocked:venus-fence-missing")
+
+        val plan = venus_command_plan(ready_features(), venus_capset(), 7, 9,
+            11u64, 4096u64, 64u64, 13u64)
+        expect(plan.admitted).to_equal(true)
+        expect(plan.reason).to_equal("ready:venus-command-plan")
+        expect(plan.command_count).to_equal(6)

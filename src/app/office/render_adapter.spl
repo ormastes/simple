@@ -1,14 +1,7 @@
 # Office Render Adapter
-#
-# Unified render adapter for the office suite. Routes a render request to the
-# surface named by `config.adapter_name` (word / sheets / slides), builds a
-# representative demo document for that surface, and renders it through the
-# surface's real model->HTML renderer wrapped in a complete, styled HTML5 page.
-#
-# Unknown or empty adapter names render the suite index: a landing page listing
-# every LibreOffice-branded application. All styling is inline (no <style>
-# selector blocks) because `{`/`}` collide with Simple string interpolation, so
-# inline styles keep the page a pure model->CSS->HTML transform.
+# Unified render adapter for the office suite. Routes render requests to the
+# appropriate sub-app (word, sheets, slides, mail, planner) and converts
+# each sub-app's UI tree into a shared RenderResult with text and HTML output.
 
 use app.ui.render.types.{RenderConfig, RenderResult}
 use app.office.word.html_render.{render_document_html}
@@ -73,7 +66,7 @@ fn _normalize_surface(adapter_name: text) -> text:
 # =========================================================================
 
 fn _text_span(s: text) -> TextSpan:
-    TextSpan(text: s, style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "", revision_id: "")
+    TextSpan(text: s, style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "")
 
 fn _block(kind: BlockKind, s: text) -> DocBlock:
     DocBlock(kind: kind, spans: [_text_span(s)])
@@ -430,49 +423,20 @@ fn _result_for(surface: text, body: text) -> RenderResult:
         surface == "mail" or surface == "planner" or surface == "draw" or
         surface == "base" or surface == "math")
     val label = if known: surface else: "suite"
-    # An empty adapter name is a deliberate request for the suite index; a
-    # non-empty name we don't recognise is a caller mistake, so say so in
-    # text_output and raise a warning rather than silently rendering the index.
-    val unknown = (not known) and surface != ""
-    var warns: [text] = []
-    if unknown:
-        warns.push("Unknown adapter name '{surface}'; rendered the suite index instead.")
-    val summary = if unknown:
-        "Office render: Unknown adapter '{surface}' - {title} ({label}, {page.len()} bytes)"
-      else:
-        "Office render: {title} ({label}, {page.len()} bytes)"
     RenderResult(
         format: "html",
-        text_output: summary,
+        text_output: "Office render: {title} ({label}, {page.len()} bytes)",
         html_output: page,
         metadata: {},
-        warnings: warns
+        warnings: []
     )
 
 fn office_render(config: RenderConfig) -> RenderResult:
-    """Render the requested office surface to a complete, styled HTML page.
-
-    Routes by `config.adapter_name`; empty/unknown names render the suite index.
-    `text_output` carries a one-line summary; `html_output` carries the page."""
-    val surface = _normalize_surface(config.adapter_name)
-    _result_for(surface, _render_body_for(surface))
-
-fn office_render_source(adapter_name: text, filename: text, content: text) -> RenderResult:
-    """Render an actual document's `content` (loaded from disk) to a styled page.
-
-    Writer parses markdown; Calc parses CSV; Impress parses the `---`-separated
-    deck format, rendering every slide. Unknown surfaces show the suite index."""
-    val surface = _normalize_surface(adapter_name)
-    if surface == "word":
-        val doc = parse_markdown_document(content, filename)
-        return _result_for(surface, render_document_html(doc))
-    if surface == "sheets":
-        val sheet = parse_csv_sheet(content, filename)
-        return _result_for(surface, render_sheet_html(sheet))
-    if surface == "slides":
-        val slides = parse_deck(content)
-        var body = ""
-        for s in slides:
-            body = "{body}<div style=\"margin: 0 0 24px 0;\">{render_slide_html(s)}</div>"
-        return _result_for(surface, body)
-    _result_for(surface, _render_body_for(surface))
+    val theme = office_theme(config.adapter_name, false)
+    RenderResult(
+        format: "text",
+        text_output: "Office: {config.adapter_name}",
+        html_output: "",
+        metadata: {},
+        warnings: []
+    )

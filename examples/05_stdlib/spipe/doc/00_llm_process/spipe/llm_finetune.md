@@ -101,22 +101,13 @@ Use `spipe fine-tune-status <attempt_id>` before handoff to confirm the attempt
 has data, model, training, eval, and decision evidence. If a data-check registry
 row records a repo-local `.spipe/llm-finetune-process/scripts/*.shs` checker,
 status also prints the checker execution state so a present registry row cannot
-hide a WARN cache/license gate. Checker paths are resolved under
-`.spipe/llm-finetune-process/scripts/`; traversal outside that directory is
-reported as a failed unsafe checker path. Status also prints the first
-readiness blocker, or `readiness_blocker=none` when the release gate is ready.
+hide a WARN cache/license gate.
 Use `spipe fine-tune-doctor <attempt_id>` to check registry evidence,
-placeholder values, missing local model artifact or handoff doc paths, and the
-target-eval failure reason before treating an attempt as production evidence.
+placeholder values, and the next readiness action before treating an attempt as
+production evidence.
 Use `spipe fine-tune-ready <attempt_id>` as the release/training handoff gate;
 it fails while requirement selection, model choice, real tuning method, model
-artifact, target-reaching eval, accepted decision, or deployable app handoff
-evidence remains pending. Local filesystem model artifact paths must exist;
-explicit artifact URIs such as `model://...` are treated as provider-managed
-artifacts. Local filesystem app handoff doc paths must also exist; explicit doc
-URIs are treated as externally managed evidence. A handoff doc path alone is not
-ready when the app handoff still says `do not deploy`, license constraints are
-pending, safety eval has not run, or deployment evidence is not deployable.
+artifact, target-reaching eval, or accepted decision evidence remains pending.
 Use `spipe fine-tune-next <attempt_id>` to print the next required phase for an
 attempt, including create-attempt, requirements selection, model selection,
 tuning method selection, artifact creation, target eval, or acceptance decision.

@@ -1,6 +1,29 @@
 # Tab Manager Specification
 
-> Tests covering Chromium TabManager — construction, Chromium TabManager — switching, Chromium TabManager — closing, Chromium BrowserTab — per-tab state.
+> 1. var mgr = TabManager new
+
+<!-- sdn-diagram:id=tab_manager_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=tab_manager_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+tab_manager_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=tab_manager_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,22 +40,16 @@
 
 #### starts empty with no active tab
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- starts empty with no active tab
+1. var mgr = TabManager new
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("starts empty with no active tab")
 var mgr = TabManager.new()
 expect(mgr.is_empty()).to_be_true()
 expect(mgr.count() == 0).to_be_true()
@@ -43,18 +60,16 @@ expect(mgr.active_index_of() == -1).to_be_true()
 
 #### new_tab assigns monotonically increasing ids
 
-- new_tab assigns monotonically increasing ids
+1. var mgr = TabManager new
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("new_tab assigns monotonically increasing ids")
 var mgr = TabManager.new()
 val id_a = mgr.new_tab("about:blank")
 val id_b = mgr.new_tab("about:home")
@@ -66,18 +81,18 @@ expect(mgr.count() == 2).to_be_true()
 
 #### new_tab promotes the freshly created tab to active
 
-- new_tab promotes the freshly created tab to active
+1. var mgr = TabManager new
+2. mgr new tab
+3. mgr new tab
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("new_tab promotes the freshly created tab to active")
 var mgr = TabManager.new()
 mgr.new_tab("first")
 mgr.new_tab("second")
@@ -89,18 +104,17 @@ expect(mgr.active_tab().title == "second").to_be_true()
 
 #### new_tab uses the default render target size
 
-- new_tab uses the default render target size
+1. var mgr = TabManager new
+2. mgr new tab
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("new_tab uses the default render target size")
 var mgr = TabManager.new()
 mgr.new_tab("sized")
 val t = mgr.active_tab()
@@ -115,18 +129,19 @@ expect(t.pixel_count() == DEFAULT_TAB_WIDTH * DEFAULT_TAB_HEIGHT).to_be_true()
 
 #### switch_to changes the active index
 
-- switch_to changes the active index
+1. var mgr = TabManager new
+2. mgr new tab
+3. mgr new tab
+4. mgr new tab
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("switch_to changes the active index")
 var mgr = TabManager.new()
 mgr.new_tab("a")
 mgr.new_tab("b")
@@ -141,18 +156,17 @@ expect(mgr.active_tab().title == "a").to_be_true()
 
 #### switch_to rejects out-of-range indices
 
-- switch_to rejects out-of-range indices
+1. var mgr = TabManager new
+2. mgr new tab
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("switch_to rejects out-of-range indices")
 var mgr = TabManager.new()
 mgr.new_tab("only")
 val ok = mgr.switch_to(5)
@@ -164,18 +178,16 @@ expect(mgr.active_index_of() == 0).to_be_true()
 
 #### switch_to_id focuses the tab with the given id
 
-- switch_to_id focuses the tab with the given id
+1. var mgr = TabManager new
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("switch_to_id focuses the tab with the given id")
 var mgr = TabManager.new()
 val id_a = mgr.new_tab("a")
 val id_b = mgr.new_tab("b")
@@ -190,18 +202,19 @@ expect(mgr.active_tab().id == id_a).to_be_true()
 
 #### close_tab removes a tab and leaves siblings intact
 
-- close_tab removes a tab and leaves siblings intact
+1. var mgr = TabManager new
+2. mgr new tab
+3. mgr new tab
+4. mgr new tab
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("close_tab removes a tab and leaves siblings intact")
 var mgr = TabManager.new()
 mgr.new_tab("a")
 mgr.new_tab("b")
@@ -217,18 +230,21 @@ expect(mgr.tab_at(1).title == "c").to_be_true()
 
 #### closing a tab before the active index shifts active down
 
-- closing a tab before the active index shifts active down
+1. var mgr = TabManager new
+2. mgr new tab
+3. mgr new tab
+4. mgr new tab
+5. mgr switch to
+6. mgr close tab
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("closing a tab before the active index shifts active down")
 var mgr = TabManager.new()
 mgr.new_tab("a")
 mgr.new_tab("b")
@@ -244,18 +260,19 @@ expect(mgr.active_tab().title == "c").to_be_true()
 
 #### closing the active last tab falls back to the previous one
 
-- closing the active last tab falls back to the previous one
+1. var mgr = TabManager new
+2. mgr new tab
+3. mgr new tab
+4. mgr close tab
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("closing the active last tab falls back to the previous one")
 var mgr = TabManager.new()
 mgr.new_tab("a")
 mgr.new_tab("b")
@@ -269,18 +286,18 @@ expect(mgr.active_tab().title == "a").to_be_true()
 
 #### closing the sole remaining tab clears the active index
 
-- closing the sole remaining tab clears the active index
+1. var mgr = TabManager new
+2. mgr new tab
+3. mgr close tab
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("closing the sole remaining tab clears the active index")
 var mgr = TabManager.new()
 mgr.new_tab("a")
 mgr.close_tab(0)
@@ -292,18 +309,20 @@ expect(mgr.active_index_of() == -1).to_be_true()
 
 #### close_all empties the manager
 
-- close_all empties the manager
+1. var mgr = TabManager new
+2. mgr new tab
+3. mgr new tab
+4. mgr new tab
+5. mgr close all
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("close_all empties the manager")
 var mgr = TabManager.new()
 mgr.new_tab("a")
 mgr.new_tab("b")
@@ -320,18 +339,17 @@ expect(mgr.active_index_of() == -1).to_be_true()
 
 #### tab starts dirty and clear_dirty resets the flag
 
-- tab starts dirty and clear_dirty resets the flag
+1. tab clear dirty
+2. tab mark dirty
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("tab starts dirty and clear_dirty resets the flag")
 val tab = BrowserTab.new(42, "fresh", 64, 48)
 expect(tab.dirty).to_be_true()
 tab.clear_dirty()
@@ -344,18 +362,16 @@ expect(tab.dirty).to_be_true()
 
 #### set_title updates the visible title
 
-- set_title updates the visible title
+1. tab set title
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("set_title updates the visible title")
 val tab = BrowserTab.new(1, "old", 32, 16)
 tab.set_title("new")
 expect(tab.title == "new").to_be_true()
@@ -365,18 +381,16 @@ expect(tab.title == "new").to_be_true()
 
 #### set_z_order records the stacking value
 
-- set_z_order records the stacking value
+1. tab set z order
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("set_z_order records the stacking value")
 val tab = BrowserTab.new(1, "z", 32, 16)
 tab.set_z_order(7)
 expect(tab.z_order == 7).to_be_true()
@@ -386,18 +400,19 @@ expect(tab.z_order == 7).to_be_true()
 
 #### close flips the closed flag without removing siblings
 
-- close flips the closed flag without removing siblings
+1. var mgr = TabManager new
+2. mgr new tab
+3. mgr new tab
+4. t close
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("close flips the closed flag without removing siblings")
 var mgr = TabManager.new()
 mgr.new_tab("a")
 mgr.new_tab("b")
@@ -416,12 +431,12 @@ expect(mgr.count() == 2).to_be_true()
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui.chromium/tab_manager_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Chromium TabManager — construction, Chromium TabManager — switching, Chromium TabManager — closing, Chromium BrowserTab — per-tab state.
+Tests covering:
 - Chromium TabManager — construction
 - Chromium TabManager — switching
 - Chromium TabManager — closing
@@ -439,51 +454,3 @@ Tests covering Chromium TabManager — construction, Chromium TabManager — swi
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `dfabfb7454f734d60b6f4f03682220053d35cf4e0cf58f0807ee61798a7aeffb`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `dfabfb7454f734d60b6f4f03682220053d35cf4e0cf58f0807ee61798a7aeffb`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `dfabfb7454f734d60b6f4f03682220053d35cf4e0cf58f0807ee61798a7aeffb`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/ui.chromium/tab_manager_spec.spl
-mirror: doc/06_spec/01_unit/app/ui.chromium/tab_manager_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/ui.chromium/tab_manager_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/ui.chromium/tab_manager_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/ui.chromium/tab_manager_spec.spl:32:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'starts empty with no active tab' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui.chromium/tab_manager_spec.spl:40:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'new_tab assigns monotonically increasing ids' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui.chromium/tab_manager_spec.spl:49:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'new_tab promotes the freshly created tab to active' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

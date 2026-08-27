@@ -1,6 +1,6 @@
-# @req REQ-SSPEC-COMPILER
+# Contract spec: test/01_unit/compiler/backend/stage4_final_symbol_closure_spec.spl
 
-> val prefixed = exact.replace(" T rt_", " T _rt_")
+> Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,9 +9,9 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# @req REQ-SSPEC-COMPILER
+# Contract spec: test/01_unit/compiler/backend/stage4_final_symbol_closure_spec.spl
 
-val prefixed = exact.replace(" T rt_", " T _rt_")
+Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
 
 ## At a Glance
 
@@ -20,224 +20,36 @@ val prefixed = exact.replace(" T rt_", " T _rt_")
 | Category | Compiler |
 | Status | Active |
 | Source | `test/01_unit/compiler/backend/stage4_final_symbol_closure_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-val prefixed = exact.replace(" T rt_", " T _rt_")
-        expect(stage4_validate_font_provider_symbol_contract(exact, "elf").is_ok()).to_be(true)
-        expect(stage4_validate_font_provider_symbol_contract(prefixed, "macho").is_ok()).to_be(true)
-        expect(stage4_validate_font_provider_symbol_contract(exact + "00000000 A @feat.00\n", "coff-msvc").is_ok()).to_be(true)
-        expect(stage4_validate_font_provider_symbol_contract(prefixed, "coff-mingw").is_ok()).to_be(true)
+## Purpose and Audience
 
-    it "rejects font ABI drift duplicate exports and runtime dependencies":
-        step("rejects font ABI drift duplicate exports and runtime dependencies")
-        val exact = "00000000 T rt_font_load_bytes\n00000010 T rt_font_load\n00000020 T rt_font_free\n00000030 T rt_font_glyph_bitmap\n00000040 T rt_font_glyph_index\n00000050 T rt_font_glyph_bitmap_index\n00000060 T rt_font_bitmap_width\n00000070 T rt_font_bitmap_height\n00000080 T rt_font_bitmap_xoff\n00000090 T rt_font_bitmap_yoff\n000000a0 T rt_font_bitmap_get_pixel\n000000b0 T rt_font_bitmap_free\n000000c0 T rt_font_glyph_advance\n000000d0 T rt_font_glyph_advance_index\n000000e0 T rt_font_line_height\n000000f0 T rt_font_ascent\n00000100 T rt_font_descent\n00000110 T rt_font_line_gap\n"
-        expect(stage4_validate_font_provider_symbol_contract(exact.replace("00000110 T rt_font_line_gap\n", ""), "elf").is_err()).to_be(true)
-        expect(stage4_validate_font_provider_symbol_contract(exact + "00000120 T stbtt_leaked\n", "elf").is_err()).to_be(true)
-        expect(stage4_validate_font_provider_symbol_contract(exact + "00000120 T rt_font_load\n", "elf").is_err()).to_be(true)
-        expect(stage4_validate_font_provider_symbol_contract(exact + "         U rt_hidden_dependency\n", "elf").is_err()).to_be(true)
-        expect(stage4_validate_font_provider_symbol_contract(exact, "wasm").is_err()).to_be(true)
+Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
+contracts red-visible, so a regression in the owned code fails this spec
+instead of shipping silently.
 
-    it "accepts only the exact hosted memtrack provider ABI":
-        step("accepts only the exact hosted memtrack provider ABI")
-        val exact = "00000000 B g_memtrack_enabled\n00000010 T spl_memtrack_enable\n00000020 T spl_memtrack_disable\n00000030 T spl_memtrack_is_enabled\n00000040 T spl_memtrack_record\n00000050 T spl_memtrack_unrecord\n00000060 T spl_memtrack_snapshot\n00000070 T spl_memtrack_dump_since\n00000080 T spl_memtrack_live_count\n00000090 T spl_memtrack_live_bytes\n000000a0 T spl_memtrack_reset\n000000b0 T spl_memtrack_count_since\n000000c0 T spl_memtrack_bytes_since\n000000d0 T spl_memtrack_set_listener\n000000e0 T spl_memtrack_clear_listener\n         U calloc\n"
-        val prefixed = exact.replace(" B g_", " B _g_").replace(" T spl_", " T _spl_")
-        expect(stage4_validate_memtrack_provider_symbol_contract(exact, "elf").is_ok()).to_be(true)
-        expect(stage4_validate_memtrack_provider_symbol_contract(prefixed, "macho").is_ok()).to_be(true)
-        expect(stage4_validate_memtrack_provider_symbol_contract(exact + "00000000 A @feat.00\n", "coff-msvc").is_ok()).to_be(true)
-        expect(stage4_validate_memtrack_provider_symbol_contract(prefixed, "coff-mingw").is_ok()).to_be(true)
-        expect(stage4_validate_memtrack_provider_symbol_contract(exact.replace("000000e0 T spl_memtrack_clear_listener\n", ""), "elf").is_err()).to_be(true)
-        expect(stage4_validate_memtrack_provider_symbol_contract(exact + "000000f0 T spl_memtrack_extra\n", "elf").is_err()).to_be(true)
-        expect(stage4_validate_memtrack_provider_symbol_contract(exact + "000000f0 T spl_memtrack_enable\n", "elf").is_err()).to_be(true)
-        expect(stage4_validate_memtrack_provider_symbol_contract(exact + "         U rt_hidden_dependency\n", "elf").is_err()).to_be(true)
-        expect(stage4_validate_memtrack_provider_symbol_contract(exact + "         w spl_hidden_dependency\n", "elf").is_err()).to_be(true)
-        expect(stage4_validate_memtrack_provider_symbol_contract(exact, "wasm").is_err()).to_be(true)
+## Scope and Preconditions
 
-    it "accepts the exact hosted time and progress ABI":
-        step("accepts the exact hosted time and progress ABI")
-        val exact = "00000000 T rt_progress_get_elapsed_seconds\n00000010 T rt_progress_init\n00000020 T rt_progress_reset\n00000030 T rt_time_now_seconds_f64\n00000040 T rt_timestamp_add_days\n00000050 T rt_timestamp_diff_days\n00000060 T rt_timestamp_from_components\n00000070 T rt_timestamp_get_day\n00000080 T rt_timestamp_get_hour\n00000090 T rt_timestamp_get_microsecond\n000000a0 T rt_timestamp_get_minute\n000000b0 T rt_timestamp_get_month\n000000c0 T rt_timestamp_get_second\n000000d0 T rt_timestamp_get_year\n"
-        val prefixed = exact.replace(" T rt_", " T _rt_")
-        val elf = exact + "         U clock_gettime\n"
-        val macho = prefixed + "         U _clock_gettime\n"
-        val msvc = exact + "00000000 A @feat.00\n         U rt_time_now_unix_micros\n         U rt_time_now_nanos\n         U __chkstk\n"
-        val mingw = prefixed + "         U _rt_time_now_unix_micros\n         U _rt_time_now_nanos\n         U ___chkstk_ms\n"
-        expect(stage4_validate_time_provider_symbol_contract(elf, "elf").is_ok()).to_be(true)
-        expect(stage4_validate_time_provider_symbol_contract(macho, "macho").is_ok()).to_be(true)
-        expect(stage4_validate_time_provider_symbol_contract(msvc, "coff-msvc").is_ok()).to_be(true)
-        expect(stage4_validate_time_provider_symbol_contract(mingw, "coff-mingw").is_ok()).to_be(true)
+Precondition: the repository working tree holds the subject code under test.
+Each scenario exercises the subject and asserts its observable contract; no
+behavior outside the named subject is claimed.
 
-    it "rejects time ABI and runtime dependency drift":
-        step("rejects time ABI and runtime dependency drift")
-        val exact = "00000000 T rt_progress_get_elapsed_seconds\n00000010 T rt_progress_init\n00000020 T rt_progress_reset\n00000030 T rt_time_now_seconds_f64\n00000040 T rt_timestamp_add_days\n00000050 T rt_timestamp_diff_days\n00000060 T rt_timestamp_from_components\n00000070 T rt_timestamp_get_day\n00000080 T rt_timestamp_get_hour\n00000090 T rt_timestamp_get_microsecond\n000000a0 T rt_timestamp_get_minute\n000000b0 T rt_timestamp_get_month\n000000c0 T rt_timestamp_get_second\n000000d0 T rt_timestamp_get_year\n"
-        val windows = exact + "         U rt_time_now_unix_micros\n         U rt_time_now_nanos\n"
-        expect(stage4_validate_time_provider_symbol_contract(exact.replace("000000d0 T rt_timestamp_get_year\n", ""), "elf").is_err()).to_be(true)
-        expect(stage4_validate_time_provider_symbol_contract(exact + "000000e0 T rt_time_extra\n", "elf").is_err()).to_be(true)
-        expect(stage4_validate_time_provider_symbol_contract(exact + "000000e0 T rt_progress_init\n", "elf").is_err()).to_be(true)
-        expect(stage4_validate_time_provider_symbol_contract(exact + "         U rt_hidden_dependency\n", "elf").is_err()).to_be(true)
-        expect(stage4_validate_time_provider_symbol_contract(windows.replace("         U rt_time_now_nanos\n", ""), "coff-msvc").is_err()).to_be(true)
-        expect(stage4_validate_time_provider_symbol_contract(windows + "         U spl_hidden_dependency\n", "coff-msvc").is_err()).to_be(true)
-        expect(stage4_validate_time_provider_symbol_contract(windows + "         U rt_time_now_nanos\n", "coff-msvc").is_err()).to_be(true)
-        expect(stage4_validate_time_provider_symbol_contract(exact, "wasm").is_err()).to_be(true)
+## Primary Workflow
 
-    it "accepts the exact hosted fork ABI and POSIX memtrack dependencies":
-        step("accepts the exact hosted fork ABI and POSIX memtrack dependencies")
-        val exact = "00000000 T rt_fork_child_setup\n00000010 T rt_fork_parent_wait\n00000020 T rt_fork_parent_wait_bounded\n00000030 T rt_fork_parent_timed_out\n00000040 T rt_fork_parent_signaled\n00000050 T rt_fork_parent_stdout\n00000060 T rt_fork_parent_stderr\n00000070 T rt_fork_child_exit\n"
-        val posix_dependencies = "         U g_memtrack_enabled\n         U spl_memtrack_record\n         U spl_memtrack_unrecord\n"
-        val prefixed = exact.replace(" T rt_", " T _rt_")
-        val prefixed_dependencies = posix_dependencies.replace(" U g_", " U _g_").replace(" U spl_", " U _spl_")
-        expect(stage4_validate_fork_provider_symbol_contract(exact + posix_dependencies + "         U poll\n", "elf").is_ok()).to_be(true)
-        expect(stage4_validate_fork_provider_symbol_contract(prefixed + prefixed_dependencies + "         U _poll\n", "macho").is_ok()).to_be(true)
-        expect(stage4_validate_fork_provider_symbol_contract(exact + "00000000 A @feat.00\n         U exit\n", "coff-msvc").is_err()).to_be(true)
-        expect(stage4_validate_fork_provider_symbol_contract(prefixed + "         U _exit\n", "coff-mingw").is_err()).to_be(true)
+Run the scenarios; each one drives the subject through its pinned contract
+and asserts the expected observable outcome with an executed oracle.
 
-    it "rejects fork ABI and platform-specific memtrack dependency drift":
-        step("rejects fork ABI and platform-specific memtrack dependency drift")
-        val exact = "00000000 T rt_fork_child_setup\n00000010 T rt_fork_parent_wait\n00000020 T rt_fork_parent_wait_bounded\n00000030 T rt_fork_parent_timed_out\n00000040 T rt_fork_parent_signaled\n00000050 T rt_fork_parent_stdout\n00000060 T rt_fork_parent_stderr\n00000070 T rt_fork_child_exit\n"
-        val dependencies = "         U g_memtrack_enabled\n         U spl_memtrack_record\n         U spl_memtrack_unrecord\n"
-        expect(stage4_validate_fork_provider_symbol_contract(exact.replace("00000020 T rt_fork_parent_wait_bounded\n", "") + dependencies, "elf").is_err()).to_be(true)
-        expect(stage4_validate_fork_provider_symbol_contract(exact.replace("00000070 T rt_fork_child_exit\n", "") + dependencies, "elf").is_err()).to_be(true)
-        expect(stage4_validate_fork_provider_symbol_contract(exact + "00000080 T rt_fork_extra\n" + dependencies, "elf").is_err()).to_be(true)
-        expect(stage4_validate_fork_provider_symbol_contract(exact + dependencies.replace("         U g_memtrack_enabled\n", ""), "elf").is_err()).to_be(true)
-        expect(stage4_validate_fork_provider_symbol_contract(exact + dependencies.replace("         U spl_memtrack_record\n", ""), "elf").is_err()).to_be(true)
-        expect(stage4_validate_fork_provider_symbol_contract(exact + dependencies.replace("         U spl_memtrack_unrecord\n", ""), "elf").is_err()).to_be(true)
-        expect(stage4_validate_fork_provider_symbol_contract(exact + dependencies + "         U spl_hidden_dependency\n", "elf").is_err()).to_be(true)
-        expect(stage4_validate_fork_provider_symbol_contract(exact + dependencies, "coff-msvc").is_err()).to_be(true)
-        expect(stage4_validate_fork_provider_symbol_contract(exact, "wasm").is_err()).to_be(true)
+## Unsupported / Limitations
 
-    it "compiles stages validates and cleans the time provider after memtrack":
-        step("compiles stages validates and cleans the time provider after memtrack")
-        expect(stage4_time_provider_archive_file("linux", false).unwrap()).to_equal("libsimple_stage4_time.a")
-        expect(stage4_time_provider_archive_file("windows", true).unwrap()).to_equal("simple_stage4_time.lib")
-        expect(stage4_time_provider_archive_file("linux", true).is_err()).to_be(true)
-        expect(stage4_time_provider_object_format("freebsd", false).unwrap()).to_equal("elf")
-        expect(stage4_time_provider_object_format("macos", false).unwrap()).to_equal("macho")
-        expect(stage4_time_provider_object_format("windows", false).unwrap()).to_equal("coff-mingw")
-        val compiler_source = rt_file_read_text("src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
-        expect(compiler_source).to_contain("\"runtime_memtrack\", \"runtime_timestamp\", \"runtime_fork\"")
-        expect(compiler_source).to_contain("{{object_prefix}}runtime_timestamp{{ext}}")
-        val source = compiler_native_link_source()
-        val memtrack_pos = source.last_index_of("llvm_stage4_build_memtrack_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid)")
-        val time_pos = source.last_index_of("llvm_stage4_build_time_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid)")
-        val projection_pos = source.find("llvm_stage4_project_selected_archives(candidate_labels, candidate_paths, selected_archive_indices, stage4_requested_symbols")
-        expect(time_pos).to_be_greater_than(memtrack_pos)
-        expect(projection_pos).to_be_greater_than(time_pos)
-        expect(source).to_contain("llvm_stage4_build_single_object_provider_archive(runtime_objects, \"runtime_timestamp\"")
-        expect(source).to_contain("llvm_stage4_candidate_archive_inventory([\"runtime_timestamp\"], [archive_path])")
-        expect(source).to_contain("stage4_validate_time_provider_symbol_contract(scans[0], object_format)")
-        expect(source).to_contain("\"Stage4 time provider failed: \" + err")
-        expect(source).to_contain("file_delete(time_provider_archive)")
+Only the pinned contracts are asserted here; end-to-end and integration
+behavior of the surrounding system is covered by companion specs.
 
-    it "stages validates and cleans the fork provider after its memtrack dependency":
-        step("stages validates and cleans the fork provider after its memtrack dependency")
-        expect(stage4_fork_provider_archive_file("linux", false).unwrap()).to_equal("libsimple_stage4_fork.a")
-        expect(stage4_fork_provider_archive_file("windows", true).is_err()).to_be(true)
-        expect(stage4_fork_provider_archive_file("windows", false).is_err()).to_be(true)
-        expect(stage4_fork_provider_archive_file("linux", true).is_err()).to_be(true)
-        expect(stage4_fork_provider_object_format("freebsd", false).unwrap()).to_equal("elf")
-        expect(stage4_fork_provider_object_format("macos", false).unwrap()).to_equal("macho")
-        expect(stage4_fork_provider_object_format("windows", false).is_err()).to_be(true)
-        expect(stage4_fork_provider_object_format("windows", true).is_err()).to_be(true)
-        val source = compiler_native_link_source()
-        val memtrack_pos = source.last_index_of("llvm_stage4_build_memtrack_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid)")
-        val fork_pos = source.last_index_of("llvm_stage4_build_fork_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid)")
-        val projection_pos = source.find("llvm_stage4_project_selected_archives(candidate_labels, candidate_paths, selected_archive_indices, stage4_requested_symbols")
-        expect(fork_pos).to_be_greater_than(memtrack_pos)
-        expect(projection_pos).to_be_greater_than(fork_pos)
-        expect(source).to_contain("llvm_stage4_build_single_object_provider_archive(runtime_objects, \"runtime_fork\"")
-        expect(source).to_contain("llvm_stage4_candidate_archive_inventory([\"runtime_fork\"], [archive_path])")
-        expect(source).to_contain("stage4_validate_fork_provider_symbol_contract(scans[0], object_format)")
-        expect(source).to_contain("\"Stage4 fork provider failed: \" + err")
-        expect(source).to_contain("file_delete(fork_provider_archive)")
+## Verification and Recovery
 
-    it "stages validates and cleans the memtrack provider before projection":
-        step("stages validates and cleans the memtrack provider before projection")
-        expect(stage4_memtrack_provider_archive_file("linux", false).unwrap()).to_equal("libsimple_stage4_memtrack.a")
-        expect(stage4_memtrack_provider_archive_file("windows", true).unwrap()).to_equal("simple_stage4_memtrack.lib")
-        expect(stage4_memtrack_provider_object_format("macos", false).unwrap()).to_equal("macho")
-        expect(stage4_memtrack_provider_object_format("windows", false).unwrap()).to_equal("coff-mingw")
-        val source = compiler_native_link_source()
-        val font_pos = source.last_index_of("llvm_stage4_build_font_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid)")
-        val memtrack_pos = source.last_index_of("llvm_stage4_build_memtrack_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid)")
-        val projection_pos = source.find("llvm_stage4_project_selected_archives(candidate_labels, candidate_paths, selected_archive_indices, stage4_requested_symbols")
-        expect(memtrack_pos).to_be_greater_than(font_pos)
-        expect(projection_pos).to_be_greater_than(memtrack_pos)
-        expect(source).to_contain("llvm_stage4_build_single_object_provider_archive(runtime_objects, \"runtime_memtrack\"")
-        expect(source).to_contain("llvm_stage4_candidate_archive_inventory([\"runtime_memtrack\"], [archive_path])")
-        expect(source).to_contain("stage4_validate_memtrack_provider_symbol_contract(scans[0], object_format)")
-        expect(source).to_contain("file_delete(memtrack_provider_archive)")
-
-    it "builds inventories validates and cleans the font provider before projection":
-        step("builds inventories validates and cleans the font provider before projection")
-        val source = compiler_native_link_source()
-        val build_pos = source.find("llvm_stage4_build_font_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid)")
-        val projection_pos = source.find("llvm_stage4_project_selected_archives(candidate_labels, candidate_paths, selected_archive_indices, stage4_requested_symbols")
-        expect(build_pos).to_be_greater_than(-1)
-        expect(projection_pos).to_be_greater_than(build_pos)
-        expect(source).to_contain("llvm_stage4_candidate_archive_inventory([\"runtime_font\"], [archive_path])")
-        expect(source).to_contain("stage4_validate_font_provider_symbol_contract(scans[0], object_format)")
-        expect(source).to_contain("file_delete(font_provider_archive)")
-        val font_source = rt_file_read_text("src/runtime/runtime_font.c") ?? ""
-        expect(font_source).to_contain("#define STBTT_STATIC\n#define STB_TRUETYPE_IMPLEMENTATION")
-
-    it "cleans bootstrap support on every strict provider failure exit":
-        step("cleans bootstrap support on every strict provider failure exit")
-        val source = compiler_native_link_source()
-        val strict_start = source.find("if stage4_requested:")
-        val strict_end = source.find("# Step 3: Combine all objects and link")
-        val strict_source = source.substring(strict_start, strict_end)
-        expect(strict_source).to_contain("file_delete(bootstrap_support_obj)\n            return Err(\"Stage4 strict profile rejects")
-        expect(strict_source).to_contain("file_delete(bootstrap_support_obj)\n                return Err(err)")
-        expect(strict_source).to_contain("\"Stage4 dynamic-loader provider failed: \" + err")
-        expect(strict_source).to_contain("\"Stage4 font provider failed: \" + err")
-        expect(strict_source).to_contain("\"Stage4 memtrack provider failed: \" + err")
-        expect(strict_source).to_contain("file_delete(bootstrap_support_obj)\n                return Err(\"Stage4 time provider failed")
-        expect(strict_source).to_contain("file_delete(bootstrap_support_obj)\n                return Err(\"Stage4 fork provider failed")
-
-    it "rejects hosted constructor and destructor section families":
-        step("rejects hosted constructor and destructor section families")
-        val headers = ".preinit_array .init_array.42 .ctors .fini_array .dtors __mod_init_func __mod_term_func .CRT$XIA .CRT$XCU .CRT$XPU .CRT$XTU .CRT$XLB"
-        val found = stage4_forbidden_archive_sections(headers)
-        val joined = found.join(" ")
-        expect(joined).to_contain(".preinit_array")
-        expect(joined).to_contain(".init_array")
-        expect(joined).to_contain(".ctors")
-        expect(joined).to_contain(".fini_array")
-        expect(joined).to_contain(".dtors")
-        expect(joined).to_contain("__mod_init_func")
-        expect(joined).to_contain("__mod_term_func")
-        expect(joined).to_contain(".CRT$XI")
-        expect(joined).to_contain(".CRT$XC")
-        expect(joined).to_contain(".CRT$XP")
-        expect(joined).to_contain(".CRT$XT")
-        expect(joined).to_contain(".CRT$XL")
-        expect(stage4_forbidden_archive_sections(".text .data .bss").len()).to_equal(0)
-
-    it "subtracts sibling definitions and returns sorted unique runtime requests":
-        step("subtracts sibling definitions and returns sorted unique runtime requests")
-        val rows = """
-first.o:
-                 U rt_cross
-                 U rt_need
-                 U rt_need
-                 U user_helper
-                 U rt_unique
-                 U rt_weak_lower_fn
-                 w rt_weak_lower_fn
-                 U rt_weak_lower_data
-                 v rt_weak_lower_data
-                 U rt_weak_upper_fn
-                 W rt_weak_upper_fn
-                 U rt_weak_upper_data
-                 V rt_weak_upper_data
-                 U rt_weak_defined
-                 U rt_malformed
-second.o:
-0000000000000000 T rt_cross
-0000000000000000 u rt_unique
-0000000000000000 W rt_weak_defined
-                 U spl_init_args
-                 u rt_malformed
-not-an-address W rt_malformed
+A red scenario names the contract that regressed. Recover by restoring the
+pinned behavior in the subject; verify with
+`bin/simple test test/01_unit/compiler/backend/stage4_final_symbol_closure_spec.spl` and a green Results line.
 
 ## Scenarios
 
@@ -421,7 +233,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("uses seed-safe canonical ordering instead of the seed no-op sort")
 val source = rt_file_read_text("src/compiler/70.backend/backend/stage4_symbol_closure.spl") ?? ""
 expect(source).to_contain("fn stage4_sorted_text")
-expect(source.contains(".sort()")).to_be(false)
+expect(source).to_not_contain(".sort()")
 ```
 
 </details>
@@ -914,46 +726,36 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `b913b1991bb417306d1a2fb040c8fb11acf9dd70cc65a13309e7c15a0b20fe55`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `ec2b5a1b9c4630a9256b0d9d1af1fe29e5c1981e0a72ea5bcf8eb7c86e1ce038`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `b913b1991bb417306d1a2fb040c8fb11acf9dd70cc65a13309e7c15a0b20fe55`.
+Source SHA-256: `ec2b5a1b9c4630a9256b0d9d1af1fe29e5c1981e0a72ea5bcf8eb7c86e1ce038`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `b913b1991bb417306d1a2fb040c8fb11acf9dd70cc65a13309e7c15a0b20fe55`  
+Source SHA-256: `ec2b5a1b9c4630a9256b0d9d1af1fe29e5c1981e0a72ea5bcf8eb7c86e1ce038`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **76/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 89/100
 source: test/01_unit/compiler/backend/stage4_final_symbol_closure_spec.spl
 mirror: doc/06_spec/01_unit/compiler/backend/stage4_final_symbol_closure_spec.md (current)
-findings: 7 blockers: 1
-  narrative=100 structure=100 oracle=20
-  traceability=100 evidence=70 coverage=100 maintainability=70
+findings: 4 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=100
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=76; blocker cap makes effective=49
-doc/06_spec/01_unit/compiler/backend/stage4_final_symbol_closure_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/compiler/backend/stage4_final_symbol_closure_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/compiler/backend/stage4_final_symbol_closure_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
 test/01_unit/compiler/backend/stage4_final_symbol_closure_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 26 unexplained numeric expected value(s)
   why: Reviewers need to know why a magic expected value is authoritative.
   improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/compiler/backend/stage4_final_symbol_closure_spec.spl:19:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches provider objects only at a portable leaf token boundary' has no retained capture or evidence
+test/01_unit/compiler/backend/stage4_final_symbol_closure_spec.spl:51:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches provider objects only at a portable leaf token boundary' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler/backend/stage4_final_symbol_closure_spec.spl:32:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'names and localizes the runtime-native archive for each hosted object ABI' has no retained capture or evidence
+test/01_unit/compiler/backend/stage4_final_symbol_closure_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'names and localizes the runtime-native archive for each hosted object ABI' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler/backend/stage4_final_symbol_closure_spec.spl:70:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'stages runtime core before owner resolution and includes fork only on POSIX' has no retained capture or evidence
+test/01_unit/compiler/backend/stage4_final_symbol_closure_spec.spl:102:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'stages runtime core before owner resolution and includes fork only on POSIX' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

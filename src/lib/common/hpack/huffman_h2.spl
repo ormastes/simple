@@ -276,11 +276,11 @@ fn huffman_table() -> [HuffEntry]:
         HuffEntry(code: 0x7ffffea, bits: 27),    # 0xf7
         HuffEntry(code: 0x7ffffeb, bits: 27),    # 0xf8
         HuffEntry(code: 0xfffffe0, bits: 28),    # 0xf9
-        HuffEntry(code: 0xfffffe1, bits: 28),    # 0xfa
-        HuffEntry(code: 0x7ffffec, bits: 27),    # 0xfb
-        HuffEntry(code: 0x7ffffed, bits: 27),    # 0xfc
-        HuffEntry(code: 0x7ffffee, bits: 27),    # 0xfd
-        HuffEntry(code: 0x7ffffef, bits: 27),    # 0xfe
+        HuffEntry(code: 0x7ffffec, bits: 27),    # 0xfa
+        HuffEntry(code: 0x7ffffed, bits: 27),    # 0xfb
+        HuffEntry(code: 0x7ffffee, bits: 27),    # 0xfc
+        HuffEntry(code: 0x7ffffef, bits: 27),    # 0xfd
+        HuffEntry(code: 0x7fffff0, bits: 27),    # 0xfe
         HuffEntry(code: 0x3ffffee, bits: 26),    # 0xff
         HuffEntry(code: 0x3fffffff, bits: 30)    # EOS (index 256)
     ]
@@ -329,11 +329,10 @@ fn hpack_huffman_encode(payload: [u8]) -> [u8]:
 fn hpack_huffman_decode(bytes: [u8], offset: i64, length: i64) -> Result<[u8], text>:
     if offset < 0 or length < 0:
         return Err("hpack_huffman_decode: negative offset or length")
-    if offset + length > bytes.len():
+    if decoded_cap < 0:
+        return Err("hpack_huffman_decode: negative decoded cap")
+    if offset > bytes.len().to_i64() or length > bytes.len().to_i64() - offset:
         return Err("hpack_huffman_decode: range out of bounds")
-    val table = huffman_table()
-    # Build a decode tree from the table.
-    val tree = _build_decode_tree(table)
     var out: [u8] = []
     var node: i64 = 0       # current tree node index (0 = root)
     var partial: i64 = 0    # bits consumed in current (incomplete) code
@@ -342,20 +341,18 @@ fn hpack_huffman_decode(bytes: [u8], offset: i64, length: i64) -> Result<[u8], t
         val byte = bytes[offset + i].to_i64()
         var bit: i64 = 7
         while bit >= 0:
-            val b = (byte / _pow2(bit)) & 1
-            partial = partial + 1
-            node = match _tree_child(tree, node, b):
-                case Ok(child): child
-                case Err(_): return Err("hpack_huffman_decode: invalid code sequence")
-            match _tree_symbol(tree, node):
-                case Ok(sym):
-                    if sym == 256:
-                        return Err("hpack_huffman_decode: EOS symbol in stream")
-                    out.push(sym.to_u8())
-                    node = 0     # back to root
-                    partial = 0  # reset partial counter
-                case Err(_):
-                    pass
+            if code_bits >= 30: return Err("hpack_huffman_decode: overlong code")
+            val one = ((byte >> bit) & 1) != 0
+            code_bits = code_bits + 1
+            node = if one: HPACK_HUFFMAN_RIGHT[node] else: HPACK_HUFFMAN_LEFT[node]
+            if node < 0: return Err("hpack_huffman_decode: invalid code sequence")
+            val exact = HPACK_HUFFMAN_SYMBOL[node]
+            if exact >= 0:
+                if exact == 256: return Err("hpack_huffman_decode: EOS symbol in stream")
+                if out.len().to_i64() >= decoded_cap: return Err("hpack_huffman_decode: decoded cap")
+                out.push(exact.to_u8())
+                node = 0
+                code_bits = 0
             bit = bit - 1
         i = i + 1
     # After all bytes: node must be root (clean boundary) or mid-tree (padding).

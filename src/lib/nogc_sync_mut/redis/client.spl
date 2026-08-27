@@ -17,7 +17,6 @@ client.close()?
 """
 
 use std.io.types.{IoError, IoErrorKind}
-use std.convert (try_parse_int)
 
 # ============================================================================
 # RedisClient
@@ -45,8 +44,7 @@ class RedisClient:
             Connected RedisClient or IoError
         """
         val addr = "{host}:{port}"
-        val fd = unsafe(capabilities: [ffi]):
-            rt_io_tcp_connect(addr)
+        val fd = rt_io_tcp_connect(addr)
         if fd < 0:
             return Err(IoError(kind: IoErrorKind.ConnectionRefused, message: "redis connect failed: {addr}", source: nil))
         Ok(RedisClient(host: host, port: port, fd: fd, is_connected: true))
@@ -63,8 +61,7 @@ class RedisClient:
             Connected RedisClient or IoError
         """
         val addr = "{host}:{port}"
-        val fd = unsafe(capabilities: [ffi]):
-            rt_io_tcp_connect_timeout(addr, ms)
+        val fd = rt_io_tcp_connect_timeout(addr, ms)
         if fd < 0:
             return Err(IoError(kind: IoErrorKind.TimedOut, message: "redis connect timed out: {addr}", source: nil))
         Ok(RedisClient(host: host, port: port, fd: fd, is_connected: true))
@@ -262,8 +259,7 @@ impl RedisClient:
         """Close the Redis connection."""
         if not self.is_connected:
             return Ok(())
-        val ok = unsafe(capabilities: [ffi]):
-            rt_io_tcp_close(self.fd)
+        val ok = rt_io_tcp_close(self.fd)
         self.is_connected = false
         if not ok:
             return Err(IoError(kind: IoErrorKind.Other, message: "close failed", source: nil))
@@ -279,10 +275,9 @@ impl RedisClient:
         """Send raw RESP text to the server."""
         if not self.is_connected:
             return Err(IoError(kind: IoErrorKind.Other, message: "not connected", source: nil))
-        val written = unsafe(capabilities: [ffi]):
-            rt_io_tcp_write_text(self.fd, data)
-        if written != data.len():
-            return Err(IoError(kind: IoErrorKind.BrokenPipe, message: "send incomplete", source: nil))
+        val written = rt_io_tcp_write_text(self.fd, data)
+        if written <= 0:
+            return Err(IoError(kind: IoErrorKind.BrokenPipe, message: "send failed", source: nil))
         Ok(())
 
     fn read_reply() -> Result<RedisReply, IoError>:
@@ -295,15 +290,12 @@ impl RedisClient:
             return Err(IoError(kind: IoErrorKind.Other, message: "not connected", source: nil))
         var buf: [u8] = []
         while true:
-            val chunk = unsafe(capabilities: [ffi]):
-                rt_io_tcp_read(self.fd, 4096)
-            if chunk == nil:
-                return Err(IoError(kind: IoErrorKind.ConnectionReset, message: "reply read failed", source: nil))
-            if chunk!.len() == 0:
+            val chunk = rt_io_tcp_read(self.fd, 4096)
+            if chunk.len() == 0:
                 if buf.len() == 0:
                     return Err(IoError(kind: IoErrorKind.UnexpectedEof, message: "empty reply", source: nil))
                 return Err(IoError(kind: IoErrorKind.UnexpectedEof, message: "incomplete reply", source: nil))
-            buf = buf + chunk!
+            buf = buf + chunk
             val attempt = try_parse_resp(buf, 0)
             match attempt:
                 Some(parsed):
@@ -357,8 +349,6 @@ fn try_parse_resp(buf: [u8], start: i64) -> Option<ParseResult>:
     Returns nil if the buffer is incomplete (need more data).
     Handles +status, -error, :integer, $bulk, *array, _null replies.
     """
-    if start < 0:
-        return nil
     if start >= buf.len():
         return nil
 
@@ -397,11 +387,7 @@ fn try_parse_resp(buf: [u8], start: i64) -> Option<ParseResult>:
                 parsed_line
             nil:
                 return nil
-        # Fail-CLOSED: a non-numeric RESP length is a protocol error, not 0.
-        # `.to_int() ?? -1` never fired (the intrinsic cannot yield nil), so
-        # `$abc\r\n` was read as a valid zero-length bulk and desynced the stream.
-        val parsed_length = try_parse_int(l.content)
-        val length: i64 = parsed_length ?? -1
+        val length = l.content.to_int() ?? -1
         if length < 0:
             return Some(ParseResult(reply: RedisReply.Nil, offset: l.end))
         val data_start = l.end
@@ -414,7 +400,7 @@ fn try_parse_resp(buf: [u8], start: i64) -> Option<ParseResult>:
         while di < data_end:
             data_bytes.push(buf[di])
             di = di + 1
-        val data_text = bytes_to_text(data_bytes)
+        val data_text = rt_bytes_to_text(data_bytes)
         return Some(ParseResult(reply: RedisReply.Bulk(value: data_text), offset: after_crlf))
 
     if type_byte == 42:
@@ -424,9 +410,7 @@ fn try_parse_resp(buf: [u8], start: i64) -> Option<ParseResult>:
                 parsed_line
             nil:
                 return nil
-        # Fail-CLOSED: a non-numeric RESP array count is a protocol error, not 0.
-        val parsed_count = try_parse_int(l.content)
-        val count: i64 = parsed_count ?? -1
+        val count = l.content.to_int() ?? -1
         if count < 0:
             return Some(ParseResult(reply: RedisReply.Nil, offset: l.end))
         var elements: [RedisReply] = []
@@ -456,14 +440,12 @@ fn try_read_line_from(buf: [u8], start: i64) -> Option<LineResult>:
 
     Returns nil if no CRLF found (incomplete buffer).
     """
-    if start < 0:
-        return nil
     var line_bytes: [u8] = []
     var pos = start
     while pos < buf.len():
         if (pos + 1 < buf.len() and
             buf[pos] == 13 and buf[pos + 1] == 10):
-            val content = bytes_to_text(line_bytes)
+            val content = rt_bytes_to_text(line_bytes)
             return Some(LineResult(content: content, end: pos + 2))
         line_bytes.push(buf[pos])
         pos = pos + 1
@@ -473,14 +455,9 @@ fn try_read_line_from(buf: [u8], start: i64) -> Option<LineResult>:
 # SFFI
 # ============================================================================
 
-@unsafe(reason: "raw connected descriptor; negative sentinel means connect failed", capabilities: [ffi])
 extern fn rt_io_tcp_connect(addr: text) -> i64
-@unsafe(reason: "raw connected descriptor; negative sentinel conflates timeout and failure", capabilities: [ffi])
 extern fn rt_io_tcp_connect_timeout(addr: text, ms: i64) -> i64
-@unsafe(reason: "raw nullable TCP bytes; nil is read failure and empty is EOF", capabilities: [ffi])
-extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]?
-@unsafe(reason: "raw TCP text-write count; negative sentinel or short count means failure", capabilities: [ffi])
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
 extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
-@unsafe(reason: "raw descriptor close consumes one live descriptor; false means close failed", capabilities: [ffi])
 extern fn rt_io_tcp_close(fd: i64) -> bool
-use std.common.string_core.{bytes_to_text}
+extern fn rt_bytes_to_text(data: [u8]) -> text

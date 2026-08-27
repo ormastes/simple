@@ -1,0 +1,174 @@
+# codex-impl
+# V2 hot identity is scalar-only. Canonical descriptors remain in the bounded
+# caller-owned cold registry. A lane collision with different canonical text
+# is rejected before freeze; dispatch accepts only a frozen receipt/generation.
+# Foreign rows are candidates only: the parent re-admits their canonical
+# descriptor and never trusts their receipt. Registry construction is serialized
+# by the process owner so its monotonic generation cannot race or be reused.
+
+const RT_HAL_EXACT_TYPE_ID_VERSION: i64=2
+# The descriptor authority caps the whole tree at 1024 nodes, so a flat tuple
+# can contain at most 1023 children in addition to its root.
+const RT_HAL_EXACT_TYPE_ID_MAX_CHILDREN: i64=1023
+const RT_HAL_EXACT_TYPE_ID_MAX_DESCRIPTOR_BYTES: i64=65536
+const RT_HAL_EXACT_TYPE_ID_MAX_REGISTRY_ROWS: i64=4096
+const _RTHAL_TYPE_MOD: i64=2147483629
+
+fn _rtid_digits(value: i64) ->i64:
+    if value<0:return -1
+    var digits=1;var remaining=value
+    while remaining>=10:remaining=remaining/10;digits=digits+1
+    digits
+
+pub struct RtHalExactTypeId:
+    schema_version: i64
+    lane0: i64
+    lane1: i64
+    lane2: i64
+    lane3: i64
+    descriptor_length: i64
+    receipt: i64
+    generation: i64
+    valid: bool
+
+pub struct RtHalExactTypeDescriptor:
+    identity: RtHalExactTypeId
+    canonical: text
+
+# Wire-only claim. It is deliberately nominally distinct from the
+# nogc_sync_mut owner-issued admission type and carries no receipt/generation.
+pub struct RtHalExactTypeForeignCandidate:
+    schema_version: i64
+    lane0: i64
+    lane1: i64
+    lane2: i64
+    lane3: i64
+    descriptor_length: i64
+    valid: bool
+
+pub fn rt_hal_exact_type_foreign_candidate(value: RtHalExactTypeId) ->RtHalExactTypeForeignCandidate:
+    RtHalExactTypeForeignCandidate(schema_version:value.schema_version,
+        lane0: value.lane0,lane1:value.lane1,lane2:value.lane2,lane3:value.lane3,
+        descriptor_length: value.descriptor_length,valid:value.valid)
+
+fn _rtid_invalid() ->RtHalExactTypeId:
+    RtHalExactTypeId(schema_version:0,lane0:0,lane1:0,lane2:0,lane3:0,descriptor_length:0,receipt:-1,generation:-1,valid:false)
+
+fn _rtid_seed(tag: i64,n: i64) ->RtHalExactTypeId:
+    if tag<=0 or n<=0 or n>RT_HAL_EXACT_TYPE_ID_MAX_DESCRIPTOR_BYTES: return _rtid_invalid()
+    RtHalExactTypeId(schema_version:RT_HAL_EXACT_TYPE_ID_VERSION,lane0:RT_HAL_EXACT_TYPE_ID_VERSION,lane1:tag,
+        lane2: (tag*65537+n*17+17)%_RTHAL_TYPE_MOD,
+        lane3: (tag*131071+n*29+29)%_RTHAL_TYPE_MOD,
+        descriptor_length: n,receipt:-1,generation:-1,valid:true)
+
+fn _rtid_fold(parent: RtHalExactTypeId,child: RtHalExactTypeId,ordinal: i64) ->RtHalExactTypeId:
+    if not parent.valid or not child.valid or ordinal<0: return _rtid_invalid()
+    RtHalExactTypeId(
+        schema_version: RT_HAL_EXACT_TYPE_ID_VERSION,
+        lane0: (parent.lane0*65537+child.lane0+ordinal+1)%_RTHAL_TYPE_MOD,
+        lane1: (parent.lane1*65539+child.lane1+ordinal+3)%_RTHAL_TYPE_MOD,
+        lane2: (parent.lane2*65543+child.lane2+ordinal+5)%_RTHAL_TYPE_MOD,
+        lane3: (parent.lane3*65551+child.lane3+ordinal+7)%_RTHAL_TYPE_MOD,
+        descriptor_length: parent.descriptor_length,receipt:-1,generation:-1,valid:true)
+
+fn _rtid_key(value: RtHalExactTypeId) ->text:
+    "{value.schema_version}:{value.lane0}:{value.lane1}:{value.lane2}:{value.lane3}:{value.descriptor_length}"
+
+pub fn rt_hal_exact_type_id_equal(a: RtHalExactTypeId,b: RtHalExactTypeId) ->bool:
+    a.valid and b.valid and a.schema_version==RT_HAL_EXACT_TYPE_ID_VERSION and
+        a.schema_version==b.schema_version and a.receipt>=0 and b.receipt>=0 and a.generation>=0 and
+        a.generation==b.generation and a.receipt==b.receipt and
+        a.descriptor_length==b.descriptor_length and a.lane0==b.lane0 and
+        a.lane1==b.lane1 and a.lane2==b.lane2 and a.lane3==b.lane3
+
+pub fn rt_hal_exact_type_id_error(v: RtHalExactTypeId) ->text:
+    if not v.valid or v.schema_version!=RT_HAL_EXACT_TYPE_ID_VERSION: return "RTHAL-V2-E-TYPE-ID-INVALID"
+    if v.descriptor_length<=0 or v.descriptor_length>RT_HAL_EXACT_TYPE_ID_MAX_DESCRIPTOR_BYTES: return "RTHAL-V2-E-TYPE-ID-BOUND"
+    if v.receipt<0 or v.generation<0: return "RTHAL-V2-E-TYPE-ID-UNADMITTED"
+    ""
+
+pub fn rt_hal_exact_type_id_unit() ->RtHalExactTypeId: _rtid_seed(1,7)
+pub fn rt_hal_exact_type_id_i8() ->RtHalExactTypeId: _rtid_seed(2,5)
+pub fn rt_hal_exact_type_id_i16() ->RtHalExactTypeId: _rtid_seed(3,6)
+pub fn rt_hal_exact_type_id_i32() ->RtHalExactTypeId: _rtid_seed(4,6)
+pub fn rt_hal_exact_type_id_i64() ->RtHalExactTypeId: _rtid_seed(5,6)
+pub fn rt_hal_exact_type_id_u8() ->RtHalExactTypeId: _rtid_seed(6,5)
+pub fn rt_hal_exact_type_id_u16() ->RtHalExactTypeId: _rtid_seed(7,6)
+pub fn rt_hal_exact_type_id_u32() ->RtHalExactTypeId: _rtid_seed(8,6)
+pub fn rt_hal_exact_type_id_u64() ->RtHalExactTypeId: _rtid_seed(9,6)
+pub fn rt_hal_exact_type_id_f32() ->RtHalExactTypeId: _rtid_seed(10,6)
+pub fn rt_hal_exact_type_id_f64() ->RtHalExactTypeId: _rtid_seed(11,6)
+pub fn rt_hal_exact_type_id_bool() ->RtHalExactTypeId: _rtid_seed(12,7)
+pub fn rt_hal_exact_type_id_char() ->RtHalExactTypeId: _rtid_seed(13,7)
+pub fn rt_hal_exact_type_id_bytes() ->RtHalExactTypeId: _rtid_seed(14,8)
+pub fn rt_hal_exact_type_id_text() ->RtHalExactTypeId: _rtid_seed(15,12)
+
+fn _rtdesc(id: RtHalExactTypeId,canonical: text) ->RtHalExactTypeDescriptor:
+    if not id.valid or canonical.len()!=id.descriptor_length: return RtHalExactTypeDescriptor(identity:_rtid_invalid(),canonical:"")
+    RtHalExactTypeDescriptor(identity:id,canonical:canonical)
+
+pub fn rt_hal_exact_type_descriptor_unit() ->RtHalExactTypeDescriptor: _rtdesc(rt_hal_exact_type_id_unit(),"v2;unit")
+pub fn rt_hal_exact_type_descriptor_i8() ->RtHalExactTypeDescriptor: _rtdesc(rt_hal_exact_type_id_i8(),"v2;i8")
+pub fn rt_hal_exact_type_descriptor_i16() ->RtHalExactTypeDescriptor: _rtdesc(rt_hal_exact_type_id_i16(),"v2;i16")
+pub fn rt_hal_exact_type_descriptor_i32() ->RtHalExactTypeDescriptor: _rtdesc(rt_hal_exact_type_id_i32(),"v2;i32")
+pub fn rt_hal_exact_type_descriptor_i64() ->RtHalExactTypeDescriptor: _rtdesc(rt_hal_exact_type_id_i64(),"v2;i64")
+pub fn rt_hal_exact_type_descriptor_u8() ->RtHalExactTypeDescriptor: _rtdesc(rt_hal_exact_type_id_u8(),"v2;u8")
+pub fn rt_hal_exact_type_descriptor_u16() ->RtHalExactTypeDescriptor: _rtdesc(rt_hal_exact_type_id_u16(),"v2;u16")
+pub fn rt_hal_exact_type_descriptor_u32() ->RtHalExactTypeDescriptor: _rtdesc(rt_hal_exact_type_id_u32(),"v2;u32")
+pub fn rt_hal_exact_type_descriptor_u64() ->RtHalExactTypeDescriptor: _rtdesc(rt_hal_exact_type_id_u64(),"v2;u64")
+pub fn rt_hal_exact_type_descriptor_f32() ->RtHalExactTypeDescriptor: _rtdesc(rt_hal_exact_type_id_f32(),"v2;f32")
+pub fn rt_hal_exact_type_descriptor_f64() ->RtHalExactTypeDescriptor: _rtdesc(rt_hal_exact_type_id_f64(),"v2;f64")
+pub fn rt_hal_exact_type_descriptor_bool() ->RtHalExactTypeDescriptor: _rtdesc(rt_hal_exact_type_id_bool(),"v2;bool")
+pub fn rt_hal_exact_type_descriptor_char() ->RtHalExactTypeDescriptor: _rtdesc(rt_hal_exact_type_id_char(),"v2;char")
+pub fn rt_hal_exact_type_descriptor_bytes() ->RtHalExactTypeDescriptor: _rtdesc(rt_hal_exact_type_id_bytes(),"v2;bytes")
+pub fn rt_hal_exact_type_descriptor_text() ->RtHalExactTypeDescriptor: _rtdesc(rt_hal_exact_type_id_text(),"v2;text: utf8")
+
+pub fn rt_hal_exact_type_id_fixed_array(element: RtHalExactTypeId,length: i64) ->RtHalExactTypeId:
+    if not element.valid or length<0:return _rtid_invalid()
+    val n=11+_rtid_digits(length)+_rtid_digits(element.descriptor_length)+element.descriptor_length
+    var result=_rtid_seed(16,n);result=_rtid_fold(result,element,0)
+    result.lane0=(result.lane0*65557+(length%_RTHAL_TYPE_MOD))%_RTHAL_TYPE_MOD;result
+
+pub fn rt_hal_exact_type_id_tuple(fields: [RtHalExactTypeId]) ->RtHalExactTypeId:
+    if fields.len()>RT_HAL_EXACT_TYPE_ID_MAX_CHILDREN:return _rtid_invalid()
+    var n=10+_rtid_digits(fields.len());var i=0
+    while i<fields.len():
+        if not fields[i].valid:return _rtid_invalid()
+        n=n+_rtid_digits(fields[i].descriptor_length)+1+fields[i].descriptor_length
+        if n>RT_HAL_EXACT_TYPE_ID_MAX_DESCRIPTOR_BYTES:return _rtid_invalid()
+        i=i+1
+    var result=_rtid_seed(17,n);i=0
+    while i<fields.len():result=_rtid_fold(result,fields[i],i);i=i+1
+    result
+
+pub fn rt_hal_exact_type_id_result(ok: RtHalExactTypeId,error: RtHalExactTypeId) ->RtHalExactTypeId:
+    if not ok.valid or not error.valid:return _rtid_invalid()
+    val n=12+_rtid_digits(ok.descriptor_length)+_rtid_digits(error.descriptor_length)+ok.descriptor_length+error.descriptor_length
+    var result=_rtid_seed(18,n);result=_rtid_fold(result,ok,0);_rtid_fold(result,error,1)
+
+fn _rtdesc_part(value: RtHalExactTypeDescriptor) ->text:
+    "{value.canonical.len()}:{value.canonical}"
+
+pub fn rt_hal_exact_type_descriptor_fixed_array(element: RtHalExactTypeDescriptor,length: i64) ->RtHalExactTypeDescriptor:
+    val id=rt_hal_exact_type_id_fixed_array(element.identity,length)
+    if not id.valid or element.canonical.len()!=element.identity.descriptor_length:return RtHalExactTypeDescriptor(identity:_rtid_invalid(),canonical:"")
+    if id.descriptor_length>RT_HAL_EXACT_TYPE_ID_MAX_DESCRIPTOR_BYTES:return RtHalExactTypeDescriptor(identity:_rtid_invalid(),canonical:"")
+    _rtdesc(id,"v2;array;{length};{_rtdesc_part(element)}")
+
+pub fn rt_hal_exact_type_descriptor_tuple(fields: [RtHalExactTypeDescriptor]) ->RtHalExactTypeDescriptor:
+    if fields.len()>RT_HAL_EXACT_TYPE_ID_MAX_CHILDREN:return RtHalExactTypeDescriptor(identity:_rtid_invalid(),canonical:"")
+    var ids: [RtHalExactTypeId]=[];var parts: [text]=["v2;tuple;",fields.len().to_text(),";"];var retained=parts[0].len()+parts[1].len()+parts[2].len();var i=0
+    while i<fields.len():
+        if not fields[i].identity.valid or fields[i].canonical.len()!=fields[i].identity.descriptor_length:return RtHalExactTypeDescriptor(identity:_rtid_invalid(),canonical:"")
+        val part=_rtdesc_part(fields[i])
+        if part.len()>RT_HAL_EXACT_TYPE_ID_MAX_DESCRIPTOR_BYTES-retained:return RtHalExactTypeDescriptor(identity:_rtid_invalid(),canonical:"")
+        ids.push(fields[i].identity);parts.push(part);retained=retained+part.len();i=i+1
+    _rtdesc(rt_hal_exact_type_id_tuple(ids),parts.join(""))
+
+pub fn rt_hal_exact_type_descriptor_result(ok: RtHalExactTypeDescriptor,error: RtHalExactTypeDescriptor) ->RtHalExactTypeDescriptor:
+    val id=rt_hal_exact_type_id_result(ok.identity,error.identity)
+    if not id.valid or ok.canonical.len()!=ok.identity.descriptor_length or error.canonical.len()!=error.identity.descriptor_length:return RtHalExactTypeDescriptor(identity:_rtid_invalid(),canonical:"")
+    if id.descriptor_length>RT_HAL_EXACT_TYPE_ID_MAX_DESCRIPTOR_BYTES:return RtHalExactTypeDescriptor(identity:_rtid_invalid(),canonical:"")
+    _rtdesc(id,"v2;result;{_rtdesc_part(ok)}{_rtdesc_part(error)}")
+
+export RT_HAL_EXACT_TYPE_ID_VERSION,RT_HAL_EXACT_TYPE_ID_MAX_CHILDREN,RT_HAL_EXACT_TYPE_ID_MAX_DESCRIPTOR_BYTES,RT_HAL_EXACT_TYPE_ID_MAX_REGISTRY_ROWS

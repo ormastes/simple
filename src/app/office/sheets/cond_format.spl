@@ -1,8 +1,7 @@
 # Conditional Formatting
 #
 # Rule-based cell formatting with CSS generation.
-# Supports cell_value criteria matching, top_n highlighting, color scales,
-# data bars, above/below average matching, and unique/duplicate matching.
+# Supports cell_value criteria matching, top_n highlighting, and color scales.
 
 use app.office.sheets.spreadsheet.{Sheet}
 use app.office.sheets.cell.{CellValue, CellRef, cell_ref_to_string, parse_cell_ref, cell_display_text, empty_cell, number_cell}
@@ -17,8 +16,7 @@ struct CondRule:
 
     Fields:
         range: A1-notation range (e.g., "A1:C10") to which this rule applies
-        kind: Rule type ("cell_value", "top_n", "color_scale", "data_bar",
-              "above_average", "below_average", "unique", "duplicate")
+        kind: Rule type ("cell_value", "top_n", "color_scale")
         criteria: COUNTIF-style criteria (e.g., ">100", "<=50", "<>x", bare text for equality)
         n: Top N count (used when kind="top_n")
         css: Inline CSS to apply on match (e.g., "background:#fde7e9;color:#c00")
@@ -50,10 +48,6 @@ fn cond_css_for_cell(sheet: Sheet, rules: [CondRule], cell_a1: text) -> text:
             val scale_css = _color_scale_css(sheet, rule, cell_a1)
             if scale_css != "":
                 return scale_css
-        elif rule.kind == "data_bar":
-            val bar_css = _data_bar_css(sheet, rule, cell_a1)
-            if bar_css != "":
-                return bar_css
         elif _cell_matches_rule(sheet, rule, cell_a1):
             return rule.css
         i = i + 1
@@ -114,14 +108,6 @@ fn _cell_matches_rule(sheet: Sheet, rule: CondRule, cell_a1: text) -> bool:
             return _cell_matches_criteria(cell.value, rule.criteria)
         "top_n":
             return _cell_is_in_top_n(sheet, cell.value, rule.range, rule.n)
-        "above_average":
-            return _cell_vs_average(sheet, cell.value, rule.range, true)
-        "below_average":
-            return _cell_vs_average(sheet, cell.value, rule.range, false)
-        "unique":
-            return _cell_text_occurrence_match(sheet, cell.value, rule.range, true)
-        "duplicate":
-            return _cell_text_occurrence_match(sheet, cell.value, rule.range, false)
         _:
             return false
 
@@ -313,16 +299,14 @@ fn _color_scale_css(sheet: Sheet, rule: CondRule, cell_a1: text) -> text:
 
     _interpolate_color(lo, hi, cell_num)
 
-fn cond_data_bar_percent(sheet: Sheet, rule: CondRule, cell_a1: text) -> i64:
-    """Data-bar fill percent for one cell (pub wrapper for the sheet GUI
-    wire-through): P = (value - min) / (max - min) * 100 over the rule
-    range, rounded to integer (half up). Degenerate single-value range
-    (max == min) gets a full bar (P = 100), mirroring the color_scale
-    degenerate max-color rule. Non-numeric or out-of-range cells get -1
-    (exactly the cells _data_bar_css maps to ""). _data_bar_css builds its
-    CSS from this, so there is a single data-bar evaluation."""
+fn _data_bar_css(sheet: Sheet, rule: CondRule, cell_a1: text) -> text:
+    """Computed data-bar css: a proportional left-to-right bar where
+    P = (value - min) / (max - min) * 100 over the rule range, rounded to
+    integer (half up). Degenerate single-value range (max == min) gets a
+    full bar (P = 100), mirroring the color_scale degenerate max-color rule.
+    Non-numeric or out-of-range cells get ""."""
     if not _cell_in_range(cell_a1, rule.range):
-        return -1
+        return ""
     val cell = sheet.get_cell(cell_a1)
     var cell_num = 0.0
     var is_number = false
@@ -333,7 +317,7 @@ fn cond_data_bar_percent(sheet: Sheet, rule: CondRule, cell_a1: text) -> i64:
         _:
             pass
     if not is_number:
-        return -1
+        return ""
 
     val values = _collect_range_numbers(sheet, rule.range)
     var lo = cell_num
@@ -351,29 +335,7 @@ fn cond_data_bar_percent(sheet: Sheet, rule: CondRule, cell_a1: text) -> i64:
     if hi != lo:
         val ratio = (cell_num - lo) / (hi - lo)
         p = (ratio * 100.0 + 0.5).to_i64()
-    p
-
-fn _data_bar_css(sheet: Sheet, rule: CondRule, cell_a1: text) -> text:
-    """Computed data-bar css from cond_data_bar_percent (see there for the
-    percent semantics). Non-numeric or out-of-range cells get ""."""
-    val p = cond_data_bar_percent(sheet, rule, cell_a1)
-    if p < 0:
-        return ""
     "background:linear-gradient(to right, #638ec6 {p}%, transparent {p}%)"
-
-fn cond_rule_matches_cell(sheet: Sheet, rule: CondRule, cell_a1: text) -> bool:
-    """Does `rule` match `cell_a1`? Pub wrapper for the sheet GUI
-    wire-through so callers outside this module never reimplement rule
-    matching: the computed kinds (color_scale/data_bar) match exactly where
-    they produce non-empty CSS; every other kind delegates to
-    _cell_matches_rule (the same evaluation cond_css_for_cell uses)."""
-    if rule.kind == "color_scale":
-        val scale_css = _color_scale_css(sheet, rule, cell_a1)
-        return scale_css != ""
-    if rule.kind == "data_bar":
-        val p = cond_data_bar_percent(sheet, rule, cell_a1)
-        return p >= 0
-    _cell_matches_rule(sheet, rule, cell_a1)
 
 fn _cell_vs_average(sheet: Sheet, cell: CellValue, range_str: text, above: bool) -> bool:
     """Check if a cell's numeric value is strictly above (or below) the mean

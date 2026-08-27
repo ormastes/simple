@@ -1,0 +1,113 @@
+"""Bounded x86_64 server-launch admission seam for filesystem artifacts.
+
+`SIMPLEOS_FS_SERVER_LAUNCHER_V1` deliberately names an admission seam, not an
+execution feature.  A filesystem/VFS owner must provide already-read immutable
+artifact bytes and image-bound metadata to this module.  This module neither
+opens a path nor reads a boot filesystem; it copies those inputs into the
+canonical admission record, lets the scheduler/IPC owners validate and stage
+them, and returns a non-executing handoff receipt.  Timer programming,
+context-switch installation, CR3 activation, and `iretq` remain architecture
+owner work.  Therefore every receipt has `running == false`.
+"""
+
+use os.kernel.loader.x86_64_server_admission.{
+    X86_64_SERVER_WEB_PATH, X86_64_SERVER_DB_PATH, X86_64_SERVER_PROFILE,
+    X86_64ServerAdmissionInput,
+    x86_64_server_web_profile, x86_64_server_db_profile
+}
+use os.kernel.loader.x86_64_server_scheduler_bridge.{
+    x86_64_server_schedule_admitted_input
+}
+use os.kernel.loader.x86_64_server_first_dispatch.{
+    X86_64ServerFirstDispatchPreparation,
+    x86_64_server_prepare_first_dispatch
+}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+
+pub val SIMPLEOS_FS_SERVER_LAUNCHER_V1: text = "SIMPLEOS_FS_SERVER_LAUNCHER_V1"
+
+pub struct X86_64FsServerImmutableNonceMetadata:
+    """Image-verifier metadata copied with the two supplied artifact byte arrays.
+
+    The `launch_id` is the caller's immutable boot/launch nonce.  Hashes and
+    versions are not trusted merely because they appear here: the canonical
+    admission owner recomputes and checks them after this seam mints its input.
+    """
+    web_version: text
+    db_version: text
+    web_sha256: text
+    db_sha256: text
+    image_id: text
+    image_sha256: text
+    launch_id: text
+
+pub struct X86_64FsServerLaunchReceipt:
+    """Staged handoff facts, explicitly not evidence of server execution."""
+    preparation: X86_64ServerFirstDispatchPreparation
+    handoff_ready: bool
+    running: bool
+    reason: text
+    launch_id: text
+
+pub fn x86_64_fs_server_launcher_mint_admission_input(
+    web_artifact_bytes: [u8],
+    db_artifact_bytes: [u8],
+    metadata: X86_64FsServerImmutableNonceMetadata
+) -> X86_64ServerAdmissionInput:
+    """Copy injected evidence into the canonical admission vocabulary.
+
+    This function intentionally has no VFS, FAT, MMIO, raw-pointer, or dynamic
+    payload dependency.  The `[u8]` inputs are explicit boundary copies; their
+    content is authenticated by `x86_64_server_schedule_admitted_input`.
+    """
+    X86_64ServerAdmissionInput(
+        web_path: X86_64_SERVER_WEB_PATH,
+        db_path: X86_64_SERVER_DB_PATH,
+        web_bytes: web_artifact_bytes,
+        db_bytes: db_artifact_bytes,
+        web_version: metadata.web_version,
+        db_version: metadata.db_version,
+        web_sha256: metadata.web_sha256,
+        db_sha256: metadata.db_sha256,
+        image_id: metadata.image_id,
+        image_sha256: metadata.image_sha256,
+        launch_id: metadata.launch_id,
+        runtime_profile: X86_64_SERVER_PROFILE,
+        web_profile: x86_64_server_web_profile(metadata.launch_id),
+        db_profile: x86_64_server_db_profile(metadata.launch_id)
+    )
+
+pub fn x86_64_fs_server_launcher_admit_injected(
+    web_artifact_bytes: [u8],
+    db_artifact_bytes: [u8],
+    metadata: X86_64FsServerImmutableNonceMetadata,
+    scheduler: Scheduler,
+    ipc: IpcManager
+) -> X86_64FsServerLaunchReceipt:
+    """Validate and stage the server pair without executing either process.
+
+    `scheduler` and `ipc` are moved through the canonical bridge/preparation
+    owner pair and remain inside `preparation` for the eventual architecture
+    dispatch owner.  No timer, ISR, context switch, or user transition is
+    attempted here, so a successful receipt is strictly `handoff_ready`, never
+    `running`.
+    """
+    val launch_id = metadata.launch_id
+    val input = x86_64_fs_server_launcher_mint_admission_input(
+        web_artifact_bytes, db_artifact_bytes, metadata
+    )
+    val bridge = x86_64_server_schedule_admitted_input(input, scheduler, ipc)
+    val preparation = x86_64_server_prepare_first_dispatch(bridge)
+    X86_64FsServerLaunchReceipt(
+        preparation: preparation,
+        handoff_ready: preparation.accepted,
+        running: false,
+        reason: preparation.reason,
+        launch_id: launch_id
+    )
+
+export SIMPLEOS_FS_SERVER_LAUNCHER_V1
+export X86_64FsServerImmutableNonceMetadata, X86_64FsServerLaunchReceipt
+export x86_64_fs_server_launcher_mint_admission_input
+export x86_64_fs_server_launcher_admit_injected

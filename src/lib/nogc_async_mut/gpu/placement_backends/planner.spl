@@ -1,264 +1,191 @@
-"""Deterministic helpers for request planning and seed generation."""
+"""Deterministic placement planner over the frozen arena-ref contract."""
 
-use std.common.compute.placement_contracts.semantic.{
-    Hash256,
-    ObjectSetView,
-    PlacementRequestArenaRef,
-    ResidencyTierSet,
-    AccessPattern,
-    DeviceMask,
-    StageEpoch,
-    CostUnit,
-    AffinityGroupId,
-    Deadline,
-    PersistencePolicy
-}
-use std.common.compute.placement_contracts.planner.{
-    PlacementBudget,
-    PlacementRequest,
-    CostEstimate,
-    PlacementPlan
-}
-use std.common.compute.placement_contracts.handles.{ObjectRef, object_ref}
-use std.common.compute.placement_contracts.semantic.{ReservationArena, TransferArena, EvictionArena, PrefetchArena, LeaseArena}
+use common.compute.placement_contracts.handles.{ObjectRef, object_ref}
+use common.compute.placement_contracts.residency.{ResidencyTier}
+use common.compute.placement_contracts.semantic.{AnyObject, ReservationArena, TransferArena, EvictionArena, PrefetchArena, LeaseArena, AccessPattern, PersistencePolicy, Hash256}
+use common.compute.placement_contracts.planner.{PlacementBudget, PlacementRequest, CostEstimate, PlacementPlan}
+use common.compute.placement_contracts.backend.{PlacementError}
 
-fn planner_request_count(requests: [PlacementRequest]) -> i64:
-    requests.len()
+class PlacementObjectState:
+    request: PlacementRequest
+    resident_bytes: i64
+    pinned: bool
+    in_flight: bool
 
-fn plan_request_digest(requests: [PlacementRequest], budget: PlacementBudget) -> Hash256:
-    val sorted = _stable_sort_requests(requests)
-    Hash256(value: request_signature(sorted, budget))
+class PlacementReservationOp:
+    object: ObjectRef<AnyObject>
+    tier: ResidencyTier
+    bytes: i64
 
-fn make_deterministic_plan(
-    requests: [PlacementRequest],
-    budget: PlacementBudget
-) -> PlacementPlan:
-    val sorted = _stable_sort_requests(requests)
-    val seed = plan_request_digest(sorted, budget)
-    val estimate = _estimate_cost(sorted, budget)
-    val transfer_count = sorted.len()
+class PlacementTransferOp:
+    object: ObjectRef<AnyObject>
+    target: ResidencyTier
+    bytes: i64
+    receipt_sequence: i64
+
+class PlacementEvictionOp:
+    object: ObjectRef<AnyObject>
+    persistence: PersistencePolicy
+
+class PlacementPrefetchOp:
+    object: ObjectRef<AnyObject>
+    target: ResidencyTier
+
+class PlacementLeaseOp:
+    object: ObjectRef<AnyObject>
+    lease_epoch: u32
+
+class PlacementOperationArenas:
+    reservations: [PlacementReservationOp]
+    transfers: [PlacementTransferOp]
+    evictions: [PlacementEvictionOp]
+    prefetches: [PlacementPrefetchOp]
+    leases: [PlacementLeaseOp]
+
+class PlacementPlanResult:
+    ok: bool
+    plan: PlacementPlan
+    operations: PlacementOperationArenas
+    errors: [PlacementError]
+
+class PlacementCalibration:
+    estimated_us: i64
+    observed_us: i64
+    error_ppm: i64
+    confidence_bound_ppm: i64
+    within_confidence: bool
+
+fn placement_object_state(request: PlacementRequest, resident_bytes: i64, pinned: bool, in_flight: bool) -> PlacementObjectState:
+    PlacementObjectState(request: request, resident_bytes: resident_bytes, pinned: pinned, in_flight: in_flight)
+
+fn _nonnegative(value: i64) -> i64:
+    if value < 0: return 0
+    value
+
+fn _affinity_count(state: PlacementObjectState, states: [PlacementObjectState]) -> i64:
+    var count: i64 = 0
+    for candidate in states:
+        if candidate.request.affinity_group.value == state.request.affinity_group.value: count = count + 1
+    count
+
+fn placement_retain_score(state: PlacementObjectState, states: [PlacementObjectState]) -> i64:
+    val request = state.request
+    val live_span = _nonnegative(request.expected_last_use.value.to_i64() - request.expected_first_use.value.to_i64())
+    val reuse = 1000000 / (1 + request.expected_reuse_distance.to_i64())
+    val saved = _nonnegative(request.recompute_cost.value.to_i64() - request.transfer_cost_hint.value.to_i64())
+    val access = if request.access == AccessPattern.ReadWrite or request.access == AccessPattern.WriteOnly: 1000 else: 0
+    val protected = if state.pinned or state.in_flight: 1000000000000 else: 0
+    val bytes = if state.resident_bytes <= 0: 1 else: state.resident_bytes
+    (protected + saved * 1000 + reuse + live_span + _affinity_count(state, states) * 100 + access) / bytes
+
+fn _before(left: PlacementObjectState, right: PlacementObjectState, states: [PlacementObjectState]) -> bool:
+    val left_score = placement_retain_score(left, states)
+    val right_score = placement_retain_score(right, states)
+    if left_score != right_score: return left_score > right_score
+    if left.request.object.object_slot != right.request.object.object_slot:
+        return left.request.object.object_slot < right.request.object.object_slot
+    left.request.object.generation < right.request.object.generation
+
+fn _ordered(states: [PlacementObjectState]) -> [PlacementObjectState]:
+    var ordered: [PlacementObjectState] = []
+    for state in states:
+        var inserted = false
+        var next: [PlacementObjectState] = []
+        for current in ordered:
+            if not inserted and _before(state, current, states):
+                next.push(state)
+                inserted = true
+            next.push(current)
+        if not inserted: next.push(state)
+        ordered = next
+    ordered
+
+fn _empty_operations() -> PlacementOperationArenas:
+    PlacementOperationArenas(reservations: [], transfers: [], evictions: [], prefetches: [], leases: [])
+
+fn _hash256(value: i64) -> Hash256:
+    val segment = "{value & 0x7fffffff:016x}"
+    Hash256(value: segment + segment + segment + segment)
+
+fn placement_empty_plan() -> PlacementPlan:
     PlacementPlan(
-        reservations: object_ref(object_slot: 0, generation: 1),
-        transfers: object_ref(
-            object_slot: if transfer_count > 0: transfer_count as u32 else: 0,
-            generation: 1
-        ),
-        evictions: object_ref(object_slot: 2, generation: 1),
-        prefetches: object_ref(object_slot: 3, generation: 1),
-        leases: object_ref(object_slot: 4, generation: 1),
-        estimated_cost: estimate,
-        receipt_seed: seed
+        reservations: object_ref<ReservationArena>(1u32, 1u32),
+        transfers: object_ref<TransferArena>(2u32, 1u32),
+        evictions: object_ref<EvictionArena>(3u32, 1u32),
+        prefetches: object_ref<PrefetchArena>(4u32, 1u32),
+        leases: object_ref<LeaseArena>(5u32, 1u32),
+        estimated_cost: CostEstimate(cpu_work: 0u64, simd_work: 0u64, gpu_work: 0u64, host_to_device_bytes: 0u64, device_to_host_bytes: 0u64, ssd_read_bytes: 0u64, ssd_write_bytes: 0u64, synchronization_points: 0u32, predicted_latency_us: 0u64, confidence_milli: 0u16),
+        receipt_seed: _hash256(0)
     )
 
-fn request_signature(requests: [PlacementRequest], budget: PlacementBudget) -> text:
-    val sorted = _stable_sort_requests(requests)
-    var seed = budget.device_bytes.to_text()
-    seed = seed + "|" + budget.host_pinned_bytes.to_text()
-    seed = seed + "|" + budget.host_hot_bytes.to_text()
-    seed = seed + "|" + budget.staging_bytes.to_text()
-    seed = seed + "|" + budget.driver_queue_bytes.to_text()
-    seed = seed + "|" + budget.manifest_cache_bytes.to_text()
-    seed = seed + "|" + budget.runtime_base_bytes.to_text()
-    seed = seed + "|reqs=" + sorted.len().to_text()
-
-    var i = 0
-    while i < sorted.len():
-        val req = sorted[i]
-        seed = seed + "|" + req.object.object_slot.to_text()
-        seed = seed + "/"
-        seed = seed + req.object.generation.to_text()
-        seed = seed + ":"
-        seed = seed + req.expected_reuse_distance.to_text()
-        seed = seed + ":"
-        seed = seed + req.transfer_cost_hint.value.to_text()
-        seed = seed + ":"
-        seed = seed + request_retain_score(req).to_text()
-        seed = seed + ":"
-        seed = seed + req.affinity_group.value.to_text()
-        i = i + 1
-    seed
-
-fn make_plan_from_requests(requests: PlacementRequestArenaRef, budget: PlacementBudget) -> PlacementPlan:
-    val synthetic = _synthesize_plan_requests(requests)
-    make_deterministic_plan(synthetic, budget)
-
-fn request_ref(slot: u32) -> ObjectRef<PlacementRequestArena>:
-    object_ref(object_slot: slot, generation: 1)
-
-fn _estimate_cost(requests: [PlacementRequest], budget: PlacementBudget) -> CostEstimate:
-    val request_count = requests.len()
-    var cpu_work: u64 = 0
-    var simd_work: u64 = 0
-    var gpu_work: u64 = 0
-    var host_to_device_bytes: u64 = 0
-    var device_to_host_bytes: u64 = 0
-    var ssd_read_bytes: u64 = 0
-    var ssd_write_bytes: u64 = 0
-    var predicted_latency_us: u64 = 0
-
-    var i = 0
-    while i < request_count:
-        val req = requests[i]
-        val span = if req.expected_last_use.value >= req.expected_first_use.value:
-            req.expected_last_use.value - req.expected_first_use.value
+fn placement_plan_states(states: [PlacementObjectState], budget: PlacementBudget) -> PlacementPlanResult:
+    val ordered = _ordered(states)
+    var operations = _empty_operations()
+    var errors: [PlacementError] = []
+    var device_used: i64 = 0
+    var pinned_used: i64 = 0
+    var hot_used: i64 = 0
+    var h2d: i64 = 0
+    var ssd_read: i64 = 0
+    var ssd_write: i64 = 0
+    var predicted: i64 = 0
+    var sequence: i64 = 0
+    for state in ordered:
+        val request = state.request
+        val bytes = _nonnegative(state.resident_bytes)
+        var tier = ResidencyTier.Recomputable
+        if (state.pinned or state.in_flight) and device_used + bytes > budget.device_bytes:
+            errors.push(PlacementError.Protected)
+            continue
+        if device_used + bytes <= budget.device_bytes:
+            tier = ResidencyTier.DeviceLocal
+            device_used = device_used + bytes
+        elif request.recompute_cost.value <= request.transfer_cost_hint.value:
+            tier = ResidencyTier.Recomputable
+        elif pinned_used + bytes <= budget.host_pinned_bytes:
+            tier = ResidencyTier.HostPinned
+            pinned_used = pinned_used + bytes
+        elif hot_used + bytes <= budget.host_hot_bytes:
+            tier = ResidencyTier.HostHot
+            hot_used = hot_used + bytes
         else:
-            0
-        val score = request_retain_score(req)
-        val transfer = req.transfer_cost_hint.value
-        val recompute = req.recompute_cost.value
+            tier = ResidencyTier.SsdCas
+        if tier == ResidencyTier.DeviceLocal or tier == ResidencyTier.HostPinned or tier == ResidencyTier.HostHot:
+            operations.reservations.push(PlacementReservationOp(object: request.object, tier: tier, bytes: bytes))
+        if tier == ResidencyTier.DeviceLocal or tier == ResidencyTier.HostPinned:
+            operations.transfers.push(PlacementTransferOp(object: request.object, target: tier, bytes: bytes, receipt_sequence: sequence))
+            sequence = sequence + 1
+            ssd_read = ssd_read + bytes
+            predicted = predicted + request.transfer_cost_hint.value.to_i64()
+            if tier == ResidencyTier.DeviceLocal: h2d = h2d + bytes
+        if tier == ResidencyTier.DeviceLocal:
+            operations.leases.push(PlacementLeaseOp(object: request.object, lease_epoch: request.expected_first_use.value.to_u32()))
+        if tier == ResidencyTier.SsdCas or tier == ResidencyTier.Recomputable:
+            operations.evictions.push(PlacementEvictionOp(object: request.object, persistence: request.persistence))
+            if tier == ResidencyTier.SsdCas: ssd_write = ssd_write + bytes
+            if tier == ResidencyTier.Recomputable: predicted = predicted + request.recompute_cost.value.to_i64()
+        if request.expected_reuse_distance <= 1u32 and tier != ResidencyTier.Recomputable:
+            operations.prefetches.push(PlacementPrefetchOp(object: request.object, target: tier))
+    val estimate = CostEstimate(cpu_work: 0u64, simd_work: 0u64, gpu_work: device_used.to_u64(), host_to_device_bytes: h2d.to_u64(), device_to_host_bytes: 0u64, ssd_read_bytes: ssd_read.to_u64(), ssd_write_bytes: ssd_write.to_u64(), synchronization_points: sequence.to_u32(), predicted_latency_us: predicted.to_u64(), confidence_milli: 900u16)
+    val base = placement_empty_plan()
+    val plan = PlacementPlan(reservations: base.reservations, transfers: base.transfers, evictions: base.evictions, prefetches: base.prefetches, leases: base.leases, estimated_cost: estimate, receipt_seed: _hash256(states.len() * 131 + device_used + predicted))
+    PlacementPlanResult(ok: errors.len() == 0, plan: plan, operations: operations, errors: errors)
 
-        cpu_work = cpu_work + (score % 97)
-        simd_work = simd_work + (score % 53)
-        gpu_work = gpu_work + if recompute > transfer: recompute else: transfer
-        host_to_device_bytes = host_to_device_bytes + (transfer + 1)
-        device_to_host_bytes = device_to_host_bytes + (recompute + 1)
-        ssd_read_bytes = ssd_read_bytes + span
-        ssd_write_bytes = ssd_write_bytes + span + 1
-        predicted_latency_us = predicted_latency_us + transfer + recompute + (span * 3)
-        i = i + 1
+fn placement_calibration(estimated_us: i64, observed_us: i64, confidence_bound_ppm: i64) -> PlacementCalibration:
+    val observed = _nonnegative(observed_us)
+    val difference = if estimated_us >= observed: estimated_us - observed else: observed - estimated_us
+    val error_ppm = if observed == 0: (if difference == 0: 0 else: 1000000) else: difference * 1000000 / observed
+    PlacementCalibration(estimated_us: estimated_us, observed_us: observed_us, error_ppm: error_ppm, confidence_bound_ppm: confidence_bound_ppm, within_confidence: error_ppm <= confidence_bound_ppm)
 
-    val effective_count = if request_count == 0: 1 else: request_count
-    val normalized_host_to_device = if request_count == 0:
-        budget.staging_bytes
-    else:
-        host_to_device_bytes % (budget.device_bytes + budget.staging_bytes + 1)
-    val normalized_device_to_host = if request_count == 0:
-        budget.host_pinned_bytes
-    else:
-        device_to_host_bytes % (budget.host_hot_bytes + budget.driver_queue_bytes + 1)
+fn placement_host_rss_limit(budget: PlacementBudget) -> i64:
+    budget.runtime_base_bytes + budget.staging_bytes + budget.driver_queue_bytes + budget.manifest_cache_bytes
 
-    val confidence_milli = if budget.runtime_base_bytes > 0:
-        900
-    elif budget.host_hot_bytes > 0:
-        700
-    else:
-        500
+fn placement_modeled_peak_host_rss(budget: PlacementBudget, corpus_bytes: i64) -> i64:
+    # ponytail: deterministic allocation model only; measured VmHWM is separate evidence.
+    placement_host_rss_limit(budget)
 
-    CostEstimate(
-        cpu_work: cpu_work + budget.runtime_base_bytes as u64,
-        simd_work: simd_work + budget.host_pinned_bytes as u64,
-        gpu_work: gpu_work + budget.host_hot_bytes as u64,
-        host_to_device_bytes: normalized_host_to_device,
-        device_to_host_bytes: normalized_device_to_host,
-        ssd_read_bytes: ssd_read_bytes + budget.driver_queue_bytes,
-        ssd_write_bytes: ssd_write_bytes + budget.manifest_cache_bytes,
-        synchronization_points: if effective_count > 1: effective_count as u32 else: 1,
-        predicted_latency_us: if predicted_latency_us == 0: 0 else: predicted_latency_us,
-        confidence_milli: confidence_milli
-    )
-
-fn request_retain_score(request: PlacementRequest) -> u64:
-    val span = if request.expected_last_use.value >= request.expected_first_use.value:
-        request.expected_last_use.value - request.expected_first_use.value
-    else:
-        0
-    val reuse_advantage = request.expected_reuse_distance as u64
-    val transfer = request.transfer_cost_hint.value
-    val recompute = request.recompute_cost.value
-    val transfer_cost = if transfer == 0: 1 else: transfer
-    val recompute_adv = if recompute > transfer_cost:
-        recompute - transfer_cost
-    else:
-        0
-    span * 8 + reuse_advantage * 64 + recompute_adv + request.affinity_group.value
-
-fn _stable_sort_requests(requests: [PlacementRequest]) -> [PlacementRequest]:
-    var sorted: [PlacementRequest] = []
-    var i = 0
-    while i < requests.len():
-        val req = requests[i]
-        sorted.push(req)
-
-        var j = sorted.len() - 1
-        while j > 0:
-            val left = sorted[j - 1]
-            val next = sorted[j]
-            if _request_order_leq(left, next):
-                break
-            sorted[j] = left
-            sorted[j - 1] = next
-            j = j - 1
-        i = i + 1
-    sorted
-
-fn _request_order_leq(a: PlacementRequest, b: PlacementRequest) -> bool:
-    # Stable sort key:
-    # 1) retain score (desc)
-    # 2) affinity group id (asc)
-    # 3) reuse distance (desc)
-    # 4) liveness (asc by last use)
-    # 5) object slot and generation tie-breakers
-    val a_score = request_retain_score(a)
-    val b_score = request_retain_score(b)
-
-    if a_score > b_score:
-        true
-    elif a_score < b_score:
-        false
-    elif a.affinity_group.value < b.affinity_group.value:
-        true
-    elif a.affinity_group.value > b.affinity_group.value:
-        false
-    elif a.expected_reuse_distance > b.expected_reuse_distance:
-        true
-    elif a.expected_reuse_distance < b.expected_reuse_distance:
-        false
-    elif a.expected_last_use.value < b.expected_last_use.value:
-        true
-    elif a.expected_last_use.value > b.expected_last_use.value:
-        false
-    elif a.object.object_slot < b.object.object_slot:
-        true
-    elif a.object.object_slot > b.object.object_slot:
-        false
-    else:
-        a.object.generation <= b.object.generation
-
-fn estimate_confidence_delta(
-    estimated_latency: u64,
-    observed_latency: u64
-) -> u64:
-    if estimated_latency > observed_latency:
-        estimated_latency - observed_latency
-    else:
-        observed_latency - estimated_latency
-
-fn calibrated_within_confidence(
-    estimated: CostEstimate,
-    observed_latency_us: u64,
-    confidence_milli: u16
-) -> bool:
-    val budget = estimate_confidence_delta(estimated.predicted_latency_us, observed_latency_us)
-    val max_delta = ((estimated.predicted_latency_us * confidence_milli as u64) / 1000) + 1
-    budget <= max_delta
-
-fn _synthesize_plan_requests(requests: PlacementRequestArenaRef) -> [PlacementRequest]:
-    val request_count = (requests.object.object_slot as i64 % 3) + 1
-    var synthesized: [PlacementRequest] = []
-    var i = 0
-    while i < request_count:
-        val object_slot = requests.object.object_slot + i as u32
-        synthesized.push(PlacementRequest(
-            object: object_ref(
-                object_slot: object_slot,
-                generation: requests.object.generation
-            ),
-            access: AccessPattern.SequentialRead,
-            required_tiers: ResidencyTierSet(tiers: []),
-            preferred_tiers: [],
-            device_mask: DeviceMask(bits: 0),
-            expected_first_use: StageEpoch(value: i as u64),
-            expected_last_use: StageEpoch(value: i as u64 + 1),
-            expected_reuse_distance: (10 - i) as u32,
-            recompute_cost: CostUnit(value: 64 + i as u64),
-            transfer_cost_hint: CostUnit(value: 128 + i as u64),
-            persistence: PersistencePolicy.Checkpoint,
-            affinity_group: AffinityGroupId(value: requests.object.object_slot as u64),
-            deadline: nil
-        ))
-        i = i + 1
-    synthesized
-
-export planner_request_count, plan_request_digest, make_deterministic_plan
-export request_signature, make_plan_from_requests
-export request_retain_score, estimate_confidence_delta, calibrated_within_confidence
+export PlacementObjectState, PlacementReservationOp, PlacementTransferOp
+export PlacementEvictionOp, PlacementPrefetchOp, PlacementLeaseOp
+export PlacementOperationArenas, PlacementPlanResult, PlacementCalibration
+export placement_object_state, placement_retain_score, placement_empty_plan, placement_plan_states
+export placement_calibration, placement_host_rss_limit, placement_modeled_peak_host_rss

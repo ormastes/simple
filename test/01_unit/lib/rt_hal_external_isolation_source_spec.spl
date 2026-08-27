@@ -1,0 +1,198 @@
+# Source-level trust-boundary contracts for the isolated RT/HAL comparator.
+# These complement behavioral fixture coverage by pinning facts that a child
+# capable of echoing its oracle could otherwise make unfalsifiable.
+
+use std.spec
+use std.io_runtime.{file_read}
+
+describe "RT/HAL external comparator isolation source contract":
+    it "uses the oracle-free versioned provider argv ABI":
+        val host = file_read("src/app/io/rt_hal_isolated_host.spl")
+        expect(host.contains('"rthal-scalar-v2"')).to_equal(true)
+        expect(host.contains("append_digest(arguments, receipt.outcome_digest)")).to_equal(false)
+        expect(host.contains("append_digest(arguments, receipt.error_digest)")).to_equal(false)
+        expect(host.contains("if replay: arguments = append_digest(arguments, trace)")).to_equal(true)
+
+    it "pins distinct query and replay arities in both foreign fixtures":
+        val c_source = file_read("test/fixtures/rt_hal_external/rthal_scalar_provider.c")
+        val rust_source = file_read("test/fixtures/rt_hal_external/rthal_scalar_provider.rs")
+        expect(c_source.contains("QUERY_ARGC = 13, REPLAY_ARGC = 17")).to_equal(true)
+        expect(rust_source.contains("QUERY_ARGC: usize = 13")).to_equal(true)
+        expect(rust_source.contains("REPLAY_ARGC: usize = 17")).to_equal(true)
+
+    it "requires authoritative zero exit in addition to a parseable receipt":
+        val host = file_read("src/app/io/rt_hal_isolated_host.spl")
+        val wait_pos = host.find("process_wait_piped_result(handle, remaining)")
+        val close_pos = host.find("process_close_reaped_piped(handle)")
+        val zero_exit_pos = host.find("if exit_code != 0:")
+        val parse_pos = host.find("val parsed = parse_exact_join(rt_hal_host_tasks[index].output)")
+        val accept_pos = host.find("return parsed")
+        expect(wait_pos >= 0 and wait_pos < close_pos).to_equal(true)
+        expect(close_pos < zero_exit_pos and zero_exit_pos < parse_pos).to_equal(true)
+        expect(parse_pos < accept_pos).to_equal(true)
+
+    it "publishes reap state before descriptor cleanup and never signals from safe close":
+        val runtime = file_read("src/runtime/runtime_process.c")
+        val publish_pos = runtime.find("slot->exit_status_valid = true;")
+        val reaped_pos = runtime.find("slot->leader_reaped = true;")
+        val close_pos = runtime.find("bool rt_process_close_piped_descriptors(int64_t pid)")
+        val legacy_close_pos = runtime.find("bool rt_process_close_piped(int64_t pid)")
+        expect(publish_pos >= 0 and publish_pos < reaped_pos).to_equal(true)
+        expect(close_pos >= 0 and close_pos < legacy_close_pos).to_equal(true)
+        val safe_close = runtime.substring(close_pos, legacy_close_pos)
+        expect(safe_close.contains("kill(")).to_equal(false)
+        expect(safe_close.contains("proc_signal_tree")).to_equal(false)
+
+    it "gives every task in one wave the same absolute deadline":
+        val boundary = file_read("src/lib/nogc_sync_mut/rt_hal/exact_boundary.spl")
+        expect(boundary.contains("val wave_deadline = arena.deadline_after_fn(comparison.timeout_ticks)")).to_equal(true)
+        expect(boundary.contains("arena.join_until_fn(handle, wave_deadline)")).to_equal(true)
+        expect(boundary.contains("arena.join_until_fn(wave_handles[i], comparison.timeout_ticks)")).to_equal(false)
+
+    it "uses cold-provisioned wave scratch instead of growing comparator vectors":
+        val boundary = file_read("src/lib/nogc_sync_mut/rt_hal/exact_boundary.spl")
+        val arena = file_read("src/lib/nogc_sync_mut/rt_hal/process_task_arena.spl")
+        expect(boundary.contains("wave_store_fn: fn(i64, i64, i64) -> bool")).to_equal(true)
+        expect(boundary.contains("wave_handles.push(")).to_equal(false)
+        expect(arena.contains("rt_hal_exact_wave_handles.push(-1)")).to_equal(true)
+
+    it "fails Critical admission closed until the process facade owns fixed transport buffers":
+        val host = file_read("src/app/io/rt_hal_isolated_host.spl")
+        val arena = file_read("src/lib/nogc_sync_mut/rt_hal/process_task_arena.spl")
+        # `process_read_stdout_result` returns an owned text, and the existing
+        # pinned-spawn/write ABI consumes owned argv/frame texts.  Neither can
+        # establish an allocation-free first dispatch, so the host must never
+        # advertise the Critical capability prematurely.
+        expect(host.contains("RT_HAL_HOST_CRITICAL_NO_ALLOC_DISPATCH = false")).to_equal(true)
+        expect(host.contains("critical_no_alloc_dispatch:")).to_equal(true)
+        expect(arena.contains("critical_no_alloc_dispatch: bool")).to_equal(true)
+        expect(arena.contains("RTHAL-E-CRITICAL-HOST-ATTESTATION")).to_equal(true)
+        expect(arena.contains("rt_hal_process_exact_host_v2_install_for_assurance")).to_equal(true)
+
+    it "binds compiler assurance and the entire canonical plan to host admission":
+        val semantic = file_read("src/compiler/35.semantics/rt_hal_tag.spl")
+        val mir = file_read("src/compiler/50.mir/mir_rt_hal_boundary.spl")
+        val host = file_read("src/app/io/env_access_host.spl")
+        val plan = file_read("src/lib/common/env_access/plan_sdn.spl")
+        expect(semantic.contains("rt_hal_compilation_required_assurance_rank")).to_equal(true)
+        expect(semantic.contains("rt_hal_compilation_plan_identity")).to_equal(true)
+        expect(semantic.contains("env_access_plan_parse_sdn_v1(file_read(plan_path))")).to_equal(true)
+        expect(semantic.contains("loaded.required_assurance_rank != rt_hal_compilation_required_assurance_rank")).to_equal(true)
+        expect(mir.contains("mir_operand_const_int(required_assurance_rank)")).to_equal(true)
+        expect(mir.contains("MirConstValue.Str(plan_identity)")).to_equal(true)
+        expect(host.contains("RTHAL-E-ASSURANCE-PROVENANCE")).to_equal(true)
+        expect(host.contains("loaded.required_assurance_rank!=required_assurance_rank")).to_equal(true)
+        expect(host.contains("RTHAL-E-PLAN-PROVENANCE")).to_equal(true)
+        expect(host.contains("actual_identity!=expected_plan_identity")).to_equal(true)
+        expect(host.contains("canonical_plan_identity:actual_identity")).to_equal(true)
+        expect(host.contains("canonical_plan_identity: text")).to_equal(true)
+        expect(host.contains("\"|plan=\"+config.canonical_plan_identity")).to_equal(true)
+        expect(plan.contains("required_assurance_rank: i64")).to_equal(true)
+        expect(plan.contains("env_access_plan_canonical_identity_v1")).to_equal(true)
+
+    it "keeps exact operation mapping bounded and includes it in canonical plan identity":
+        val plan = file_read("src/lib/common/env_access/plan_sdn.spl")
+        val host = file_read("src/app/io/rt_hal_isolated_host.spl")
+        expect(plan.contains("value.rt_hal_operations.len() > 256")).to_equal(true)
+        expect(plan.contains("for row in value.rt_hal_operations")).to_equal(true)
+        expect(host.contains("row.operation_id==operation_id")).to_equal(true)
+
+    it "rejects Ready reuse for distinct same-rank plans with equal reduced host settings":
+        # Regression fixture: plan A and B may have identical tools, provider
+        # count, queue, output budget, and assurance rank, yet differ in a
+        # typed environment instruction or operation mapping.  The loader
+        # supplies the complete canonical digest and the host carries it into
+        # the lifecycle key before the Ready-for-plan query, so B cannot reuse
+        # A's Ready controller merely because their reduced settings match.
+        step("Verify: full canonical plan identity is part of Ready reuse")
+        val host = file_read("src/app/io/rt_hal_isolated_host.spl")
+        val loader = file_read("src/app/io/env_access_host.spl")
+        val fingerprint_start = host.find("fn host_config_fingerprint(config:RtHalIsolatedExactHostConfig)->text:")
+        val fingerprint_end = host.find("fn operation_plans_error", fingerprint_start)
+        val fingerprint = host.substring(fingerprint_start, fingerprint_end)
+        val install_start = host.find("fn rt_hal_install_isolated_exact_host(config: RtHalIsolatedExactHostConfig) -> text:")
+        val install_end = host.find("pub fn rt_hal_install_isolated_exact_host_from_plan(", install_start)
+        val install = host.substring(install_start, install_end)
+        # The reduced carrier is not a public authority: only the complete
+        # plan entrypoints may construct it after canonical recomputation.
+        expect(host.contains("pub struct RtHalIsolatedExactHostConfig")).to_equal(false)
+        expect(host.contains("export RtHalIsolatedExactHostConfig")).to_equal(false)
+        expect(host.contains("pub fn rt_hal_install_isolated_exact_host(")).to_equal(false)
+        expect(fingerprint.contains("|plan=\"+config.canonical_plan_identity")).to_equal(true)
+        expect(install.contains("val fingerprint=host_config_fingerprint(config)")).to_equal(true)
+        expect(install.contains("rt_hal_process_lifecycle_is_ready_for_plan(fingerprint)")).to_equal(true)
+        expect(loader.contains("actual_identity,")).to_equal(true)
+
+    it "leases shared wave scratch and rolls back partial wave admission":
+        val boundary = file_read("src/lib/nogc_sync_mut/rt_hal/exact_boundary.spl")
+        val arena = file_read("src/lib/nogc_sync_mut/rt_hal/process_task_arena.spl")
+        expect(boundary.contains("wave_claim_fn: fn() -> bool")).to_equal(true)
+        expect(boundary.contains("rt_hal_exact_cancel_submitted_wave")).to_equal(true)
+        expect(boundary.contains("arena.wave_release_fn()")).to_equal(true)
+        expect(arena.contains("var rt_hal_exact_wave_leased = false")).to_equal(true)
+
+    it "charges conservative retained result output before allocation":
+        val boundary = file_read("src/lib/nogc_sync_mut/rt_hal/exact_boundary.spl")
+        expect(boundary.contains("RT_HAL_EXACT_RESULT_SLOT_BYTES = 128")).to_equal(true)
+        expect(boundary.contains("provider_total = provider_bytes * case_count")).to_equal(true)
+        expect(boundary.contains("rt_hal_exact_result_output_fits")).to_equal(true)
+
+    it "uses monotonic saturating deadlines with a zero-budget final poll":
+        val host = file_read("src/app/io/rt_hal_isolated_host.spl")
+        expect(host.contains("time_now_micros() / 1000")).to_equal(true)
+        expect(host.contains("9223372036854775807 - timeout_ticks")).to_equal(true)
+        expect(host.contains("else: 0")).to_equal(true)
+        expect(host.contains("else: 1")).to_equal(false)
+
+    it "persists each pinned close acknowledgement so retry skips prior successes":
+        val host = file_read("src/app/io/rt_hal_isolated_host.spl")
+        val shutdown_pos = host.find("fn host_shutdown() -> bool:")
+        val io_shutdown_pos = host.find("fn host_io_shutdown()->bool:true")
+        val shutdown = host.substring(shutdown_pos, io_shutdown_pos)
+        # A two-binding partial close records binding 0 before a binding 1
+        # failure returns.  The next shutdown can therefore call close only on
+        # the unresolved binding; there is no aggregate retry loop.
+        expect(host.contains("pinned_close_acknowledged: bool")).to_equal(true)
+        expect(host.contains("pinned_close_acknowledged: false")).to_equal(true)
+        expect(shutdown.contains("if not binding.pinned_close_acknowledged:")).to_equal(true)
+        expect(shutdown.contains("pinned_close_acknowledged: true")).to_equal(true)
+        expect(shutdown.contains("for binding in rt_hal_host_bindings:")).to_equal(false)
+        val close_pos = shutdown.find("process_close_pinned_executable(binding.pinned_handle)")
+        val acknowledge_pos = shutdown.find("pinned_close_acknowledged: true")
+        expect(close_pos >= 0 and close_pos < acknowledge_pos).to_equal(true)
+
+    it "keeps every cold registration mutation inside one Installing lock transaction":
+        val arena = file_read("src/lib/nogc_sync_mut/rt_hal/process_task_arena.spl")
+        # `installer_ok_locked` is intentionally separate from the unlocked
+        # observation helper: IO ports, adapter binding, operation binding,
+        # and the fixed effect index mutate only while this authority is held.
+        expect(arena.contains("fn installer_ok_locked() -> bool:")).to_equal(true)
+        expect(arena.contains("if not installer_ok_locked():result=\"RTHAL-E-OWNER\"")).to_equal(true)
+        expect(arena.contains("if result==\"\" and not host.bind_adapter_fn(")).to_equal(true)
+        expect(arena.contains("if result==\"\" and not host.bind_operation_adapter_fn(adapter_handle,operation_id,adapter_id,false):")).to_equal(true)
+        expect(arena.contains("if result==\"\" and not host.bind_operation_adapter_fn(adapter_handle,operation_id,adapter_id,true):")).to_equal(true)
+        expect(arena.contains("if result==\"\" and not effect_admission_insert(adapter_handle,operation_id):")).to_equal(true)
+
+    it "requires the installing host owner for the Ready publication edge":
+        val arena = file_read("src/lib/nogc_sync_mut/rt_hal/process_task_arena.spl")
+        val ready_pos = arena.find("pub fn rt_hal_process_lifecycle_mark_ready()->bool:")
+        val drain_pos = arena.find("pub fn rt_hal_process_lifecycle_begin_draining()->bool:")
+        val ready = arena.substring(ready_pos, drain_pos)
+        expect(ready.contains("mutex_lock(rt_hal_lifecycle_lock)")).to_equal(true)
+        expect(ready.contains("host.current_owner_fn()==rt_hal_installer_owner_id")).to_equal(true)
+        expect(ready.contains("rt_hal_lifecycle_state=2")).to_equal(true)
+
+    it "registers authoritative piped lifecycle symbols across compiler surfaces":
+        val externs = file_read("src/compiler_rust/compiler/src/interpreter_extern/mod.rs")
+        val system = file_read("src/compiler_rust/compiler/src/interpreter_extern/system.rs")
+        val symbols = file_read("src/compiler_rust/common/src/runtime_symbols.rs")
+        val sffi = file_read("src/compiler_rust/compiler/src/codegen/runtime_sffi.rs")
+        val native_project = file_read("src/compiler_rust/compiler/src/pipeline/native_project/tests.rs")
+        val stage4 = file_read("src/compiler/70.backend/backend/stage4_symbol_closure.spl")
+        for symbol in ["rt_process_wait_piped", "rt_process_close_piped_descriptors"]:
+            expect(externs.contains(symbol)).to_equal(true)
+            expect(system.contains("pub fn " + symbol)).to_equal(true)
+            expect(symbols.contains('"' + symbol + '"')).to_equal(true)
+            expect(sffi.contains('RuntimeFuncSpec::new("' + symbol + '"')).to_equal(true)
+            expect(native_project.contains('"' + symbol + '"')).to_equal(true)
+            expect(stage4.contains('"' + symbol + '"')).to_equal(true)

@@ -1,0 +1,69 @@
+#!/bin/sh
+
+# One pinned, isolated trust root for LLVM 23.1 provider verification.  The
+# helper owns only the private keyring it creates below; cleanup never removes a
+# caller-provided GNUPGHOME.
+
+LLVM_23_1_RELEASE_SIGNER_FPR="D574BD5D1D0E98895E3BF90044F2485E45D59042"
+LLVM_23_1_RELEASE_SIGNER_KEY="scripts/setup/keys/llvm-release-tobias-hieta.asc"
+_LLVM_23_1_OWNED_GNUPGHOME=""
+_LLVM_23_1_PREVIOUS_GNUPGHOME=""
+
+llvm_23_1_owned_keyring_valid() {
+    llvm_23_1_owned_path=$1
+    case "$llvm_23_1_owned_path" in
+        /tmp/simple-llvm23-gpg.[A-Za-z0-9]*) ;;
+        *) return 1 ;;
+    esac
+    [ -d "$llvm_23_1_owned_path" ] && [ ! -L "$llvm_23_1_owned_path" ] ||
+        return 1
+    [ "$(CDPATH= cd -- "$(dirname -- "$llvm_23_1_owned_path")" && pwd -P)" = /tmp ] ||
+        return 1
+    llvm_23_1_owner=$(stat -c %u "$llvm_23_1_owned_path" 2>/dev/null ||
+        stat -f %u "$llvm_23_1_owned_path" 2>/dev/null) || return 1
+    [ "$llvm_23_1_owner" = "$(id -u)" ]
+}
+
+llvm_23_1_prepare_isolated_keyring() {
+    llvm_23_1_key_path=${1:-$LLVM_23_1_RELEASE_SIGNER_KEY}
+    llvm_23_1_expected_fpr=${2:-$LLVM_23_1_RELEASE_SIGNER_FPR}
+    [ -z "$_LLVM_23_1_OWNED_GNUPGHOME" ] || return 1
+    [ -f "$llvm_23_1_key_path" ] && [ ! -L "$llvm_23_1_key_path" ] ||
+        return 1
+    case "$llvm_23_1_expected_fpr" in
+        *[!0-9A-F]*|"") return 1 ;;
+    esac
+    [ "${#llvm_23_1_expected_fpr}" -eq 40 ] || return 1
+    command -v gpg >/dev/null 2>&1 || return 1
+    _LLVM_23_1_PREVIOUS_GNUPGHOME="${LLVM_23_1_SIGNED_GNUPGHOME:-}"
+    _LLVM_23_1_OWNED_GNUPGHOME=$(mktemp -d /tmp/simple-llvm23-gpg.XXXXXX) ||
+        return 1
+    llvm_23_1_owned_keyring_valid "$_LLVM_23_1_OWNED_GNUPGHOME" || {
+        llvm_23_1_cleanup_isolated_keyring
+        return 1
+    }
+    chmod 700 "$_LLVM_23_1_OWNED_GNUPGHOME" || {
+        llvm_23_1_cleanup_isolated_keyring
+        return 1
+    }
+    GNUPGHOME="$_LLVM_23_1_OWNED_GNUPGHOME" gpg --batch --import "$llvm_23_1_key_path" >/dev/null 2>&1 &&
+        GNUPGHOME="$_LLVM_23_1_OWNED_GNUPGHOME" gpg --with-colons --list-keys "$llvm_23_1_expected_fpr" |
+            grep -qx "fpr:::::::::${llvm_23_1_expected_fpr}:" || {
+        llvm_23_1_cleanup_isolated_keyring
+        return 1
+    }
+    LLVM_23_1_SIGNED_GNUPGHOME=$_LLVM_23_1_OWNED_GNUPGHOME
+    export LLVM_23_1_SIGNED_GNUPGHOME
+}
+
+llvm_23_1_cleanup_isolated_keyring() {
+    [ -n "$_LLVM_23_1_OWNED_GNUPGHOME" ] || return 0
+    llvm_23_1_owned_keyring_valid "$_LLVM_23_1_OWNED_GNUPGHOME" &&
+        rm -rf "$_LLVM_23_1_OWNED_GNUPGHOME"
+    if [ "${LLVM_23_1_SIGNED_GNUPGHOME:-}" = "$_LLVM_23_1_OWNED_GNUPGHOME" ]; then
+        LLVM_23_1_SIGNED_GNUPGHOME=$_LLVM_23_1_PREVIOUS_GNUPGHOME
+    fi
+    _LLVM_23_1_OWNED_GNUPGHOME=""
+    _LLVM_23_1_PREVIOUS_GNUPGHOME=""
+    export LLVM_23_1_SIGNED_GNUPGHOME
+}

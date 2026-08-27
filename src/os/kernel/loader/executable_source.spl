@@ -9,7 +9,7 @@
 
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.loader.zstd_decompress.{zstd_decompress}
-use os.kernel.loader.cpio_newc.{CpioEntry, cpio_parse_bounded}
+use os.kernel.loader.cpio_newc.{CpioEntry, cpio_parse, cpio_lookup}
 use os.kernel.loader.app_registry.{app_registry_fat32_alias, app_registry_root_alias, app_registry_canonical_from_bytes}
 use os.services.vfs.vfs_init.{g_vfs_read_executable_bytes}
 use common.string_core.{str_char_at}
@@ -147,21 +147,15 @@ fn _initramfs_read_file_bytes_or_empty(path: text) -> [u8]:
         if decomp.is_err():
             log_raw_println("[exec-source] initramfs decompress-fail path={path}")
             return []
-        val parsed = cpio_parse_bounded(decomp.unwrap(), 131072, 4096, 536870912)
-        if parsed.is_err():
-            log_raw_println("[exec-source] initramfs cpio-parse-fail path={path}")
-            g_cpio_entries = []
-            g_cpio_decoded = true
-            return []
-        g_cpio_entries = parsed.unwrap()
+        g_cpio_entries = cpio_parse(decomp.unwrap())
         g_cpio_decoded = true
 
-    for entry in g_cpio_entries:
-        if entry.path == path:
-            log_raw_println("[exec-source] initramfs hit path={path}")
-            return entry.data
-    log_raw_println("[exec-source] initramfs miss path={path}")
-    []
+    val found = cpio_lookup(g_cpio_entries, path)
+    if found == nil:
+        log_raw_println("[exec-source] initramfs miss path={path}")
+        return []
+    log_raw_println("[exec-source] initramfs hit path={path}")
+    found.unwrap()
 
 fn _initramfs_read_file(path: text) -> Result<[u8], text>:
     val bytes = _initramfs_read_file_bytes_or_empty(path)
@@ -396,21 +390,23 @@ fn resolve_executable_bytes(path: text, arch: Architecture) -> Result<[u8], text
     if path.len() == 0:
         return Err(ERR_EINVAL)
 
-    if _text_starts_with_slash(path):
-        log_raw_println("[exec-source] resolve absolute path={path}")
-        val initramfs_bytes = _initramfs_read_file_bytes_or_empty(path)
-        log_raw_println("[exec-source] resolve initramfs returned path={path}")
+    val resolved_path = simplebox_resolve_canonical_path_v1(path)
+
+    if _text_starts_with_slash(resolved_path):
+        log_raw_println("[exec-source] resolve absolute path={resolved_path}")
+        val initramfs_bytes = _initramfs_read_file_bytes_or_empty(resolved_path)
+        log_raw_println("[exec-source] resolve initramfs returned path={resolved_path}")
         if initramfs_bytes.len() > 0:
             return Ok(initramfs_bytes)
-        log_raw_println("[exec-source] resolve vfs begin path={path}")
-        val vfs_result = _vfs_read_file(path)
-        log_raw_println("[exec-source] resolve vfs returned path={path}")
+        log_raw_println("[exec-source] resolve vfs begin path={resolved_path}")
+        val vfs_result = _vfs_read_file(resolved_path)
+        log_raw_println("[exec-source] resolve vfs returned path={resolved_path}")
         if vfs_result.is_ok():
             return vfs_result
 
     # Reader said ENOENT — try the boot-test fallback.
     log_raw_println("[exec-source] resolve legacy-fallback path={path}")
-    _legacy_stub_bytes(path, arch)
+    _legacy_stub_bytes(resolved_path, arch)
 
 fn _text_starts_with_slash(path: text) -> bool:
     path.len() > 0 and str_char_at(path, 0) == "/"

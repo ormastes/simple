@@ -264,6 +264,34 @@ callable-type materialization/import registration around
 owner exists, retain RSS and callable/import cardinalities, re-verify the former
 MIR constant frontier, and rerun Phase 3 in a new cache. Only the full
 wrapper-owned LLVM bootstrap transaction may admit a later Stage 3/4 result.
+## Restart12 FV2 fresh-lane result after native-enum fix
+
+Source `0e378f9169eea9e9e111a54c9918dc82213b2fd6` included the native
+`MethodResolution` match fix and bounded entry-closure alias surfaces from
+current main. The original impossible receiver ID did not recur.
+
+The bounded three-cycle no-stub transaction used:
+
+```sh
+SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh \
+  --full-bootstrap --full-cli --deploy --jobs=2
+```
+
+Cycle 1 established the missing-seed prerequisite. Cycle 2 built the Rust
+authority and reached one clean Stage 2 failure: `ContractBlock.decrease_measure`
+was accessed through an `ANY` owner while lowering
+`HirLowering.lower_verification_contract`. Cycle 3 tested the narrower typed
+free-function-boundary hypothesis; the error moved into that helper unchanged,
+disproving the hypothesis. The ineffective source change was removed.
+
+The authoritative final log is
+`build/bootstrap/logs/x86_64-unknown-linux-gnu/stage2-native-build.log`, SHA-256
+`07a7044773ec5b682b0d1e4146a6f059fe7f80ec5ff8420b50bdd49184ac4b6e`.
+The preserved cache contains 1,306+ objects. A fresh lane must repair parameter
+type retention for parser-owned `ContractBlock` itself (not add another field
+helper), add an exact native regression covering optional `ContractClause`, and
+resume the cache without deleting it. No Stage 2, Stage 3, or Stage 4 candidate
+was produced by this lane.
 
 ### Source-current callable-boundary continuation
 
@@ -494,3 +522,40 @@ supervisor/provenance must land before a fresh current-HEAD Stage 2 and one
 instrumented Stage 3 in a fresh session. No fourth run is
 permitted here. Stage 4, essential-tools smoke, deployment, downstream
 evidence, and rollback remain gated by TODO667.
+## FV2 fresh-lane continuation
+
+After rebasing onto `f8f10b7af40`, the parser-owned `ContractBlock` and its
+flat-AST propagation became canonical. The declaration-lowering entry closure
+now imports `ContractBlock` and `ContractClause` explicitly. A first bounded
+run proved the old `ANY.decrease_measure` frontier absent and exposed a parser
+error at `convert_nodes.spl:626`; expanding the adjacent one-line `if`/`elif`
+arms fixed discovery. The next run completed Stage 2 and its sanity gate, then
+failed Stage 3 cleanly because runtime-computed bootstrap guard constants had
+no explicit type. Those six shared constants now carry `: bool`.
+
+The third and final bounded run again completed Stage 2 plus sanity and entered
+Stage 3 without either prior diagnostic. It was externally terminated with
+exit 143 during active MIR/HIR work. The final Stage 2 log SHA-256 is
+`0b539221973183846ac1365bc7278d2d5f1b2b6d5417f6128de2e54e5183804e`;
+the terminated Stage 3 log SHA-256 is
+`b2ba46409237f915099e90ecb8efc4c8ee281f9f3942dd56aeba63581444de6d`.
+No fourth run is permitted in this session. Stage 3/4 admission therefore
+remains WARN/blocked, while the parser-contract and inferred-guard frontiers
+are fixed and covered by retained executable evidence.
+
+## FV2 continuation after callable/argv integration
+
+The next bounded lane used a planner-issued
+`self-host-convergence-check` Stage 4 receipt and rebased onto the shared
+module-constant, defer-marker, callable-materialization, and CLI argv owner
+fixes. Cycle 1 found the malformed missing `defer_unsupported_marker` header;
+cycle 2 passed Stage 2 plus sanity and reached Stage 3, which exited 139 after
+the frontend error counter rose from 1 to 25. After importing the upstream
+callable/argv fixes, cycle 3 again passed Stage 2 plus sanity and reproduced the
+same Stage 3 log byte-for-byte. Stage 2 log SHA-256 is
+`5b2e626147f88792ab06ea609fe6a99e9b067729efb9fa131aac911ff69e8a4f`;
+Stage 3 log SHA-256 is
+`542786f33cd0154300600763312bc46f8e77d795d0321587148eed6d17715faf`.
+No Stage 3/4 candidate or deployed CLI exists. The three-cycle cap is exhausted;
+the next fresh lane must expose and repair the first hidden frontend diagnostic
+before the 1-to-21 error expansion instead of repeating this transaction.

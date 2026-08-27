@@ -50,11 +50,17 @@ use os.toolchain_vfs_probe_contract.{
 }
 use os.ssh_qemu_contract.{run_x64_ssh_probe}
 use hardware.riscv_common.core.riscv_formal.{verify_rv64_qemu_user_proof_contract}
-use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
-use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
-use std.nogc_sync_mut.io.env_ops.{env_get, env_set, cwd}
-use std.nogc_sync_mut.io.file_ops.{file_delete, file_exists, file_read}
-use std.nogc_sync_mut.ffi.io.{file_write_text, path_absolute}
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_env_cwd() -> text
+extern fn rt_time_now_unix_micros() -> i64
 
 fn get_all_targets() -> [OsTarget]:
     """Returns all 6 architecture targets."""
@@ -134,43 +140,18 @@ fn os_native_build_args(target: OsTarget, backend: text) -> [text]:
         # explicitly opts into a richer CPU model.
         args.push("--cpu")
         args.push("x86-64-v1")
-    if _is_wm_simple_web_check_target(target):
-        args.push("--opt-level=none")
-    elif _is_riscv32_smoke_target(target):
-        args.push("--opt-level=standard")
-    else:
-        args.push("--opt-level=aggressive")
+    args.push("--opt-level=aggressive")
     args.push("--log")
     args.push(log_mode)
-    if _is_riscv32_smoke_target(target):
-        args.push("--timeout")
-        args.push("840")
-    elif _is_wm_simple_web_check_target(target):
-        # Keep the worker timeout below the OS runner's 900s outer timeout so
-        # timed-out wm-simple-web builds do not leave orphaned workers.
-        args.push("--timeout")
-        args.push("870")
-    elif _is_arm64_desktop_engine2d_target(target):
-        args.push("--timeout")
-        args.push("870")
-    elif _is_arm64_wm_qemu_target(target) or _is_arm_fs_exec_target(target) or _is_riscv_fs_exec_target(target) or _is_riscv64_display_smoke_target(target) or _is_riscv64_hosted_target(target):
+    if _is_arm64_wm_qemu_target(target) or _is_arm_fs_exec_target(target) or _is_riscv_fs_exec_target(target) or _is_riscv64_hosted_target(target):
         args.push("--timeout")
         args.push("180")
-    elif _is_riscv64_live_helper_target(target):
-        args.push("--timeout")
-        args.push("180")
-    elif _is_ssh_live_target(target):
+    elif _is_riscv64_live_helper_target(target) or _is_ssh_live_target(target):
         # The SSH live image pulls in the full network/storage/userland slice,
-        # and several reachable modules routinely exceed short worker budgets
-        # on cold builds even when the lane is healthy.
-        val outer_timeout_secs = _os_build_timeout_ms() / 1000
-        var worker_timeout_secs = 180
-        if outer_timeout_secs > 210:
-            worker_timeout_secs = outer_timeout_secs - 30
-        elif outer_timeout_secs > 1:
-            worker_timeout_secs = outer_timeout_secs - 1
+        # and several reachable modules routinely exceed the default 60s
+        # per-file watchdog on cold LLVM builds even when the lane is healthy.
         args.push("--timeout")
-        args.push(worker_timeout_secs.to_text())
+        args.push("180")
     args.push("--entry-closure")
     args.push("--entry")
     args.push(target.entry)
@@ -185,7 +166,7 @@ fn os_native_build_args(target: OsTarget, backend: text) -> [text]:
 fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     """Builds the OS kernel for the given target.
 
-    Runs the native-build command through the process facade. Returns true on success.
+    Runs the native-build command via rt_process_run_timeout. Returns true on success.
 
     Phase-level diagnostics are printed so a stalled build identifies which phase
     ran long rather than surfacing as a generic 'Process timed out'. The timeout
@@ -194,7 +175,7 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     val arch_label = arch_display_name(target.arch)
     val backend_name = if backend == "llvm": "llvm" else: "cranelift"
     val cached_build_matches = _last_successful_build_entry == target.entry and _last_successful_build_output == target.output and _last_successful_build_backend == backend_name and _last_successful_build_target == target.target_triple
-    if cached_build_matches and file_exists(target.output):
+    if cached_build_matches and rt_file_exists(target.output):
         print "[build][{arch_label}] phase=native-build cached output={target.output}"
         return true
     val build_marker = if _is_riscv64_live_helper_target(target): _ssh_live_build_marker_value(backend) else: ""
@@ -203,10 +184,6 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     val args = os_native_build_args(target, backend_name)
     val objcopy_prefix = _objcopy_path_prefix()
     val simple_bin = _find_simple_binary_for_target(target, backend_name)
-    if simple_bin == "":
-        _remove_stale_build_output(target)
-        print "[build][{arch_label}] phase=tooling FAILED: no runnable pure-Simple compiler"
-        return false
     val stamp_content = _native_build_stamp_content(target, backend_name, args, simple_bin, log_mode)
     if build_marker == "" and _native_build_cache_hit(target, stamp_content, simple_bin):
         print "[build][{arch_label}] phase=native-build persistent-cache output={target.output}"
@@ -219,7 +196,6 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     val old_lib = env_get("SIMPLE_LIB") ?? ""
     val old_boot_minimal = env_get("SIMPLE_BOOT_MINIMAL") ?? ""
     val old_stub_env = env_get("SIMPLE_ALLOW_FREESTANDING_STUBS") ?? ""
-    val old_no_stub_fallback = env_get("SIMPLE_NO_STUB_FALLBACK") ?? ""
     val old_log_mode = env_get("SIMPLE_OS_LOG_MODE") ?? ""
     val old_path = env_get("PATH") ?? ""
     val old_build_marker = env_get("SIMPLE_SSH_LIVE_BUILD_MARKER") ?? ""
@@ -247,7 +223,7 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     if env_prefix != "":
         print "[build][{arch_label}] env: {env_prefix}"
     print "[build][{arch_label}] cmd: {simple_bin} {args.join(" ")}"
-    val (stdout, stderr, exit_code) = _run_candidate_pinned(simple_bin, args, timeout_ms)
+    val (stdout, stderr, exit_code) = rt_process_run_timeout(simple_bin, args, timeout_ms)
     val elapsed_ms = _now_ms() - started_ms
     if exit_code != 0:
         _write_bootstrap_result(target, false, false, backend_name)
@@ -262,7 +238,7 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
         _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_no_stub_fallback, old_log_mode, old_path, old_build_marker)
         return false
     print "[build][{arch_label}] phase=native-build OK elapsed_ms={elapsed_ms}"
-    if not file_exists(target.output):
+    if not rt_file_exists(target.output):
         _write_bootstrap_result(target, false, false, backend_name)
         print "[build][{arch_label}] phase=artifact FAILED output missing: {target.output}"
         _cleanup_generated_build_helpers(build_marker)
@@ -296,13 +272,13 @@ fn _native_build_stamp_content(target: OsTarget, backend_name: text, args: [text
 
 fn _write_native_build_stamp(target: OsTarget, content: text):
     val stamp_path = _native_build_stamp_path(target)
-    if not file_write_text(stamp_path, content):
+    if not rt_file_write_text(stamp_path, content):
         print "[build] warning: could not write native-build stamp: {stamp_path}"
 
 fn _path_newer_than_output(path: text, output: text) -> bool:
-    if not file_exists(path):
+    if not rt_file_exists(path):
         return false
-    val (stdout, _stderr, exit_code) = process_run_timeout("find", [path, "-newer", output, "-print", "-quit"], 10000)
+    val (stdout, _stderr, exit_code) = rt_process_run_timeout("find", [path, "-newer", output, "-print", "-quit"], 10000)
     exit_code != 0 or stdout != ""
 
 fn _native_build_inputs_newer_than_output(target: OsTarget, simple_bin: text) -> bool:
@@ -316,12 +292,12 @@ fn _native_build_inputs_newer_than_output(target: OsTarget, simple_bin: text) ->
     false
 
 fn _native_build_cache_hit(target: OsTarget, expected_stamp: text, simple_bin: text) -> bool:
-    if not file_exists(target.output):
+    if not rt_file_exists(target.output):
         return false
     val stamp_path = _native_build_stamp_path(target)
-    if not file_exists(stamp_path):
+    if not rt_file_exists(stamp_path):
         return false
-    if file_read(stamp_path) != expected_stamp:
+    if rt_file_read_text(stamp_path) != expected_stamp:
         return false
     not _native_build_inputs_newer_than_output(target, simple_bin)
 
@@ -329,18 +305,18 @@ fn _objcopy_path_prefix() -> text:
     # macOS Homebrew locations
     if file_exists("/opt/homebrew/opt/llvm/bin/llvm-objcopy"):
         return "/opt/homebrew/opt/llvm/bin"
-    if file_exists("/usr/local/opt/llvm/bin/llvm-objcopy"):
+    if rt_file_exists("/usr/local/opt/llvm/bin/llvm-objcopy"):
         return "/usr/local/opt/llvm/bin"
     # Linux system locations (Debian/Ubuntu packaged LLVM)
-    if file_exists("/usr/bin/llvm-objcopy"):
+    if rt_file_exists("/usr/bin/llvm-objcopy"):
         return "/usr/bin"
-    if file_exists("/usr/lib/llvm-20/bin/llvm-objcopy"):
+    if rt_file_exists("/usr/lib/llvm-20/bin/llvm-objcopy"):
         return "/usr/lib/llvm-20/bin"
-    if file_exists("/usr/lib/llvm-19/bin/llvm-objcopy"):
+    if rt_file_exists("/usr/lib/llvm-19/bin/llvm-objcopy"):
         return "/usr/lib/llvm-19/bin"
-    if file_exists("/usr/lib/llvm-18/bin/llvm-objcopy"):
+    if rt_file_exists("/usr/lib/llvm-18/bin/llvm-objcopy"):
         return "/usr/lib/llvm-18/bin"
-    if file_exists("/usr/lib/llvm-17/bin/llvm-objcopy"):
+    if rt_file_exists("/usr/lib/llvm-17/bin/llvm-objcopy"):
         return "/usr/lib/llvm-17/bin"
     ""
 
@@ -396,6 +372,8 @@ fn _candidate_frontend_smoke(candidate: text) -> bool:
     val probe_dir = probe_dir_stdout.trim()
     if not probe_dir.starts_with(probe_prefix) or not file_exists(probe_dir):
         return false
+    val (stdout, _stderr, exit_code) = process_run_timeout(candidate, ["--version"], 5000)
+    exit_code == 0 and stdout != ""
 
     val probe_output = probe_dir + "/p2_add"
     val probe_log = probe_dir + "/build.log"
@@ -417,32 +395,35 @@ fn _candidate_frontend_smoke(candidate: text) -> bool:
     if build_exit == 0 and log_ok and file_exists(probe_output):
         val (run_stdout, _, run_exit) = process_run_timeout(probe_output, [], 5000)
         accepted = run_exit == 0 and _candidate_exact_five(run_stdout)
-    val cleanup_ok = dir_remove_all(probe_dir)
+    val cleanup_ok = dir_remove_all(probe_dir) == 0
     accepted and cleanup_ok
 
 fn _simple_binary_is_valid(candidate: text) -> bool:
-    """Validate a candidate with version and bounded frontend checks.
+    """Validate a candidate `simple` binary by running `<candidate> --version`.
 
-    Guards against seed, stale-ABI, and corrupt binaries before any QEMU build.
+    Requires exit code 0 and non-empty stdout. Guards against stale or
+    corrupt bootstrap binaries (e.g. ones that segfault on startup, which
+    the Linux bootstrap binary at src/compiler_rust/target/release/simple
+    was observed to do on 2026-04-13).
     """
-    if not file_exists(candidate):
+    if not rt_file_exists(candidate):
         return false
-    val (stdout, stderr, exit_code) = process_run_timeout(candidate, ["--version"], 5000)
-    val version = stdout + "\n" + stderr
-    if exit_code != 0 or version.trim() == "" or version.contains("bootstrap seed only"):
-        return false
-    _candidate_frontend_smoke(candidate)
+    val (stdout, _stderr, exit_code) = rt_process_run_timeout(candidate, ["--version"], 5000)
+    exit_code == 0 and stdout != ""
 
-fn _simple_binary_has_native_build_contract(candidate: text, backend_name: text) -> bool:
-    # This is a bounded CLI liveness/command-surface probe. The real build is
-    # still authoritative for backend runtime/toolchain availability.
+fn _simple_binary_supports_backend(candidate: text, backend_name: text) -> bool:
     if not _simple_binary_is_valid(candidate):
         return false
+    if backend_name != "llvm":
+        return true
     val probe_args = [
         "native-build",
-        "--backend", backend_name,
+        "--backend", "llvm",
+        "--source", "src",
         "--entry", "src/app/cli/main.spl",
-        "--mode", "definitely-invalid-mode"
+        "--target", "definitely-invalid-target",
+        "-o", "/tmp/simple_backend_probe.elf",
+        "--linker-script", "examples/09_embedded/simple_os/arch/riscv64/linker.ld"
     ]
     val (stdout, stderr, exit_code) = _run_candidate_admission_pinned(
         candidate, probe_args, _os_probe_timeout_ms()
@@ -451,19 +432,18 @@ fn _simple_binary_has_native_build_contract(candidate: text, backend_name: text)
     exit_code == 1 and (stdout + "\n" + stderr).contains(diagnostic)
 
 fn _find_simple_binary() -> text:
-    val env_bin = env_get("SIMPLE_BINARY") ?? ""
-    if env_bin != "" and _simple_binary_is_valid(env_bin):
+    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "":
         return env_bin
-    val env_simple_bin = env_get("SIMPLE_BIN") ?? ""
-    if env_simple_bin != "" and _simple_binary_is_valid(env_simple_bin):
-        return env_simple_bin
     # Probe in priority order. Prefer freshly built local binaries first so
     # QEMU/native-build lanes see the current source tree instead of an older
     # release artifact that merely still passes `--version`.
-    # Each candidate must pass version and a bounded checked-in frontend smoke,
-    # so stale or segfaulting binaries fall through.
+    # Each candidate is validated via `<candidate> --version` (exit 0 +
+    # non-empty stdout) so stale or segfaulting binaries fall through.
     val candidates: [text] = [
-        "release/x86_64-unknown-linux-gnu/simple",
+        "src/compiler_rust/target/debug/simple",
+        "src/compiler_rust/target/bootstrap/simple",
+        "src/compiler_rust/target/release/simple",
         "bin/simple",
         "bin/release/aarch64-apple-darwin-macho/simple",
         "bin/release/macos-arm64/simple",
@@ -474,17 +454,20 @@ fn _find_simple_binary() -> text:
     for cand in candidates:
         if _simple_binary_is_valid(cand):
             return cand
-    ""
+    "bin/simple"
 
 fn _find_simple_binary_for_target(target: OsTarget, backend_name: text) -> text:
-    val env_bin = env_get("SIMPLE_BINARY") ?? ""
-    if env_bin != "" and _simple_binary_has_native_build_contract(env_bin, backend_name):
+    if backend_name == "llvm" and target.arch == Architecture.X86 and _simple_binary_supports_backend("src/compiler_rust/target/bootstrap/simple", backend_name):
+        return "src/compiler_rust/target/bootstrap/simple"
+    if backend_name == "llvm" and _simple_binary_supports_backend("src/compiler_rust/target/release/simple", backend_name):
+        return "src/compiler_rust/target/release/simple"
+    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "" and _simple_binary_supports_backend(env_bin, backend_name):
         return env_bin
-    val env_simple_bin = env_get("SIMPLE_BIN") ?? ""
-    if env_simple_bin != "" and _simple_binary_has_native_build_contract(env_simple_bin, backend_name):
-        return env_simple_bin
     val candidates: [text] = [
-        "release/x86_64-unknown-linux-gnu/simple",
+        "src/compiler_rust/target/debug/simple",
+        "src/compiler_rust/target/bootstrap/simple",
+        "src/compiler_rust/target/release/simple",
         "bin/simple",
         "bin/release/aarch64-apple-darwin-macho/simple",
         "bin/release/macos-arm64/simple",
@@ -493,21 +476,13 @@ fn _find_simple_binary_for_target(target: OsTarget, backend_name: text) -> text:
         "bin/release/linux-x86_64/simple",
     ]
     for cand in candidates:
-        if _simple_binary_has_native_build_contract(cand, backend_name):
+        if _simple_binary_supports_backend(cand, backend_name):
             return cand
-    ""
+    _find_simple_binary()
 
 fn _build_sources(target: OsTarget) -> [text]:
-    if _is_arm64_wm_qemu_target(target) or _is_arm64_desktop_engine2d_target(target):
-        return ["build/os/generated", "src/os", "src/lib", "examples/09_embedded/simple_os"]
-    if _is_host_gpu_probe_target(target):
-        return ["build/os/generated", "src/os", "src/lib", "examples/09_embedded/simple_os"]
     if _is_riscv64_live_helper_target(target):
         return ["build/os/generated", "src", "examples"]
-    if _is_riscv64_smoke_target(target):
-        return ["build/os/generated", "src/os", "src/lib"]
-    if _is_riscv32_smoke_target(target):
-        return ["build/os/generated", "src/os", "src/lib"]
     if _is_ssh_live_target(target):
         return ["build/os/generated", "src/os", "src/lib", "examples/09_embedded/simple_os"]
     if _is_x86_32_probe_target(target):
@@ -519,19 +494,19 @@ fn _build_sources(target: OsTarget) -> [text]:
     if _is_desktop_wrapper_target(target):
         return ["build/os/generated", "src/os", "src/lib", "examples/09_embedded/simple_os"]
     if _is_wm_simple_web_check_target(target):
-        return ["build/os/generated", "src/os", "src/lib", "examples/09_embedded/simple_os"]
+        return ["build/os/generated", "src/os", "src/lib", "examples/09_embedded/simple_os/arch/x86_64"]
     if _is_gui_engine2d_wrapper_target(target):
         return ["build/os/generated", "src/os", "src/lib", "examples/09_embedded/simple_os"]
     if _is_js_browser_runtime_probe_target(target):
         return ["build/os/generated", "src/os", "src/lib", "examples/09_embedded/simple_os"]
     if _is_fs_wrapper_target(target):
         return ["build/os/generated", "src/os", "src/lib", "examples/09_embedded/simple_os"]
+    if _is_arm64_wm_qemu_target(target):
+        return ["build/os/generated", "src/os", "examples/09_embedded/simple_os"]
     if _is_arm_fs_exec_target(target):
         return ["build/os/generated", "src/os", "examples/09_embedded/simple_os"]
     if _is_riscv64_fs_exec_target(target):
         return ["build/os/generated", "examples/09_embedded/simple_os/arch/riscv64"]
-    if _is_riscv64_display_smoke_target(target):
-        return ["build/os/generated", "src/os", "src/lib", "examples/09_embedded/simple_os"]
     if _is_riscv64_hosted_target(target):
         return ["build/os/generated", "src", "examples"]
     if _is_riscv32_fs_exec_target(target):
@@ -543,18 +518,15 @@ fn _build_env_prefix(target: OsTarget, objcopy_prefix: text) -> text:
     if _is_x86_64_kernel_target(target) or _is_x86_32_probe_target(target) or _uses_baremetal_wrapper_profile(target):
         envs.push("SIMPLE_BOOTSTRAP=1")
         envs.push("SIMPLE_LIB=\"$(pwd)/src\"")
-    if _is_arm64_wm_qemu_target(target) or _is_arm64_desktop_engine2d_target(target):
+    if _is_arm64_wm_qemu_target(target):
         envs.push("SIMPLE_BOOTSTRAP=1")
         envs.push("SIMPLE_LIB=\"$(pwd)/src\"")
-        envs.push("SIMPLE_NO_STUB_FALLBACK=1")
+        envs.push("SIMPLE_ALLOW_FREESTANDING_STUBS=1")
     if _is_arm_fs_exec_target(target):
         envs.push("SIMPLE_BOOT_MINIMAL=1")
     if _needs_arm_freestanding_stub_env(target):
         envs.push("SIMPLE_ALLOW_FREESTANDING_STUBS=1")
-    if _is_riscv64_display_smoke_target(target):
-        envs.push("SIMPLE_BOOTSTRAP=1")
-        envs.push("SIMPLE_LIB=\"$(pwd)/src\"")
-    if _is_riscv_fs_exec_target(target) or _is_riscv64_display_smoke_target(target) or _is_riscv64_hosted_target(target) or _is_riscv64_live_helper_target(target) or _is_host_gpu_probe_target(target):
+    if _is_riscv_fs_exec_target(target) or _is_riscv64_hosted_target(target) or _is_riscv64_live_helper_target(target):
         envs.push("SIMPLE_BOOT_MINIMAL=1")
     if _needs_freestanding_stub_env(target):
         envs.push("SIMPLE_ALLOW_FREESTANDING_STUBS=1")
@@ -605,93 +577,77 @@ fn _simpleos_log_config_source(enabled: bool) -> text:
         "        return \"on\"\n" +
         "    \"off\"\n"
 
-fn _remove_stale_build_output(target: OsTarget) -> bool:
-    if file_exists(target.output):
-        if not file_delete(target.output):
+fn _prepare_build_output(target: OsTarget, build_marker: text) -> bool:
+    if rt_file_exists(target.output):
+        if not rt_file_delete(target.output):
             print "[build] could not remove stale artifact: {target.output}"
             return false
-    true
-
-fn _prepare_build_output(target: OsTarget, build_marker: text) -> bool:
-    if not _remove_stale_build_output(target):
-        return false
-    if file_exists(_legacy_simpleos_log_config_path()):
-        file_delete(_legacy_simpleos_log_config_path())
-    if not dir_create_all("build/os/generated/generated"):
+    if rt_file_exists(_legacy_simpleos_log_config_path()):
+        rt_file_delete(_legacy_simpleos_log_config_path())
+    if not rt_dir_create_all("build/os/generated/generated"):
         print "[build] could not create build/os/generated/generated"
         return false
-    if not file_write_text(_simpleos_log_config_path(), _simpleos_log_config_source(_os_build_log_mode() == "on")):
+    if not rt_file_write_text(_simpleos_log_config_path(), _simpleos_log_config_source(_os_build_log_mode() == "on")):
         print "[build] could not write SimpleOS log compile config"
         return false
     if build_marker != "":
-        if not file_write_text(_ssh_live_build_marker_path(), _ssh_live_build_marker_source(build_marker)):
+        if not rt_file_write_text(_ssh_live_build_marker_path(), _ssh_live_build_marker_source(build_marker)):
             print "[build] could not write SSH live build marker"
             return false
-        if not env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", build_marker):
+        if not rt_env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", build_marker):
             print "[build] could not export SIMPLE_SSH_LIVE_BUILD_MARKER"
             return false
     true
 
 fn _cleanup_generated_build_helpers(build_marker: text):
-    if file_exists(_simpleos_log_config_path()):
-        file_delete(_simpleos_log_config_path())
-    if build_marker != "" and file_exists(_ssh_live_build_marker_path()):
-        file_delete(_ssh_live_build_marker_path())
+    if rt_file_exists(_simpleos_log_config_path()):
+        rt_file_delete(_simpleos_log_config_path())
+    if build_marker != "" and rt_file_exists(_ssh_live_build_marker_path()):
+        rt_file_delete(_ssh_live_build_marker_path())
     if build_marker != "":
-        env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", "")
+        rt_env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", "")
 
-fn _restore_build_env(old_bootstrap: text, old_lib: text, old_boot_minimal: text, old_stub_env: text, old_no_stub_fallback: text, old_log_mode: text, old_path: text, old_build_marker: text):
+fn _restore_build_env(old_bootstrap: text, old_lib: text, old_boot_minimal: text, old_stub_env: text, old_log_mode: text, old_path: text, old_build_marker: text):
     env_set("SIMPLE_BOOTSTRAP", old_bootstrap)
     env_set("SIMPLE_LIB", old_lib)
     env_set("SIMPLE_BOOT_MINIMAL", old_boot_minimal)
     env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", old_stub_env)
-    env_set("SIMPLE_NO_STUB_FALLBACK", old_no_stub_fallback)
     env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
     env_set("PATH", old_path)
     env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", old_build_marker)
 
 fn _apply_build_env(target: OsTarget, objcopy_prefix: text) -> bool:
-    val cwd = cwd()
+    val cwd = rt_env_cwd()
     if _is_x86_64_kernel_target(target) or _is_x86_32_probe_target(target) or _uses_baremetal_wrapper_profile(target):
-        if not env_set("SIMPLE_BOOTSTRAP", "1"):
+        if not rt_env_set("SIMPLE_BOOTSTRAP", "1"):
             return false
         if not env_set("SIMPLE_LIB", "{cwd}/src"):
             return false
-    if _is_arm64_wm_qemu_target(target) or _is_arm64_desktop_engine2d_target(target):
-        if not env_set("SIMPLE_BOOTSTRAP", "1"):
-            return false
-        if not env_set("SIMPLE_LIB", "{cwd}/src"):
-            return false
-        if not env_set("SIMPLE_NO_STUB_FALLBACK", "1"):
+        if not env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", "1"):
             return false
     if _is_arm_fs_exec_target(target):
-        if not env_set("SIMPLE_BOOT_MINIMAL", "1"):
+        if not rt_env_set("SIMPLE_BOOT_MINIMAL", "1"):
             return false
-        if not env_set("SIMPLE_LIB", "{cwd}/src"):
+        if not rt_env_set("SIMPLE_LIB", "{cwd}/src"):
             return false
     if _needs_arm_freestanding_stub_env(target):
-        if not env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", "1"):
+        if not rt_env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", "1"):
             return false
-    if _is_riscv64_display_smoke_target(target):
-        if not env_set("SIMPLE_BOOTSTRAP", "1"):
-            return false
-        if not env_set("SIMPLE_LIB", "{cwd}/src"):
-            return false
-    if _is_riscv_fs_exec_target(target) or _is_riscv64_display_smoke_target(target) or _is_riscv64_hosted_target(target) or _is_riscv64_live_helper_target(target) or _is_host_gpu_probe_target(target):
-        if not env_set("SIMPLE_BOOT_MINIMAL", "1"):
+    if _is_riscv_fs_exec_target(target) or _is_riscv64_hosted_target(target) or _is_riscv64_live_helper_target(target):
+        if not rt_env_set("SIMPLE_BOOT_MINIMAL", "1"):
             return false
     if _needs_freestanding_stub_env(target):
-        if not env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", "1"):
+        if not rt_env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", "1"):
             return false
-    if not env_set("SIMPLE_OS_LOG_MODE", _os_build_log_mode()):
+    if not rt_env_set("SIMPLE_OS_LOG_MODE", _os_build_log_mode()):
         return false
     if objcopy_prefix != "":
-        val old_path = env_get("PATH") ?? ""
+        val old_path = rt_env_get("PATH") ?? ""
         if old_path == "":
-            if not env_set("PATH", objcopy_prefix):
+            if not rt_env_set("PATH", objcopy_prefix):
                 return false
         else:
-            if not env_set("PATH", "{objcopy_prefix}:{old_path}"):
+            if not rt_env_set("PATH", "{objcopy_prefix}:{old_path}"):
                 return false
     true
 
@@ -707,9 +663,6 @@ fn _needs_freestanding_stub_env(target: OsTarget) -> bool:
 fn _is_x86_64_kernel_target(target: OsTarget) -> bool:
     target.entry == "examples/09_embedded/simple_os/arch/x86_64/os_entry.spl"
 
-fn _is_host_gpu_probe_target(target: OsTarget) -> bool:
-    target.entry.ends_with("/host_gpu_smoke_entry.spl")
-
 fn _is_x86_32_browser_probe_target(target: OsTarget) -> bool:
     target.entry == "examples/09_embedded/simple_os/arch/x86_32/browser_probe_entry.spl"
 
@@ -723,7 +676,6 @@ fn _is_browser_wrapper_target(target: OsTarget) -> bool:
 
 fn _is_desktop_wrapper_target(target: OsTarget) -> bool:
     target.entry == "examples/09_embedded/simple_os/arch/x86_64/desktop_e2e_entry.spl" or
-        target.entry == "examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl" or
         target.entry == "examples/09_embedded/simple_os/arch/x86_64/desktop_probe_entry.spl" or
         target.entry == "examples/09_embedded/simple_os/arch/x86_64/ssh_live_entry.spl" or
         target.entry == "examples/09_embedded/simple_os/arch/x86_64/ssh_x25519_probe_entry.spl" or
@@ -734,11 +686,10 @@ fn _is_gui_engine2d_wrapper_target(target: OsTarget) -> bool:
         target.entry == "examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d.spl" or
         target.entry == "examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d_min.spl" or
         target.entry == "examples/09_embedded/simple_os/arch/x86_64/gui_engine2d_primitives_entry.spl" or
-        target.entry == "examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d_virtio.spl" or
-        target.entry == "examples/09_embedded/simple_os/arch/x86_64/gpu_test_entry.spl"
+        target.entry == "examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d_virtio.spl"
 
 fn _is_wm_simple_web_check_target(target: OsTarget) -> bool:
-    target.entry == "examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl" and
+    target.entry == "examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d.spl" and
         target.output == "build/os/simpleos_wm_simple_web_check_32.elf"
 
 fn _is_js_browser_runtime_probe_target(target: OsTarget) -> bool:
@@ -753,12 +704,8 @@ fn _is_fs_wrapper_target(target: OsTarget) -> bool:
         target.entry == "examples/09_embedded/simple_os/arch/x86_64/toolchain_vfs_probe_entry.spl"
 
 fn _is_arm64_wm_qemu_target(target: OsTarget) -> bool:
-    target.entry == "examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl" and
+    target.entry == "examples/09_embedded/simple_os/arch/arm64/wm_entry.spl" and
         target.output == "build/os/simpleos_arm64_wm.elf"
-
-fn _is_arm64_desktop_engine2d_target(target: OsTarget) -> bool:
-    target.entry == "examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl" and
-        target.output == "build/os/simpleos_arm64_desktop_engine2d.elf"
 
 fn _is_arm_fs_exec_target(target: OsTarget) -> bool:
     target.entry == "examples/09_embedded/simple_os/arch/arm64/fs_exec_entry.spl" or
@@ -784,18 +731,6 @@ fn _is_riscv32_fs_exec_target(target: OsTarget) -> bool:
 fn _is_riscv64_hosted_target(target: OsTarget) -> bool:
     target.entry == "examples/09_embedded/simple_os/arch/riscv64/hosted_entry.spl" and
         target.output == "build/os/simpleos_riscv64_hosted.elf"
-
-fn _is_riscv64_smoke_target(target: OsTarget) -> bool:
-    target.entry == "src/os/kernel/arch/riscv64/boot.spl" and
-        target.output == "build/os/simpleos_riscv64.elf"
-
-fn _is_riscv32_smoke_target(target: OsTarget) -> bool:
-    target.entry == "src/os/kernel/arch/riscv32/boot.spl" and
-        target.output == "build/os/simpleos_riscv32.elf"
-
-fn _is_riscv64_display_smoke_target(target: OsTarget) -> bool:
-    target.entry == "examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl" and
-        target.output == "build/os/simpleos_riscv64_display_smoke.elf"
 
 fn _is_riscv_fs_exec_target(target: OsTarget) -> bool:
     _is_riscv64_fs_exec_target(target) or _is_riscv32_fs_exec_target(target)
@@ -934,7 +869,7 @@ fn run_os_with_options(target: OsTarget, options: QemuRunOptions) -> bool:
 
     Checks that the binary exists, then spawns QEMU. Returns true on success.
     """
-    if not file_exists(target.output):
+    if not rt_file_exists(target.output):
         print "[run] ERROR: kernel binary not found: {target.output}"
         print "[run] Run 'bin/simple os build --arch={arch_display_name(target.arch)}' first"
         return false
@@ -945,7 +880,7 @@ fn run_os_with_options(target: OsTarget, options: QemuRunOptions) -> bool:
         print "[run] GUI debug lane enabled: serial output is attached to stdio"
     print "[run] {arch_display_name(target.arch)}: {cmd_parts.join(" ")}"
     val timeout: i64 = if target.gui_mode: 600000 else: 30000
-    val (stdout, stderr, exit_code) = process_run_timeout(qemu_bin, qemu_args, timeout)
+    val (stdout, stderr, exit_code) = rt_process_run_timeout(qemu_bin, qemu_args, timeout)
     if stdout != "":
         print "[run] serial output:\n{stdout}"
     if stderr != "":

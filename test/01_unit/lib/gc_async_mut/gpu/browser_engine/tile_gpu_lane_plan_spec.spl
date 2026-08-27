@@ -1,0 +1,44 @@
+use std.spec.{describe, it, expect}
+use std.gpu.engine2d.engine.{Engine2D}
+use common.ui.draw_ir.{draw_ir_rect}
+use std.gpu.browser_engine.simple_web_html_layout_renderer_paint_tiles_gpu.{
+    tile_lane_plan, tile_lane_plan_matches_commands,
+    tile_lane_render_plan_into
+}
+
+describe "Web DrawIR retained tile plan":
+    it "reuses exact geometry while allowing paint-only changes":
+        val first_commands = [
+            draw_ir_rect("background", 0, 0, 128, 128, 0xFF111827u32),
+            draw_ir_rect("box", 16, 16, 32, 32, 0xFFDC2626u32)
+        ]
+        val second_commands = [
+            draw_ir_rect("background", 0, 0, 128, 128, 0xFF111827u32),
+            draw_ir_rect("box", 16, 16, 32, 32, 0xFF2563EBu32)
+        ]
+        val plan = tile_lane_plan(first_commands, 128, 128, 128, 128, 0)
+        expect(tile_lane_plan_matches_commands(plan, second_commands)).to_equal(true)
+
+        var engine = Engine2D.create_with_backend(128, 128, "software")
+        val first = tile_lane_render_plan_into(
+            engine, first_commands, plan, 0xFF000000u32, "software")
+        engine = first.engine
+        val second = tile_lane_render_plan_into(
+            engine, second_commands, plan, 0xFF000000u32, "software")
+        expect(first.render.pixels[16 * 128 + 16]).to_equal(0xFFDC2626u32)
+        expect(second.render.pixels[16 * 128 + 16]).to_equal(0xFF2563EBu32)
+        expect(second.render.ops_rendered).to_equal(first.render.ops_rendered)
+        second.engine.shutdown()
+
+    it "rejects moved geometry instead of replaying stale bins":
+        val original = [draw_ir_rect("box", 0, 0, 32, 32, 0xFFFFFFFFu32)]
+        val moved = [draw_ir_rect("box", 64, 0, 32, 32, 0xFFFFFFFFu32)]
+        val plan = tile_lane_plan(original, 128, 128, 128, 128, 0)
+        expect(tile_lane_plan_matches_commands(plan, moved)).to_equal(false)
+        var engine = Engine2D.create_with_backend(128, 128, "software")
+        val stale = tile_lane_render_plan_into(
+            engine, moved, plan, 0xFF000000u32, "software")
+        expect(stale.render.unsupported_kinds).to_equal("stale-tile-lane-plan")
+        expect(stale.render.ops_rendered).to_equal(0)
+        expect(stale.render.pixels.len()).to_equal(0)
+        stale.engine.shutdown()

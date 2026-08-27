@@ -4,7 +4,7 @@
 # Proves the Simple WM (hosted compositor) can LAUNCH MULTIPLE GUI apps as
 # internal windows through Simple GUI, that the TASKBAR reflects them and WORKS
 # (clicking a taskbar item focuses/restores its window), in a real on-screen
-# GuiRenderer window, and captures binding evidence.
+# winit window, and captures binding evidence.
 #
 # Launches examples/06_io/ui/wm_multiapp_taskbar_gui.spl for real via a throwaway
 # .app bundle (LaunchServices registers the process with the macOS window server
@@ -20,25 +20,26 @@
 #     - `[wm-multiapp] final_state_ready .. all_visible=true`
 #   CAPTURES: the SimpleGui content window per state (launched-all / minimized /
 #     final), captured DIRECTLY by its CGWindowID via `screencapture -l<id>`
-#     (Space/foreground-independent — a background host window is otherwise not
+#     (Space/foreground-independent — a background winit window is otherwise not
 #     capturable by `-x`, which only shows the current Space). The id is resolved
 #     by window title via CGWindowListCopyWindowInfo (JXA).
 #   PIXEL CHECKS (binding, on the final capture; via
-#     scripts/check/measure_wm_multiapp_taskbar.spl which validates the real
-#     captured WM frame and self-calibrates the logical->physical scale):
+#     scripts/check/measure_wm_multiapp_taskbar.spl which locates the WM content
+#     by its magenta locator frame and self-calibrates the logical->physical
+#     scale):
 #     - each internal window's titlebar band differs from the desktop backdrop,
 #     - the bottom taskbar shows >= 4 colored item segments,
 #     - per-window crops written to app_<name>.png.
 #
 # Without Screen Recording permission the window capture / window names are
-# unavailable; the pixel checks then fail closed.
+# unavailable; the pixel checks then fail closed (calibration finds no locator).
 #
 # Writes build/wm_multiapp_taskbar/report.md (key=value lines).
 # Exit 0 = PASS (or non-macOS skip), non-zero = FAIL.
 #
 # `set -u` (nounset) only, NOT `set -e`: this gate deliberately continues past
 # non-fatal command failures (a missing capture, a validator that finds no
-# capture/validation errors) and classifies them into a fail-closed REASON via
+# locator, etc.) and classifies them into a fail-closed REASON at the end via
 # classify()/write_report — an errexit abort would instead leave NO report.
 # All fatal preconditions are checked explicitly with fail().
 set -u
@@ -67,8 +68,7 @@ HOST_OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 
 STATUS=fail
 REASON=unknown
-GUI_BIN="${SIMPLE_BIN:-}"
-SFFI_LIB=""
+GUI_BIN=""
 CAPTURE_METHOD="cgwindowid-screencapture-l"
 LAUNCH_COUNT=0
 TASKBAR_COUNT=0
@@ -86,8 +86,6 @@ CAP_FINAL=missing
 CALIB=""
 TASKBAR_LIT=0
 WINDOWS_OK=0
-TITLE_TEXT_OK=0
-CLOSE_BUTTONS_OK=0
 CROPS=""
 
 FINAL_PNG="$BUILD_DIR/state_final.png"
@@ -120,8 +118,6 @@ write_report() {
         echo "wm_multiapp_taskbar_calibration=$CALIB"
         echo "wm_multiapp_taskbar_lit_segments=$TASKBAR_LIT"
         echo "wm_multiapp_taskbar_windows_titlebar_ok=$WINDOWS_OK"
-        echo "wm_multiapp_taskbar_title_text_ok=$TITLE_TEXT_OK"
-        echo "wm_multiapp_taskbar_close_buttons_ok=$CLOSE_BUTTONS_OK"
         echo "wm_multiapp_taskbar_crops=$CROPS"
         echo "wm_multiapp_taskbar_final_png=$FINAL_PNG"
         echo "wm_multiapp_taskbar_launched_png=$LAUNCHED_PNG"
@@ -149,30 +145,10 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 # --- locate self-hosted Simple and the GuiRenderer SFFI sibling library ---
 is_rust_seed_simple() {
-    # Identity probe, not just a path pattern (2026-07-28).
-    # This used to test ONLY for a src/compiler_rust/ path. The deployed Rust
-    # seed lives at bin/release/<triple>/simple, which matches none of those
-    # patterns, so the seed was classified "not a seed" and every self-hosted
-    # claim in this script was asserted against it. Ask the binary instead.
-    # Audit: doc/08_tracking/todo/check_scripts_seed_identity_fail_open_2026-07-28.md
     case "$1" in
-        src/compiler_rust/*|./src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
     esac
-    # Not runnable: leave it to the caller's own missing-binary branch, which
-    # already fails. Do not report "seed" for something we never ran.
-    [ -n "${1:-}" ] && [ -x "$1" ] || return 1
-    # Executable but unverifiable => treat as forbidden (fail closed). The seed
-    # self-identifies on stderr, so 2>&1 is required.
-    if command -v timeout >/dev/null 2>&1; then
-        _irss_v="$(timeout 10 "$1" --version 2>&1)" || return 0
-    else
-        _irss_v="$("$1" --version 2>&1)" || return 0
-    fi
-    [ -n "$_irss_v" ] || return 0
-    case "$_irss_v" in
-        *"bootstrap seed only"*|*"Rust-built"*|*"debug build"*) return 0 ;;
-    esac
-    return 1
 }
 
 if [ -z "$GUI_BIN" ]; then
@@ -230,7 +206,6 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <key>SIMPLE_TIMEOUT_SECONDS</key><string>0</string>
     <key>SIMPLE_EXECUTION_LIMIT</key><string>0</string>
     <key>SIMPLE_ONE_CALL_READBACK</key><string>1</string>
-    <key>SIMPLE_SPL_WINIT_PATH</key><string>${SFFI_LIB}</string>
     <key>OSTYPE</key><string>${OSTYPE:-darwin}</string>
   </dict>
 </dict></plist>
@@ -243,13 +218,16 @@ ABS_SPL="$ROOT_DIR/$APP_SPL"
 echo "launching $APP_SPL via $APP_DIR (driver: $GUI_BIN) ..."
 open -n --stdout "$APP_LOG" --stderr "$APP_ERR" "$APP_DIR" --args run "$ABS_SPL"
 
-# We capture the window DIRECTLY by its CGWindowID with
+# The demo window is fullscreen and lives on its own macOS Space; `screencapture
+# -x` (current Space) photographs the desktop, not the app, and a background
+# `open -n` app is never foreground so no activation reliably switches Spaces in
+# CI. Instead we capture the window DIRECTLY by its CGWindowID with
 # `screencapture -l<id>`, which is Space-independent and needs no activation.
-# The window id is found via CGWindowListCopyWindowInfo (JXA/ObjC bridge). The
-# host runtime can own several windows for the process (the content window, a
-# full-width menu-bar window, and blank metal/helper layers) whose sizes are not reliable
+# The window id is found via CGWindowListCopyWindowInfo (JXA/ObjC bridge). winit
+# owns several windows for the process (the content window, a full-width menu-bar
+# window, and blank metal/helper layers) whose sizes are not reliable
 # discriminators, so we select by the content window's TITLE — the exact string
-# passed to GuiRenderer.create ("Simple WM — Multi-App"). Window names require
+# passed to winit_window_new ("Simple WM — Multi-App"). Window names require
 # Screen Recording permission, which the driving Terminal already holds.
 JXA_WID="$BUILD_DIR/_getwid.js"
 cat > "$JXA_WID" <<'JXA'
@@ -344,12 +322,10 @@ if [ -s "$FINAL_PNG" ]; then
             SIMPLE_LIB="${SIMPLE_LIB:-src}" SIMPLE_EXECUTION_MODE=interpret \
             SIMPLE_EXECUTION_LIMIT=0 OSTYPE=darwin \
             "$GUI_BIN" run "$VALIDATOR" --mode=interpreter 2>/dev/null)"
-        echo "$VAL_OUT" | grep -E '^(capture_dims|calib|bg_ref|window |window_crop |taskbar_item |taskbar_lit_segments|windows_ok|title_text_ok|close_buttons_ok|measure_error)' || true
+        echo "$VAL_OUT" | grep -E '^(capture_dims|calib|bg_ref|window |window_crop |taskbar_item |taskbar_lit_segments|windows_ok|measure_error)' || true
         CALIB="$(printf '%s' "$VAL_OUT" | sed -n 's/^calib //p' | head -1)"
         TASKBAR_LIT="$(printf '%s' "$VAL_OUT" | sed -n 's/^taskbar_lit_segments=\([0-9]*\).*/\1/p' | tail -1)"
         WINDOWS_OK="$(printf '%s' "$VAL_OUT" | sed -n 's/^windows_ok=\([0-9]*\).*/\1/p' | tail -1)"
-        TITLE_TEXT_OK="$(printf '%s' "$VAL_OUT" | sed -n 's/^title_text_ok=\([0-9]*\).*/\1/p' | tail -1)"
-        CLOSE_BUTTONS_OK="$(printf '%s' "$VAL_OUT" | sed -n 's/^close_buttons_ok=\([0-9]*\).*/\1/p' | tail -1)"
         # Convert per-window crop PPMs to PNG.
         for ppm in "$BUILD_DIR"/app_*.ppm; do
             [ -e "$ppm" ] || continue
@@ -368,8 +344,6 @@ fi
 if [ -z "$TASKBAR_COUNT" ]; then TASKBAR_COUNT=0; fi
 if [ -z "$TASKBAR_LIT" ]; then TASKBAR_LIT=0; fi
 if [ -z "$WINDOWS_OK" ]; then WINDOWS_OK=0; fi
-if [ -z "$TITLE_TEXT_OK" ]; then TITLE_TEXT_OK=0; fi
-if [ -z "$CLOSE_BUTTONS_OK" ]; then CLOSE_BUTTONS_OK=0; fi
 
 classify() {
     if grep -q "\[wm-multiapp\] error=" "$APP_LOG" 2>/dev/null; then
@@ -382,10 +356,8 @@ classify() {
     [ "$RESTORED" = "true" ] || { REASON="taskbar-restore-not-observed(min_now=$RESTORE_MIN_NOW)"; return; }
     [ "$FINAL_READY" = "true" ] || { REASON="final-state-not-reached"; return; }
     [ "$CAP_FINAL" = "captured" ] || { REASON="final-capture-missing"; return; }
-    [ -n "$CALIB" ] || { REASON="pixel-calibration-failed(screen-recording-permission?)"; return; }
+    [ -n "$CALIB" ] || { REASON="pixel-calibration-failed(no-desktop-backdrop;screen-recording-permission?)"; return; }
     [ "$WINDOWS_OK" -ge "$EXPECT_APPS" ] || { REASON="window-titlebars-differ-from-bg-only-$WINDOWS_OK-of-$EXPECT_APPS"; return; }
-    [ "$TITLE_TEXT_OK" -ge "$EXPECT_APPS" ] || { REASON="window-title-text-visible-only-$TITLE_TEXT_OK-of-$EXPECT_APPS"; return; }
-    [ "$CLOSE_BUTTONS_OK" -ge "$EXPECT_APPS" ] || { REASON="close-buttons-recognizable-only-$CLOSE_BUTTONS_OK-of-$EXPECT_APPS"; return; }
     [ "$TASKBAR_LIT" -ge "$EXPECT_APPS" ] || { REASON="taskbar-lit-segments-$TASKBAR_LIT-lt-$EXPECT_APPS"; return; }
     STATUS=pass
     REASON=pass

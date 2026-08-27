@@ -1,6 +1,29 @@
-# Web Async Ws Numeric Guard Specification
+# @manual: primary
 
-> Tests covering web async websocket numeric guards.
+> <details>
+
+<!-- sdn-diagram:id=web_async_ws_numeric_guard_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=web_async_ws_numeric_guard_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+web_async_ws_numeric_guard_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=web_async_ws_numeric_guard_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +32,7 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Web Async Ws Numeric Guard Specification
+# @manual: primary
 
 ## Scenarios
 
@@ -17,25 +40,13 @@
 
 #### guards resize dimension parsing
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- guards resize dimension parsing
-   - Expected: source does not contain `val w: i32 = width_str.to_int()`
-   - Expected: source does not contain `val h: i32 = height_str.to_int()`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("guards resize dimension parsing")
-# evidence(protocol_json): asserted result fields below are the complete typed oracle
 val source = rt_file_read_text("src/app/ui.web/async_ws.spl") ?? ""
 
 expect(source).to_contain("fn parse_ws_resize_dim(value: text) -> i32")
@@ -56,12 +67,27 @@ expect(source.contains("val h: i32 = height_str.to_int()")).to_equal(false)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/web_async_ws_numeric_guard_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Overview
+## Purpose and audience
+Purpose: Verify web async websocket numeric guards.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check verification guidance in the linked design docs before editing oracles.
+# @manual: primary
+REQ-APP-UI-001
+doc/01_research/local/REQ-APP-UI-001.md
+doc/03_plan/sys_test/REQ-APP-UI-001.md
+doc/04_architecture/REQ-APP-UI-001.md
+doc/05_design/REQ-APP-UI-001.md
 
-Tests covering web async websocket numeric guards.
+Tests covering:
 - web async websocket numeric guards
 
 ## Scenario Summary
@@ -76,46 +102,3 @@ Tests covering web async websocket numeric guards.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-APP`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `45dba4ed6eee9b7247e18e954d3160007784cf55148b627db554150cb2abb6bb`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `45dba4ed6eee9b7247e18e954d3160007784cf55148b627db554150cb2abb6bb`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `45dba4ed6eee9b7247e18e954d3160007784cf55148b627db554150cb2abb6bb`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **87/100**; effective score: **49/100**; blockers: **1**.
-
-SSpec documentization score: 49/100
-source: test/01_unit/app/ui/web_async_ws_numeric_guard_spec.spl
-mirror: doc/06_spec/01_unit/app/ui/web_async_ws_numeric_guard_spec.md (current)
-findings: 3 blockers: 1
-  narrative=100 structure=100 oracle=50
-  traceability=100 evidence=100 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=87; blocker cap makes effective=49
-doc/06_spec/01_unit/app/ui/web_async_ws_numeric_guard_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/ui/web_async_ws_numeric_guard_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/ui/web_async_ws_numeric_guard_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
-<!-- sspec-maintain:scorecard:end -->

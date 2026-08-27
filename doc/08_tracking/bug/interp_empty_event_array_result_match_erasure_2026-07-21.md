@@ -1,8 +1,7 @@
 # Interp: empty `[Event]` payload bound via `case Ok(events)` degrades to i64 0
 
 - **Date:** 2026-07-21
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- **Status:** FIXED + VERIFIED (same day; root cause was NOT type erasure — see below)
 - **Area:** Rust seed interpreter — `rt_event_loop_poll` extern shim contract drift
 - **Severity:** medium (silent type degradation; faults on first method call)
 

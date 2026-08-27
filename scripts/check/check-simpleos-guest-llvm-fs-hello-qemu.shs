@@ -2,15 +2,36 @@
 # Fresh-QEMU gate for the guest-native /usr/bin/{clang,ld.lld,llvm-ar} chain.
 set -eu
 fail() { echo "guest-llvm-qemu: $*" >&2; exit 1; }
-[ "$#" -eq 4 ] || fail "usage: $0 <arm64|riscv64> KERNEL IMAGE PROVISION_RECEIPT"
+sha() { sha256sum "$1" | awk '{print $1}'; }
+field() {
+    key=$1 file=$2
+    count=$(awk -F= -v k="$key" '$1 == k {n++} END {print n+0}' "$file")
+    [ "$count" -eq 1 ] || fail "receipt field-count $key=$count"
+    awk -F= -v k="$key" '$1 == k {print substr($0,index($0,"=")+1)}' "$file"
+}
+[ "$#" -eq 4 ] || fail "usage: $0 <x86_64|arm64|riscv64> KERNEL IMAGE PROVISION_RECEIPT"
 arch=$1 kernel=$2 image=$3 receipt=$4
+[ -f "$kernel" ] && [ ! -L "$kernel" ] && [ -s "$kernel" ] || fail "kernel missing or unsafe"
+[ -f "$image" ] && [ ! -L "$image" ] && [ -s "$image" ] || fail "image missing or unsafe"
 [ -f "$receipt" ] && [ ! -L "$receipt" ] || fail "provision receipt missing or unsafe"
 grep -Fqx status=pass "$receipt" || fail "provision receipt is not passing"
 grep -Fqx execution_claim=false "$receipt" || fail "provisioning improperly claims execution"
-[ "$(awk -F= '$1=="image_sha256"{print $2}' "$receipt")" = "$(sha256sum "$image" | awk '{print $1}')" ] || fail "image digest mismatch"
-serial=$(mktemp "${TMPDIR:-/tmp}/simpleos-guest-llvm-${arch}.XXXXXX")
-trap 'rm -f "$serial"' EXIT HUP INT TERM
+[ "$(field image_sha256 "$receipt")" = "$(sha "$image")" ] || fail "image digest mismatch"
+[ "$(field kernel_sha256 "$receipt")" = "$(sha "$kernel")" ] || fail "kernel digest mismatch"
+serial="${receipt}.qemu.serial.log"
+execution_receipt="${receipt}.qemu-execution"
+tmp_execution_receipt="${execution_receipt}.tmp.$$"
+rm -f "$serial" "$tmp_execution_receipt"
+trap 'rm -f "$tmp_execution_receipt"' EXIT HUP INT TERM
 case "$arch" in
+    x86_64)
+        command -v qemu-system-x86_64 >/dev/null 2>&1 || fail "qemu-system-x86_64 missing"
+        set +e
+        timeout -k 5 180 qemu-system-x86_64 -no-user-config -monitor none -nographic -no-reboot \
+            -machine q35 -cpu qemu64 -m 2G -kernel "$kernel" \
+            -drive "file=$image,if=none,id=toolfs,format=raw,readonly=on" \
+            -device nvme,serial=guestllvm,drive=toolfs >"$serial" 2>&1
+        rc=$?; set -e ;;
     arm64)
         command -v qemu-system-aarch64 >/dev/null 2>&1 || fail "qemu-system-aarch64 missing"
         set +e
@@ -28,9 +49,22 @@ case "$arch" in
     *) fail "unsupported architecture: $arch" ;;
 esac
 case "$rc" in 0|124) ;; *) fail "qemu exit=$rc" ;; esac
-target=$(awk -F= '$1=="target"{print $2}' "$receipt")
+target=$(field target "$receipt")
 grep -Fqx "SMOKE_LLVM_FS_HELLO_OK target=$target clang=/usr/bin/clang lld=/usr/bin/ld.lld llvm_ar=/usr/bin/llvm-ar" "$serial" || {
     tail -80 "$serial" >&2
     fail "fresh guest did not produce the exact filesystem toolchain marker"
 }
-echo "guest_llvm_qemu_status=pass target=$target"
+{
+    echo schema=simpleos-guest-llvm-fs-qemu-execution-v1
+    echo status=pass
+    echo target="$target"
+    echo kernel_sha256="$(sha "$kernel")"
+    echo image_sha256="$(sha "$image")"
+    echo provision_receipt_sha256="$(sha "$receipt")"
+    echo serial_path="$serial"
+    echo serial_sha256="$(sha "$serial")"
+    echo marker="SMOKE_LLVM_FS_HELLO_OK target=$target clang=/usr/bin/clang lld=/usr/bin/ld.lld llvm_ar=/usr/bin/llvm-ar"
+} >"$tmp_execution_receipt"
+mv "$tmp_execution_receipt" "$execution_receipt"
+trap - EXIT HUP INT TERM
+echo "guest_llvm_qemu_status=pass target=$target serial=$serial receipt=$execution_receipt"

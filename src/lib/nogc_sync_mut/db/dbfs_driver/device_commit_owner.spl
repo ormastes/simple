@@ -9,11 +9,17 @@ use std.fs_driver.block_device.{BlockDevice}
 use std.fs_driver.error.{FsError}
 use std.common.hash.adler32.{adler32}
 use std.common.string_core.{text_to_bytes}
+use std.common.binary_io.{bytes_to_string}
+use std.nogc_sync_mut.compression.gzip.crc.{crc32_calculate}
+use std.nogc_sync_mut.src.collections.hashset.{HashSet}
 use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
 use std.io_runtime.{platform_name}
 
-val DBFS_NAMESPACE_MAX_ENTRIES: i64 = 64
+val DBFS_NAMESPACE_LEGACY_MAX_ENTRIES: i64 = 64
+val DBFS_NAMESPACE_MAX_ENTRIES: i64 = 1024
 val DBFS_NAMESPACE_MAX_PATH_BYTES: i64 = 255
+val DBFS_NAMESPACE_MAX_PAYLOAD_BYTES: i64 = 1048576
+val DBFS_NAMESPACE_MAX_SLOT_SECTORS: i64 = 2048
 val DBFS_DEVICE_SERIALIZATION_MISSING: text =
     "missing-simpleos-atomic-compare-exchange-or-scheduler-exclusion"
 
@@ -31,7 +37,6 @@ fn dbfs_device_serialization_blocker() -> text:
 
 struct DbfsNamespaceEntry:
     inode_id: u64
-    content_generation: u64
     is_dir: bool
     size: i64
     blob_offset: i64
@@ -40,16 +45,46 @@ struct DbfsNamespaceEntry:
     path: text
 
 struct DbfsNamespaceSnapshot:
+    format_version: i32
     generation: i64
     next_inode: u64
     next_offset: i64
     entries: [DbfsNamespaceEntry]
+
+pub struct DbfsDurableRootSnapshotV1:
+    """Immutable admission facts for one currently durable DBFS root.
+
+    This is evidence only, not read or write authority.  It is minted while
+    the canonical device owner lock is held and is suitable for a higher
+    owner to bind retained signed-bundle leases to the exact durable root.
+    """
+    instance_id: i64
+    mutation_epoch: u64
+    durable_generation: i64
+    durable_slot: i32
 
 struct DbfsBlobBinding:
     exists: bool
     offset: i64
     length: i64
     checksum: i64
+
+struct DbfsCheckpointGeometry:
+    data_blocks: i64
+    slot_sectors: i64
+    slot_capacity: i64
+
+struct DbfsNamespaceRootV4:
+    generation: i64
+    slot: i32
+    payload_length: i64
+    payload_crc32: u32
+
+enum DbfsNamespacePublication:
+    """Durability result for one owner-serialized namespace transaction."""
+    NotPublished(error: FsError)
+    Published(generation: i64)
+    Indeterminate(error: FsError)
 
 # One runtime-backed serialization domain owns every device binding and every
 # durable/pending generation transition below.  The scalar is the opaque
@@ -65,8 +100,11 @@ var _owner_durable_slots: [i32] = []
 var _owner_pending_generations: [i64] = []
 var _owner_pending_slots: [i32] = []
 var _owner_pending_dirty: [bool] = []
+var _owner_pending_poisoned: [bool] = []
+var _owner_pending_root_lbas: [u64] = []
+var _owner_pending_root_sectors: [[u8]] = []
+var _owner_pending_root_written: [bool] = []
 var _owner_device_dirty: [bool] = []
-var _owner_mutation_epochs: [u64] = []
 var _owner_quarantined: bool = false
 
 var _owner_blob_inst_ids: [i64] = []
@@ -74,6 +112,31 @@ var _owner_blob_inode_ids: [u64] = []
 var _owner_blob_offsets: [i64] = []
 var _owner_blob_lengths: [i64] = []
 var _owner_blob_checksums: [i64] = []
+val DBFS_BLOB_RESERVATION_CAPACITY: i32 = 64
+
+pub struct DbfsBlobReservationLease:
+    _slot: i32
+    _generation: u32
+    _inst_id: i64
+    _offset: i64
+    _size: i64
+
+impl DbfsBlobReservationLease:
+    pub static fn invalid_probe() -> DbfsBlobReservationLease:
+        DbfsBlobReservationLease(
+            _slot: -1, _generation: 0u32, _inst_id: 0, _offset: 0, _size: 0)
+
+struct DbfsBlobReservationSlot:
+    active: bool
+    generation: u32
+    inst_id: i64
+    offset: i64
+    size: i64
+
+var _owner_reservations: [DbfsBlobReservationSlot] = [
+    DbfsBlobReservationSlot(
+        active: false, generation: 1u32, inst_id: 0, offset: 0, size: 0);
+    64]
 
 fn _owner_lock() -> bool:
     not _owner_quarantined and
@@ -102,6 +165,10 @@ fn dbfs_owner_transaction_end() -> bool:
 
 fn dbfs_owner_quarantined() -> bool:
     _owner_quarantined
+
+fn dbfs_owner_quarantine_locked():
+    """Fail closed after an owner-held transaction loses cleanup authority."""
+    _owner_quarantined = true
 
 fn _finish_bool(value: bool) -> bool:
     if _owner_unlock(): return value
@@ -170,14 +237,6 @@ fn _blob_idx(inst_id: i64, inode_id: u64) -> i32:
         i = i + 1
     -1
 
-fn _advance_mutation_epoch_locked(inst_id: i64):
-    val idx = _owner_idx(inst_id)
-    if idx < 0: return
-    if _owner_mutation_epochs[idx] == 0xFFFFFFFFFFFFFFFFu64:
-        _owner_quarantined = true
-        return
-    _owner_mutation_epochs[idx] = _owner_mutation_epochs[idx] + 1u64
-
 fn _device_register_locked(inst_id: i64, dev: BlockDevice) -> Result<bool, FsError>:
     val existing = _owner_idx(inst_id)
     if existing >= 0:
@@ -190,8 +249,11 @@ fn _device_register_locked(inst_id: i64, dev: BlockDevice) -> Result<bool, FsErr
     _owner_pending_generations.push(0)
     _owner_pending_slots.push(-1)
     _owner_pending_dirty.push(false)
+    _owner_pending_poisoned.push(false)
+    _owner_pending_root_lbas.push(0u64)
+    _owner_pending_root_sectors.push([])
+    _owner_pending_root_written.push(false)
     _owner_device_dirty.push(false)
-    _owner_mutation_epochs.push(1u64)
     Ok(true)
 
 fn _device_unregister_locked(inst_id: i64) -> Result<bool, FsError>:
@@ -206,8 +268,11 @@ fn _device_unregister_locked(inst_id: i64) -> Result<bool, FsError>:
     _owner_pending_generations.remove(idx)
     _owner_pending_slots.remove(idx)
     _owner_pending_dirty.remove(idx)
+    _owner_pending_poisoned.remove(idx)
+    _owner_pending_root_lbas.remove(idx)
+    _owner_pending_root_sectors.remove(idx)
+    _owner_pending_root_written.remove(idx)
     _owner_device_dirty.remove(idx)
-    _owner_mutation_epochs.remove(idx)
     var blob_idx = _owner_blob_inst_ids.len() as i32 - 1
     while blob_idx >= 0:
         if _owner_blob_inst_ids[blob_idx] == inst_id:
@@ -217,6 +282,17 @@ fn _device_unregister_locked(inst_id: i64) -> Result<bool, FsError>:
             _owner_blob_lengths.remove(blob_idx)
             _owner_blob_checksums.remove(blob_idx)
         blob_idx = blob_idx - 1
+    var reservation_idx: i32 = 0
+    while reservation_idx < DBFS_BLOB_RESERVATION_CAPACITY:
+        val reservation = _owner_reservations[reservation_idx]
+        if reservation.active and reservation.inst_id == inst_id:
+            if reservation.generation == 0xFFFFFFFFu32:
+                _owner_quarantined = true
+            else:
+                _owner_reservations[reservation_idx] = DbfsBlobReservationSlot(
+                    active: false, generation: reservation.generation + 1u32,
+                    inst_id: 0, offset: 0, size: 0)
+        reservation_idx = reservation_idx + 1
     Ok(true)
 
 fn _device_sector_size_locked(inst_id: i64) -> i64:
@@ -225,14 +301,50 @@ fn _device_sector_size_locked(inst_id: i64) -> i64:
         return 0
     _owner_devices[idx].sector_size() as i64
 
+fn _checkpoint_geometry(sector_size: i64, block_count: i64) -> DbfsCheckpointGeometry:
+    """Partition an arena into data, two payload slots, and two root sectors.
+
+    Arenas too small for two payload sectors retain the legacy layout.  Larger
+    arenas devote at most one quarter of their non-root blocks to bounded namespace
+    payloads, capped at one MiB per slot.  Arithmetic is checked before any LBA
+    is derived, so corrupt or hostile geometry cannot wrap into data blocks.
+    """
+    if sector_size <= 0 or block_count < 4:
+        return DbfsCheckpointGeometry(data_blocks: 0, slot_sectors: 0, slot_capacity: 0)
+    var slot_sectors: i64 = 0
+    if block_count >= 7:
+        slot_sectors = (block_count - 3) / 8
+        if slot_sectors < 1:
+            slot_sectors = 1
+        val byte_cap_sectors = DBFS_NAMESPACE_MAX_PAYLOAD_BYTES / sector_size
+        if slot_sectors > DBFS_NAMESPACE_MAX_SLOT_SECTORS:
+            slot_sectors = DBFS_NAMESPACE_MAX_SLOT_SECTORS
+        if slot_sectors > byte_cap_sectors:
+            slot_sectors = byte_cap_sectors
+    if slot_sectors < 1:
+        return DbfsCheckpointGeometry(
+            data_blocks: block_count - 3, slot_sectors: 0, slot_capacity: 0)
+    val data_blocks = block_count - 3 - slot_sectors * 2
+    if data_blocks < 1 or slot_sectors > 9223372036854775807 / sector_size:
+        return DbfsCheckpointGeometry(data_blocks: 0, slot_sectors: 0, slot_capacity: 0)
+    DbfsCheckpointGeometry(
+        data_blocks: data_blocks,
+        slot_sectors: slot_sectors,
+        slot_capacity: slot_sectors * sector_size)
+
 fn _device_data_capacity_locked(inst_id: i64, block_count: i64) -> i64:
     val sector_size = _device_sector_size_locked(inst_id)
-    if sector_size <= 0 or block_count < 4:
+    val geometry = _checkpoint_geometry(sector_size, block_count)
+    if geometry.data_blocks <= 0 or geometry.data_blocks > 9223372036854775807 / sector_size:
         return 0
-    val data_blocks = block_count - 3
-    if data_blocks > 9223372036854775807 / sector_size:
+    geometry.data_blocks * sector_size
+
+fn _device_legacy_data_capacity_locked(inst_id: i64, block_count: i64) -> i64:
+    val sector_size = _device_sector_size_locked(inst_id)
+    if sector_size <= 0 or block_count < 4 or
+            block_count - 3 > 9223372036854775807 / sector_size:
         return 0
-    data_blocks * sector_size
+    (block_count - 3) * sector_size
 
 fn _range_within(offset: i64, length: i64, capacity: i64) -> bool:
     if offset < 0 or length < 0 or capacity < 0 or offset > capacity:
@@ -251,7 +363,6 @@ fn _device_blob_binding_locked(inst_id: i64, inode_id: u64) -> DbfsBlobBinding:
     )
 
 fn _device_restore_blob_locked(inst_id: i64, inode_id: u64, binding: DbfsBlobBinding):
-    _advance_mutation_epoch_locked(inst_id)
     val idx = _blob_idx(inst_id, inode_id)
     if not binding.exists:
         if idx >= 0:
@@ -314,17 +425,14 @@ fn _write_bytes(inst_id: i64, base_block: i64, block_count: i64, offset: i64, da
         val write_result = _owner_devices[idx].write_sector(lba, sector)
         if write_result.is_err() or not write_result.unwrap():
             return Err(FsError.IoError(code: 0u32))
-        # Any accepted device write requires a real flush before durability can
-        # be acknowledged.  This includes unbound passthrough writes, which do
-        # not publish a namespace generation.
-        _owner_device_dirty[idx] = true
     Ok(written)
 
-fn _device_read_bytes_locked(inst_id: i64, base_block: i64, block_count: i64, offset: i64, length: i64) -> Result<[u8], FsError>:
+fn _device_read_bytes_with_capacity_locked(inst_id: i64, base_block: i64,
+        offset: i64, length: i64, capacity: i64) -> Result<[u8], FsError>:
     val idx = _owner_idx(inst_id)
     if idx < 0:
         return Err(FsError.Unsupported)
-    if not _range_within(offset, length, _device_data_capacity_locked(inst_id, block_count)):
+    if not _range_within(offset, length, capacity):
         return Err(FsError.InvalidArg)
     val sector_size = _device_sector_size_locked(inst_id)
     var out: [u8] = []
@@ -349,9 +457,18 @@ fn _device_read_bytes_locked(inst_id: i64, base_block: i64, block_count: i64, of
             return Err(FsError.Corrupt)
     Ok(out)
 
+fn _device_read_bytes_locked(inst_id: i64, base_block: i64, block_count: i64,
+        offset: i64, length: i64) -> Result<[u8], FsError>:
+    val idx = _owner_idx(inst_id)
+    val capacity = if idx >= 0 and _owner_reads_legacy_layout[idx]:
+        _device_legacy_data_capacity_locked(inst_id, block_count)
+    else:
+        _device_data_capacity_locked(inst_id, block_count)
+    _device_read_bytes_with_capacity_locked(
+        inst_id, base_block, offset, length, capacity)
+
 fn _device_append_locked(inst_id: i64, base_block: i64, block_count: i64,
         data: [u8]) -> Result<i64, FsError>:
-    _advance_mutation_epoch_locked(inst_id)
     val idx = _owner_idx(inst_id)
     if idx < 0:
         return Err(FsError.Unsupported)
@@ -376,6 +493,110 @@ fn _device_append_locked(inst_id: i64, base_block: i64, block_count: i64,
     _owner_next_offsets[idx] = offset + written
     Ok(offset)
 
+fn _device_reserve_blob_locked(inst_id: i64, block_count: i64,
+        exact_size: i64) -> Result<DbfsBlobReservationLease, FsError>:
+    """Reserve one aligned append-only extent without materializing its bytes."""
+    _advance_mutation_epoch_locked(inst_id)
+    val idx = _owner_idx(inst_id)
+    if idx < 0:
+        return Err(FsError.Unsupported)
+    if exact_size < 0:
+        return Err(FsError.InvalidArg)
+    var reservation_slot: i32 = 0
+    while reservation_slot < DBFS_BLOB_RESERVATION_CAPACITY and
+            (_owner_reservations[reservation_slot].active or
+             _owner_reservations[reservation_slot].generation == 0xFFFFFFFFu32):
+        reservation_slot = reservation_slot + 1
+    if reservation_slot >= DBFS_BLOB_RESERVATION_CAPACITY:
+        return Err(FsError.Busy)
+    val sector_size = _device_sector_size_locked(inst_id)
+    if sector_size <= 0:
+        return Err(FsError.InvalidArg)
+    val prior_end = _owner_next_offsets[idx]
+    val capacity = _device_data_capacity_locked(inst_id, block_count)
+    if prior_end < 0 or prior_end > capacity:
+        return Err(FsError.Corrupt)
+    var offset = prior_end
+    if prior_end % sector_size != 0:
+        if prior_end > 0x7FFFFFFFFFFFFFFF - sector_size:
+            return Err(FsError.TooLarge)
+        offset = prior_end + sector_size - (prior_end % sector_size)
+    if not _range_within(offset, exact_size, capacity):
+        return Err(FsError.TooLarge)
+    _owner_next_offsets[idx] = offset + exact_size
+    val generation = _owner_reservations[reservation_slot].generation
+    _owner_reservations[reservation_slot] = DbfsBlobReservationSlot(
+        active: true, generation: generation, inst_id: inst_id,
+        offset: offset, size: exact_size)
+    Ok(DbfsBlobReservationLease(
+        _slot: reservation_slot, _generation: generation, _inst_id: inst_id,
+        _offset: offset, _size: exact_size))
+
+fn _reservation_valid_locked(lease: DbfsBlobReservationLease) -> bool:
+    if lease._slot < 0 or lease._slot >= DBFS_BLOB_RESERVATION_CAPACITY or
+            lease._inst_id <= 0:
+        return false
+    val slot = _owner_reservations[lease._slot]
+    slot.active and slot.generation == lease._generation and
+        slot.inst_id == lease._inst_id and slot.offset == lease._offset and
+        slot.size == lease._size
+
+fn _device_release_reservation_locked(
+        lease: DbfsBlobReservationLease) -> Result<bool, FsError>:
+    if not _reservation_valid_locked(lease):
+        return Err(FsError.StaleHandle)
+    val slot = _owner_reservations[lease._slot]
+    if slot.generation == 0xFFFFFFFFu32:
+        _owner_quarantined = true
+        return Err(FsError.TooLarge)
+    _owner_reservations[lease._slot] = DbfsBlobReservationSlot(
+        active: false, generation: slot.generation + 1u32,
+        inst_id: 0, offset: 0, size: 0)
+    Ok(true)
+
+fn _device_write_reserved_blob_locked(inst_id: i64, base_block: i64,
+        block_count: i64, lease: DbfsBlobReservationLease,
+        exact_offset: i64, data: [u8]) -> Result<i64, FsError>:
+    """Write one exact-offset chunk wholly inside a reserved extent."""
+    if not _reservation_valid_locked(lease) or lease._inst_id != inst_id:
+        return Err(FsError.StaleHandle)
+    if not _range_within(exact_offset, data.len() as i64, lease._size):
+        return Err(FsError.InvalidArg)
+    if lease._offset < 0 or exact_offset > 0x7FFFFFFFFFFFFFFF - lease._offset:
+        return Err(FsError.InvalidArg)
+    _write_bytes(
+        inst_id, base_block, block_count,
+        lease._offset + exact_offset, data)
+
+fn _device_read_reserved_blob_locked(inst_id: i64, base_block: i64,
+        block_count: i64, lease: DbfsBlobReservationLease,
+        exact_offset: i64, length: i64) -> Result<[u8], FsError>:
+    if not _reservation_valid_locked(lease) or lease._inst_id != inst_id:
+        return Err(FsError.StaleHandle)
+    if not _range_within(exact_offset, length, lease._size) or
+            exact_offset > 0x7FFFFFFFFFFFFFFF - lease._offset:
+        return Err(FsError.InvalidArg)
+    _device_read_bytes_locked(
+        inst_id, base_block, block_count, lease._offset + exact_offset, length)
+
+fn _device_bind_reserved_blob_locked(inst_id: i64, block_count: i64,
+        inode_id: u64, lease: DbfsBlobReservationLease,
+        checksum: i64) -> Result<bool, FsError>:
+    """Bind a completely written private extent immediately before checkpointing."""
+    val idx = _owner_idx(inst_id)
+    if idx < 0:
+        return Err(FsError.Unsupported)
+    if not _reservation_valid_locked(lease) or lease._inst_id != inst_id:
+        return Err(FsError.StaleHandle)
+    if checksum < 0 or
+            not _range_within(lease._offset, lease._size,
+                _device_data_capacity_locked(inst_id, block_count)) or
+            lease._offset + lease._size > _owner_next_offsets[idx]:
+        return Err(FsError.InvalidArg)
+    _advance_mutation_epoch_locked(inst_id)
+    _record_blob(inst_id, inode_id, lease._offset, lease._size, checksum)
+    Ok(true)
+
 fn _device_commit_blob_locked(inst_id: i64, base_block: i64, block_count: i64,
         inode_id: u64, data: [u8]) -> Result<bool, FsError>:
     val appended = _device_append_locked(inst_id, base_block, block_count, data)
@@ -387,9 +608,13 @@ fn _device_commit_blob_locked(inst_id: i64, base_block: i64, block_count: i64,
 fn _namespace_lba(base_block: i64, block_count: i64, slot: i32) -> u64:
     (base_block + block_count - 2 + slot as i64) as u64
 
+fn _namespace_payload_lba(base_block: i64, geometry: DbfsCheckpointGeometry,
+        slot: i32) -> u64:
+    (base_block + 1 + geometry.data_blocks +
+        geometry.slot_sectors * slot as i64) as u64
+
 fn _valid_entry_shape(entry: DbfsNamespaceEntry, data_capacity: i64) -> bool:
-    if entry.inode_id <= 1u64 or entry.content_generation == 0u64 or
-            entry.path.len() <= 0 or entry.path.len() > DBFS_NAMESPACE_MAX_PATH_BYTES:
+    if entry.inode_id <= 1u64 or entry.path.len() <= 0 or entry.path.len() > DBFS_NAMESPACE_MAX_PATH_BYTES:
         return false
     if not entry.path.starts_with("/") or entry.path.contains("|") or entry.path.contains("\n") or entry.path.contains("\0"):
         return false
@@ -400,25 +625,91 @@ fn _valid_entry_shape(entry: DbfsNamespaceEntry, data_capacity: i64) -> bool:
     entry.size == entry.blob_length and _range_within(entry.blob_offset, entry.blob_length, data_capacity)
 
 fn _entries_unique(entries: [DbfsNamespaceEntry]) -> bool:
-    var i: i32 = 0
-    while i < entries.len() as i32:
-        var j = i + 1
-        while j < entries.len() as i32:
-            if entries[i].inode_id == entries[j].inode_id or entries[i].path == entries[j].path:
-                return false
-            j = j + 1
-        i = i + 1
+    # One bounded open-addressed set replaces the former all-pairs scan.  The
+    # type prefix keeps inode and path identities in disjoint key domains.
+    if entries.len() as i64 > DBFS_NAMESPACE_MAX_ENTRIES:
+        return false
+    var seen = HashSet.with_capacity(entries.len() as i64 * 4 + 1)
+    for entry in entries:
+        if not seen.insert("i:" + entry.inode_id.to_text()):
+            return false
+        if not seen.insert("p:" + entry.path):
+            return false
     true
 
 fn _entry_line(entry: DbfsNamespaceEntry) -> text:
     val kind = if entry.is_dir: "D" else: "F"
-    kind + "|" + entry.inode_id.to_text() + "|" +
-        entry.content_generation.to_text() + "|" + entry.size.to_text() + "|" +
-        entry.blob_offset.to_text() + "|" + entry.blob_length.to_text() + "|" +
-        entry.blob_checksum.to_text() + "|" + entry.path + "\n"
+    kind + "|" + entry.inode_id.to_text() + "|" + entry.size.to_text() + "|" + entry.blob_offset.to_text() + "|" + entry.blob_length.to_text() + "|" + entry.blob_checksum.to_text() + "|" + entry.path + "\n"
+
+fn _encode_payload_v4(generation: i64, entries: [DbfsNamespaceEntry],
+        payload_capacity: i64, data_capacity: i64) -> Result<[u8], FsError>:
+    if generation <= 0 or payload_capacity <= 0 or
+            payload_capacity > DBFS_NAMESPACE_MAX_PAYLOAD_BYTES or
+            entries.len() as i64 > DBFS_NAMESPACE_MAX_ENTRIES or
+            not _entries_unique(entries):
+        return Err(FsError.TooLarge)
+    var body_lines: [text] = []
+    for entry in entries:
+        if not _valid_entry_shape(entry, data_capacity):
+            return Err(FsError.InvalidArg)
+        body_lines.push(_entry_line(entry))
+    val encoded = "DBFSNP4|" + generation.to_text() + "|" +
+        entries.len().to_text() + "\n" + body_lines.join("") + "DBFSEND\n"
+    val bytes = dbfs_text_to_bytes(encoded)
+    if bytes.len() as i64 <= 0 or bytes.len() as i64 > payload_capacity:
+        return Err(FsError.TooLarge)
+    Ok(bytes)
+
+fn _encode_root_v4(generation: i64, slot: i32, payload: [u8],
+        sector_size: i64) -> Result<[u8], FsError>:
+    if generation <= 0 or (slot != 0 and slot != 1) or
+            payload.len() as i64 <= 0:
+        return Err(FsError.InvalidArg)
+    val payload_crc = crc32_calculate(payload) as u32
+    val prefix = "DBFSNR4|" + generation.to_text() + "|" + slot.to_text() +
+        "|" + payload.len().to_text() + "|" + payload_crc.to_text() + "|"
+    val root_crc = crc32_calculate(dbfs_text_to_bytes(prefix)) as u32
+    val bytes = dbfs_text_to_bytes(prefix + root_crc.to_text() + "\n")
+    if bytes.len() as i64 > sector_size:
+        return Err(FsError.TooLarge)
+    Ok(_pad_sector(bytes, sector_size))
+
+fn _decode_root_v4(bytes: [u8], expected_slot: i32,
+        payload_capacity: i64) -> Option<DbfsNamespaceRootV4>:
+    val root_text = dbfs_bytes_to_text(bytes, bytes.len() as i64)
+    val root_lines: [text] = root_text.split("\n")
+    if root_lines.len() < 1:
+        return None
+    val line = root_lines[0]
+    val parts: [text] = line.split("|")
+    if parts.len() != 6 or parts[0] != "DBFSNR4":
+        return None
+    val generation = parts[1].to_i64() ?? -1
+    val slot_value = parts[2].to_i64() ?? -1
+    val payload_length = parts[3].to_i64() ?? -1
+    val payload_crc_value = parts[4].to_i64() ?? -1
+    val root_crc_value = parts[5].to_i64() ?? -1
+    if generation <= 0 or slot_value != expected_slot as i64 or
+            payload_length <= 0 or payload_length > payload_capacity or
+            payload_crc_value < 0 or payload_crc_value > 4294967295 or
+            root_crc_value < 0 or root_crc_value > 4294967295:
+        return None
+    val prefix = "DBFSNR4|" + generation.to_text() + "|" +
+        slot_value.to_text() + "|" + payload_length.to_text() + "|" +
+        payload_crc_value.to_text() + "|"
+    val computed_root_crc = crc32_calculate(dbfs_text_to_bytes(prefix)) as u32
+    if computed_root_crc != root_crc_value as u32:
+        return None
+    Some(DbfsNamespaceRootV4(
+        generation: generation,
+        slot: expected_slot,
+        payload_length: payload_length,
+        payload_crc32: payload_crc_value as u32))
 
 fn _encode_snapshot(generation: i64, entries: [DbfsNamespaceEntry], sector_size: i64, data_capacity: i64) -> Result<[u8], FsError>:
-    if generation <= 0 or entries.len() as i64 > DBFS_NAMESPACE_MAX_ENTRIES or not _entries_unique(entries):
+    if generation <= 0 or
+            entries.len() as i64 > DBFS_NAMESPACE_LEGACY_MAX_ENTRIES or
+            not _entries_unique(entries):
         return Err(FsError.TooLarge)
     var body_lines: [text] = []
     for entry in entries:
@@ -427,7 +718,7 @@ fn _encode_snapshot(generation: i64, entries: [DbfsNamespaceEntry], sector_size:
         body_lines.push(_entry_line(entry))
     val body = body_lines.join("")
     val checksum = adler32(dbfs_text_to_bytes(body))
-    val encoded = "DBFSNS3|" + generation.to_text() + "|" + checksum.to_text() + "\n" + body + "DBFSEND\n"
+    val encoded = "DBFSNS2|" + generation.to_text() + "|" + checksum.to_text() + "\n" + body + "DBFSEND\n"
     val bytes = dbfs_text_to_bytes(encoded)
     if bytes.len() as i64 > sector_size:
         return Err(FsError.TooLarge)
@@ -439,25 +730,102 @@ fn _sector_nonzero(bytes: [u8]) -> bool:
             return true
     false
 
+fn _write_payload_v4_locked(inst_id: i64, base_block: i64,
+        geometry: DbfsCheckpointGeometry, slot: i32,
+        payload: [u8]) -> Result<bool, FsError>:
+    val idx = _owner_idx(inst_id)
+    if idx < 0 or geometry.slot_sectors <= 0 or
+            payload.len() as i64 <= 0 or payload.len() as i64 > geometry.slot_capacity:
+        return Err(FsError.InvalidArg)
+    val sector_size = _device_sector_size_locked(inst_id)
+    val first_lba = _namespace_payload_lba(base_block, geometry, slot)
+    var offset: i64 = 0
+    var sector_index: i64 = 0
+    while offset < payload.len() as i64:
+        var sector: [u8] = []
+        var pos: i64 = 0
+        while pos < sector_size:
+            if offset < payload.len() as i64:
+                sector.push(payload[offset as i32])
+                offset = offset + 1
+            else:
+                sector.push(0u8)
+            pos = pos + 1
+        val write_result = _owner_devices[idx].write_sector(
+            first_lba + sector_index as u64, sector)
+        if write_result.is_err() or not write_result.unwrap():
+            return Err(FsError.IoError(code: 0u32))
+        _owner_device_dirty[idx] = true
+        sector_index = sector_index + 1
+    Ok(true)
+
+fn _read_payload_v4_locked(inst_id: i64, base_block: i64,
+        geometry: DbfsCheckpointGeometry, root: DbfsNamespaceRootV4) -> Option<[u8]>:
+    val idx = _owner_idx(inst_id)
+    if idx < 0 or root.payload_length <= 0 or
+            root.payload_length > geometry.slot_capacity:
+        return None
+    val sector_size = _device_sector_size_locked(inst_id)
+    val first_lba = _namespace_payload_lba(base_block, geometry, root.slot)
+    var payload: [u8] = []
+    var sector_index: i64 = 0
+    while payload.len() as i64 < root.payload_length:
+        if sector_index >= geometry.slot_sectors:
+            return None
+        val read_result = _owner_devices[idx].read_sector(
+            first_lba + sector_index as u64)
+        if read_result.is_err():
+            return None
+        val sector = read_result.unwrap()
+        var pos: i64 = 0
+        while pos < sector.len() as i64 and payload.len() as i64 < root.payload_length:
+            payload.push(sector[pos as i32])
+            pos = pos + 1
+        if sector.len() as i64 != sector_size:
+            return None
+        sector_index = sector_index + 1
+    val computed_payload_crc = crc32_calculate(payload) as u32
+    if computed_payload_crc != root.payload_crc32:
+        return None
+    Some(payload)
+
 fn _decode_snapshot(inst_id: i64, base_block: i64, block_count: i64, bytes: [u8]) -> Option<DbfsNamespaceSnapshot>:
-    val text_data = dbfs_bytes_to_text(bytes, bytes.len() as i64)
+    # V4 payloads are exact-length byte arrays (unlike padded legacy/root
+    # sectors), so use the canonical one-allocation bulk lift.  The old
+    # per-byte `.chr()` array would allocate up to one tiny text per payload
+    # byte at the one-MiB geometry ceiling.
+    val is_payload_v4_bytes = dbfs_bytes_to_text(bytes, 8) == "DBFSNP4|"
+    val text_data = if is_payload_v4_bytes:
+        bytes_to_string(bytes)
+    else:
+        dbfs_bytes_to_text(bytes, bytes.len() as i64)
     val lines: [text] = text_data.split("\n")
     if lines.len() < 2 or (not lines[0].starts_with("DBFSNS2|") and
-            not lines[0].starts_with("DBFSNS3|")):
+            not lines[0].starts_with("DBFSNS3|") and
+            not lines[0].starts_with("DBFSNP4|")):
         return None
-    val has_file_generations = lines[0].starts_with("DBFSNS3|")
+    val is_payload_v4 = lines[0].starts_with("DBFSNP4|")
+    val has_file_generations = lines[0].starts_with("DBFSNS3|") or is_payload_v4
+    val snapshot_data_capacity = if is_payload_v4:
+        _device_data_capacity_locked(inst_id, block_count)
+    else:
+        _device_legacy_data_capacity_locked(inst_id, block_count)
     val header: [text] = lines[0].split("|")
     if header.len() != 3:
         return None
     val generation = header[1].to_i64() ?? -1
-    val expected_checksum = header[2].to_i64() ?? -1
-    if generation <= 0 or expected_checksum < 0:
+    val header_value = header[2].to_i64() ?? -1
+    if generation <= 0 or header_value < 0:
         return None
     var body_lines: [text] = []
     var entries: [DbfsNamespaceEntry] = []
     var found_end = false
     var i: i32 = 1
-    while i < lines.len() as i32 and entries.len() as i64 <= DBFS_NAMESPACE_MAX_ENTRIES:
+    val entry_limit = if is_payload_v4:
+        DBFS_NAMESPACE_MAX_ENTRIES
+    else:
+        DBFS_NAMESPACE_LEGACY_MAX_ENTRIES
+    while i < lines.len() as i32 and entries.len() as i64 <= entry_limit:
         val line = lines[i]
         if line == "DBFSEND":
             found_end = true
@@ -465,53 +833,86 @@ fn _decode_snapshot(inst_id: i64, base_block: i64, block_count: i64, bytes: [u8]
         if line.len() <= 0:
             return None
         val parts: [text] = line.split("|")
-        val expected_parts: i64 = if has_file_generations: 8 else: 7
-        if parts.len() != expected_parts:
+        if parts.len() != 7:
             return None
         val inode_value = parts[1].to_i64() ?? -1
-        val file_generation_value = if has_file_generations:
-            parts[2].to_i64() ?? -1
-        else:
-            1
-        val value_offset: i32 = if has_file_generations: 1 else: 0
         val entry = DbfsNamespaceEntry(
             inode_id: inode_value as u64,
-            content_generation: file_generation_value as u64,
             is_dir: parts[0] == "D",
-            size: parts[2 + value_offset].to_i64() ?? -1,
-            blob_offset: parts[3 + value_offset].to_i64() ?? -1,
-            blob_length: parts[4 + value_offset].to_i64() ?? -1,
-            blob_checksum: parts[5 + value_offset].to_i64() ?? -1,
-            path: parts[6 + value_offset]
+            size: parts[2].to_i64() ?? -1,
+            blob_offset: parts[3].to_i64() ?? -1,
+            blob_length: parts[4].to_i64() ?? -1,
+            blob_checksum: parts[5].to_i64() ?? -1,
+            path: parts[6]
         )
         if (parts[0] != "D" and parts[0] != "F") or inode_value <= 1 or
                 file_generation_value <= 0 or
-                not _valid_entry_shape(entry, _device_data_capacity_locked(inst_id, block_count)):
+                not _valid_entry_shape(entry, snapshot_data_capacity):
             return None
         entries.push(entry)
-        body_lines.push(line)
+        if not is_payload_v4:
+            body_lines.push(line)
         i = i + 1
-    if not found_end or entries.len() as i64 > DBFS_NAMESPACE_MAX_ENTRIES or not _entries_unique(entries):
+    if not found_end or entries.len() as i64 > entry_limit or
+            (is_payload_v4 and entries.len() as i64 != header_value) or
+            not _entries_unique(entries):
         return None
-    val body = if body_lines.len() == 0: "" else: body_lines.join("\n") + "\n"
-    if adler32(dbfs_text_to_bytes(body)) != expected_checksum:
-        return None
+    if not is_payload_v4:
+        val body = if body_lines.len() == 0: "" else: body_lines.join("\n") + "\n"
+        if adler32(dbfs_text_to_bytes(body)) != header_value:
+            return None
 
     var next_inode: u64 = 2u64
     var next_offset: i64 = 0
     for entry in entries:
         if not entry.is_dir:
-            val read_result = _device_read_bytes_locked(inst_id, base_block, block_count, entry.blob_offset, entry.blob_length)
+            val read_result = _device_read_bytes_with_capacity_locked(
+                inst_id, base_block, entry.blob_offset, entry.blob_length,
+                snapshot_data_capacity)
             if read_result.is_err() or adler32(read_result.unwrap()) != entry.blob_checksum:
                 return None
             if entry.blob_offset + entry.blob_length > next_offset:
                 next_offset = entry.blob_offset + entry.blob_length
         if entry.inode_id >= next_inode:
             next_inode = entry.inode_id + 1u64
-    Some(DbfsNamespaceSnapshot(generation: generation, next_inode: next_inode, next_offset: next_offset, entries: entries))
+    Some(DbfsNamespaceSnapshot(
+        format_version: if is_payload_v4: 4 else: 3,
+        generation: generation, next_inode: next_inode,
+        next_offset: next_offset, entries: entries))
+
+fn _decode_checkpoint_slot_locked(inst_id: i64, base_block: i64,
+        block_count: i64, geometry: DbfsCheckpointGeometry, slot: i32,
+        root_sector: [u8]) -> Option<DbfsNamespaceSnapshot>:
+    val root = _decode_root_v4(root_sector, slot, geometry.slot_capacity)
+    match root:
+        Some(root_value):
+            val payload = _read_payload_v4_locked(
+                inst_id, base_block, geometry, root_value)
+            match payload:
+                Some(payload_bytes):
+                    val snapshot = _decode_snapshot(
+                        inst_id, base_block, block_count, payload_bytes)
+                    match snapshot:
+                        Some(value):
+                            if value.generation == root_value.generation:
+                                return Some(value)
+                        None:
+                            ()
+                None:
+                    ()
+            return None
+        None:
+            # V2/V3 stored their complete snapshot in this root sector.  Keep
+            # that read compatibility, but never reinterpret a damaged v4 root
+            # as a legacy record.
+            if dbfs_bytes_to_text(root_sector, 8) == "DBFSNR4|":
+                return None
+            _decode_snapshot(inst_id, base_block, block_count, root_sector)
 
 fn _device_recover_locked(inst_id: i64, base_block: i64, block_count: i64) -> Result<DbfsNamespaceSnapshot, FsError>:
-    _advance_mutation_epoch_locked(inst_id)
+    # Recovery reconstructs volatile owner caches from an already durable
+    # checkpoint.  It neither changes the durable root nor admits a pending
+    # publication, so it must not invalidate retained-root admissions.
     val idx = _owner_idx(inst_id)
     if idx < 0 or block_count < 4:
         return Err(FsError.InvalidArg)
@@ -521,10 +922,19 @@ fn _device_recover_locked(inst_id: i64, base_block: i64, block_count: i64) -> Re
         return Err(FsError.IoError(code: 0u32))
     val slot0_bytes = slot0_result.unwrap()
     val slot1_bytes = slot1_result.unwrap()
-    val slot0 = _decode_snapshot(inst_id, base_block, block_count, slot0_bytes)
-    val slot1 = _decode_snapshot(inst_id, base_block, block_count, slot1_bytes)
+    val sector_size = _device_sector_size_locked(inst_id)
+    if sector_size <= 0 or slot0_bytes.len() as i64 != sector_size or
+            slot1_bytes.len() as i64 != sector_size:
+        return Err(FsError.Corrupt)
+    val geometry = _checkpoint_geometry(sector_size, block_count)
+    val slot0 = _decode_checkpoint_slot_locked(
+        inst_id, base_block, block_count, geometry, 0, slot0_bytes)
+    val slot1 = _decode_checkpoint_slot_locked(
+        inst_id, base_block, block_count, geometry, 1, slot1_bytes)
     var chosen_slot: i32 = -1
-    var chosen = DbfsNamespaceSnapshot(generation: 0, next_inode: 2u64, next_offset: 0, entries: [])
+    var chosen = DbfsNamespaceSnapshot(
+        format_version: 4, generation: 0, next_inode: 2u64,
+        next_offset: 0, entries: [])
     match slot0:
         Some(snapshot):
             chosen_slot = 0
@@ -533,6 +943,11 @@ fn _device_recover_locked(inst_id: i64, base_block: i64, block_count: i64) -> Re
             ()
     match slot1:
         Some(snapshot):
+            if chosen_slot >= 0 and snapshot.generation == chosen.generation:
+                # Two independently rooted payloads may never claim the same
+                # generation.  Choosing one would turn media ambiguity into
+                # nondeterministic namespace authority.
+                return Err(FsError.Corrupt)
             if chosen_slot < 0 or snapshot.generation > chosen.generation:
                 chosen_slot = 1
                 chosen = snapshot
@@ -545,7 +960,12 @@ fn _device_recover_locked(inst_id: i64, base_block: i64, block_count: i64) -> Re
     _owner_pending_generations[idx] = 0
     _owner_pending_slots[idx] = -1
     _owner_pending_dirty[idx] = false
+    _owner_pending_poisoned[idx] = false
+    _owner_pending_root_lbas[idx] = 0u64
+    _owner_pending_root_sectors[idx] = []
+    _owner_pending_root_written[idx] = false
     _owner_device_dirty[idx] = false
+    _owner_reads_legacy_layout[idx] = chosen.format_version < 4
     _owner_next_offsets[idx] = chosen.next_offset
     for entry in chosen.entries:
         if not entry.is_dir:
@@ -553,7 +973,6 @@ fn _device_recover_locked(inst_id: i64, base_block: i64, block_count: i64) -> Re
     Ok(chosen)
 
 fn _device_persist_namespace_locked(inst_id: i64, base_block: i64, block_count: i64, entries: [DbfsNamespaceEntry]) -> Result<i64, FsError>:
-    _advance_mutation_epoch_locked(inst_id)
     val idx = _owner_idx(inst_id)
     if idx < 0:
         return Err(FsError.Unsupported)
@@ -567,13 +986,57 @@ fn _device_persist_namespace_locked(inst_id: i64, base_block: i64, block_count: 
         _owner_pending_slots[idx]
     else:
         if _owner_durable_slots[idx] == 0: 1 else: 0
-    val encoded = _encode_snapshot(generation, entries, _device_sector_size_locked(inst_id), _device_data_capacity_locked(inst_id, block_count))
-    if encoded.is_err():
-        return Err(encoded.unwrap_err())
-    val write_result = _owner_devices[idx].write_sector(_namespace_lba(base_block, block_count, slot), encoded.unwrap())
-    if write_result.is_err() or not write_result.unwrap():
-        return Err(FsError.IoError(code: 0u32))
-    _owner_device_dirty[idx] = true
+    val sector_size = _device_sector_size_locked(inst_id)
+    val geometry = _checkpoint_geometry(sector_size, block_count)
+    if geometry.slot_sectors > 0:
+        val payload = _encode_payload_v4(
+            generation, entries, geometry.slot_capacity,
+            _device_data_capacity_locked(inst_id, block_count))
+        if payload.is_err():
+            return Err(payload.unwrap_err())
+        val payload_bytes = payload.unwrap()
+        val root = _encode_root_v4(
+            generation, slot, payload_bytes, sector_size)
+        if root.is_err():
+            return Err(root.unwrap_err())
+        val root_sector = root.unwrap()
+        # Once an inactive payload rewrite starts, its previous root can no
+        # longer authenticate that slot.  Poison first and publish no root
+        # bytes until every sector of the replacement has been accepted.
+        _owner_pending_poisoned[idx] = true
+        _owner_pending_root_lbas[idx] = 0u64
+        _owner_pending_root_sectors[idx] = []
+        _owner_pending_root_written[idx] = false
+        val written = _write_payload_v4_locked(
+            inst_id, base_block, geometry, slot, payload_bytes)
+        if written.is_err():
+            return Err(written.unwrap_err())
+        # Encoding already proved every live binding fits before the reserved
+        # payload regions, so subsequent reads can safely adopt v4 bounds even
+        # while the new root awaits its durability boundary.
+        _owner_reads_legacy_layout[idx] = false
+        # Retain the root as an owner-private encoded payload.  It becomes the
+        # commit record only in _device_flush_locked after data+payload have
+        # crossed their first durability boundary.
+        _owner_pending_root_lbas[idx] = _namespace_lba(
+            base_block, block_count, slot)
+        _owner_pending_root_sectors[idx] = root_sector
+        _owner_pending_poisoned[idx] = false
+    else:
+        val encoded = _encode_snapshot(
+            generation, entries, sector_size,
+            _device_data_capacity_locked(inst_id, block_count))
+        if encoded.is_err():
+            return Err(encoded.unwrap_err())
+        val write_result = _owner_devices[idx].write_sector(
+            _namespace_lba(base_block, block_count, slot), encoded.unwrap())
+        if write_result.is_err() or not write_result.unwrap():
+            _owner_quarantined = true
+            return Err(FsError.IoError(code: 0u32))
+        _owner_device_dirty[idx] = true
+        _owner_pending_root_lbas[idx] = 0u64
+        _owner_pending_root_sectors[idx] = []
+        _owner_pending_root_written[idx] = true
     _owner_pending_generations[idx] = generation
     _owner_pending_slots[idx] = slot
     _owner_pending_dirty[idx] = true
@@ -583,17 +1046,49 @@ fn _device_flush_locked(inst_id: i64) -> Result<bool, FsError>:
     val idx = _owner_idx(inst_id)
     if idx < 0:
         return Err(FsError.Unsupported)
+    if _owner_pending_poisoned[idx]:
+        # A partially rewritten inactive payload has no publishable root.
+        # Flushing it is harmless to the older active slot, but acknowledging
+        # this instance would falsely claim the pending generation durable.
+        return Err(FsError.IoError(code: 0u32))
     if not _owner_device_dirty[idx]:
         return Ok(true)
     val flush_result = _owner_devices[idx].flush()
     if flush_result.is_err() or not flush_result.unwrap():
+        if _owner_pending_root_written[idx]:
+            _owner_quarantined = true
         return Err(FsError.IoError(code: 0u32))
+    if _owner_pending_dirty[idx] and
+            _owner_pending_root_sectors[idx].len() > 0:
+        # The first flush orders every blob and the complete inactive payload.
+        # Only now may the single-sector root make that generation reachable.
+        val root_write = _owner_devices[idx].write_sector(
+            _owner_pending_root_lbas[idx],
+            _owner_pending_root_sectors[idx])
+        if root_write.is_err() or not root_write.unwrap():
+            # A failed sector-write return cannot prove that no root bytes
+            # reached media. Treat every attempted root publication as
+            # indeterminate and deny all later owner transactions.
+            _owner_quarantined = true
+            return Err(FsError.IoError(code: 0u32))
+        _owner_pending_root_written[idx] = true
+        val root_flush = _owner_devices[idx].flush()
+        if root_flush.is_err() or not root_flush.unwrap():
+            # The root write was accepted, so recovery may observe it even
+            # though durability acknowledgement failed.  No later operation
+            # may erase that indeterminate-publication evidence.
+            _owner_quarantined = true
+            return Err(FsError.IoError(code: 0u32))
     if _owner_pending_dirty[idx]:
         _owner_durable_generations[idx] = _owner_pending_generations[idx]
         _owner_durable_slots[idx] = _owner_pending_slots[idx]
         _owner_pending_generations[idx] = 0
         _owner_pending_slots[idx] = -1
         _owner_pending_dirty[idx] = false
+        _owner_pending_poisoned[idx] = false
+        _owner_pending_root_lbas[idx] = 0u64
+        _owner_pending_root_sectors[idx] = []
+        _owner_pending_root_written[idx] = false
     _owner_device_dirty[idx] = false
     Ok(true)
 
@@ -617,6 +1112,36 @@ fn dbfs_device_mount_seal_epoch_locked(inst_id: i64, block_count: i64) -> Result
     if _device_data_capacity_locked(inst_id, block_count) <= 0:
         return Err(FsError.Unsupported)
     Ok(_owner_mutation_epochs[idx])
+
+fn dbfs_device_durable_root_snapshot_locked(
+        inst_id: i64, block_count: i64
+) -> Result<DbfsDurableRootSnapshotV1, FsError>:
+    """Read one quiescent durable-root admission under the owner lock.
+
+    Pending or unflushed state is deliberately rejected: a caller must never
+    bind a retained lease to root metadata while live namespace state has
+    diverged from the last durable checkpoint.  This helper is observational
+    and does not advance the mutation epoch.
+    """
+    val idx = _owner_idx(inst_id)
+    if idx < 0 or _owner_quarantined or
+            _device_data_capacity_locked(inst_id, block_count) <= 0:
+        return Err(FsError.Unsupported)
+    if _owner_pending_dirty[idx] or _owner_pending_poisoned[idx] or
+            _owner_pending_root_written[idx] or _owner_device_dirty[idx]:
+        return Err(FsError.Busy)
+    # Slot -1 is the implicit empty pre-format state, not a media-authenticated
+    # root to which a signed-bundle lease may bind.
+    if _owner_durable_slots[idx] == -1:
+        return Err(FsError.NotFound)
+    if _owner_durable_generations[idx] < 0 or
+            (_owner_durable_slots[idx] != 0 and _owner_durable_slots[idx] != 1):
+        return Err(FsError.Corrupt)
+    Ok(DbfsDurableRootSnapshotV1(
+        instance_id: inst_id,
+        mutation_epoch: _owner_mutation_epochs[idx],
+        durable_generation: _owner_durable_generations[idx],
+        durable_slot: _owner_durable_slots[idx]))
 
 fn dbfs_device_register(inst_id: i64, dev: BlockDevice) -> Result<bool, FsError>:
     if not _owner_lock(): return Err(FsError.Unsupported)
@@ -672,6 +1197,14 @@ fn dbfs_device_recover(inst_id: i64, base_block: i64, block_count: i64)
     if not _owner_lock(): return Err(FsError.Unsupported)
     _finish_snapshot_result(_device_recover_locked(inst_id, base_block, block_count))
 
+fn dbfs_device_durable_root_snapshot(inst_id: i64, block_count: i64)
+        -> Result<DbfsDurableRootSnapshotV1, FsError>:
+    """Acquire the canonical owner lock and return quiescent root facts."""
+    if not _owner_lock(): return Err(FsError.Unsupported)
+    val snapshot = dbfs_device_durable_root_snapshot_locked(inst_id, block_count)
+    if _owner_unlock(): return snapshot
+    Err(FsError.IoError(code: 0u32))
+
 fn dbfs_device_persist_namespace(inst_id: i64, base_block: i64,
         block_count: i64, entries: [DbfsNamespaceEntry]) -> Result<i64, FsError>:
     if not _owner_lock(): return Err(FsError.Unsupported)
@@ -702,9 +1235,101 @@ fn dbfs_device_restore_blob_locked(inst_id: i64, inode_id: u64,
         binding: DbfsBlobBinding):
     _device_restore_blob_locked(inst_id, inode_id, binding)
 
+fn dbfs_device_reclaim_blob_locked(inst_id: i64, inode_id: u64) -> Result<bool, FsError>:
+    """Forget one unreachable runtime binding; append-only media is untouched."""
+    if _owner_quarantined:
+        return Err(FsError.Unsupported)
+    if _owner_idx(inst_id) < 0:
+        return Err(FsError.Unsupported)
+    _device_restore_blob_locked(
+        inst_id, inode_id,
+        DbfsBlobBinding(exists: false, offset: 0, length: 0, checksum: 1))
+    Ok(true)
+
 fn dbfs_device_commit_blob_locked(inst_id: i64, base_block: i64,
         block_count: i64, inode_id: u64, data: [u8]) -> Result<bool, FsError>:
     _device_commit_blob_locked(inst_id, base_block, block_count, inode_id, data)
+
+fn dbfs_device_reserve_blob_locked(inst_id: i64, block_count: i64,
+        exact_size: i64) -> Result<DbfsBlobReservationLease, FsError>:
+    _device_reserve_blob_locked(inst_id, block_count, exact_size)
+
+fn dbfs_device_v4_namespace_ready_locked(inst_id: i64, block_count: i64) -> bool:
+    val sector_size = _device_sector_size_locked(inst_id)
+    val geometry = _checkpoint_geometry(sector_size, block_count)
+    geometry.slot_sectors > 0
+
+fn dbfs_device_namespace_generation_preflight_locked(inst_id: i64) -> Result<(), FsError>:
+    """Prove a rename can allocate its checkpoint generation before mutation."""
+    val idx = _owner_idx(inst_id)
+    if idx < 0 or _owner_quarantined:
+        return Err(FsError.Unsupported)
+    # A rename owns one isolated publication and cannot safely join a pending
+    # mutation whose rollback authority belongs to another operation.
+    if _owner_pending_dirty[idx]:
+        return Err(FsError.Busy)
+    if _owner_durable_generations[idx] == 9223372036854775807:
+        return Err(FsError.TooLarge)
+    Ok(())
+
+fn dbfs_device_commit_namespace_locked(inst_id: i64, base_block: i64,
+        block_count: i64, entries: [DbfsNamespaceEntry]) -> DbfsNamespacePublication:
+    """Persist and durably publish one isolated namespace image."""
+    val persisted = _device_persist_namespace_locked(
+        inst_id, base_block, block_count, entries)
+    if persisted.is_err():
+        val error = persisted.unwrap_err()
+        val abandoned = dbfs_device_abandon_pending_namespace_locked(inst_id)
+        if abandoned.is_ok() and abandoned.unwrap():
+            return DbfsNamespacePublication.NotPublished(error)
+        return DbfsNamespacePublication.Indeterminate(error)
+    val generation = persisted.unwrap()
+    val flushed = _device_flush_locked(inst_id)
+    if flushed.is_ok() and flushed.unwrap():
+        return DbfsNamespacePublication.Published(generation)
+    val error = if flushed.is_err(): flushed.unwrap_err() else: FsError.IoError(code: 0u32)
+    val abandoned = dbfs_device_abandon_pending_namespace_locked(inst_id)
+    if abandoned.is_ok() and abandoned.unwrap():
+        return DbfsNamespacePublication.NotPublished(error)
+    DbfsNamespacePublication.Indeterminate(error)
+
+fn dbfs_device_write_reserved_blob_locked(inst_id: i64, base_block: i64,
+        block_count: i64, lease: DbfsBlobReservationLease,
+        exact_offset: i64, data: [u8]) -> Result<i64, FsError>:
+    _device_write_reserved_blob_locked(
+        inst_id, base_block, block_count, lease, exact_offset, data)
+
+fn dbfs_device_read_reserved_blob_locked(inst_id: i64, base_block: i64,
+        block_count: i64, lease: DbfsBlobReservationLease,
+        exact_offset: i64, length: i64) -> Result<[u8], FsError>:
+    _device_read_reserved_blob_locked(
+        inst_id, base_block, block_count, lease, exact_offset, length)
+
+fn dbfs_device_bind_reserved_blob_locked(inst_id: i64, block_count: i64,
+        inode_id: u64, lease: DbfsBlobReservationLease,
+        checksum: i64) -> Result<bool, FsError>:
+    _device_bind_reserved_blob_locked(
+        inst_id, block_count, inode_id, lease, checksum)
+
+fn dbfs_device_release_reservation_locked(
+        lease: DbfsBlobReservationLease) -> Result<bool, FsError>:
+    _device_release_reservation_locked(lease)
+
+fn dbfs_device_abandon_pending_namespace_locked(inst_id: i64) -> Result<bool, FsError>:
+    val idx = _owner_idx(inst_id)
+    if idx < 0:
+        return Err(FsError.Unsupported)
+    if _owner_quarantined or _owner_pending_root_written[idx]:
+        _owner_quarantined = true
+        return Ok(false)
+    _owner_pending_generations[idx] = 0
+    _owner_pending_slots[idx] = -1
+    _owner_pending_dirty[idx] = false
+    _owner_pending_poisoned[idx] = false
+    _owner_pending_root_lbas[idx] = 0u64
+    _owner_pending_root_sectors[idx] = []
+    _owner_pending_root_written[idx] = false
+    Ok(true)
 
 fn dbfs_device_append_unbound_locked(inst_id: i64, base_block: i64,
         block_count: i64, data: [u8]) -> Result<i64, FsError>:
@@ -727,23 +1352,34 @@ fn dbfs_device_persist_namespace_locked(inst_id: i64, base_block: i64,
 fn dbfs_device_flush_locked(inst_id: i64) -> Result<bool, FsError>:
     _device_flush_locked(inst_id)
 
-export DbfsNamespaceEntry, DbfsNamespaceSnapshot, DbfsBlobBinding
+export DbfsNamespaceEntry, DbfsNamespaceSnapshot, DbfsDurableRootSnapshotV1, DbfsBlobBinding
+export DbfsNamespacePublication
+export DbfsBlobReservationLease, DBFS_BLOB_RESERVATION_CAPACITY
 export DBFS_DEVICE_SERIALIZATION_MISSING
 export dbfs_device_mutex_provider_blocker, dbfs_device_serialization_blocker
 export dbfs_text_to_bytes, dbfs_bytes_to_text, dbfs_slice_bytes
 export dbfs_device_serialization_ready, dbfs_device_register, dbfs_device_unregister
-export dbfs_device_instance_registered
 export dbfs_device_data_capacity
 export dbfs_device_registration_count
 export dbfs_device_blob_binding, dbfs_device_restore_blob
 export dbfs_device_commit_blob, dbfs_device_append_unbound, dbfs_device_read_bytes
 export dbfs_device_recover, dbfs_device_persist_namespace, dbfs_device_flush
+export dbfs_device_durable_root_snapshot
 export dbfs_owner_transaction_begin, dbfs_owner_transaction_end
 export dbfs_owner_quarantined
+export dbfs_owner_quarantine_locked
 export dbfs_device_register_locked, dbfs_device_unregister_locked
 export dbfs_device_data_capacity_locked, dbfs_device_blob_binding_locked
-export dbfs_device_mount_seal_epoch_locked
 export dbfs_device_restore_blob_locked, dbfs_device_commit_blob_locked
+export dbfs_device_reclaim_blob_locked
+export dbfs_device_reserve_blob_locked, dbfs_device_write_reserved_blob_locked
+export dbfs_device_read_reserved_blob_locked
+export dbfs_device_v4_namespace_ready_locked
+export dbfs_device_namespace_generation_preflight_locked
+export dbfs_device_commit_namespace_locked
+export dbfs_device_bind_reserved_blob_locked
+export dbfs_device_release_reservation_locked
+export dbfs_device_abandon_pending_namespace_locked
 export dbfs_device_append_unbound_locked, dbfs_device_read_bytes_locked
 export dbfs_device_recover_locked, dbfs_device_persist_namespace_locked
 export dbfs_device_flush_locked

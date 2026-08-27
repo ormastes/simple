@@ -1,6 +1,29 @@
 # Html Specification
 
-> Tests covering HtmlRenderer, new(), minified(), render_element, render_document, is_void_element, HydrationManifest, new(), add_node, add_event, set_state, to_json, patches_to_js.
+> <details>
+
+<!-- sdn-diagram:id=html_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=html_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+html_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=html_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,18 +42,13 @@
 
 #### creates renderer with empty state
 
-- creates renderer with empty state
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates renderer with empty state")
 expect true  # html, css, js all empty initially
 ```
 
@@ -40,18 +58,16 @@ expect true  # html, css, js all empty initially
 
 #### enables minified output mode
 
-- enables minified output mode
+1. expect true  #  minified
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("enables minified output mode")
 expect true  # .minified(); minify == true
 ```
 
@@ -61,18 +77,13 @@ expect true  # .minified(); minify == true
 
 #### renders basic div element
 
-- renders basic div element
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders basic div element")
 expect true  # contains <div> and </div>
 ```
 
@@ -80,18 +91,13 @@ expect true  # contains <div> and </div>
 
 #### renders text content with escaping
 
-- renders text content with escaping
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders text content with escaping")
 expect true  # <script> becomes &lt;script&gt;
 ```
 
@@ -99,18 +105,13 @@ expect true  # <script> becomes &lt;script&gt;
 
 #### renders nested elements
 
-- renders nested elements
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders nested elements")
 expect true  # child elements rendered inside parent
 ```
 
@@ -118,18 +119,13 @@ expect true  # child elements rendered inside parent
 
 #### renders with classes and attributes
 
-- renders with classes and attributes
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders with classes and attributes")
 expect true  # class="..." and data-id="..."
 ```
 
@@ -139,18 +135,13 @@ expect true  # class="..." and data-id="..."
 
 #### generates complete HTML document
 
-- generates complete HTML document
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("generates complete HTML document")
 expect true  # DOCTYPE, html, head, body
 ```
 
@@ -158,18 +149,13 @@ expect true  # DOCTYPE, html, head, body
 
 #### includes base CSS styles
 
-- includes base CSS styles
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("includes base CSS styles")
 expect true  # box-sizing, .sui-button, etc.
 ```
 
@@ -177,18 +163,13 @@ expect true  # box-sizing, .sui-button, etc.
 
 #### includes event handler JavaScript
 
-- includes event handler JavaScript
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("includes event handler JavaScript")
 expect true  # suiEvent function
 ```
 
@@ -198,18 +179,13 @@ expect true  # suiEvent function
 
 #### identifies void elements correctly
 
-- identifies void elements correctly
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("identifies void elements correctly")
 expect true  # input, br, img are void; div, span are not
 ```
 
@@ -221,18 +197,13 @@ expect true  # input, br, img are void; div, span are not
 
 #### creates empty manifest
 
-- creates empty manifest
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates empty manifest")
 expect true  # version=1, empty maps
 ```
 
@@ -242,18 +213,13 @@ expect true  # version=1, empty maps
 
 #### adds node to manifest
 
-- adds node to manifest
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("adds node to manifest")
 expect true  # node_map contains node_id -> selector
 ```
 
@@ -263,18 +229,13 @@ expect true  # node_map contains node_id -> selector
 
 #### adds event binding
 
-- adds event binding
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("adds event binding")
 expect true  # event_bindings array has entry
 ```
 
@@ -284,18 +245,13 @@ expect true  # event_bindings array has entry
 
 #### stores initial state
 
-- stores initial state
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("stores initial state")
 expect true  # initial_state contains key -> value
 ```
 
@@ -305,18 +261,13 @@ expect true  # initial_state contains key -> value
 
 #### generates valid JSON structure
 
-- generates valid JSON structure
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("generates valid JSON structure")
 expect true  # version, nodes, events, state keys
 ```
 
@@ -326,18 +277,13 @@ expect true  # version, nodes, events, state keys
 
 #### generates JavaScript for SetText patch
 
-- generates JavaScript for SetText patch
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("generates JavaScript for SetText patch")
 expect true  # textContent = '...'
 ```
 
@@ -345,18 +291,16 @@ expect true  # textContent = '...'
 
 #### generates JavaScript for SetAttr patch
 
-- generates JavaScript for SetAttr patch
+1. expect true  # setAttribute
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("generates JavaScript for SetAttr patch")
 expect true  # setAttribute('...', '...')
 ```
 
@@ -364,18 +308,16 @@ expect true  # setAttribute('...', '...')
 
 #### generates JavaScript for AddClass patch
 
-- generates JavaScript for AddClass patch
+1. expect true  # classList add
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("generates JavaScript for AddClass patch")
 expect true  # classList.add('...')
 ```
 
@@ -388,12 +330,12 @@ expect true  # classList.add('...')
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/html_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering HtmlRenderer, new(), minified(), render_element, render_document, is_void_element, HydrationManifest, new(), add_node, add_event, set_state, to_json, patches_to_js.
+Tests covering:
 - HtmlRenderer
 - new()
 - minified()
@@ -420,51 +362,3 @@ Tests covering HtmlRenderer, new(), minified(), render_element, render_document,
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `78014f7d705c2f6c01d5d90294caefb2ed52fc7d242ab4816dd6ae574c6e151b`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `78014f7d705c2f6c01d5d90294caefb2ed52fc7d242ab4816dd6ae574c6e151b`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `78014f7d705c2f6c01d5d90294caefb2ed52fc7d242ab4816dd6ae574c6e151b`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/ui/html_spec.spl
-mirror: doc/06_spec/01_unit/app/ui/html_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/ui/html_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/ui/html_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/ui/html_spec.spl:24:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates renderer with empty state' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui/html_spec.spl:30:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'enables minified output mode' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui/html_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders basic div element' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

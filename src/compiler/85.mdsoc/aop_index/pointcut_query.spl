@@ -1,0 +1,273 @@
+# Typed, normalized pointcut query — replaces `WeavingRule.predicate_text: text`.
+#
+# Prerequisite 1 of the AOP cache-group split
+# (doc/03_plan/compiler/cache/c0_schema_freeze_2026-08-09.md §5a).
+#
+# The tree's predicates are an untyped string in a small real grammar, e.g.
+#   "execution(*.handle_request) & within(http_server.**)"
+#   "attr(requires_auth) & within(http_server.**)"
+#   "execution(*.authenticate*) | execution(*.verify_password*)"
+#
+# This module gives that grammar a data structure with a CANONICAL normal form
+# (disjunctive normal form: a sorted, deduped set of sorted, deduped clauses),
+# so two textually different but logically identical queries normalize to the
+# same value and therefore to the same digest.
+#
+# Conservative rule: anything this module cannot represent exactly becomes
+# `POINTCUT_KIND_UNPARSED`, whose read set is ALL descriptor fields. A query we
+# do not understand must be re-evaluated on every change (false miss), never
+# assumed independent of a field (false hit).
+
+use compiler.mdsoc.aop_index.pointcut_text.{pointcut_text_lt}
+
+# Bumped whenever normalization or the selector vocabulary changes. It feeds
+# `matcher_schema_digest`, so a bump invalidates every selection digest.
+val POINTCUT_NORMALIZER_VERSION: i64 = 1
+
+# --- selector vocabulary --------------------------------------------------
+# Exactly the five descriptor fields JoinPointContext actually carries today
+# (c0 §5a `degraded_selector_read_set_today`). No selector may be added here
+# without a backing field on JoinPointContext.
+val SELECTOR_EXECUTION: text = "execution"   # reads qualified_name
+val SELECTOR_WITHIN: text = "within"         # reads owning_scope
+val SELECTOR_SIGNATURE: text = "signature"   # reads signature
+val SELECTOR_ATTR: text = "attr"             # reads attributes
+val SELECTOR_EFFECT: text = "effect"         # reads effects
+
+val POINTCUT_KIND_DNF: text = "dnf"
+val POINTCUT_KIND_ALL: text = "all"          # matches every join point
+val POINTCUT_KIND_NONE: text = "none"        # matches nothing
+val POINTCUT_KIND_UNPARSED: text = "unparsed"
+
+# One selector application, e.g. `within(http_server.**)`.
+struct PointcutAtom:
+    """A single selector applied to one argument pattern."""
+    selector: text
+    argument: text
+
+struct PointcutLiteral:
+    """A (possibly negated) atom."""
+    negated: bool
+    atom: PointcutAtom
+
+struct PointcutClause:
+    """A conjunction of literals. Empty literal list means `true`."""
+    literals: [PointcutLiteral]
+
+struct PointcutQuery:
+    """A pointcut in disjunctive normal form, plus the text it came from."""
+    kind: text
+    clauses: [PointcutClause]
+    raw: text
+
+# Which descriptor fields a query actually reads. This is what makes precise
+# invalidation possible: a query reading only `owning_scope` must not be
+# reevaluated when an attribute changes.
+struct SelectorReadSet:
+    """The descriptor fields a query may read."""
+    qualified_name: bool
+    owning_scope: bool
+    signature: bool
+    attributes: bool
+    effects: bool
+
+fn pointcut_selector_is_known(selector: text) -> bool:
+    """True when the selector has a backing JoinPointContext field."""
+    if selector == SELECTOR_EXECUTION:
+        return true
+    if selector == SELECTOR_WITHIN:
+        return true
+    if selector == SELECTOR_SIGNATURE:
+        return true
+    if selector == SELECTOR_ATTR:
+        return true
+    if selector == SELECTOR_EFFECT:
+        return true
+    false
+
+fn pointcut_len_prefixed(s: text) -> text:
+    """`<len>:<s>` — length prefixing makes separator injection impossible."""
+    s.len().to_text() + ":" + s
+
+fn pointcut_literal_sort_key(lit: PointcutLiteral) -> text:
+    """Total-order key. Selector, then argument, then polarity."""
+    var neg = "0"
+    if lit.negated:
+        neg = "1"
+    pointcut_len_prefixed(lit.atom.selector) + pointcut_len_prefixed(lit.atom.argument) + neg
+
+fn pointcut_clause_sort_key(clause: PointcutClause) -> text:
+    """Total-order key over an already literal-sorted clause."""
+    var parts: [text] = []
+    for lit in clause.literals:
+        parts = parts.push(pointcut_len_prefixed(pointcut_literal_sort_key(lit)))
+    parts.join("")
+
+fn pointcut_sort_literals(lits: [PointcutLiteral]) -> [PointcutLiteral]:
+    """Insertion sort by `pointcut_literal_sort_key` (stable, small inputs)."""
+    var out: [PointcutLiteral] = []
+    for lit in lits:
+        val key = pointcut_literal_sort_key(lit)
+        var placed: [PointcutLiteral] = []
+        var inserted = false
+        for existing in out:
+            if not inserted and pointcut_text_lt(a: key, b: pointcut_literal_sort_key(existing)):
+                placed = placed.push(lit)
+                inserted = true
+            placed = placed.push(existing)
+        if not inserted:
+            placed = placed.push(lit)
+        out = placed
+    out
+
+fn pointcut_dedupe_literals(lits: [PointcutLiteral]) -> [PointcutLiteral]:
+    """Drop adjacent duplicates from a sorted literal list."""
+    var out: [PointcutLiteral] = []
+    var last = ""
+    var first = true
+    for lit in lits:
+        val key = pointcut_literal_sort_key(lit)
+        if first or key != last:
+            out = out.push(lit)
+        last = key
+        first = false
+    out
+
+fn pointcut_clause_is_contradictory(lits: [PointcutLiteral]) -> bool:
+    """True when the clause holds both `x` and `!x` — it can never match."""
+    for a in lits:
+        for b in lits:
+            if a.negated != b.negated:
+                if a.atom.selector == b.atom.selector and a.atom.argument == b.atom.argument:
+                    return true
+    false
+
+fn pointcut_normalize_clause(lits: [PointcutLiteral]) -> PointcutClause:
+    """Sort and dedupe a conjunction into canonical form."""
+    PointcutClause(literals: pointcut_dedupe_literals(pointcut_sort_literals(lits)))
+
+fn pointcut_query_normalize(kind: text, clauses: [PointcutClause], raw: text) -> PointcutQuery:
+    """Canonicalise a DNF query: drop contradictions, sort and dedupe clauses.
+
+    Equal queries — modulo clause order, literal order and duplication — always
+    produce an identical `PointcutQuery`, hence an identical digest.
+    """
+    if kind != POINTCUT_KIND_DNF:
+        return PointcutQuery(kind: kind, clauses: [], raw: raw)
+
+    var normalized: [PointcutClause] = []
+    var saw_true_clause = false
+    for clause in clauses:
+        if not pointcut_clause_is_contradictory(clause.literals):
+            val norm = pointcut_normalize_clause(clause.literals)
+            if norm.literals.is_empty():
+                saw_true_clause = true
+            normalized = normalized.push(norm)
+
+    if saw_true_clause:
+        # A disjunct that is unconditionally true swallows the whole query.
+        return PointcutQuery(kind: POINTCUT_KIND_ALL, clauses: [], raw: raw)
+    if normalized.is_empty():
+        return PointcutQuery(kind: POINTCUT_KIND_NONE, clauses: [], raw: raw)
+
+    # Sort clauses, then dedupe.
+    var sorted: [PointcutClause] = []
+    for clause in normalized:
+        val key = pointcut_clause_sort_key(clause)
+        var placed: [PointcutClause] = []
+        var inserted = false
+        for existing in sorted:
+            if not inserted and pointcut_text_lt(a: key, b: pointcut_clause_sort_key(existing)):
+                placed = placed.push(clause)
+                inserted = true
+            placed = placed.push(existing)
+        if not inserted:
+            placed = placed.push(clause)
+        sorted = placed
+
+    var deduped: [PointcutClause] = []
+    var last = ""
+    var first = true
+    for clause in sorted:
+        val key = pointcut_clause_sort_key(clause)
+        if first or key != last:
+            deduped = deduped.push(clause)
+        last = key
+        first = false
+
+    PointcutQuery(kind: POINTCUT_KIND_DNF, clauses: deduped, raw: raw)
+
+fn selector_read_set_none() -> SelectorReadSet:
+    """A read set over no fields."""
+    SelectorReadSet(
+        qualified_name: false,
+        owning_scope: false,
+        signature: false,
+        attributes: false,
+        effects: false
+    )
+
+fn selector_read_set_all() -> SelectorReadSet:
+    """The conservative read set: every descriptor field."""
+    SelectorReadSet(
+        qualified_name: true,
+        owning_scope: true,
+        signature: true,
+        attributes: true,
+        effects: true
+    )
+
+fn pointcut_query_read_set(query: PointcutQuery) -> SelectorReadSet:
+    """The descriptor fields `query` may read.
+
+    `unparsed` reads everything — an unknown selector must invalidate broadly.
+    `all` / `none` are constants and read nothing.
+    """
+    if query.kind == POINTCUT_KIND_UNPARSED:
+        return selector_read_set_all()
+    if query.kind != POINTCUT_KIND_DNF:
+        return selector_read_set_none()
+
+    var qualified_name = false
+    var owning_scope = false
+    var signature = false
+    var attributes = false
+    var effects = false
+    for clause in query.clauses:
+        for lit in clause.literals:
+            val sel = lit.atom.selector
+            if sel == SELECTOR_EXECUTION:
+                qualified_name = true
+            if sel == SELECTOR_WITHIN:
+                owning_scope = true
+            if sel == SELECTOR_SIGNATURE:
+                signature = true
+            if sel == SELECTOR_ATTR:
+                attributes = true
+            if sel == SELECTOR_EFFECT:
+                effects = true
+            if not pointcut_selector_is_known(sel):
+                # Unknown selector inside an otherwise typed query: fail wide.
+                return selector_read_set_all()
+    SelectorReadSet(
+        qualified_name: qualified_name,
+        owning_scope: owning_scope,
+        signature: signature,
+        attributes: attributes,
+        effects: effects
+    )
+
+fn selector_read_set_field_names(rs: SelectorReadSet) -> [text]:
+    """Read-set fields as canonical schema names, in canonical order."""
+    var out: [text] = []
+    if rs.qualified_name:
+        out = out.push("qualified_name")
+    if rs.owning_scope:
+        out = out.push("owning_scope")
+    if rs.signature:
+        out = out.push("signature")
+    if rs.attributes:
+        out = out.push("attributes")
+    if rs.effects:
+        out = out.push("effects")
+    out

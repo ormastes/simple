@@ -1,0 +1,38 @@
+"""Scalar-only projection of the immutable pgwire limit contract.
+
+`PgWireLinuxLimits` is a configuration aggregate owned by the server creator.
+It must not be returned by a native worker/registry operation.  This module
+copies the one control value needed for admission into a small immutable
+snapshot.  Consumers crossing an execution boundary read only the `i64`
+result from `max_sessions`; no aggregate, class, enum, text, `Any`, or raw
+pointer is transported.
+
+Ownership contract:
+
+* The caller owns the source `PgWireLinuxLimits` and may discard or replace it
+  after `pgwire_max_sessions_snapshot` returns.
+* `PgWireMaxSessionsSnapshot` owns its copied scalar value for its whole
+  lifetime.  It has no reference into the source aggregate and is safe to
+  freeze/share as a value.
+* `pgwire_max_sessions` is a read-only scalar projection.  It does not retain
+  the receiver, mutate state, or create a loan.  A worker may copy the result;
+  the parent remains the owner of admission state and performs all commits.
+* A non-positive source bound is normalized to `1`, matching
+  `PgWireLinuxLimits.create`'s fail-closed capacity policy.  No unbounded
+  value can enter a worker descriptor through this operation.
+"""
+
+use nogc_sync_mut.database.postgres_mimic.linux_limits.{PgWireLinuxLimits}
+
+struct PgWireMaxSessionsSnapshot:
+    value: i64
+
+fn pgwire_max_sessions_snapshot(limits: PgWireLinuxLimits) -> PgWireMaxSessionsSnapshot:
+    val bounded = if limits.max_sessions > 0: limits.max_sessions else: 1
+    PgWireMaxSessionsSnapshot(value: bounded)
+
+fn pgwire_max_sessions(snapshot: PgWireMaxSessionsSnapshot) -> i64:
+    snapshot.value
+
+export PgWireMaxSessionsSnapshot
+export pgwire_max_sessions_snapshot, pgwire_max_sessions

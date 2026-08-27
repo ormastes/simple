@@ -2,26 +2,34 @@
 
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.arch.user_entry_bridge.{dispatch_fs_exec_user_handoff}
-use os.kernel.loader.fs_exec_spawn.{fs_exec_prepare_spawn}
-use os.kernel.loader.fs_exec_spawn.{fs_exec_adopt_authenticated_v1}
+use os.kernel.loader.fs_exec_spawn.{
+    fs_exec_prepare_spawn, fs_exec_adopt_authenticated_v1,
+    fs_exec_adopt_authenticated_with_launch_v1
+}
 use std.fs_driver.mount_table.{MountTable}
 use os.kernel.loader.executable_authority_registry.{ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1}
 use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerV1}
 use os.kernel.scheduler.scheduler_types.{Scheduler}
 use os.kernel.scheduler.process_execution_observation.{
-    SchedulerExecutionEvidenceTokenV1, scheduler_execution_take_reaped_token_v1,
+    SchedulerExecutionEvidenceTokenV1, SchedulerExecutionDeliveryStatusV2,
+    scheduler_execution_compare_and_deliver_reaped_v2,
+    scheduler_execution_discard_terminal_v2,
     scheduler_execution_evidence_consume_once_v1
 }
 use std.fs_driver.bytes_util.{text_to_bytes_pure}
 use os.kernel.arch.riscv64.process_stdout_capture.{Rv64ProcessStdoutResult, rv64_process_stdout_begin, rv64_process_stdout_finish}
 use os.kernel.types.task_types.{TaskId}
-use os.kernel.scheduler.scheduler.{wait_collect_result_error, wait_collect_result_status}
+use os.kernel.scheduler.scheduler.{
+    wait_collect_result_error, wait_collect_result_pid, wait_collect_result_status
+}
+use os.kernel.types.capability_types.{CapabilitySet}
 
 extern fn serial_println(msg: text)
 
 pub struct Rv64AuthenticatedExecutionResultV1:
     exit_code: i64
     evidence: SchedulerExecutionEvidenceTokenV1?
+    scheduler: Scheduler
 
 pub fn riscv64_fs_exec_spawn_authenticated_capture_v1(
     scheduler: Scheduler,
@@ -40,7 +48,8 @@ pub fn riscv64_fs_exec_spawn_authenticated_capture_v1(
         scheduler, table, authorities, token, consumer, entry_point, caller, path, recipe)
     if prepared.pid <= 0:
         return Rv64AuthenticatedExecutionResultV1(
-            exit_code: rv64_process_stdout_finish(prepared.pid).exit_code, evidence: nil)
+            exit_code: rv64_process_stdout_finish(prepared.pid).exit_code,
+            evidence: nil, scheduler: prepared.scheduler)
     serial_println("RV64_AUTH_EXEC_ADOPTION status=authorized")
     val child = TaskId(id: prepared.pid.to_u64())
     val exit_code = dispatch_fs_exec_user_handoff(Architecture.Riscv64, child.id, prepared.scheduler)
@@ -49,15 +58,61 @@ pub fn riscv64_fs_exec_spawn_authenticated_capture_v1(
     val collected = owner.wait_for_collect(TaskId(id: 0), child, false)
     val captured = rv64_process_stdout_finish(exit_code)
     if wait_collect_result_error(collected) != 0 or
+       wait_collect_result_pid(collected) != child.id or
        wait_collect_result_status(collected) != exit_code.to_i32():
-        return Rv64AuthenticatedExecutionResultV1(exit_code: -10, evidence: nil)
+        return Rv64AuthenticatedExecutionResultV1(
+            exit_code: -10, evidence: nil, scheduler: owner)
     serial_println("RV64_AUTH_EXEC_EXIT code={captured.exit_code}")
     val evidence = scheduler_execution_take_reaped_token_v1(child.id)
     if evidence.?:
         serial_println("RV64_AUTH_EXEC_REAP count=1 token=issued")
     Rv64AuthenticatedExecutionResultV1(
         exit_code: captured.exit_code,
-        evidence: evidence)
+        evidence: evidence, scheduler: owner)
+
+pub(package) fn riscv64_fs_exec_spawn_authenticated_capture_with_launch_v1(
+    scheduler: Scheduler,
+    mut table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64,
+    caller: i64,
+    caller_caps: CapabilitySet,
+    path: text,
+    argv: [text],
+    envp: [text],
+    recipe: i64
+) -> Rv64AuthenticatedExecutionResultV1:
+    """Adopt the exact RV64 image and capture its one-shot reap evidence."""
+    rv64_process_stdout_begin()
+    val prepared = fs_exec_adopt_authenticated_with_launch_v1(
+        scheduler, table, authorities, token, consumer, entry_point, caller,
+        caller_caps, path, argv, envp, recipe)
+    if prepared.pid <= 0:
+        return Rv64AuthenticatedExecutionResultV1(
+            exit_code: rv64_process_stdout_finish(prepared.pid).exit_code,
+            evidence: nil, scheduler: prepared.scheduler)
+    val child = TaskId(id: prepared.pid.to_u64())
+    val exit_code = dispatch_fs_exec_user_handoff(
+        Architecture.Riscv64, child.id, prepared.scheduler)
+    var owner = prepared.scheduler
+    owner.exit_task_by_id(child, exit_code.to_i32())
+    val collected = owner.wait_for_collect(TaskId(id: 0u64), child, false)
+    val captured = rv64_process_stdout_finish(exit_code)
+    if (wait_collect_result_error(collected) != 0 or
+        wait_collect_result_pid(collected) != child.id or
+        wait_collect_result_status(collected) != exit_code.to_i32()):
+        return Rv64AuthenticatedExecutionResultV1(
+            exit_code: -10, evidence: nil, scheduler: owner)
+    val delivered = scheduler_execution_compare_and_deliver_reaped_v2(
+        child.id, path, argv)
+    if delivered.status != SchedulerExecutionDeliveryStatusV2.Delivered:
+        _ = scheduler_execution_discard_terminal_v2(child.id)
+        return Rv64AuthenticatedExecutionResultV1(
+            exit_code: -10, evidence: nil, scheduler: owner)
+    Rv64AuthenticatedExecutionResultV1(
+        exit_code: captured.exit_code, evidence: delivered.token, scheduler: owner)
 
 pub fn riscv64_authenticated_execution_acceptance_fixture_v1(
     scheduler: Scheduler, table: MountTable,
@@ -109,7 +164,8 @@ pub fn riscv64_fs_exec_spawn_capture(path: text, argv: [text], envp: [text]) -> 
     var scheduler = prepared.scheduler
     scheduler.exit_task_by_id(child, exit_code as i32)
     val collected = scheduler.wait_for_collect(TaskId(id: 0), child, false)
-    if wait_collect_result_error(collected) != 0:
+    if wait_collect_result_error(collected) != 0 or
+       wait_collect_result_pid(collected) != child.id:
         return rv64_process_stdout_finish(-10)
     if wait_collect_result_status(collected) != exit_code as i32:
         return rv64_process_stdout_finish(-10)

@@ -1,6 +1,30 @@
 # Ed25519 Scalar Muladd Specification
 
-> Tests covering Ed25519 scalar muladd.
+> <details>
+
+<!-- sdn-diagram:id=ed25519_scalar_muladd_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=ed25519_scalar_muladd_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+ed25519_scalar_muladd_spec -> std
+ed25519_scalar_muladd_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=ed25519_scalar_muladd_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,23 +41,13 @@
 
 #### reduces the RV64 diagnostic challenge hash modulo L
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- reduces the RV64 diagnostic challenge hash modulo L
-   - Expected: sc_reduce(challenge_hash) equals `expected_k`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("reduces the RV64 diagnostic challenge hash modulo L")
 val challenge_hash: [u8] = [
     0x6d, 0x8f, 0xc3, 0x78, 0xa6, 0xa7, 0x85, 0xa0,
     0x94, 0xae, 0x9f, 0xca, 0xf4, 0x43, 0xc4, 0x0f,
@@ -57,19 +71,13 @@ expect(sc_reduce(challenge_hash)).to_equal(expected_k)
 
 #### reduces the RV64 diagnostic nonce hash modulo L
 
-- reduces the RV64 diagnostic nonce hash modulo L
-   - Expected: sc_reduce(nonce_hash) equals `expected_r`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("reduces the RV64 diagnostic nonce hash modulo L")
 val nonce_hash: [u8] = [
     0xa5, 0x9d, 0x49, 0xbd, 0xbf, 0xc1, 0x21, 0xfd,
     0xdd, 0x5d, 0x5b, 0xe2, 0xe3, 0x6d, 0xc3, 0x82,
@@ -93,19 +101,13 @@ expect(sc_reduce(nonce_hash)).to_equal(expected_r)
 
 #### matches the direct Ed25519 reference S scalar for an RV64 diagnostic exchange hash
 
-- matches the direct Ed25519 reference S scalar for an RV64 diagnostic exchange hash
-   - Expected: sc_muladd(k, a, r) equals `expected_s`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("matches the direct Ed25519 reference S scalar for an RV64 diagnostic exchange hash")
 val k: [u8] = [
     0xba, 0x9f, 0xe9, 0x8d, 0xc7, 0x3d, 0xe6, 0x0e,
     0xd8, 0xc2, 0x4d, 0xc4, 0x59, 0xde, 0x2a, 0x08,
@@ -137,19 +139,13 @@ expect(sc_muladd(k, a, r)).to_equal(expected_s)
 
 #### matches the direct Ed25519 reference S scalar for a second RV64 diagnostic exchange hash
 
-- matches the direct Ed25519 reference S scalar for a second RV64 diagnostic exchange hash
-   - Expected: sc_muladd(k, a, r) equals `expected_s`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("matches the direct Ed25519 reference S scalar for a second RV64 diagnostic exchange hash")
 val k: [u8] = [
     0x7b, 0x05, 0xd9, 0xcf, 0x9c, 0x8d, 0x88, 0xea,
     0xcb, 0xf0, 0xa5, 0x7b, 0xa5, 0xab, 0x85, 0x7b,
@@ -186,12 +182,12 @@ expect(sc_muladd(k, a, r)).to_equal(expected_s)
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/crypto/ed25519_scalar_muladd_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Ed25519 scalar muladd.
+Tests covering:
 - Ed25519 scalar muladd
 
 ## Scenario Summary
@@ -206,51 +202,3 @@ Tests covering Ed25519 scalar muladd.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `7ae2c3e15c348b4fa3ac9b23be53dcce7ad3950bd769f56d3d1277744802487b`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `7ae2c3e15c348b4fa3ac9b23be53dcce7ad3950bd769f56d3d1277744802487b`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `7ae2c3e15c348b4fa3ac9b23be53dcce7ad3950bd769f56d3d1277744802487b`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/os/crypto/ed25519_scalar_muladd_spec.spl
-mirror: doc/06_spec/01_unit/os/crypto/ed25519_scalar_muladd_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/os/crypto/ed25519_scalar_muladd_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/crypto/ed25519_scalar_muladd_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/os/crypto/ed25519_scalar_muladd_spec.spl:12:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reduces the RV64 diagnostic challenge hash modulo L' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/os/crypto/ed25519_scalar_muladd_spec.spl:33:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reduces the RV64 diagnostic nonce hash modulo L' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/os/crypto/ed25519_scalar_muladd_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches the direct Ed25519 reference S scalar for an RV64 diagnostic exchange hash' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

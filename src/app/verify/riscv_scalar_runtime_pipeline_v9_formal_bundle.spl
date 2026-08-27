@@ -1,0 +1,79 @@
+# Generate the sealed V9 RVFI formal evidence inputs consumed by the external
+# SymbiYosys runner.  This app never claims a proof result itself.
+
+use std.cli.cli_util.{get_cli_args}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.backend.backend.riscv_scalar_runtime_pipeline_v9_rvfi_formal.{RiscvScalarRuntimePipelineV9RvfiFormalArtifactsV1, generate_riscv_scalar_runtime_pipeline_v9_rvfi_formal_artifacts}
+
+pub fn riscv_v9_formal_bundle_name_is_safe(name: text) -> bool:
+    if name == "": return false
+    var index = 0
+    while index < name.len():
+        val code = name.char_code_at(index)
+        val ascii_letter = (code >= 97 and code <= 122) or (code >= 65 and code <= 90)
+        val ascii_digit = code >= 48 and code <= 57
+        if not (ascii_letter or ascii_digit or code == 95): return false
+        index = index + 1
+    true
+
+pub fn riscv_v9_formal_bundle_profile_is_exact(profile: text) -> bool:
+    profile == "rv32im_zicsr_zifencei" or profile == "rv64im_zicsr_zifencei"
+
+fn riscv_v9_formal_config(profile: text) -> CoreConfig:
+    if profile == "rv32im_zicsr_zifencei":
+        CoreConfig.rv32im_zicsr_zifencei()
+    else:
+        CoreConfig.rv64im_zicsr_zifencei()
+
+fn riscv_v9_formal_lsu_config(profile: text) -> LsuConfig:
+    if profile == "rv32im_zicsr_zifencei":
+        LsuConfig.rv32_product_default()
+    else:
+        LsuConfig.rv64_product_default()
+
+fn write_riscv_v9_formal_bundle_file(dir: text, name: text, content: text) -> bool:
+    content != "" and file_write(dir + "/" + name, content)
+
+pub fn write_riscv_v9_formal_bundle_v1(
+    dir: text,
+    artifacts: RiscvScalarRuntimePipelineV9RvfiFormalArtifactsV1
+) -> bool:
+    if dir == "" or artifacts.diagnostic() != "": return false
+    if not dir_create_all(dir): return false
+    write_riscv_v9_formal_bundle_file(dir, artifacts.core_file, artifacts.core_vhdl) and
+        write_riscv_v9_formal_bundle_file(dir, artifacts.harness_file, artifacts.harness_vhdl) and
+        write_riscv_v9_formal_bundle_file(dir, artifacts.mutant_harness_file,
+            artifacts.mutant_harness_vhdl) and
+        write_riscv_v9_formal_bundle_file(dir, artifacts.prove_file, artifacts.prove_sby) and
+        write_riscv_v9_formal_bundle_file(dir, artifacts.cover_file, artifacts.cover_sby) and
+        write_riscv_v9_formal_bundle_file(dir, artifacts.mutant_file, artifacts.mutant_sby) and
+        write_riscv_v9_formal_bundle_file(dir,
+            artifacts.module_name + "_formal_manifest.sdn", artifacts.manifest)
+
+fn main() -> i64:
+    val args = get_cli_args()
+    if args.len() != 3:
+        eprint "Usage: riscv_scalar_runtime_pipeline_v9_formal_bundle OUTPUT_DIR MODULE_NAME PRODUCT_PROFILE"
+        return 2
+    val output_dir = args[0]
+    val module_name = args[1]
+    val profile = args[2]
+    if output_dir == "" or not riscv_v9_formal_bundle_name_is_safe(module_name) or not riscv_v9_formal_bundle_profile_is_exact(profile):
+        eprint "FV2-E-RISCV-V9-FORMAL-BUNDLE-IDENTITY: output/module/profile must be exact"
+        return 2
+    match generate_riscv_scalar_runtime_pipeline_v9_rvfi_formal_artifacts(
+        module_name, riscv_v9_formal_config(profile), riscv_v9_formal_lsu_config(profile)):
+        case Err(message):
+            eprint message
+            3
+        case Ok(artifacts):
+            if not write_riscv_v9_formal_bundle_v1(output_dir, artifacts):
+                eprint "FV2-E-RISCV-V9-FORMAL-BUNDLE-WRITE: generated bundle could not be retained"
+                4
+            else:
+                print "FV2-RISCV-V9-FORMAL-BUNDLE-WRITTEN module=" + module_name +
+                    " product_profile=" + profile + " rtl=" + artifacts.rtl_hash
+                0

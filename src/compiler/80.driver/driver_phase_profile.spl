@@ -1,0 +1,150 @@
+# Durable compiler phase-evidence owner.
+#
+# The phase profile is a separate append-only stream from HIR memory snapshots.
+# This module alone owns its descriptor, sequence, and terminal state. Callers
+# pass only scalar identity/outcome fields; bytewise token encoding, clock/PID,
+# bounded formatting, writes, and fsync are runtime-owned.
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_mem_snapshot_open(path: text) -> i64
+extern fn rt_phase_profile_record_v2(
+    fd: i64,
+    run_id: text,
+    mode: text,
+    seq: i64,
+    event: text,
+    physical_index: i64,
+    source_path: text,
+    module_name: text,
+    outcome: text,
+    detail: text
+) -> bool
+extern fn rt_mem_snapshot_close(fd: i64) -> bool
+use compiler.driver.driver_evidence_identity.{
+    driver_evidence_run_id,
+    driver_evidence_mode
+}
+
+var _phase_profile_fd: i64 = -1
+var _phase_profile_seq: i64 = 0
+var _phase_profile_enabled: bool = false
+var _phase_profile_failed: bool = false
+var _phase_profile_finished: bool = false
+val _PHASE_PROFILE_MAX_SEQ: i64 = 9223372036854775807
+
+fn _phase_profile_append(
+    event: text,
+    physical_index: i64,
+    source_path: text,
+    module_name: text,
+    outcome: text,
+    detail: text
+) -> bool:
+    if not _phase_profile_enabled or _phase_profile_finished:
+        return true
+    if _phase_profile_failed or _phase_profile_fd < 0:
+        return false
+    if _phase_profile_seq == _PHASE_PROFILE_MAX_SEQ:
+        _phase_profile_failed = true
+        return false
+    if not rt_phase_profile_record_v2(
+        _phase_profile_fd, driver_evidence_run_id(), driver_evidence_mode(),
+        _phase_profile_seq, event, physical_index,
+        source_path, module_name, outcome, detail):
+        _phase_profile_failed = true
+        return false
+    _phase_profile_seq = _phase_profile_seq + 1
+    true
+
+# Returns 0 when disabled, 1 after a durable open record, and -1 on any
+# fail-closed setup/schema/write failure.
+pub fn phase_profile_begin() -> i64:
+    if _phase_profile_enabled or _phase_profile_fd >= 0:
+        return -1
+    val path = rt_env_get("SIMPLE_COMPILER_PHASE_PROFILE_FILE") ?? ""
+    if path == "":
+        _phase_profile_enabled = false
+        return 0
+    _phase_profile_enabled = true
+    _phase_profile_failed = false
+    _phase_profile_finished = false
+    _phase_profile_seq = 0
+    _phase_profile_fd = rt_mem_snapshot_open(path)
+    if _phase_profile_fd < 0:
+        _phase_profile_failed = true
+        return -1
+    if not _phase_profile_append(
+        "open", -1, "", "", "running", ""):
+        val _ = rt_mem_snapshot_close(_phase_profile_fd)
+        _phase_profile_fd = -1
+        return -1
+    1
+
+pub fn phase_profile_note(message: text) -> bool:
+    _phase_profile_append("phase", -1, "", "", "observed", message)
+
+pub fn phase_profile_physical(
+    event: text,
+    physical_index: i64,
+    source_path: text,
+    module_name: text,
+    outcome: text,
+    detail: text
+) -> bool:
+    if not _phase_profile_enabled:
+        return true
+    if _phase_profile_finished:
+        _phase_profile_failed = true
+        return false
+    if physical_index < 0 or source_path == "" or module_name == "":
+        _phase_profile_failed = true
+        return false
+    _phase_profile_append(
+        event, physical_index, source_path, module_name, outcome, detail)
+
+pub fn phase_profile_physical_descriptor(
+    physical_index: i64,
+    source_path: text,
+    module_name: text
+) -> bool:
+    phase_profile_physical(
+        "physical-descriptor", physical_index, source_path, module_name,
+        "bound", "")
+
+pub fn phase_profile_failed() -> bool:
+    _phase_profile_failed
+
+pub fn phase_profile_finish_with_outcome(outcome: text) -> bool:
+    if not _phase_profile_enabled:
+        return true
+    if _phase_profile_failed or _phase_profile_finished:
+        return false
+    val appended = _phase_profile_append(
+        "terminal", -1, "", "", outcome, "")
+    val closed = if _phase_profile_fd >= 0:
+        rt_mem_snapshot_close(_phase_profile_fd)
+    else:
+        false
+    _phase_profile_fd = -1
+    _phase_profile_finished = true
+    if not appended or not closed:
+        _phase_profile_failed = true
+        return false
+    true
+
+pub fn phase_profile_abort():
+    if _phase_profile_fd >= 0:
+        # A schema/cap rejection leaves the reserved terminal budget intact.
+        # Attempt one explicit failure closure; a hard write/fsync fault still
+        # rejects it and the checked close leaves an incomplete stream.
+        if not _phase_profile_finished:
+            val failure_recorded = rt_phase_profile_record_v2(
+                _phase_profile_fd, driver_evidence_run_id(),
+                driver_evidence_mode(), _phase_profile_seq,
+                "terminal", -1, "", "", "evidence-failed", "")
+            if failure_recorded:
+                _phase_profile_seq = _phase_profile_seq + 1
+        val _closed = rt_mem_snapshot_close(_phase_profile_fd)
+    _phase_profile_fd = -1
+    _phase_profile_failed = true
+    _phase_profile_finished = true

@@ -1,6 +1,6 @@
 # Native AOT: cross-module generic `Result<[u8], E>` payload type erasure
 
-**Status:** IMPLEMENTED 2026-07-15 — strict LLVM/Cranelift execution pending a fresh pure-Simple compiler.
+**Status:** OPEN — blocked on a large prerequisite (not a contained fix).
 **Date:** 2026-06-22 (supersedes the 2026-06-21 doc dropped by parallel churn).
 **Mode:** native AOT only (`bin/simple <file> --compile` / `native-build`). Interpreter and `check` are unaffected.
 
@@ -32,20 +32,20 @@ The real chain:
    payload sub-patterns with no type — the variant's payload type is never
    extracted from the instantiated `Result<[u8], E>`.
 3. **MIR index lowering defaults to dynamic.**
-   `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:225` reads `expr.type_`,
+   `src/compiler/50.mir/mir_lowering_expr_part1.spl:225` reads `expr.type_`,
    finds nil, defaults the element type → `local_is_array` is false
    (`60.mir_opt/mir_opt/collection_opt_core.spl:368`) → dynamic `rt_index_get`
    path → unlinked convert → fault.
 
-## 2026-06-22 assessment (superseded)
+## Why this is NOT a contained fix
 Recovering `[u8]` at HIR-lowering time needs the match subject's *instantiated*
 generic type (`Result<[u8], E>`). With the no-op checker, that type exists
 nowhere by HIR time. A real fix requires either (a) real generic type
 propagation through the native pipeline, or (b) switching native `--compile` to
 a real type checker **and** fixing variant-payload extraction there
-(`30.types/type_system/_StmtCheck/bindings_check.spl:365` `EnumPattern` also assigns the
+(`30.types/type_system/stmt_check_part1.spl:365` `EnumPattern` also assigns the
 whole subject type, not the payload). Both are major compiler subsystems —
-disproportionate to the payoff (un-gating two slang byte tests).
+disproportionate to the payoff (un-gating two svllm byte tests).
 
 ## 2026-07-15 resolution
 
@@ -65,7 +65,7 @@ explicitly out of scope.
 
 ## Historical mitigation
 
-Production slang previously avoided the erased leaf with typed `[[u8]]`
+Production svllm previously avoided the erased leaf with typed `[[u8]]`
 containers and gated byte-value tests behind `native_u8_fixed`. Those named
 gates are no longer present in the current tree; the focused dual-backend
 checker above is their replacement regression.

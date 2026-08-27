@@ -1,0 +1,73 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-011 REQ-013 REQ-014
+
+use std.spec.*
+use app.hal_provider.sealed_session.*
+use std.common.structural.hal_provider.*
+
+fn sealed_capacity() -> HalCapacityV1:
+    hal_capacity_v1(128, 64, 8, 512, 4, 512, 512, 2000)
+
+fn sealed_operation(assurance: HalAssurance,
+                    providers: i64 = 7) -> HalOperationV1:
+    hal_operation_v1(
+        101, assurance, providers, 0, 11, 12,
+        HalSideEffectPolicy.PlanThenCommit, sealed_capacity(), 13, 14,
+        HalProviderKind.PureSimple,
+        if hal_assurance_to_i64(assurance) < HAL_ASSURANCE_CRITICAL:
+            99
+        else:
+            0)
+
+fn sealed_request() -> HalProviderRequestV1:
+    hal_provider_request_v1(101, 7, 9, 0, 32, 64, 8)
+
+fn persistent_lane(provider: HalProviderKind) -> HalProviderLaneV1:
+    val ordinal = hal_provider_kind_to_i64(provider)
+    hal_provider_lane_v1(
+        provider, true, true, false, true,
+        hal_isolation_receipt_v1(
+            provider, 7, 100 + ordinal, 100 + ordinal,
+            0, 0, 0, true, true),
+        hal_provider_result_v1(
+            provider, 7, HalStatusV1.Ok, 0, 10, 20, 30, 40,
+            32, 64, 8, 8, HalOverflowKindV1.None, -1, 0, 5))
+
+describe "sealed rt(hal) Simple facade contracts":
+    it "admits only all-provider compare operations at critical or verified assurance":
+        expect(hal_sealed_operation_admitted_v1(
+            sealed_operation(HalAssurance.Critical),
+            HalRunMode.AlphaCompare)).to_be(true)
+        expect(hal_sealed_operation_admitted_v1(
+            sealed_operation(HalAssurance.Verified),
+            HalRunMode.BetaCompare)).to_be(true)
+        expect(hal_sealed_operation_admitted_v1(
+            sealed_operation(HalAssurance.Robust),
+            HalRunMode.AlphaCompare)).to_be(false)
+        expect(hal_sealed_operation_admitted_v1(
+            sealed_operation(HalAssurance.Critical, 1),
+            HalRunMode.AlphaCompare)).to_be(false)
+        expect(hal_sealed_operation_admitted_v1(
+            sealed_operation(HalAssurance.Critical),
+            HalRunMode.NormalPreferred)).to_be(false)
+
+    it "admits complete persistent results without pretending workers were reaped":
+        val operation = sealed_operation(HalAssurance.Critical)
+        val receipt = hal_orchestrate_sealed_provider_receipts_v1(
+            operation, sealed_request(), HalRunMode.AlphaCompare,
+            persistent_lane(HalProviderKind.PureSimple),
+            persistent_lane(HalProviderKind.C),
+            persistent_lane(HalProviderKind.Rust))
+        expect(receipt.admitted_mask).to_equal(7)
+        expect(receipt.status).to_equal(HalOrchestrationStatusV1.CommitReady)
+        expect(receipt.commit_allowed).to_be(true)
+
+    it "keeps the per-invocation coordinator reaping requirement unchanged":
+        val operation = sealed_operation(HalAssurance.Critical)
+        val receipt = hal_orchestrate_provider_receipts_v1(
+            operation, sealed_request(), HalRunMode.AlphaCompare,
+            persistent_lane(HalProviderKind.PureSimple),
+            persistent_lane(HalProviderKind.C),
+            persistent_lane(HalProviderKind.Rust))
+        expect(receipt.admitted_mask).to_equal(0)
+        expect(receipt.commit_allowed).to_be(false)

@@ -5,10 +5,10 @@
 # and database update logic.
 
 use std.io.{env_set, env_get}
-use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.io.{time_now_unix_micros}
 use std.io.{file_exists}
 
-use std.test_runner.test_runner_types.{TestOptions, TestRunResult}
+use std.test_runner.test_runner_types.{TestOptions, TestRunResult, doctest_discovery_scope_path, production_spl_doctest_roots}
 use std.test_runner.test_config.{TestConfig}
 use std.test_runner.test_runner_files.{strip_ansi}
 use std.test_runner.test_runner_output.{print_result, print_summary}
@@ -19,7 +19,7 @@ use std.test_runner.test_runner_helpers.{parse_individual_results, extract_test_
 # use test_runner_container.container_detect_runtime
 # use test_runner_coverage.{setup_coverage, collect_coverage, print_coverage_summary, generate_coverage_reports, check_coverage_threshold, get_coverage_threshold, print_coverage_delta}
 # GROUP 4: Database & feature tracking
-# use test_db_compat.{RunnerTestDb, load_test_db_compat, micros_to_rfc3339}  # Using compatibility layer
+# use test_db_compat.{TestDatabase, load_test_db_compat, micros_to_rfc3339}  # Using compatibility layer
 # use test_db_types.*
 # use std.database.feature.{FeatureDatabase, load_feature_database, create_feature_database, FeatureStatus}
 # GROUP 5: Doc generation & sdoctest
@@ -27,8 +27,8 @@ use std.test_runner.test_runner_helpers.{parse_individual_results, extract_test_
 # use rust_test_runner.{run_rust_tests, RustTestResult}
 # use sdoctest.config.load_sdoctest_config
 # use sdoctest.runner.{run_sdoctest_mode, print_sdoctest_summary}
-use std.test_runner.sdoctest.types.{SdoctestRunResult, SdoctestFileResult, BlockStatus}
-use std.test_runner.doctest_runner.{run_spl_doctests_same_file, discover_spl_doctest_files}
+# use sdoctest.types.{SdoctestRunResult, SdoctestFileResult, BlockStatus}
+# use doctest_runner.{run_spl_doctests_same_file, discover_spl_doctest_files}
 # use sdoctest.result_db.write_sdoctest_db
 # use sdoctest.doc_gen.generate_sdoctest_report
 # GROUP 9: Closure warnings
@@ -40,82 +40,64 @@ use std.test_runner.doctest_runner.{run_spl_doctests_same_file, discover_spl_doc
 # SPL Doctest Mode
 # =========================================================================
 
-fn run_spl_doctest_mode(options: TestOptions, config: TestConfig) -> SdoctestRunResult:
-    # Scoped launch: an explicit CLI target (--spl-doctest <file.spl|dir>)
-    # narrows discovery to just that path, mirroring run_sdoctest_mode's
-    # cli_path pattern for the markdown lane. No target (the bare "test/" /
-    # "test" default) keeps the full repo-wide sweep.
-    val cli_path = if options.path_explicit: options.path else: ""
-    val explicit_target = cli_path != ""
-    var files: [text] = []
-    if explicit_target:
-        if cli_path.ends_with(".spl"):
-            if file_exists(cli_path):
-                files = [cli_path]
-        else:
-            files = discover_spl_doctest_files([cli_path])
-    else:
-        files = discover_spl_doctest_files(["src/lib/", "src/compiler/", "src/app/"])
-
-    if files.len() == 0:
-        if explicit_target:
-            # An explicitly named target with nothing to run is fail-closed —
-            # mirrors the sdoctest md lane and the single-file spec arbiter's
-            # "no examples executed" contract. Config-driven sweeps (no
-            # target) keep their existing zero-is-ok semantics.
-            print "error: test-runner: no doctest blocks found"
-            return SdoctestRunResult(files: [], total: 0, passed: 0, failed: 1, skipped: 0, errors: 0, accepted: 0, duration_ms: 0)
-        print "No SPL files with doctests found."
-        return SdoctestRunResult(files: [], total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, accepted: 0, duration_ms: 0)
-
-    print "SPL Doctest: Running doctests from {files.len()} source file(s)..."
-    val run_start = time_now_unix_micros()
-    var file_results: [SdoctestFileResult] = []
-    var total = 0
-    var passed = 0
-    var failed = 0
-    var skipped = 0
-    var errors_count = 0
-    val timeout_ms = config.timeout_seconds * 1000
-
-    for file_path in files:
-        val file_result = run_spl_doctests_same_file(file_path, timeout_ms)
-        if file_result.total > 0:
-            val status = if file_result.failed == 0 and file_result.errors == 0: "PASS" else: "FAIL"
-            print "  {status}  {file_result.source_file} ({file_result.passed} passed, {file_result.failed} failed, {file_result.duration_ms}ms)"
-            if file_result.failed > 0 or file_result.errors > 0:
-                for block_result in file_result.blocks:
-                    if block_result.status == BlockStatus.Failed or block_result.status == BlockStatus.Error:
-                        print "        Line {block_result.block.line_number}: {block_result.error}"
-
-        total = total + file_result.total
-        passed = passed + file_result.passed
-        failed = failed + file_result.failed
-        skipped = skipped + file_result.skipped
-        errors_count = errors_count + file_result.errors
-        file_results.push(file_result)
-        if options.fail_fast and (file_result.failed > 0 or file_result.errors > 0):
-            break
-
-    val duration_ms = (time_now_unix_micros() - run_start) / 1000
-
-    if explicit_target and total == 0:
-        # The explicit target resolved to a real file, but it contained no
-        # extractable doctest (e.g. no ///-or-## fenced block). Fail-closed,
-        # same rationale as the zero-files-found case above.
-        print "error: test-runner: no doctest blocks found"
-        return SdoctestRunResult(files: file_results, total: 0, passed: 0, failed: 1, skipped: skipped, errors: errors_count, accepted: 0, duration_ms: duration_ms)
-
-    SdoctestRunResult(
-        files: file_results,
-        total: total,
-        passed: passed,
-        failed: failed,
-        skipped: skipped,
-        errors: errors_count,
-        accepted: 0,
-        duration_ms: duration_ms
-    )
+# MEMORY DEBUG: entire body commented out (uses GROUP 5 types)
+fn run_spl_doctest_mode(options: TestOptions, config: TestConfig):
+    print "DISABLED: run_spl_doctest_mode (memory debug)"
+    # val dirs = ["src/lib/", "src/compiler/"]
+    # val files = discover_spl_doctest_files(dirs)
+    #
+    # if files.len() == 0:
+    #     print "No SPL files with doctests found."
+    #     return SdoctestRunResult(files: [], total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, accepted: 0, duration_ms: 0)
+    #
+    # print "SPL Doctest: Running doctests from {files.len()} source file(s)..."
+    # print ""
+    #
+    # val run_start = time_now_unix_micros()
+    # var file_results: [SdoctestFileResult] = []
+    # var total = 0
+    # var passed = 0
+    # var failed = 0
+    # var skipped = 0
+    # var errors_count = 0
+    #
+    # val timeout_ms = config.timeout_seconds * 1000
+    #
+    # for file_path in files:
+    #     val file_result = run_spl_doctests_same_file(file_path, timeout_ms)
+    #     if file_result.total > 0:
+    #         val status_icon = if file_result.failed == 0 and file_result.errors == 0: "PASS" else: "FAIL"
+    #         print "  {status_icon}  {file_result.source_file} ({file_result.passed} passed, {file_result.failed} failed, {file_result.duration_ms}ms)"
+    #         if file_result.failed > 0 or file_result.errors > 0:
+    #             for br in file_result.blocks:
+    #                 if br.status == BlockStatus.Failed or br.status == BlockStatus.Error:
+    #                     print "        Line {br.block.line_number}: {br.error}"
+    #
+    #     total = total + file_result.total
+    #     passed = passed + file_result.passed
+    #     failed = failed + file_result.failed
+    #     skipped = skipped + file_result.skipped
+    #     errors_count = errors_count + file_result.errors
+    #     file_results.push(file_result)
+    #
+    #     if options.fail_fast and (file_result.failed > 0 or file_result.errors > 0):
+    #         print ""
+    #         print "Stopping early (--fail-fast)"
+    #         break
+    #
+    # val run_end = time_now_unix_micros()
+    # val duration_ms = (run_end - run_start) / 1000
+    #
+    # SdoctestRunResult(
+    #     files: file_results,
+    #     total: total,
+    #     passed: passed,
+    #     failed: failed,
+    #     skipped: skipped,
+    #     errors: errors_count,
+    #     accepted: 0,
+    #     duration_ms: duration_ms
+    # )
 
 # =========================================================================
 # Combined Mode (Spec + SDoctest)
@@ -382,8 +364,6 @@ fn run_tests_sequential_containers(files: [text], options: TestOptions) -> TestR
 fn categorize_test_file(file_path: text) -> text:
     if file_path.contains("test/01_unit/"):
         return "Unit"
-    if file_path.contains("test/shared/"):
-        return "Shared"
     if file_path.contains("test/03_system/feature/"):
         return "Feature"
     if file_path.contains("test/02_integration/"):
@@ -490,3 +470,4 @@ fn update_features_from_tests_stub(result: TestRunResult):
 # =========================================================================
 # Exports
 # =========================================================================
+

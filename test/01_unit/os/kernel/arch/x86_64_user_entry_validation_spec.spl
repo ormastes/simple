@@ -1,3 +1,32 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-OS
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-OS
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/os/kernel/arch/x86_64_user_entry_validation_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Covers the behavior asserted here; platform-specific behavior is out of scope.
+"""
+
+# doc-path: doc/01_research/local/x86_64_user_entry_validation_spec.md
+# doc-path: doc/03_plan/sys_test/x86_64_user_entry_validation_spec.md
+# doc-path: doc/04_architecture/x86_64_user_entry_validation_spec.md
+# doc-path: doc/05_design/x86_64_user_entry_validation_spec_oracles.md
+# @manual: primary
+
 """
 # x86_64 User Entry Validation Specification
 
@@ -42,6 +71,8 @@ reserved for the opt-in live QEMU hardware/user gate.
 **Research:** doc/01_research/local/multicore_green.md
 """
 
+use std.spec.step
+
 use std.spec.{describe, it, expect, step}
 use os.kernel.arch.x86_64.user_entry_validation.{validate_enter_user_blocking_handoff}
 use os.kernel.scheduler.scheduler.{Scheduler, scheduler_user_context_for_arch, sched_exec_arch}
@@ -57,6 +88,7 @@ struct UserEntryValidationFixture:
     stack_top: u64
     initial_sp: u64
     cr3: u64
+    generation: u64
 
 fn make_x86_64_user_image() -> UserProcessImage:
     UserProcessImage(
@@ -85,30 +117,39 @@ fn build_spawn_fixture() -> UserEntryValidationFixture:
     var sched = Scheduler.new_with_cpu_count(2u32)
     val pid = sched.create_user_task_pid(image, TaskPriority.Normal, CapabilitySet.full())
     var cr3 = 0u64
+    var generation = 0u64
     val task = sched.get_task(TaskId(id: pid))
     if task != nil:
         cr3 = task.address_space
+        generation = task.isolation.address_space_id
     UserEntryValidationFixture(
         scheduler: sched,
         pid: pid,
         entry: image.entry,
         stack_top: image.stack_top,
         initial_sp: image.initial_sp & 0xFFFFFFFFFFFFFFF0,
-        cr3: cr3
+        cr3: cr3,
+        generation: generation
     )
 
 describe "x86_64 user entry validation":
+    # @manual scenario evidence
     it "rejects a missing user handoff task without entering ring-3":
+        # @req REQ-SSPEC-OS
+        step("rejects a missing user handoff task without entering ring-3")
         step("validate an empty scheduler")
         val validation = validate_enter_user_blocking_handoff(701u64, Scheduler.new_with_cpu_count(2u32))
         expect(validation.ok).to_be(false)
         expect(validation.error).to_equal("handoff task not found")
         expect(validation.pid).to_equal(701u64)
         expect(validation.cr3).to_equal(0u64)
+        expect(validation.generation).to_equal(0u64)
         val context_present = if validation.context == nil: 0 else: 1
         expect(context_present).to_equal(0)
 
     it "creates a real scheduler user task through the spawn path":
+        # @req REQ-SSPEC-OS
+        step("creates a real scheduler user task through the spawn path")
         step("build a real x86_64 user process image and create a scheduler user task")
         val fixture = build_spawn_fixture()
         expect(fixture.pid).to_be_greater_than(0)
@@ -123,6 +164,8 @@ describe "x86_64 user entry validation":
             expect(created.address_space).to_equal(fixture.cr3)
 
     it "accepts a real x86_64 user image handoff record without entering ring-3":
+        # @req REQ-SSPEC-OS
+        step("accepts a real x86_64 user image handoff record without entering ring-3")
         step("create a scheduler user task through the real spawn path")
         val fixture = build_spawn_fixture()
         expect(fixture.pid).to_be_greater_than(0)
@@ -135,6 +178,8 @@ describe "x86_64 user entry validation":
         expect(validation.pid).to_equal(fixture.pid)
         expect(validation.generation).to_be_greater_than(0u64)
         expect(validation.cr3).to_equal(fixture.cr3)
+        expect(validation.generation).to_equal(fixture.generation)
+        expect(validation.generation).to_be_greater_than(0)
         val context_present = if validation.context == nil: 0 else: 1
         expect(context_present).to_equal(1)
         if validation.context != nil:

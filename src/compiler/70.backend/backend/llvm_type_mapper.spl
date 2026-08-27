@@ -5,6 +5,8 @@
 
 use compiler.mir.mir_data.*
 use compiler.backend.common.type_mapper.*
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.mir.mir_types.{MirType}
 
 fn _llvm_left_brace() -> text:
     val ascii_table = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
@@ -89,12 +91,6 @@ class LlvmTypeMapper:
         else:
             LlvmTypeMapper.create_64bit()
 
-fn llvm_type_mapper_create_for_target(target: CodegenTarget) -> LlvmTypeMapper:
-    if target.is_32bit():
-        LlvmTypeMapper(target_bits: 32, ctx: LlvmContext.empty())
-    else:
-        LlvmTypeMapper(target_bits: 64, ctx: LlvmContext.empty())
-
 impl TypeMapper for LlvmTypeMapper:
     fn map_primitive(ty: PrimitiveType) -> text:
         """
@@ -111,10 +107,6 @@ impl TypeMapper for LlvmTypeMapper:
             case I32: "i32"
             case I16: "i16"
             case I8: "i8"
-            case U64: "i64"
-            case U32: "i32"
-            case U16: "i16"
-            case U8: "i8"
             case F64: "double"
             case F32: "float"
             case Bool: "i1"
@@ -143,33 +135,24 @@ impl LlvmTypeMapper:
         Overrides default to add generic checking.
         """
         match ty.kind:
-            case I64 | U64: "i64"
-            case I32 | U32: "i32"
-            case I16 | U16: "i16"
-            case I8 | U8: "i8"
-            case F64: "double"
-            case F32: "float"
-            case Bool: "i1"
-            case Unit: "void"
+            case I64 | I32 | I16 | I8 | F64 | F32 | Bool | Unit:
+                self.map_primitive(ty.kind)
 
-            case Ptr(t_inner, t_mutability):
-                val inner_ty = self.map_type(t_inner)
-                self.map_pointer(inner_ty, t_mutability)
+            case Ptr(inner, mutability):
+                val inner_ty = self.map_type(inner)
+                self.map_pointer(inner_ty, mutability)
 
-            case Struct(t_fields):
-                self.map_struct(t_fields)
+            case Struct(fields):
+                self.map_struct(fields)
 
-            case Array(t_element, t_size):
-                self.map_array(t_element, t_size)
+            case Array(element, size):
+                self.map_array(element, size)
 
-            case Tuple(t_elements):
-                self.map_tuple(t_elements)
+            case Tuple(elements):
+                self.map_tuple(elements)
 
-            # `Function` is not a MirTypeKind variant — it is `FuncPtr(sig)`.
-            # The old arm never matched, so function-pointer types fell through.
-            # See doc/08_tracking/bug/case_bare_ident_is_irrefutable_binding_2026-08-01.md
-            case FuncPtr(t_sig):
-                self.map_function(t_sig.params, t_sig.return_type)
+            case Function(params, ret):
+                self.map_function(params, ret)
 
             case Opaque(_):
                 "ptr"
@@ -259,10 +242,10 @@ impl LlvmTypeMapper:
         Uses target_bits to determine pointer size.
         """
         match ty.kind:
-            case I64 | U64 | F64: 8
-            case I32 | U32 | F32: 4
-            case I16 | U16: 2
-            case I8 | U8 | Bool: 1
+            case I64 | F64: 8
+            case I32 | F32: 4
+            case I16: 2
+            case I8 | Bool: 1
             case Unit: 0
             case Ptr(_, _):
                 self.target_bits / 8  # 4 bytes on 32-bit, 8 on 64-bit
@@ -296,10 +279,10 @@ impl LlvmTypeMapper:
         - Structs: max alignment of fields
         """
         match ty.kind:
-            case I64 | U64 | F64: 8
-            case I32 | U32 | F32: 4
-            case I16 | U16: 2
-            case I8 | U8 | Bool: 1
+            case I64 | F64: 8
+            case I32 | F32: 4
+            case I16: 2
+            case I8 | Bool: 1
             case Ptr(_, _):
                 self.target_bits / 8
             case Struct(_):
@@ -320,4 +303,3 @@ impl LlvmTypeMapper:
 # ============================================================================
 # Export
 # ============================================================================
-export LlvmContext, LlvmTypeMapper, llvm_type_mapper_create_for_target

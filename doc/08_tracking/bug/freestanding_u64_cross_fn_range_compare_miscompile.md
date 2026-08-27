@@ -1,7 +1,6 @@
 # BUG: freestanding native-build miscompiles a u64 range comparison across a function boundary
 
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+**Status:** open
 **Severity:** high (silently wrong arithmetic in freestanding/baremetal code)
 **Component:** compiler / freestanding native-build (`clang --target=x86_64-unknown-elf` path)
 **Found:** 2026-07-08, SimpleOS x86_64 ring-3 FS-exec loader (M2 argv-frame work)

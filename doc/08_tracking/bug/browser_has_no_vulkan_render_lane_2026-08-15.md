@@ -1,23 +1,10 @@
 # Browser has no Vulkan render lane; deployed seed lacks the vulkan feature
 
 **Date:** 2026-08-15
-**Status:** PARTIAL (2026-08-15 post-push audit: the earlier Docker/Vulkan
-result used a Rust runtime-vulkan seed and is diagnostic only, not admissible
-production evidence. The gate now rejects seeds and remains unverified until a
-Vulkan-capable pure-Simple self-hosted CLI passes it. The compiler `vulkan`
-feature vendoring blocker is fixed — see "Vendored rspirv repaired" below.)
+**Status:** PARTIAL (2026-08-15: docker/Vulkan system lane GREEN with a
+runtime-vulkan seed at `build/browser-vulkan/simple`; compiler `vulkan`
+feature still blocked by incomplete vendored rspirv — see bottom)
 **Area:** src/app/browser, src/compiler_rust (seed features)
-
-## Post-push verification correction
-
-The original lane silently returned from its SSpec when Docker or the
-Vulkan-featured seed was absent, and its shell driver explicitly executed that
-seed. Both behaviors violated the repository's fail-closed, pure-Simple
-verification policy. The SSpec now treats every unavailable/error result as a
-failure, while the driver defaults to `bin/simple` and uses
-`scripts/check/lib/require-self-hosted.shs` to reject Rust bootstrap seeds.
-Historical seed results below remain useful diagnostics, but do not establish
-a green system-test verdict.
 
 ## Gap 1 — no browser-level Vulkan render lane
 
@@ -134,33 +121,6 @@ it and reads it back pixel-perfect on lavapipe (`readback_source=device_readback
   not provide — browser_render_lane_spec results also fluctuated (10/11 →
   3/11) under concurrent-session tree churn.
 
-## Vendored rspirv repaired (2026-08-15)
-
-The `simple-compiler/vulkan` blocker (`E0583: file not found for module
-'build'` in `vendor/rspirv/dr/mod.rs:28`) is fixed:
-
-- Fetched pristine `rspirv v0.12.0+sdk-1.3.268.0` from crates.io via
-  `cargo fetch` (scratch `CARGO_HOME`, minimal manifest depending on
-  `rspirv = "=0.12.0"`). `diff -rq` against the vendored copy showed exactly
-  one delta: the whole `dr/build/` directory was missing (7 files:
-  `mod.rs`, `autogen_{annotation,constant,debug,norm_insts,terminator,type}.rs`).
-- Copied `dr/build/` into `src/compiler_rust/vendor/rspirv/dr/build/` and
-  added the 7 sha256 entries to `vendor/rspirv/.cargo-checksum.json`
-  (package checksum unchanged — files match the registry crate exactly).
-- Also fixed two unrelated blockers hit on the way: refreshed the
-  `vendor/zerocopy/.cargo-checksum.json` entry for `win-cargo.bat` (the
-  COMMITTED file's sha256 disagrees with the committed checksum — CRLF
-  normalization at vendoring time), and re-exported
-  `compile_stack_bytes_from_mib` from `compiler/src/pipeline/mod.rs`
-  (defined in `pipeline/native_project`, used by `driver/src/cli/native_build.rs`,
-  never re-exported — this also un-breaks the "committed HEAD seed
-  unbuildable" E0432 item above).
-- Verified: `cargo check --release --bin simple --features
-  "simple-compiler/vulkan"` → `Finished 'release' profile` (exit 0), and
-  `cargo build --release --bin simple --features
-  "simple-runtime/vulkan,simple-compiler/vulkan"` → `Finished 'release'
-  profile [optimized] target(s) in 4m 38s`, exit 0.
-
 ## Fix direction
 
 - Add a `vulkan` feature to the driver crate forwarding to
@@ -168,29 +128,3 @@ The `simple-compiler/vulkan` blocker (`E0583: file not found for module
   a vulkan-featured seed.
 - Longer term: a real browser `vulkan` render lane routing draw IR through
   engine2d GPU primitives.
-
-## 2026-08-16 update — browser ENGINE vulkan routing verified (minimal wiring already existed)
-
-Assessment of `src/lib/gc_async_mut/gpu/browser_engine/**`: the minimal wiring
-is already present — no glue needed. `SimpleWebRenderer.create_with_backend`
-/ `simple_web_render_html_to_readback_with_engine2d_backend(html,w,h,"vulkan")`
-route through `simple_web_engine2d_resolved_backend_name` (probe-gated:
-resolves "vulkan" only when `Engine2D.probe_backend` initializes, else
-"software"), and non-CPU resolutions present through
-`present_layout_pixels_with_engine2d_readback`, returning `Engine2DReadback`
-with honest `source` provenance ("device_readback" vs "cpu_mirror").
-
-What was missing was proof. Added
-`test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_engine_vulkan_readback_spec.spl`
-(oracle-compare vs the strict software backend, [probe-gpu] disclosure, no
-vacuous green). On this host (lavapipe + 2x RTX A6000, vulkan-featured
-self-hosted binary):
-
-```
-[probe-gpu] browser-vulkan: GPU-PROVEN — device readback served the browser frame (source=device_readback identity=... mismatches=0/512)
-2 total, 2 passed  |  engine2d_backend_matrix_spec: 16/16 (vulkan GPU-PROVEN)
-```
-
-Still open (unchanged): a fully GPU-PAINTING browser lane (draw IR executed by
-engine2d GPU primitives rather than CPU layout raster + device present) —
-that remains the large feature under "Fix direction".

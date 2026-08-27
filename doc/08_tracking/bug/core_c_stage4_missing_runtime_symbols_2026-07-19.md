@@ -1,7 +1,6 @@
 # Core-C Stage4 missing runtime symbols — 2026-07-19
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+**Status:** SOURCE FIXED / STAGE 4 QUALIFICATION PENDING
 
 ## Reproduction
 

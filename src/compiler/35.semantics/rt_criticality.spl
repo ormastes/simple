@@ -24,6 +24,25 @@ struct RtCriticalFact:
     line: i64
     effect_units: Dict<i64, i64> = {}
 
+enum RtCriticalDiagnosticSeverity:
+    Warning
+    Error
+
+struct RtCriticalDiagnostic:
+    severity: RtCriticalDiagnosticSeverity
+    message: text
+
+fn rt_profile_assurance_rank(profile: text) -> i64:
+    # An unqualified @rt root is Critical by language contract.  This rank is
+    # deliberately independent of the compilation's global assurance profile.
+    if profile == "": return 3
+    val normalized = normalize_profile_name(profile)
+    if normalized == "verified": return 4
+    if normalized == "critical": return 3
+    if normalized == "robust": return 2
+    if normalized == "strict": return 1
+    0
+
 struct RtBoundCapability:
     subject_id: text
     closure_digest: text
@@ -46,25 +65,52 @@ fn rt_bound_manifest_capabilities() -> [RtBoundCapability]:
     if not rt_bound_manifest_sealed: return []
     rt_bound_manifest_entries
 
+fn rt_bound_manifest_count() -> i64:
+    if not rt_bound_manifest_sealed: return 0
+    rt_bound_manifest_entries.len()
+
+fn rt_bound_manifest_capability_at(index: i64) -> RtBoundCapability?:
+    if not rt_bound_manifest_sealed or index < 0 or
+       index >= rt_bound_manifest_entries.len():
+        return nil
+    Some(rt_bound_manifest_entries[index])
+
 fn rt_sort_text(items: [text]) -> [text]:
     var out: [text] = []
+    var scratch: [text] = []
     for item in items:
-        var at = out.len()
+        out.push(item)
+        scratch.push("")
+    var width = 1
+    while width < out.len():
+        var base = 0
+        while base < out.len():
+            var left = base
+            var right = base + width
+            var left_end = right
+            if left_end > out.len(): left_end = out.len()
+            var right_end = base + width + width
+            if right_end > out.len(): right_end = out.len()
+            var write = base
+            while left < left_end or right < right_end:
+                if right >= right_end or
+                   (left < left_end and
+                    (out[left] < out[right] or out[left] == out[right])):
+                    scratch[write] = out[left]
+                    left = left + 1
+                else:
+                    scratch[write] = out[right]
+                    right = right + 1
+                write = write + 1
+            base = base + width + width
         var i = 0
         while i < out.len():
-            if item < out[i]:
-                at = i
-                break
+            out[i] = scratch[i]
             i = i + 1
-        out.push(item)
-        var j = out.len() - 1
-        while j > at:
-            out[j] = out[j - 1]
-            j = j - 1
-        out[at] = item
+        width = width + width
     out
 
-fn rt_closure_digest(root_name: text, facts: [RtCriticalFact]) -> text:
+fn rt_closure_digest_material(facts: [RtCriticalFact]) -> text:
     var lines: [text] = []
     for fact in facts:
         var unit_parts: [text] = []
@@ -73,7 +119,13 @@ fn rt_closure_digest(root_name: text, facts: [RtCriticalFact]) -> text:
         lines.push(fact.name + "|" + fact.own_effects.to_text() + "|" +
             rt_sort_text(unit_parts).join(",") + "|" +
             rt_sort_text(fact.callees).join(","))
-    sha256_text("RT-CLOSURE-V1\n" + root_name + "\n" + rt_sort_text(lines).join("\n"))
+    rt_sort_text(lines).join("\n")
+
+fn rt_closure_digest_from_material(root_name: text, material: text) -> text:
+    sha256_text("RT-CLOSURE-V1\n" + root_name + "\n" + material)
+
+fn rt_closure_digest(root_name: text, facts: [RtCriticalFact]) -> text:
+    rt_closure_digest_from_material(root_name, rt_closure_digest_material(facts))
 
 fn rt_observed_effect_units(effects: i64) -> Dict<i64, i64>:
     var units: Dict<i64, i64> = {}
@@ -116,7 +168,7 @@ fn rt_effect_name(bit: i64) -> text:
     "unknown"
 
 fn rt_critical_profile(profile: text) -> bool:
-    profile == "" or normalize_profile_name(profile) == "critical"
+    rt_profile_assurance_rank(profile) >= 3
 
 fn rt_critical_profile_diagnostics(fn_name: text, profile: text, reason: text, implicit_as_error: bool) -> [text]:
     var out: [text] = []
@@ -131,7 +183,7 @@ fn rt_critical_profile_diagnostics(fn_name: text, profile: text, reason: text, i
         out.push("error[RT-E-UNKNOWN-PROFILE]: @rt declaration '" + fn_name +
             "' has unknown criticality profile '" + profile + "'")
         return out
-    if normalized != "critical" and reason == "":
+    if rt_profile_assurance_rank(profile) < 3 and reason == "":
         out.push("error[RT-E-LOWER-TIER-REASON]: @rt declaration '" + fn_name +
             "' lowers criticality to '" + profile + "' without reason")
     out
@@ -144,20 +196,147 @@ fn rt_fact_index(facts: [RtCriticalFact]) -> Dict<text, i64>:
         i = i + 1
     index
 
+class RtCriticalClosureScratch:
+    index: Dict<text, i64>
+    reverse: [[i64]]
+    base_remaining: [i64]
+    has_unknown_callee: [i64]
+    masks: [i64]
+    remaining: [i64]
+    queued: [i64]
+    queue: [i64]
+
+    static fn build(facts: [RtCriticalFact]) -> RtCriticalClosureScratch:
+        val index = rt_fact_index(facts)
+        var reverse: [[i64]] = []
+        var base_remaining: [i64] = []
+        var has_unknown_callee: [i64] = []
+        var masks: [i64] = []
+        var remaining: [i64] = []
+        var queued: [i64] = []
+        var queue: [i64] = []
+        var i = 0
+        while i < facts.len():
+            reverse.push([])
+            base_remaining.push(0)
+            has_unknown_callee.push(0)
+            masks.push(0)
+            remaining.push(0)
+            queued.push(0)
+            i = i + 1
+        i = 0
+        while i < facts.len():
+            for callee in facts[i].callees:
+                if index.contains_key(callee):
+                    val ci = index[callee]
+                    reverse[ci] = reverse[ci].push(i)
+                    base_remaining[i] = base_remaining[i] + 1
+                else:
+                    has_unknown_callee[i] = 1
+            i = i + 1
+        # Kahn, the initial propagation seed, and nine fixed effect-bit
+        # changes enqueue at most 11V.
+        i = 0
+        while i < facts.len() * 11:
+            queue.push(0)
+            i = i + 1
+        RtCriticalClosureScratch(index: index, reverse: reverse,
+            base_remaining: base_remaining,
+            has_unknown_callee: has_unknown_callee, masks: masks,
+            remaining: remaining, queued: queued, queue: queue)
+
+    me compute(facts: [RtCriticalFact], reviewed: Dict<text, i64>,
+        authority_prefix: text = "") -> bool:
+        var i = 0
+        while i < facts.len():
+            var authority_key = facts[i].name
+            if authority_prefix != "":
+                authority_key = authority_prefix + "|" + facts[i].name
+            val reviewed_mask = reviewed[authority_key] ?? 0
+            self.masks[i] = facts[i].own_effects &
+                ~(facts[i].bounded_effects | reviewed_mask)
+            if self.has_unknown_callee[i] != 0:
+                self.masks[i] = self.masks[i] | RT_EFFECT_UNKNOWN
+            self.remaining[i] = self.base_remaining[i]
+            self.queued[i] = 0
+            i = i + 1
+        var head = 0
+        var tail = 0
+        i = 0
+        while i < facts.len():
+            if self.remaining[i] == 0:
+                if tail >= self.queue.len(): return false
+                self.queue[tail] = i
+                tail = tail + 1
+            i = i + 1
+        while head < tail:
+            val done = self.queue[head]
+            head = head + 1
+            for caller in self.reverse[done]:
+                self.remaining[caller] = self.remaining[caller] - 1
+                if self.remaining[caller] == 0:
+                    if tail >= self.queue.len(): return false
+                    self.queue[tail] = caller
+                    tail = tail + 1
+        i = 0
+        while i < facts.len():
+            if self.remaining[i] > 0:
+                self.masks[i] = self.masks[i] | RT_EFFECT_RECURSION
+            self.queued[i] = 1
+            if tail >= self.queue.len(): return false
+            self.queue[tail] = i
+            tail = tail + 1
+            i = i + 1
+        while head < tail:
+            val done = self.queue[head]
+            head = head + 1
+            self.queued[done] = 0
+            for caller in self.reverse[done]:
+                val next = self.masks[caller] | self.masks[done]
+                if next != self.masks[caller]:
+                    self.masks[caller] = next
+                    if self.queued[caller] == 0:
+                        if tail >= self.queue.len(): return false
+                        self.queue[tail] = caller
+                        tail = tail + 1
+                        self.queued[caller] = 1
+        true
+
+    fn mask_at(index: i64) -> i64:
+        if index < 0 or index >= self.masks.len(): return RT_EFFECT_UNKNOWN
+        self.masks[index]
+
 fn rt_critical_closure(facts: [RtCriticalFact]) -> [i64]:
-    val index = rt_fact_index(facts)
+    var scratch = RtCriticalClosureScratch.build(facts)
+    var reviewed: Dict<text, i64> = {}
+    if not scratch.compute(facts, reviewed):
+        var failed: [i64] = []
+        for _fact in facts: failed.push(RT_EFFECT_UNKNOWN)
+        return failed
     var masks: [i64] = []
+    var i = 0
+    while i < facts.len():
+        masks.push(scratch.mask_at(i))
+        i = i + 1
+    masks
+
+fn rt_effective_assurance_closure(facts: [RtCriticalFact],
+    declared_ranks: Dict<text, i64>) -> [i64]:
+    # A caller inherits the strongest @rt assurance reachable through its call
+    # closure.  The worklist carries one scalar rank per vertex; adjacency is
+    # built once and no object is allocated while visiting an edge.  A rank can
+    # rise at most four times, so this remains O(V + E) for the fixed lattice.
+    val index = rt_fact_index(facts)
     var reverse: [[i64]] = []
-    var remaining: [i64] = []
+    var ranks: [i64] = []
+    var queued: [i64] = []
     var queue: [i64] = []
     var i = 0
     while i < facts.len():
-        # A reviewed bound applies only to this function's own effect. It is
-        # consumed before propagation and can never waive the same category in
-        # an arbitrary transitive callee.
-        masks.push(facts[i].own_effects & ~facts[i].bounded_effects)
         reverse.push([])
-        remaining.push(0)
+        ranks.push(declared_ranks[facts[i].name] ?? 0)
+        queued.push(1)
+        queue.push(i)
         i = i + 1
     i = 0
     while i < facts.len():
@@ -165,59 +344,22 @@ fn rt_critical_closure(facts: [RtCriticalFact]) -> [i64]:
             if index.contains_key(callee):
                 val ci = index[callee]
                 reverse[ci] = reverse[ci].push(i)
-                remaining[i] = remaining[i] + 1
-            else:
-                masks[i] = masks[i] | RT_EFFECT_UNKNOWN
-        if remaining[i] == 0: queue.push(i)
         i = i + 1
-    # Kahn elimination identifies every recursive SCC and every caller whose
-    # closure depends on it. It deliberately does not propagate effects; the
-    # monotone worklist below handles acyclic and cyclic edges uniformly.
     var head = 0
-    while head < queue.len():
-        val done = queue[head]
-        head = head + 1
-        for caller in reverse[done]:
-            remaining[caller] = remaining[caller] - 1
-            if remaining[caller] == 0: queue.push(caller)
-    # Nodes left after leaf-first elimination are recursive or depend on a
-    # recursive SCC. Both are forbidden in a critical transitive closure.
-    i = 0
-    while i < facts.len():
-        if remaining[i] > 0: masks[i] = masks[i] | RT_EFFECT_RECURSION
-        i = i + 1
-    # Propagate every category through SCCs and ordinary edges. A bit can enter
-    # each node once, so the work is bounded by O((V + E) * category_bits),
-    # including recursive graphs; there is no iteration-count guess.
-    queue = []
-    var queued: [i64] = []
-    i = 0
-    while i < facts.len():
-        queue.push(i)
-        queued.push(1)
-        i = i + 1
-    head = 0
     while head < queue.len():
         val done = queue[head]
         head = head + 1
         queued[done] = 0
         for caller in reverse[done]:
-            val next = masks[caller] | masks[done]
-            if next != masks[caller]:
-                masks[caller] = next
+            if ranks[done] > ranks[caller]:
+                ranks[caller] = ranks[done]
                 if queued[caller] == 0:
                     queue.push(caller)
                     queued[caller] = 1
-    masks
+    ranks
 
-fn rt_critical_admit(root_name: text, facts: [RtCriticalFact]) -> [text]:
+fn rt_critical_admit_mask(root_name: text, rejected: i64) -> [text]:
     var out: [text] = []
-    val index = rt_fact_index(facts)
-    if not index.contains_key(root_name):
-        return ["error[RT-E-UNBOUNDED-UNKNOWN]: @rt declaration '" + root_name + "' has no lowered body"]
-    val i = index[root_name]
-    val masks = rt_critical_closure(facts)
-    val rejected = masks[i]
     for bit in [RT_EFFECT_ALLOC, RT_EFFECT_BLOCKING, RT_EFFECT_LOOP,
         RT_EFFECT_RECURSION, RT_EFFECT_DISPATCH, RT_EFFECT_LOGGING,
         RT_EFFECT_SYNC, RT_EFFECT_LOADER, RT_EFFECT_UNKNOWN]:
@@ -226,12 +368,25 @@ fn rt_critical_admit(root_name: text, facts: [RtCriticalFact]) -> [text]:
                 "]: critical RT closure '" + root_name + "' contains unproved " + rt_effect_name(bit))
     out
 
+fn rt_critical_admit(root_name: text, facts: [RtCriticalFact]) -> [text]:
+    val index = rt_fact_index(facts)
+    if not index.contains_key(root_name):
+        return ["error[RT-E-UNBOUNDED-UNKNOWN]: @rt declaration '" + root_name + "' has no lowered body"]
+    val masks = rt_critical_closure(facts)
+    rt_critical_admit_mask(root_name, masks[index[root_name]])
+
 export RT_EFFECT_ALLOC, RT_EFFECT_BLOCKING, RT_EFFECT_LOOP, RT_EFFECT_RECURSION
 export RT_EFFECT_DISPATCH, RT_EFFECT_LOGGING, RT_EFFECT_SYNC, RT_EFFECT_LOADER, RT_EFFECT_UNKNOWN
 export RtCriticalFact, rt_critical_profile, rt_critical_profile_diagnostics
+export RtCriticalDiagnosticSeverity, RtCriticalDiagnostic
+export rt_profile_assurance_rank, rt_effective_assurance_closure
 export RtBoundCapability, rt_reviewed_bound_mask, rt_effect_is_single
 export rt_bound_manifest_replace, rt_bound_manifest_clear, rt_bound_manifest_capabilities
-export rt_closure_digest, rt_observed_effect_units, rt_sort_text
+export rt_bound_manifest_count, rt_bound_manifest_capability_at
+export rt_closure_digest, rt_closure_digest_material, rt_closure_digest_from_material
+export rt_observed_effect_units, rt_sort_text
 export rt_fact_observed_units
-export rt_critical_closure, rt_critical_admit, rt_effect_name
+export rt_fact_index, rt_critical_closure, rt_critical_admit, rt_effect_name
+export rt_critical_admit_mask
+export RtCriticalClosureScratch
 export RT_PROFILE_MIGRATION_EPOCH, rt_implicit_profile_is_error

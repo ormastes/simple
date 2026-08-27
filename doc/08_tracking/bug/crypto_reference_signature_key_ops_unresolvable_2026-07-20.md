@@ -1,12 +1,9 @@
 # `std.signature.key_ops` has only a compiled `.smf` artifact, no `.spl` source — module unresolvable under test
 
-> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
-
 - **Date:** 2026-07-20
 - **Area:** `src/lib/common/signature/key_ops.smf` (and siblings)
 - **Severity:** medium (whole spec file cannot load; 0 examples run).
-- Status: OPEN (P2)
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- **Status:** OPEN.
 
 ## Symptom
 
@@ -53,11 +50,3 @@ gap, not a spec authoring issue.
 
 - `test/unit/lib/crypto/crypto_reference_spec.spl` (0 examples executed —
   load failure)
-
-## Verification 2026-08-17 (content classification, fleet lane I)
-STILL-OPEN. `ls -d src/lib/common/signature` -> No such file or directory: the
-whole package, not just `key_ops`, is absent. `test/01_unit/lib/crypto/crypto_reference_spec.spl`
-still imports `std.signature.key_ops` at :8, so the spec cannot load at all.
-NOTE: this row is adjacent to the `src/lib/common/crypto/**` paths this lane is
-explicitly forbidden to touch, and the fix is "write the signature library" —
-out of scope here in both directions. Reported, not attempted.

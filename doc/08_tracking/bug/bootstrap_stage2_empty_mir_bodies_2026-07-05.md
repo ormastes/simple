@@ -1,7 +1,6 @@
 ---
 id: bootstrap_stage2_empty_mir_bodies_2026-07-05
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+status: IN_PROGRESS
 severity: critical
 discovered: 2026-07-05
 discovered_by: Bootstrap stage-2 binary verification
@@ -12,7 +11,6 @@ related: src/compiler/50.mir/_MirLowering/function_lowering.spl
 related: src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
 related: src/compiler/80.driver/driver_bootstrap.spl
 related: build/bootstrap/stage2/aarch64-apple-darwin/simple
-related: src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl
 ---
 
 # Stage-2 Bootstrap: All function bodies empty (ret-0 stubs)
@@ -31,112 +29,6 @@ functions:count 6`, `instr-total=24`). A **loud-failure guard** was added and is
 proven to fire on an all-stub (0-instruction) module. The build now fails
 *loudly* at a deeper, still-unfinished layer (MIR→LLVM lowering, see Remaining
 Work) rather than silently shipping an empty binary.
-
-## 2026-08-17 (W2) — all 5 chain links source-verified fixed; the original defect is SUPERSEDED
-
-Full re-audit of the current working tree by reading every source point this doc
-names (no SHA ancestry, no full bootstrap — that is T3 and was explicitly out of
-scope). Verdict on the question this bug actually asks — *which declarations lower
-to empty bodies, and why*:
-
-**On the live bootstrap MIR path today: none.** Every declaration in the entry
-HIR module goes through the normal `lowering.lower_function(hir_fn)`
-(`50.mir/_MirLowering/bootstrap_globals.spl:753`) inside
-`bootstrap_lower_hir_globals_to_mir_module`. There is no name-based
-short-circuit, no stub fallback, and no gate on that loop.
-
-Link-by-link, in current source:
-
-1. **Flat-bridge entry gate — fixed.** `flat_is_bootstrap_entry_path`
-   (`10.frontend/_FlatAstBridge/convert_nodes.spl:62-85`) returns `true`
-   unconditionally under `SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1`, and otherwise
-   matches `path == native_entry or path.ends_with("/" + native_entry)`, then
-   falls back to `ends_with("bootstrap_main.spl")`.
-2. **HIR `lower_module` bootstrap branch — fixed.** The
-   `SIMPLE_BOOTSTRAP_DECL_TAG_*` / `SIMPLE_BOOTSTRAP_REAL_HIR` env-driven
-   deferred branch survives only as an explanatory comment
-   (`20.hir/hir_lowering/_Items/module_lowering.spl:2187-2189`).
-3. **MIR free path — fixed.** See the `lower_function` call above.
-4. **MIR name-based stubs — fixed on the live path.** `SIMPLE_BOOTSTRAP_REAL_LOWER`
-   survives only as a comment (`50.mir/_MirLowering/function_lowering.spl:119`).
-5. **Flat-bridge dropped call args — fixed** (no empty `Call`/`MethodCall`
-   reconstruction remains).
-
-**Loud-failure guard is live and fail-closed**, at two independent sites:
-`bootstrap_globals.spl:776-779` (`real_instr_total == 0` -> `rt_exit(1)`),
-`:782-783` (entry HIR module never set -> `rt_exit(1)`), and
-`:406-408` for the flat-HIR variant. So the silent-wrong-code shape this bug is
-named for — a linked stage-2 binary full of ret-0 stubs — cannot be shipped
-silently; it aborts the build.
-
-### The only remaining empty-body producers, and why they are intentional
-
-- `flat_empty_module(path)` (`10.frontend/_FlatAstBridge/module_assembly.spl:123`)
-  is still returned, but only when `SIMPLE_BOOTSTRAP=1` **and** the path is not
-  the entry **and** `SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE` is unset — i.e. the
-  deliberate single-entry stage-2/3 lane, where only `bootstrap_main.spl` is
-  meant to be assembled. Under `--entry-closure` this branch is unreachable
-  (link 1 above).
-- Extern declarations are deliberately SKIPPED, not stubbed
-  (`bootstrap_globals.spl:741-748`): lowering a body-less extern would emit a
-  strong `define ... { ret 0 }` that shadows the real runtime archive symbol at
-  link. The comment there is correct and the skip is the fix, not a defect.
-
-### Residual landmine (NOT fixed here — deleting it breaks two specs)
-
-`50.mir/_MirLowering/module_lowering.spl` still contains two **callerless**
-stub-emitting methods — verified zero call sites across `src/` and `test/`:
-
-- `lower_bootstrap_stub_function` (`:534-545`) — emits a bare ret-0 body.
-- `lower_bootstrap_flat_function` (`:547-594`) — hardcodes `bootstrap_version`
-  to the string `"0.9.8"` and `native_build_help` to const `0`, ignoring the
-  real bodies. `"0.9.8"` is **stale**: `src/app/cli/bootstrap_identity.spl:5`
-  returns `"1.0.0-beta"`. (`native_build_help`'s real body in
-  `bootstrap_main.spl:18-19` genuinely is `0`, so only the version string
-  diverges.)
-
-These are dead today, so they cause no wrong code — but they are exactly the
-shape of defect this bug records, sitting one call site away from returning.
-They were deliberately left in place rather than deleted because two source-text
-specs pin their scaffolding and would fail on removal:
-`test/01_unit/compiler/mir/bootstrap_signature_source_spec.spl:9-15` and
-`test/01_unit/compiler/driver/native_build_cache_plumbing_spec.spl:294-295`
-(both assert on `self.bootstrap_function_signature(name)` /
-`self.bootstrap_default_return_operand(`, whose only remaining callers are these
-two dead methods). Removing the dead code therefore requires amending those two
-specs — a separate, reviewable change, not a drive-by cleanup in this lane.
-
-### Status
-
-The five-link root-cause chain named by this bug is **resolved in source**. This
-row is kept open only for the "Remaining work" items further down, and the
-current stage-2 blocker has moved on: per the 2026-07-24 entry at the bottom,
-the next distinct failure is tracked in
-`bootstrap_stage2_interpreted_parser_empty_array_2026-07-24.md`. No stage-2
-rebuild was run today (T3; ~20 foreign `bin/simple` processes live on this box),
-so there is deliberately **no before/after verdict line** for a build here — the
-evidence above is source-inspection only, and is labelled as such.
-
-## 2026-08-17 (W1) — chain link 1 confirmed still fixed in current source
-
-Checked by reading current source, not SHA ancestry, because the
-`re-verified 2026-08-17 by source inspection` stamp on this file is untrustworthy
-(it was proven wrong on 37% of the rows it touched).
-`flat_is_bootstrap_entry_path` (`src/compiler/10.frontend/_FlatAstBridge/
-convert_nodes.spl:62-86`) now (a) returns `true` unconditionally when
-`SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE == "1"`, so every module in the entry closure
-is really assembled rather than routed to `flat_empty_module()`, and (b) matches
-the entry by `path == native_entry or path.ends_with("/" + native_entry)`, which
-covers the driver's `src/app/cli/bootstrap_main.spl` spelling that the original
-`/src/...` / `./src/...` patterns missed. Both branches carry comments naming
-this bug id. This row shares a defect FAMILY with
-`stage3_selfhost_entry_module_zero_functions_2026-08-11` and
-`stage3_selfhost_reaches_mir_entry_module_not_captured_2026-08-10`: in all three
-the entry module's identity or body is lost while being rebuilt through a global
-flat accumulator instead of being read from its owning value. Not re-reproduced
-(needs a full bootstrap; the box was already running one), so no before/after
-verdict line — the remaining MIR→LLVM layer in "Remaining Work" is untouched by
-this note.
 
 ## Root-cause chain (all verified by rebuild + LLVM IR inspection)
 
@@ -1209,3 +1101,653 @@ The post-fix worker also passed the subsequently exposed
 `rt_heap_registry_count` dispatcher gap and reached parsing of the 383-source
 closure. Its next distinct failure is tracked in
 `bootstrap_stage2_interpreted_parser_empty_array_2026-07-24.md`.
+
+## 2026-08-24 — STILL FIRING on an ADMITTED Stage 2; localized to the stmt-kind disc pre-dispatch
+
+Reached by clearing the arm64 `hc_enc_hir_module` SIGSEGV
+(`stage2_hir_codec_segv_is_i32_truncated_heap_ref_2026-08-24.md`); with
+`SIMPLE_HIR_CACHE=0` this guard is now the Stage-2 `compile` blocker. Measured
+on the **admitted** Stage 2 `7e45db55a89aed6f04139d157467e1adb6235a3b8a1006f0dacf8221375e9b40`
+(provenance `pure-simple`, sanity `pass`) — no rebuild was needed for any of
+this: every probe below is already compiled in and env-gated.
+
+### It is NOT a missing entry and NOT a stub substitution
+
+Each step verified by its own trace, not inferred:
+
+| evidence | trace |
+|---|---|
+| entry module found, 1 function | `[bootstrap-flat-entry] index=0 modules=1 functions=1` |
+| the function is `main`, not extern | `[mir-flat-prescan-function] ... index=0 name=main` (prescan skips extern) |
+| real lowering runs on it end to end | `[mir-lower] real-lower:start main` … `real-lower:done main` |
+| its body is not empty | `[mir-lower] block:start stmts=1 has=false` |
+| the statement IS walked | `block:stmt 0` … `block:stmt-done 0` |
+
+So the body is present and visited. The instructions are lost *inside* the
+statement walk.
+
+### The statement lowers to nothing, silently
+
+With `SIMPLE_MIR_STMT_CALLER_DEBUG=1` (the probe wrapping `lower_stmt_impl` at
+`mir_lowering_stmts.spl:693-695`) and `SIMPLE_COMPILER_TRACE=1` for maximum MIR
+tracing, the entire window between the two probe calls is:
+
+```
+[mir-stmt-caller] before disc=4119164143 file= line=0 col=0
+[mir-stmt-caller] after  disc=4119164143 file= line=0 col=0
+```
+
+Nothing in between. `lower_stmt_impl` is entered and exited having emitted zero
+MIR and zero diagnostics — the `case _: ()` silent arm.
+
+### Root: the discriminant PRE-DISPATCH is itself defeated
+
+`hir_stmt_expr_payload_extraction_nil_2026-07-17` ("Wall 1") fixed this exact
+symptom by pre-dispatching on `mir_hir_stmt_kind_disc` before the qualified
+match. That fix is still present and even hardened
+(`mir_lowering_stmts.spl:1102-1113`, direct `rt_enum_payload` + a loud nil
+guard). **It no longer helps, because the disc comparison now fails too.**
+
+`mir_hir_stmt_kind_disc` is `rt_enum_discriminant`. Measured values of the
+INCOMING statement kinds:
+
+| source statement | disc |
+|---|---|
+| `print("hi")` | **4119164143** (`0xF58574EF`) |
+| `val a = 1` | **2163764024** |
+| `return 7` | **4119164143** |
+
+These are **stable per kind and byte-identical across separate processes**, so
+they are not ASLR pointers — they are content-derived. But they are not small
+ordinals, and they evidently do not equal the disc of the locally constructed
+probes the code compares against (`HirStmtKind.Expr(fallback_expr)`,
+`HirStmtKind.Let(...)`), because BOTH the `Expr` pre-check and every qualified
+`case` arm miss, for `Expr`, `Let` and `Return` alike. The `empty HIR
+expression-statement payload` guard never fires either, which places the failure
+*before* payload extraction.
+
+Note also `file= line=0 col=0`: every `HirStmt` arriving at MIR carries an empty
+span. The producer is handing over statements with no source location, which is
+a second signal about where these values are being built.
+
+**Class:** a non-nil value that is not the enum the consumer expects, defeating
+both a nil guard and a match — the same disease as the `hir codec: no
+\`HirTypeKind\` arm for tag -1` fall-through recorded in the stage-2 SIGSEGV
+record, at a different layer. Two producers disagreeing on enum identity, not a
+missing arm.
+
+### Reassurance on severity: the guard is loud AND fail-closed
+
+The concern that this shape "compiles to a binary that does nothing and passes a
+naive did-it-produce-an-artifact check" does **not** apply here — which is
+exactly what this bug's original lane added the guard for. It `eprint`s and then
+`rt_exit(1)` (`bootstrap_globals.spl:437-439`), rc=1, and **no `.smf` is
+written** (verified: no artifact in any run). The silent-wrong-output failure
+mode is already prevented; what remains is the real defect behind it.
+
+### Ruled out, cheaply
+
+* **Fixture form.** `fn main()` newline-block, `fn main():`, and
+  `fn main() -> i64:` all fail identically.
+* **Statement kind.** bare call, `val`, and `return` all fail identically.
+* **Flat vs globals MIR path.** `SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=0` and `=1`
+  are byte-identical here; the flat path is taken either way for `compile`.
+* **The missing-runtime-symbol class** (`b5afb5579b8`, `char_from_code` /
+  `rt_array_sort`). Nothing is linked on this path — the only match for
+  "unresolved" in a full trace is the counter `[mono] … unresolved=0`, and the
+  failure is well before codegen.
+
+### Next step for whoever takes this
+
+Print the EXPECTED disc next to the incoming one — the code already computes
+`expr_disc` / `let_disc` locally at `mir_lowering_stmts.spl:1102` and `:721`;
+logging both under the existing `SIMPLE_MIR_STMT_CALLER_DEBUG` gate turns this
+from "the comparison fails" into "these two numbers differ, and here is which
+producer is wrong". That is a one-line probe on the Simple side and needs no
+seed rebuild.
+
+## 2026-08-24 (later) — CORRECTION: the disc is CORRECT and the span is NORMAL; the defect is native execution, not dispatch
+
+**This supersedes two claims made in the section immediately above.** Both were
+wrong, and a run that SUCCEEDS proves it.
+
+### The experiment
+
+The same Simple MIR source, the same fixture, executed by the Rust seed
+INTERPRETING `src/compiler/**` (`native-build --entry-closure`, no
+`SIMPLE_NATIVE_BUILD_RUST`) instead of by the self-compiled Stage 2 binary:
+
+```
+[bootstrap-flat-entry] index=0 modules=1 functions=1
+[mir-stmt-caller] before disc=4119164143 file= line=0 col=0
+[mir-stmt-caller] after  disc=4119164143 file= line=0 col=0
+rc=0   ->  ./hbin5  ->  prints "hi", exit 0
+```
+
+**Identical disc. Identical empty span. rc=0 and a real running binary.**
+
+### What that corrects
+
+| earlier claim | verdict |
+|---|---|
+| "the disc pre-dispatch is itself defeated" / the incoming disc does not equal the locally-constructed one | **WRONG.** 4119164143 is the CORRECT discriminant for `HirStmtKind.Expr`; a working run shows the same value, so the comparison succeeds. |
+| "every arriving `HirStmt` has an empty span — a second signal about the producer" | **WRONG.** The empty span is present on the working run too. It is normal on this path and carries no signal. |
+
+### The collision that started this was not a collision
+
+`HirStmtKind` (`hir_definitions.spl:763`) has exactly five variants — `Expr`,
+`Let`, `Assign`, `Block`, `AsmAssert`. There is **no `Return` variant**:
+`Return(value: HirExpr?)` belongs to `HirExprKind`
+(`hir_definitions.spl:605`). So `return 7` is a `HirStmtKind.Expr` wrapping a
+`HirExprKind.Return`, and `print("hi")` and `return 7` sharing 4119164143 is
+two statements of the SAME variant reporting the same discriminant — exactly
+correct behaviour. Two distinct kinds observed (`Expr`, `Let`) produced two
+distinct values. Nothing here is a hash collision or a non-discriminant; the
+values are simply large and content-derived rather than dense ordinals.
+
+### Where the defect actually is
+
+Dispatch succeeds. On Stage 2 the pre-dispatch branch
+(`mir_lowering_stmts.spl:1102-1113`) is therefore taken, `rt_enum_payload`
+returns a NON-nil payload (the `empty HIR expression-statement payload` guard
+never fires), `self.lower_expr(expr)` is called — **and emits nothing**.
+
+That is precisely the hazard the code's own comment at that site names:
+
+> "The native worker can misbind this first-variant payload in a qualified
+> match even after exact discriminator dispatch."
+
+So the fault is **not** in the Simple source, which demonstrably compiles and
+runs a hello world when interpreted. It is in how the **self-compiled Stage 2
+binary executes that source** — a non-nil but misbound first-variant payload
+flowing into `lower_expr`, which then produces no instructions and no
+diagnostic. Same family as the other surfacings, but the discriminating fact is
+now *interpreted works / self-compiled does not*, on identical source.
+
+### Reusable fast loop (and the macOS blocker it needed)
+
+Iterating on `src/compiler/**` costs seconds, not a 27-minute Stage 2 build:
+
+```sh
+SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1 \
+SIMPLE_PROJECT_ROOT=<repo> SIMPLE_CACHE_SCOPE=<fresh> \
+  src/compiler_rust/target/bootstrap/simple \
+  native-build --backend llvm --source . --entry h.spl --entry-closure -o hbin
+```
+
+Two traps cost real time here and are worth writing down:
+
+* **Use the IN-TREE seed, not a copy.** A `cp` of the same binary elsewhere
+  fails with `error: pure-Simple tool 'native-build' unavailable; refusing Rust
+  fallback` — the app dispatch resolves `src/app/**` relative to the executable.
+* **macOS has no `setsid(1)`**, and the worker invokes it as `setsid -w …`. A
+  shim that only does `exec "$@"` fails with `exec: -w: invalid option`; it must
+  strip options first:
+
+```sh
+#!/bin/sh
+while [ $# -gt 0 ]; do case "$1" in -*) shift ;; *) break ;; esac; done
+exec "$@"
+```
+
+### The remaining question, and why the scoped probe cannot answer it cheaply
+
+The one bit still unmeasured is whether Stage 2 computes the same value for the
+LOCALLY constructed `HirStmtKind.Expr(fallback_expr)` as for the incoming one.
+The probe for it (log `expr_disc`/`let_disc` beside the incoming disc under
+`SIMPLE_MIR_STMT_CALLER_DEBUG`) is still one line — but it has to run inside a
+Stage 2 binary, because the interpreted lane above does not reproduce the bug at
+all. That means a ~27-minute rebuild, and the file to be probed
+(`mir_lowering_stmts.spl`) is a parallel session's live working file, so it was
+not edited here.
+
+## 2026-08-24 (later still) — the discriminant is a HASHED uint32, not an ordinal; and "dispatch succeeds" is retracted as unproven
+
+### The runtime representation rules out an ordinal off-by-one
+
+`RtCoreEnum` (`src/runtime/runtime_native.c:867-875`) stores:
+
+```c
+uint32_t enum_id;
+uint32_t discriminant;   /* <-- uint32, set from whatever codegen passes */
+int64_t  payload;
+```
+
+`rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload)` takes the
+discriminant from codegen, and `rt_enum_discriminant`
+(`runtime_native.c:7457`, the STRONG definition that overrides the `weak` one in
+`runtime.c:1504`) returns `e->discriminant`, or **-1** when
+`rt_core_as_enum(value)` is NULL.
+
+So the observed values are exactly what this representation predicts for a
+**hash-derived** discriminant, not a dense variant index:
+
+| statement kind | discriminant |
+|---|---|
+| `HirStmtKind.Expr` | 4119164143 (`0xF58574EF`) |
+| `HirStmtKind.Let` | 2163764024 |
+
+Two consequences, both load-bearing:
+
+1. **The incoming `stmt.kind` IS a well-formed enum on Stage 2 — now established,
+   not inferred.** A malformed or non-enum value returns the sentinel **-1**.
+   We never observe -1, on either engine. And the interpreter and the native
+   Stage 2 agree on the same numbers, so both engines compute the same hash for
+   the same variant.
+2. **A "variant 0 / first-variant" off-by-one cannot live in the runtime tag
+   comparison.** No ordinal index is stored anywhere in `RtCoreEnum`; there is
+   no 0 to be off by, and no zero-vs-absent conflation available at this layer.
+   Any first-variant defect has to live in the SEED's codegen for qualified
+   match arms, not in a discriminant comparison. Anyone hunting an index
+   off-by-one should start from the emitted match code, not from the tags.
+
+### RETRACTION: "Dispatch succeeds" was an inference, not a measurement
+
+The section above states that Stage 2 takes the pre-dispatch branch and that the
+failure is downstream in `lower_expr`. **That is not established.** The argument
+rested on the `Let` statement staying silent, and that argument does not hold:
+`bootstrap_reject_fatal_mir_errors` is called at
+`bootstrap_globals.spl:346` — BEFORE the flat function loop — and the
+0-instruction guard is at `:438`, with **no rejection call between them**. So a
+`self.error(...)` raised while lowering a function body is recorded and never
+printed before the guard exits.
+
+`val a = 1` producing neither instructions nor a visible error is therefore
+equally consistent with:
+
+* **(a)** dispatch succeeded, and the handler bailed via a silent `self.error`; or
+* **(b)** dispatch failed, and both the pre-check and the qualified match missed,
+  leaving `case _: ()`.
+
+Nothing measured so far separates (a) from (b). What IS established is that the
+incoming value is a well-formed enum with the correct hashed discriminant in both
+engines (above), and that the same source works interpreted and fails
+self-compiled.
+
+The two-disc probe — logging `expr_disc` / `let_disc` beside the incoming disc —
+remains the one measurement that separates them, and it still only reproduces
+inside a Stage 2 binary.
+
+### Confirming build must be `--fresh-cache`
+
+The native object cache does not invalidate on source change: a rebuild after a
+real edit can return byte-identical output with `N cached`, because discovery
+re-parses the file while codegen is reused. Every measurement on this lane is
+clean of that — each run used its own fresh `SIMPLE_CACHE_SCOPE` (a new scope is
+a new cache DIRECTORY, so nothing can be reused), and every log reads
+`1 compiled, 0 cached` for the fixtures and `750 compiled, 0 cached` for both
+Stage 2 builds. Any future confirming build must keep that property or pass
+`--fresh-cache`, or it will measure the previous binary.
+
+## 2026-08-24 (final) — MEASURED: dispatch succeeds, and this ONE guard was hiding THREE defects
+
+Both instruments landed in `79a488cceb4` and measured on an **admitted** Stage 2
+built from that exact tree with `--fresh-cache`
+(`750 compiled, 0 cached`, sha256 `10e29a5474ad5100b0b8bf8d71d99a301d64a776aa0c69d7fa250e69d119a1f3`,
+provenance `pure-simple`, `explicit-full-bootstrap-stage2-trust-root`).
+
+### Result 1 — dispatch SUCCEEDS on a self-compiled Stage 2
+
+The two-disc probe compares the incoming discriminant against the discs of
+LOCALLY constructed variants, rebuilt exactly as the dispatch sites at `:1102`
+and `:721` build them:
+
+```
+[mir-stmt-caller] before disc=2163764024 ref_expr=4119164143 ref_let=2163764024 hits_expr=no  hits_let=yes   # val a = 1
+[mir-stmt-caller] before disc=4119164143 ref_expr=4119164143 ref_let=2163764024 hits_expr=yes hits_let=no    # print(a)
+```
+
+Both hit, and the reference discs are byte-identical to the interpreter's. So
+**(b) "dispatch failed into `case _: ()`" is eliminated and (a) is confirmed** —
+this settles by measurement the question that was correctly retracted as
+unproven earlier. The disc machinery is healthy on Stage 2.
+
+### Result 2 — three distinct defects behind one message
+
+Surfacing the swallowed errors splits the single
+`0 MIR instructions` verdict into three unrelated failures:
+
+| fixture | now visible | reading |
+|---|---|---|
+| `fn main():` | **FATAL** `E-SFFI-016: missing return in non-unit function 'main'` | a **UNIT** `main` is misclassified as **non-unit**. Dispatch succeeded; the handler bailed on a fatal error that was previously never printed. |
+| `fn main() -> i64: return 7` | `0 errors recorded` + 0 instructions, `hits_expr=yes` | a genuinely **SILENT emission failure** — dispatch succeeded, nothing was recorded, nothing was emitted. |
+| `fn helper() -> i64: …` + `fn main(): print(helper())` | rc=**139**, no output at all | a **third** failure that appears only once a second function exists. |
+
+The `0 errors recorded` line is what makes rows 1 and 2 distinguishable; without
+it both look identical from outside. That is why the helper prints it instead of
+staying quiet on an empty list.
+
+### The interpreted control, per row
+
+Row 2's fixture, byte-identical, built by the seed INTERPRETING
+`src/compiler/**`: **rc=0, and the binary exits 7 — correct.** So the same source
+that Stage 2 silently drops produces correct code one engine over. The
+interpreted/self-compiled split established earlier holds per-fixture, not just
+in aggregate.
+
+### Why `E-SFFI-016` is the most actionable of the three
+
+It is a fatal, named, first-party diagnostic pointing at return-type
+classification of the entry function — `fn main():` is unit and is being read as
+non-unit. That is a concrete claim about one slot's value, in the same
+wrong-kind-of-value family as the rest of this cluster, and it is now visible to
+anyone who reruns the guard. Rows 2 and 3 need their own lanes.
+
+### Cost note
+
+Both instruments were landed in one build deliberately: a `--fresh-cache`
+Stage 2 is ~845 s of compile, and paying that twice to ask two questions would
+have been waste. Instrument 1 runs only where the process is already about to
+`rt_exit(1)`; instrument 2 is behind an env gate that is off by default. Neither
+changes behaviour on any passing path.
+
+## 2026-08-24 — E-SFFI-016 SETTLED: the classification is wrong for EVERY function, and it is not the Stage 2 blocker
+
+Settled with the probe landed in `db2651ca785`, measured on the **interpreted**
+lane in seconds. **No second Stage 2 build was needed** — validating the probe
+before spending 845 s is what made the build unnecessary.
+
+### The measurement
+
+`SIMPLE_MIR_RETTYPE_DEBUG=1` on a fixture with three deliberately different
+signatures:
+
+```
+[mir-rettype] fn=h_i64  hir_ret=2375492728 hir_unit=406810393 mir_ret=258540933 mir_unit=406810393 eq_unit=false mir_ret_text=I64
+[mir-rettype] fn=h_unit hir_ret=2375492728 hir_unit=406810393 mir_ret=258540933 mir_unit=406810393 eq_unit=false mir_ret_text=I64
+[mir-rettype] fn=main   hir_ret=2375492728 hir_unit=406810393 mir_ret=258540933 mir_unit=406810393 eq_unit=false mir_ret_text=I64
+```
+
+`h_i64() -> i64`, `h_unit()` — **declared unit** — and `main()` all report the
+same `hir_ret`/`mir_ret` discriminants and all lower to **`I64`**. Per-function
+return types are not preserved on the bootstrap flat path; every function becomes
+`I64`.
+
+### Which of the three candidates it was
+
+| candidate | verdict |
+|---|---|
+| (a) HIR classification is wrong | **YES** — but far wider than the entry point |
+| (b) `lower_type` drops Unit | subsumed by (a): the HIR side is already wrong (`hir_ret != hir_unit`) |
+| (c) the `==` comparison is broken | **NO** — `mir_unit` is a distinct, stable value and the comparison answers correctly for the values it is given |
+
+### And the guard is right
+
+The error branch is reachable only when `return_type.kind != MirTypeKind.Unit`.
+`main` really is non-unit **in this compiler's own view**, so the check applies
+legitimately and the message is accurate. The alternative reading — "the guard
+shouldn't apply to a unit entry point" — is **refuted**: the entry point is not
+unit here, and it is not special either; `h_unit()` is misclassified identically.
+
+### E-SFFI-016 is a SYMPTOM on Stage 2, not the cause
+
+The misclassification is **identical in both engines** — the numbers above come
+from the run that SUCCEEDS. So it is neither the interpreted/self-compiled
+divergence nor the Stage 2 blocker. What differs is downstream:
+
+* **Interpreted:** the body emits instructions, so a tail `result` exists, the
+  `elif result.?` branch is taken, and the misclassification stays masked.
+* **Stage 2:** the body emits nothing (0 instructions, with dispatch verified
+  succeeding), so there is no explicit terminator and no `result` — and the
+  `else` branch fires E-SFFI-016.
+
+So row 1 of the three-defect table collapses into the same underlying failure as
+row 2: **statement/expression lowering emits no MIR on a self-compiled Stage 2
+despite correct dispatch.** E-SFFI-016 was the loudest thing near it, not a
+separate defect.
+
+### What is now genuinely open
+
+1. The silent emission failure itself (rows 1 and 2, now one defect).
+2. Row 3 — `helper()` + `main()` gives rc=139 with no output, appearing only once
+   a second function exists. Untouched, deliberately: three defects behind one
+   guard is how this got confusing in the first place.
+3. Return types collapsing to `I64` on the bootstrap flat path. Real,
+   pre-existing, currently masked in the interpreter, and its own lane — it will
+   produce wrong ABI/return handling the moment a body does emit.
+
+## 2026-08-24 — `lower_expr` DOES run; and a `HirTypeKind` with `disc=-1` links this to the codec blocker
+
+All of the below cost **zero** builds: it uses instruments already compiled into
+the Stage 2 from `79a488cceb4`, including one (`SIMPLE_MIR_GARBAGE_EXPR_DEBUG`)
+that already existed in the tree.
+
+### 1. `lower_expr` executes and returns a valid local
+
+A **method-call** fixture (`fn main(): "abc".len()`) makes the
+`[mir-lower-expr]` traces fire — they are gated on `span_method_name != ""`, so
+they only ever fire for `MethodCall`. On Stage 2:
+
+```
+[mir-stmt-caller] before disc=4119164143 ... hits_expr=yes
+[mir-lower-expr] impl-return method=len id=1
+[mir-lower-expr] span-builder-written method=len id=1
+```
+
+So `lower_expr` is entered, `lower_expr_impl` returns, and a **valid local
+(id=1)** comes back. The failure is therefore NOT "lower_expr never runs": zero
+instructions are produced *despite* a successful lowering call.
+
+**Correction to an earlier reading in this record:** the silence between the
+statement probes under `SIMPLE_COMPILER_TRACE=1` was never evidence that nothing
+happened — those traces are MethodCall-only and the fixture was a plain `Call`.
+
+### 2. The HirExpr payload is a live enum — wild-handle misbind eliminated
+
+`SIMPLE_MIR_GARBAGE_EXPR_DEBUG=1` runs the tree's own garbage-child detector at
+the single choke point every lowered expression passes through. It fires when
+`rt_enum_discriminant(expr.kind) < 0`. On Stage 2 it reports **0** findings. So
+the payload handed to `lower_expr` is a live boxed enum with a valid
+discriminant. (It would not catch a payload that is a *different* valid enum, so
+this eliminates the wild-handle case, not every misbind.)
+
+### 3. NEW — a `HirTypeKind` that is not an enum at all, and only on Stage 2
+
+Surfaced **only** because the swallowed-error instrument now prints what was
+recorded:
+
+```
+error: bootstrap MIR lowering (flat entry, fatal):
+       E-MIR-TYPE-Unknown: unreachable HirTypeKind disc=-1: 0
+error: bootstrap MIR lowering (flat entry, fatal):
+       E-SFFI-016: missing return in non-unit function 'main'
+```
+
+`-1` is `rt_enum_discriminant`'s **not-an-enum sentinel** (it answers
+`e ? e->discriminant : -1`). So a `HirTypeKind` reaching `lower_type` is not a
+live enum at all.
+
+Scoped precisely, same fixture both engines:
+
+| engine | `disc=-1` occurrences | result |
+|---|---|---|
+| self-compiled Stage 2 | **present** (fatal) | rc=1, 0 instructions |
+| seed interpreting `src/compiler/**` | **0** | rc=0, binary runs |
+
+### 4. This is the same condition as the codec blocker — same enum, same sentinel
+
+The other open Stage-2 blocker is
+`hir codec: no \`HirTypeKind\` arm for tag -1`, whose `-1` is a hardcoded
+sentinel meaning "the encoder's match fell through" — i.e. a `HirTypeKind` value
+that matches no variant. Here a **different consumer** (`lower_type`) of the
+**same enum type** reports `disc=-1`, i.e. not an enum at all.
+
+Two independent consumers of `HirTypeKind` both finding a non-variant value, on a
+self-compiled Stage 2 only, is a strong hint of **one root cause: `HirTypeKind`
+values are not live enums in the self-compiled binary.** Stated as a hypothesis,
+not a conclusion — nothing here proves the two share a producer.
+
+It also gives a mechanical account of E-SFFI-016 on Stage 2 that the earlier
+section could only assert: a garbage `HirTypeKind` falls to the `Unknown` arm,
+`lower_type` yields its `I64` fallback, the function reads as non-unit, and the
+missing-return branch fires.
+
+### Next discriminating step
+
+The remaining question for the emission failure is narrow: `lower_expr` returns a
+valid local, so are instructions emitted into a **builder copy that is then
+discarded** (this project's documented value-semantics/CoW hazard — every site
+here is `var b = self.builder; …; self.builder = b`), or never emitted at all?
+Probe: instruction count on `self.builder` immediately after the `lower_expr`
+call in the `Expr` pre-dispatch branch, against the function's total at
+`end_function`. `>0` then `0` proves loss; `0` then `0` proves non-emission.
+That one needs a build, and it discriminates exactly those two.
+
+## 2026-08-24 — PROVEN: the instructions are EMITTED and then LOST
+
+The build was spent on one binary question and it answered cleanly. Measured on an
+**admitted** `--fresh-cache` Stage 2 (`750 compiled, 0 cached`, sha256
+`e1f7be28d207019bcc3d31f5e0d0cd02ef408ccf7b702b186d745b49cd0b6351`), against the
+interpreted lane as control:
+
+| fixture | engine | after `lower_expr` | at `end_function` |
+|---|---|---|---|
+| `fn main(): "abc".len()` | **Stage 2** | pending=**2** | **0** |
+| `fn main(): "abc".len()` | interpreted | pending=**2** | **2** |
+| `fn main(): print("hi")` | **Stage 2** | pending=**3** | **0** |
+| `fn main(): print("hi")` | interpreted | pending=**3** | **3** |
+
+The pending counts are **byte-identical in both engines**. Lowering does the right
+work and emits the right number of instructions on Stage 2; the finished function
+keeps them interpreted and loses **all** of them self-compiled. `>0` then `0` was
+the pre-specified proof of loss.
+
+### What this reframes
+
+This is **not** a silent emission failure. It is a silent instruction **LOSS**,
+between statement lowering and `end_function` — builder state written into a copy
+and never propagated back. Every site on that path is the
+`var b = self.builder; …; self.builder = b` value-semantics round trip that
+`code-style.md` names, and the interpreted engine's different aliasing behaviour is
+exactly why it survives there.
+
+**The lowering logic is exonerated.** The defect is in state propagation, not in
+any HIR/MIR translation rule.
+
+It also retro-explains the rest of the cluster with every link now measured: 0
+instructions trips the guard; with no instructions there is no explicit terminator
+and no tail `result`, so E-SFFI-016 fires downstream — confirming the earlier
+collapse of row 1 into row 2.
+
+### Calibration note (worth keeping)
+
+The first version of the emission probe read only `builder.blocks` and reported
+**0 even on the WORKING interpreted engine**, because `MirBuilder` accumulates into
+a pending `instructions` list that `finalize_block()` only flushes at
+`end_function`. Validating on the seconds-long interpreted lane caught this before
+the 845 s build. An uncalibrated probe would have read "0 then 0" and concluded
+**non-emission — the exact opposite of the truth.** Calibrate a probe on a run that
+is known to work before trusting it on one that does not.
+
+### Where the CoW lint stands on this
+
+`scripts/check/cow_alias_hotpath_baseline.txt` contains **zero** `50.mir` entries,
+so these sites are not flagged. That is not a gap in the lint: `cow_alias_hotpath`
+is a **performance** ratchet (PERF-COW-001/002 flag round trips that deep-copy),
+and the round-trip pattern used here is the *correct*, merely slow form. A **missing**
+write-back is a correctness defect the rule does not model. So "a known-bad pattern
+was left in a load-bearing path" is NOT supported — the pattern is the sanctioned
+one, and the bug is a write-back that does not survive on the self-compiled binary.
+
+### Secondary, and explicitly NOT settled
+
+`lower_type` sees **two** entries on Stage 2 (`disc=-1` and `disc=2375492728`)
+versus **one** live entry interpreted. So a dead `HirTypeKind` exists only on
+Stage 2 and only on a call the interpreter never makes. This does **not** settle
+"born dead vs killed in transit", and it does not confirm the unification
+hypothesis with the codec blocker — the function's own return type is live in both
+engines. Left open.
+
+## 2026-08-24 — LOCALISED to a ONE-STATEMENT window inside `end_function`
+
+Bracketing probes (`dab9def9b15`) on an admitted `--fresh-cache` Stage 2
+(`750 compiled, 0 cached`, sha256 `b96c4d1649dc21d686090ccb3cfc160a62546bf837b1b6c611be21fa00a0891f`),
+with the interpreted lane as a matched control on the same fixture:
+
+| point | interpreted | Stage 2 |
+|---|---|---|
+| after `lower_expr` | pending=3 | pending=3 |
+| post-impl (`lower_stmt` wrapper) | pending=3 | pending=3 |
+| post-restore (`self.builder = b_restore`) | pending=3 | pending=3 |
+| pre-`end_function` (`self.builder`) | pending=0 finalized=**3** | pending=0 finalized=**3** |
+| `MIRB end` — **inside** `end_function` | b0_insts=**3** locals=3 | b0_insts=**0** locals=3 |
+| returned function | instr_total=**3** | instr_total=**0** |
+
+**Every value agrees until control enters `end_function`.**
+
+### What this exonerates
+
+The write-back chain is **not** at fault. The `lower_stmt` wrapper's
+`self.builder = b_restore` persists, and `self.builder` still holds all three
+instructions immediately before the call. So the earlier suspicion that a
+`self.builder = b` assignment fails to survive is **refuted** — every one of them
+survives.
+
+### The remaining window
+
+Between `end_function`'s entry and its own `SIMPLE_MIRB_TRACE` print there is
+exactly **one** statement:
+
+```
+me end_function() -> MirFunction:
+    self.finalize_block()          # <-- the entire remaining window
+    ...
+    print "MIRB end ... b0_insts={first_insts} ..."
+```
+
+### Mechanism hypothesis — consistent with everything, NOT proven
+
+`finalize_block()` opens with:
+
+```
+if self.instructions.is_empty():
+    return
+...
+block.instructions = self.instructions
+```
+
+Pending **is** empty here (measured `pending=0`). If that guard fails to fire on
+the self-compiled binary, control falls through to
+`block.instructions = self.instructions` and **overwrites the already-finalized 3
+with the empty pending list**.
+
+Two independent observations match this and argue against the alternative (a lossy
+`var bldr3 = self.builder` copy): the **`blocks` count (1) survives** and
+**`locals` (3) survives**, in both engines. A lossy builder copy would be expected
+to damage those too; only the per-block instruction list is zeroed.
+
+This is the same family as the rest of the cluster — a value read wrongly on a
+self-compiled binary — but note it is a *predicate* (`is_empty()` on an empty
+collection), not an enum payload.
+
+### Not yet done
+
+The hypothesis is not proven: no probe has yet observed `is_empty()`'s answer or
+whether `finalize_block` takes its early return. That is the next measurement, and
+it is a one-line probe inside `finalize_block` — but it needs a Stage 2 build,
+because the interpreted lane does not reproduce the defect at all.
+
+**No fix is attempted here, and no workaround has been applied.** When a fix is
+made, per the standing instruction: if the root is a seed miscompile it should be
+fixed there; if a local restructure is used instead it must be recorded explicitly
+as a workaround for a live seed defect, with the seed defect filed separately, and
+it must not close this record.
+
+## 2026-08-24 — signature parameter projection workaround (does not close this record)
+
+A later Stage 3 run reached MIR lowering for the 26-function flat entry module,
+then emitted twelve identical diagnostics before its missing-return cascade:
+
+```
+E-MIR-TYPE-Unknown: unreachable HirTypeKind disc=-1: 0
+```
+
+The signature loop was the only parameter loop that read the enum-bearing field
+through a chained array projection (`fn_.params[pmi].type_`).  The later binding
+loop already materialized the `HirParam` first and retained its nested type.  The
+candidate change applies that same owner-local shape to CPU, Vulkan, and CUDA
+signature lowering.  This is deliberately a **workaround**, not proof of the self-host
+codegen/runtime root cause and not grounds to close this record.  The next bounded
+Stage 3 run must show that all twelve `disc=-1` diagnostics disappear, check
+whether the missing-return cascade disappears, and compare peak RSS because the
+local may introduce one additional value-semantic `HirParam` copy per parameter.

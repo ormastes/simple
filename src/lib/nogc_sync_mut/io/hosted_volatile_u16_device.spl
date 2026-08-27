@@ -1,0 +1,153 @@
+# Canonical pure-Simple owner for hosted-interpreter volatile u16 devices.
+#
+# Native MMIO keeps the unchanged rt_volatile_* ABI. The tree-walk
+# interpreter must never dereference an arbitrary process address, so a
+# production caller explicitly admits this bounded device and registers each
+# address before std.io.volatile_ops may select its u16 fallback.
+#
+# Ownership: the private singleton below owns all mutable state. Admission
+# stores a private capability in the runtime's canonical TLS facility. Every
+# state transition reads that slot again, so a copied/guessed public scalar
+# cannot impersonate the creator thread. No address array or mutable slot
+# crosses that execution-domain boundary.
+
+use std.nogc_sync_mut.runtime.thread_local.{
+    rt_thread_local_new, rt_thread_local_get, rt_thread_local_set
+}
+
+pub val HOSTED_VOLATILE_U16_CAPACITY: i64 = 64
+
+pub struct HostedVolatileU16DeviceSnapshot:
+    admitted: bool
+    current_thread_owned: bool
+    generation: i64
+    live_addresses: i64
+    capacity: i64
+
+class HostedVolatileU16Device:
+    var admitted: bool
+    var tls_handle: i64
+    var capability: i64
+    var generation: i64
+    var addresses: [i64]
+    var values: [i64]
+
+var _hosted_volatile_u16_device = HostedVolatileU16Device(
+    admitted: false,
+    tls_handle: 0,
+    capability: 0,
+    generation: 0,
+    addresses: [],
+    values: []
+)
+
+fn _hosted_volatile_u16_current_thread_owned() -> bool:
+    if not _hosted_volatile_u16_device.admitted:
+        return false
+    rt_thread_local_get(_hosted_volatile_u16_device.tls_handle) == _hosted_volatile_u16_device.capability
+
+fn _hosted_volatile_u16_normalize(value: i64) -> i64:
+    value & 65535
+
+pub fn hosted_volatile_u16_owner() -> HostedVolatileU16DeviceSnapshot:
+    HostedVolatileU16DeviceSnapshot(
+        admitted: _hosted_volatile_u16_device.admitted,
+        current_thread_owned: _hosted_volatile_u16_current_thread_owned(),
+        generation: _hosted_volatile_u16_device.generation,
+        live_addresses: _hosted_volatile_u16_device.addresses.len(),
+        capacity: HOSTED_VOLATILE_U16_CAPACITY
+    )
+
+pub fn hosted_volatile_u16_current_owner_admitted() -> bool:
+    _hosted_volatile_u16_current_thread_owned()
+
+pub fn hosted_volatile_u16_admit() -> bool:
+    if _hosted_volatile_u16_device.admitted:
+        return false
+    val tls_handle = rt_thread_local_new()
+    # The handle never leaves this private owner. The distinct non-zero value
+    # lets an invalid/unset TLS read fail closed even on runtimes that use 0
+    # rather than nil for an empty slot.
+    val capability = tls_handle + 1
+    rt_thread_local_set(tls_handle, capability)
+    _hosted_volatile_u16_device.tls_handle = tls_handle
+    _hosted_volatile_u16_device.capability = capability
+    _hosted_volatile_u16_device.addresses = []
+    _hosted_volatile_u16_device.values = []
+    _hosted_volatile_u16_device.generation = 1
+    _hosted_volatile_u16_device.admitted = true
+    true
+
+pub fn hosted_volatile_u16_reset() -> bool:
+    if not _hosted_volatile_u16_current_thread_owned():
+        return false
+    _hosted_volatile_u16_device.addresses = []
+    _hosted_volatile_u16_device.values = []
+    _hosted_volatile_u16_device.generation = _hosted_volatile_u16_device.generation + 1
+    true
+
+pub fn hosted_volatile_u16_register(addr: i64, initial_value: i64) -> bool:
+    if not _hosted_volatile_u16_current_thread_owned():
+        return false
+    if addr <= 0:
+        return false
+    var i = 0
+    while i < _hosted_volatile_u16_device.addresses.len():
+        if _hosted_volatile_u16_device.addresses[i] == addr:
+            return false
+        i = i + 1
+    if _hosted_volatile_u16_device.addresses.len() >= HOSTED_VOLATILE_U16_CAPACITY:
+        return false
+    _hosted_volatile_u16_device.addresses.push(addr)
+    _hosted_volatile_u16_device.values.push(_hosted_volatile_u16_normalize(initial_value))
+    _hosted_volatile_u16_device.generation = _hosted_volatile_u16_device.generation + 1
+    true
+
+pub fn hosted_volatile_u16_unregister(addr: i64) -> bool:
+    if not _hosted_volatile_u16_current_thread_owned():
+        return false
+    var found = false
+    var next_addresses: [i64] = []
+    var next_values: [i64] = []
+    var i = 0
+    while i < _hosted_volatile_u16_device.addresses.len():
+        if _hosted_volatile_u16_device.addresses[i] == addr:
+            found = true
+        else:
+            # Retained entries stay paired and ordered across compaction.
+            next_addresses.push(_hosted_volatile_u16_device.addresses[i])
+            next_values.push(_hosted_volatile_u16_device.values[i])
+        i = i + 1
+    if not found:
+        return false
+    _hosted_volatile_u16_device.addresses = next_addresses
+    _hosted_volatile_u16_device.values = next_values
+    _hosted_volatile_u16_device.generation = _hosted_volatile_u16_device.generation + 1
+    true
+
+pub fn hosted_volatile_u16_try_read(addr: i64) -> i64:
+    if not _hosted_volatile_u16_current_thread_owned():
+        return -1
+    var i = 0
+    while i < _hosted_volatile_u16_device.addresses.len():
+        if _hosted_volatile_u16_device.addresses[i] == addr:
+            return _hosted_volatile_u16_device.values[i]
+        i = i + 1
+    -1
+
+pub fn hosted_volatile_u16_read(addr: i64) -> i64:
+    # -1 is outside the u16 result domain and is the ABI-preserving rejection
+    # sentinel. No raw load occurs for an unowned thread or unknown address.
+    hosted_volatile_u16_try_read(addr)
+
+pub fn hosted_volatile_u16_write(addr: i64, value: i64) -> bool:
+    if not _hosted_volatile_u16_current_thread_owned():
+        return false
+    var i = 0
+    while i < _hosted_volatile_u16_device.addresses.len():
+        if _hosted_volatile_u16_device.addresses[i] == addr:
+            _hosted_volatile_u16_device.values[i] = _hosted_volatile_u16_normalize(value)
+            _hosted_volatile_u16_device.generation = _hosted_volatile_u16_device.generation + 1
+            return true
+        i = i + 1
+    false

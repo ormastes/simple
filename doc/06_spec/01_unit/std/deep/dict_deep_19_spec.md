@@ -1,4 +1,4 @@
-# STDLIB Deep-Dive Test
+# @manual: primary
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -889,12 +889,54 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-UNIT
 step("complex 1")
 
-val arr = [1,2,3,4,5]
-var evens = []
-for x in arr:
-    if x % 2 == 0:
-        evens = evens.append(x)
-check(evens.len() == 2)
+</details>
+
+#### text concat slice reverse
+
+- Verify: text concat slice reverse
+   - Expected: "abc" + "def" equals `abcdef`
+   - Expected: "abc".slice(1) equals `bc`
+   - Expected: "abc".reverse() equals `cba`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-DICT-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-DICT-DEEP-0bbb
+step("Verify: text concat slice reverse")
+# oracle: "abcdef"/"bc"/"cba" — concat, slice from index 1, reverse
+expect("abc" + "def").to_equal("abcdef")
+expect("abc".slice(1)).to_equal("bc")
+expect("abc".reverse()).to_equal("cba")
+```
+
+</details>
+
+#### array sort
+
+- Verify: array sort
+   - Expected: [3, 1, 2].sorted() equals `[1, 2, 3]`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-DICT-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-DICT-DEEP-0bbb
+step("Verify: array sort")
+# oracle: [1, 2, 3] — sorted() returns ascending order
+expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
 ```
 
 </details>

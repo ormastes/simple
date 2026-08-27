@@ -8,14 +8,6 @@ QEMU_TIMEOUT="${X86_64_WM_QEMU_READINESS_TIMEOUT:-3}"
 BOOT_WAIT="${X86_64_WM_QEMU_BOOT_WAIT:-60}"
 OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
 OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
-# macOS fallback: homebrew qemu ships edk2 firmware images (same fallback as
-# check-simpleos-wm-fullscreen-evidence.shs).
-if [ ! -f "$OVMF_CODE" ] && [ -f /opt/homebrew/share/qemu/edk2-x86_64-code.fd ]; then
-    OVMF_CODE=/opt/homebrew/share/qemu/edk2-x86_64-code.fd
-fi
-if [ ! -f "$OVMF_VARS_SRC" ] && [ -f /opt/homebrew/share/qemu/edk2-i386-vars.fd ]; then
-    OVMF_VARS_SRC=/opt/homebrew/share/qemu/edk2-i386-vars.fd
-fi
 # Earliest reliable serial marker emitted by gui_entry_desktop.spl's own entry point
 # (the very first statement of fn spl_start()) — see report_gap below for why
 # this one was picked over the generic "[boot] memory init OK" marker other
@@ -23,21 +15,18 @@ fi
 BOOT_MARKER="\[desktop-gui\] spl_start"
 
 ENTRY="${ROOT_DIR}/examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl"
-# Dedicated x86_64 WM QEMU guide (2026-08-04), the sibling of arm64's
-# simpleos_arm64_wm_qemu.md. It owns the OVMF/GRUB/multiboot board-runnable
-# boot path, the serial receipt markers, the macOS tool discovery ladders, and
-# this lane's troubleshooting; simpleos_dev_guide.md 8.6/8.7 now cross-links to
-# it rather than standing in for it.
-GUIDE="${ROOT_DIR}/doc/07_guide/platform/simpleos/simpleos_x86_64_wm_qemu.md"
-guide_gap="false"
+# No dedicated "simpleos_x86_64_wm_qemu.md" guide exists (unlike arm64's
+# simpleos_arm64_wm_qemu.md). The closest available doc is the dev guide's
+# Entry Points (8.6) / QEMU Configuration (8.7) sections for the x86_64 WM
+# target — see guide_gap below.
+GUIDE="${ROOT_DIR}/doc/07_guide/platform/simpleos/simpleos_dev_guide.md"
+guide_gap="true"
 
 status="ready"
 qemu_path=""
 machine_q35="false"
 vga_std="false"
 dry_run_parse="false"
-boot_verified="false"
-boot_skipped_reason=""
 reason=""
 host_os="$(uname -s 2>/dev/null || echo unknown)"
 host_machine="$(uname -m 2>/dev/null || echo unknown)"
@@ -51,37 +40,19 @@ elif [ "$host_os" = "Linux" ] && [ "$host_machine" = "x86_64" ] && [ -e /dev/kvm
     cpu="host"
 fi
 
-# grub-mkstandalone: bare name on Linux; homebrew's x86_64-elf-grub formula
-# prefixes it on macOS (and keeps it keg-only, so it may be off PATH). Same
-# discovery ladder as check-simpleos-wm-fullscreen-evidence.shs.
-GRUB_MKSTANDALONE="${GRUB_MKSTANDALONE:-}"
-if [ -z "$GRUB_MKSTANDALONE" ]; then
-    if command -v grub-mkstandalone >/dev/null 2>&1; then
-        GRUB_MKSTANDALONE=grub-mkstandalone
-    elif command -v x86_64-elf-grub-mkstandalone >/dev/null 2>&1; then
-        GRUB_MKSTANDALONE=x86_64-elf-grub-mkstandalone
-    else
-        for grub_candidate in \
-            /opt/homebrew/opt/x86_64-elf-grub/bin/x86_64-elf-grub-mkstandalone \
-            /usr/local/opt/x86_64-elf-grub/bin/x86_64-elf-grub-mkstandalone; do
-            if [ -x "$grub_candidate" ]; then
-                GRUB_MKSTANDALONE=$grub_candidate
-                break
-            fi
-        done
-    fi
-fi
-
 if [ ! -f "$ENTRY" ]; then
     status="not-ready"
     reason="missing x86_64 WM entry"
+elif [ ! -f "$PRIM" ]; then
+    status="not-ready"
+    reason="missing x86_64 WM render-primitives module"
 elif [ ! -f "$GUIDE" ]; then
     status="not-ready"
     reason="missing x86_64 WM QEMU guide"
 elif ! qemu_path="$(command -v "$QEMU_BIN" 2>/dev/null)"; then
     status="not-ready"
     reason="qemu-system-x86_64 not found"
-elif [ -z "$GRUB_MKSTANDALONE" ]; then
+elif ! command -v grub-mkstandalone >/dev/null 2>&1; then
     status="not-ready"
     reason="grub-mkstandalone not found"
 else
@@ -101,7 +72,7 @@ else
         set +e
         dry_out="$(timeout "${QEMU_TIMEOUT}s" "$QEMU_BIN" \
             -no-user-config -monitor none -net none \
-            -machine q35 -cpu "$cpu" -accel "$accelerator" -m 2G \
+            -machine q35 -cpu "$cpu" -accel "$accelerator" -m 512M \
             -display none -serial none \
             -vga std -S 2>&1)"
         dry_code=$?
@@ -132,15 +103,8 @@ if [ "$status" = "ready" ]; then
     if [ -z "$KERNEL_ELF" ] || [ ! -f "$KERNEL_ELF" ]; then
         status="skip"
         boot_skipped_reason="SIMPLEOS_KERNEL_ELF not set or file missing (arg-parse pre-check passed, but no kernel was booted)"
-    elif [ ! -f "$OVMF_CODE" ] || [ ! -f "$OVMF_VARS_SRC" ]; then
-        status="not-ready"
-        reason="OVMF firmware not found ($OVMF_CODE / $OVMF_VARS_SRC)"
     else
         SERIAL_LOG="${ROOT_DIR}/build/os/check_simpleos_x86_64_wm_qemu_readiness.serial.log"
-        UEFI_BUILD="${ROOT_DIR}/build/os/wm_qemu_readiness_uefi"
-        ESP="$UEFI_BUILD/esp"
-        EFIAPP="$ESP/EFI/BOOT/BOOTX64.EFI"
-        OVMF_VARS="$UEFI_BUILD/OVMF_VARS_4M.fd"
         mkdir -p "$(dirname "$SERIAL_LOG")"
         rm -f "$SERIAL_LOG"
         rm -rf "$UEFI_BUILD"
@@ -166,7 +130,7 @@ menuentry "SimpleOS WM qemu-readiness (UEFI/multiboot)" {
 }
 CFG
         set +e
-        "$GRUB_MKSTANDALONE" \
+        grub-mkstandalone \
             --format=x86_64-efi \
             --output="$EFIAPP" \
             --modules="multiboot normal echo part_gpt fat efi_gop efi_uga all_video gfxterm video_bochs video_fb" \
@@ -183,12 +147,9 @@ CFG
         # BOARD-GATE evidence); the aqua/glyph evidence gate boots the same
         # ELF green at 2G. Matches the WM target's real QEMU config.
         "$QEMU_BIN" -no-user-config -monitor none -nographic -no-reboot \
-            -machine q35 -cpu "$cpu" -accel "$accelerator" -m 2G \
-            -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
-            -drive "if=pflash,format=raw,file=$OVMF_VARS" \
-            -drive "file=fat:rw:$ESP,format=raw,id=esp,if=none" \
-            -device virtio-blk-pci,drive=esp,bootindex=0 \
-            -serial "file:$SERIAL_LOG" \
+            -machine q35 -cpu "$cpu" -accel "$accelerator" -m 512M \
+            -kernel "$KERNEL_ELF" -serial "file:$SERIAL_LOG" \
+            -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
             -vga std &
         QEMU_PID=$!
 
@@ -221,15 +182,7 @@ CFG
             tail -60 "$SERIAL_LOG" 2>/dev/null || true
             echo "======================="
         fi
-        fi
     fi
-fi
-
-grub_efi_ran="false"
-kernel_start_reached="false"
-if [ -n "${SERIAL_LOG:-}" ] && [ -f "$SERIAL_LOG" ]; then
-    grep -qa "\[grub-uefi\] multiboot loading" "$SERIAL_LOG" 2>/dev/null && grub_efi_ran="true"
-    grep -qa "\[BOOT64\] call _start" "$SERIAL_LOG" 2>/dev/null && kernel_start_reached="true"
 fi
 
 echo "x86_64_wm_qemu_readiness: $status"
@@ -239,8 +192,6 @@ echo "machine_q35: $machine_q35"
 echo "vga_std: $vga_std"
 echo "dry_run_parse: $dry_run_parse"
 echo "boot_verified: $boot_verified"
-echo "grub_efi_ran: $grub_efi_ran"
-echo "kernel_start_reached: $kernel_start_reached"
 if [ -n "$boot_skipped_reason" ]; then
     echo "boot_verification_skipped: $boot_skipped_reason"
 fi
@@ -249,13 +200,13 @@ echo "host_machine: $host_machine"
 echo "accelerator: $accelerator"
 echo "cpu: $cpu"
 echo "entry: examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl"
-echo "guide: doc/07_guide/platform/simpleos/simpleos_x86_64_wm_qemu.md"
-echo "guide_gap: $guide_gap (dedicated simpleos_x86_64_wm_qemu.md exists, matching arm64's simpleos_arm64_wm_qemu.md; simpleos_dev_guide.md section 8.6/8.7 cross-links to it)"
+echo "guide: doc/07_guide/platform/simpleos/simpleos_dev_guide.md"
+echo "guide_gap: $guide_gap (no dedicated simpleos_x86_64_wm_qemu.md; arm64 has simpleos_arm64_wm_qemu.md, x86_64 does not -- using simpleos_dev_guide.md section 8.6/8.7 as the closest available doc)"
 if [ -n "$reason" ]; then
     echo "reason: $reason"
 fi
 
-if [ "$status" = "not-ready" ]; then
-    exit 1
+if [ "$status" = "ready" ]; then
+    exit 0
 fi
-exit 0
+exit 1

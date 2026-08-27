@@ -98,20 +98,15 @@ fn pattern_subsumes(broader: PatternRepr, narrower: PatternRepr) -> bool:
         case (Tuple(as_), Tuple(bs)):
             if as_.len() != bs.len(): false
             else:
+                var all_match = true
                 for i in 0..as_.len():
                     if not pattern_subsumes(as_[i], bs[i]):
-                        return false
-                true
+                        all_match = false
+                all_match
         case (Or(pats), _):
-            for pat in pats:
-                if pattern_subsumes(pat, narrower):
-                    return true
-            false
+            pats.filter(pattern_subsumes(_, narrower)).?
         case (_, Or(pats)):
-            for pat in pats:
-                if not pattern_subsumes(broader, pat):
-                    return false
-            true
+            pats.filter(not pattern_subsumes(broader, _)).len() == 0
         case (Range(s1, e1), Range(s2, e2)):
             s1 <= s2 and e1 >= e2
         case (Range(s, e), LitInt(v)):
@@ -134,25 +129,6 @@ impl PatternAnalysis:
         var missing: [text] = []
         var unreachable: [i64] = []
         var duplicates: [(i64, i64)] = []
-        var has_wildcard = false
-        var covered_enum_variants: {text: bool} = {}
-        var has_true = false
-        var has_false = false
-
-        # Classify arms once.  The former exhaustiveness checks filtered the
-        # full arm list once per enum variant (and twice more for bool), making
-        # large enum matches O(variants * arms) and allocating filter results.
-        for arm in arms:
-            match arm:
-                case Wildcard: has_wildcard = true
-                case Identifier(_): has_wildcard = true
-                case Enum(name, _): covered_enum_variants[name] = true
-                case LitBool(value):
-                    if value:
-                        has_true = true
-                    else:
-                        has_false = true
-                case _: pass
 
         # Check for unreachable/duplicate patterns
         for i in 0..arms.len():
@@ -163,16 +139,25 @@ impl PatternAnalysis:
                         duplicates = duplicates.push((j, i))
 
         # Check exhaustiveness
+        val has_wildcard = arms.filter(is_wildcard(_)).?
+
         if not has_wildcard:
             # Check enum variants
             if self.enum_variants.has(scrutinee_type):
                 val variants = self.enum_variants[scrutinee_type]
                 for v in variants:
-                    if not covered_enum_variants.contains_key(v):
+                    val covered = arms.filter(
+                        match _:
+                            case Enum(n, _): n == v
+                            case _: false
+                    ).?
+                    if not covered:
                         missing = missing.push(v)
 
             # Check bool exhaustiveness
             if scrutinee_type == "bool":
+                val has_true = arms.filter(match _: case LitBool(v): v; case _: false).?
+                val has_false = arms.filter(match _: case LitBool(v): not v; case _: false).?
                 if not has_true: missing = missing.push("true")
                 if not has_false: missing = missing.push("false")
 

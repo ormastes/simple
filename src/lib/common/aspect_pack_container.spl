@@ -1,0 +1,701 @@
+# Canonical aspect-pack binary container owner (design §11.2/§12).
+#
+# Owns pack wire layout, independent module/cluster frames, directory parsing,
+# and bounded decompression. Catalog routing and live lifecycle state are
+# deliberately owned by sibling modules.
+
+use std.common.string_core.{text_to_bytes, bytes_to_text}
+use std.common.compress.gzip.{gzip_crc32}
+use std.common.compress.deflate.{deflate_compress, deflate_decompress}
+
+val APK_MAGIC_V1: text = "SMFAPK1\0"
+val APK_SCHEMA_V1: i64 = 1
+val APK_FLAG_ASPECT_PACK: i64 = 1
+val APK_HEADER_SIZE_V1: i64 = 32
+val APK_MAX_MODULE_UNCOMPRESSED_SIZE: i64 = 268435456
+
+val APK_CHUNK_CODE: i64 = 0
+val APK_CHUNK_DEBUG: i64 = 1
+val APK_CHUNK_FLAG_NONE: i64 = 0
+val APK_CHUNK_FLAG_STORED: i64 = 1
+
+struct ApkModuleSourceV1:
+    module_id: text
+    aspect_id: text
+    payload: [u8]
+
+# design §11.2 ModuleEntry: the ABI/variant identity carried uncompressed in
+# the pack directory, so compatibility is decided WITHOUT decompressing.
+struct ApkModuleSourceV2:
+    module_id: text
+    aspect_id: text
+    module_abi_hash: text
+    required_core_public_abi_hash: text
+    variant_fingerprint: text
+    payload: [u8]
+
+# design §12.2 co-load clusters: modules that share a non-empty `cluster_id`
+# are packed into ONE deflate frame, in declaration order. An empty cluster_id
+# (the default, and what V1/V2 sources produce) means "own independent frame",
+# which is the design's default policy.
+struct ApkModuleSourceV3:
+    module_id: text
+    aspect_id: text
+    module_abi_hash: text
+    required_core_public_abi_hash: text
+    # design §11.2 ModuleEntry.required_core_layout_hash — "zero when
+    # public-only", i.e. an empty string here means the module binds against
+    # the core's PUBLIC surface only and no layout compatibility is claimed.
+    required_core_layout_hash: text
+    variant_fingerprint: text
+    cluster_id: text
+    # design §11.2 ChunkEntry.kind / .flags / .alignment. These describe the
+    # FRAME the module lands in; every member of one co-load cluster must
+    # declare the same three, otherwise the cluster is contradictory and the
+    # build fails closed.
+    chunk_kind: i64
+    chunk_flags: i64
+    alignment: i64
+    payload: [u8]
+
+# design §11.2 ChunkEntry as READ from the uncompressed pack directory. Every
+# field here is recorded by the builder and consulted by the loader; nothing
+# is carried for decoration.
+struct ApkChunkEntryV1:
+    ok: bool
+    found: bool
+    chunk_id: i64
+    kind: i64
+    flags: i64
+    file_offset: i64
+    compressed_size: i64
+    uncompressed_size: i64
+    alignment: i64
+    content_crc32: i64
+    cluster_id: text
+
+# design §12.2: the result of inflating ONE co-load cluster frame. `blob` is
+# the cluster's whole uncompressed content; each member is the slice
+# [member_offs[i], member_offs[i] + member_lens[i]). `frames_inflated` is 1 by
+# construction — that is the point of a cluster.
+struct ApkClusterLoadV1:
+    ok: bool
+    found: bool
+    error_code: text
+    error_message: text
+    cluster_id: text
+    module_ids: [text]
+    member_offs: [i64]
+    member_lens: [i64]
+    blob: [u8]
+    member_count: i64
+    frames_inflated: i64
+    bytes_decompressed: i64
+
+struct ApkBuildResultV1:
+    ok: bool
+    error_code: text
+    error_message: text
+    bytes: [u8]
+    module_count: i64
+
+struct ApkHandleV1:
+    ok: bool
+    error_code: text
+    error_message: text
+    schema_version: i64
+    flags: i64
+    module_count: i64
+    dir_size: i64
+    total_size: i64
+
+struct ApkModuleLoadV1:
+    ok: bool
+    found: bool
+    error_code: text
+    error_message: text
+    module_id: text
+    aspect_id: text
+    module_abi_hash: text
+    required_core_public_abi_hash: text
+    required_core_layout_hash: text
+    variant_fingerprint: text
+    payload: [u8]
+    modules_decompressed: i64
+    bytes_decompressed: i64
+    entries_examined: i64
+
+fn _apk_push_u16(out: [u8], value: i64):
+    out.push((value & 255) as u8)
+    out.push(((value >> 8) & 255) as u8)
+
+fn _apk_push_u32(out: [u8], value: i64):
+    var i = 0
+    while i < 4:
+        out.push(((value >> (i * 8)) & 255) as u8)
+        i = i + 1
+
+fn _apk_push_u64(out: [u8], value: i64):
+    var i = 0
+    while i < 8:
+        out.push(((value >> (i * 8)) & 255) as u8)
+        i = i + 1
+
+fn _apk_push_bytes(out: [u8], src: [u8]):
+    var i = 0
+    while i < src.len():
+        out.push(src[i])
+        i = i + 1
+
+fn _apk_push_text(out: [u8], value: text):
+    val b = text_to_bytes(value)
+    _apk_push_u32(out, b.len())
+    _apk_push_bytes(out, b)
+
+fn _apk_read_u16(data: [u8], offset: i64) -> i64:
+    (data[offset] as i64) | ((data[offset + 1] as i64) << 8)
+
+fn _apk_read_u32(data: [u8], offset: i64) -> i64:
+    var out = 0
+    var i = 0
+    while i < 4:
+        out = out | ((data[offset + i] as i64) << (i * 8))
+        i = i + 1
+    out
+
+fn _apk_read_u64(data: [u8], offset: i64) -> i64:
+    var out = 0
+    var i = 0
+    while i < 8:
+        out = out | ((data[offset + i] as i64) << (i * 8))
+        i = i + 1
+    out
+
+fn _apk_read_text(data: [u8], offset: i64, length: i64) -> text:
+    var raw: [u8] = []
+    var i = 0
+    while i < length:
+        raw.push(data[offset + i])
+        i = i + 1
+    bytes_to_text(raw)
+
+fn _apk_crc(data: [u8]) -> i64:
+    (gzip_crc32(data) as i64) & 4294967295
+
+# ---------------------------------------------------------------- pack build
+
+fn apk_build_pack_v1(modules: [ApkModuleSourceV1]) -> ApkBuildResultV1:
+    """Build a pack from modules that declare no ABI identity (design §11.2
+    fields left empty, i.e. compatibility is not checked for them)."""
+    var upgraded: [ApkModuleSourceV2] = []
+    var i = 0
+    while i < modules.len():
+        upgraded.push(ApkModuleSourceV2(module_id: modules[i].module_id,
+            aspect_id: modules[i].aspect_id, module_abi_hash: "",
+            required_core_public_abi_hash: "", variant_fingerprint: "",
+            payload: modules[i].payload))
+        i = i + 1
+    apk_build_pack_v2(upgraded)
+
+fn apk_build_pack_v2(modules: [ApkModuleSourceV2]) -> ApkBuildResultV1:
+    """Build a pack in which every module is its OWN independent, deflated,
+    unaligned code frame (design §12.2 default policy) — no co-load cluster,
+    no layout-hash claim."""
+    var upgraded: [ApkModuleSourceV3] = []
+    var i = 0
+    while i < modules.len():
+        upgraded.push(ApkModuleSourceV3(module_id: modules[i].module_id,
+            aspect_id: modules[i].aspect_id, module_abi_hash: modules[i].module_abi_hash,
+            required_core_public_abi_hash: modules[i].required_core_public_abi_hash,
+            required_core_layout_hash: "",
+            variant_fingerprint: modules[i].variant_fingerprint,
+            cluster_id: "", chunk_kind: APK_CHUNK_CODE,
+            chunk_flags: APK_CHUNK_FLAG_NONE, alignment: 1,
+            payload: modules[i].payload))
+        i = i + 1
+    apk_build_pack_v3(upgraded)
+
+fn apk_build_pack_v3(modules: [ApkModuleSourceV3]) -> ApkBuildResultV1:
+    """Build a kind=aspect_pack SMF container.
+
+    design §12.2 compression policy, in full for the parts this container can
+    honour: the directory is uncompressed; each module payload becomes an
+    INDEPENDENT deflate frame; modules sharing a non-empty `cluster_id` are
+    CO-LOADED into one shared frame; a frame flagged STORED is written
+    verbatim (no deflate) and may be aligned, which is how §12.2's
+    page-aligned hot/startup chunks are expressed; a frame whose kind is
+    APK_CHUNK_DEBUG is the design's separately-split cold chunk.
+
+    NOT implemented, and refused rather than faked: a pack-level Zstandard
+    dictionary. The in-tree zstd support is a DECODER only
+    (src/lib/nogc_sync_mut/compression/zstd/) and it explicitly rejects
+    dictionary frames, so there is no way to produce one honestly."""
+    var empty: [u8] = []
+    val n = modules.len()
+    if n == 0:
+        return ApkBuildResultV1(ok: false, error_code: "APK_EMPTY",
+            error_message: "an aspect pack must hold at least one module", bytes: empty, module_count: 0)
+    var i = 0
+    while i < n:
+        if modules[i].alignment < 1 or (modules[i].alignment & (modules[i].alignment - 1)) != 0:
+            return ApkBuildResultV1(ok: false, error_code: "APK_BAD_ALIGNMENT",
+                error_message: "module {modules[i].module_id} declares alignment {modules[i].alignment}; alignment must be a positive power of two", bytes: empty, module_count: 0)
+        if modules[i].chunk_kind != APK_CHUNK_CODE and modules[i].chunk_kind != APK_CHUNK_DEBUG:
+            return ApkBuildResultV1(ok: false, error_code: "APK_BAD_CHUNK_KIND",
+                error_message: "module {modules[i].module_id} declares an unknown chunk kind", bytes: empty, module_count: 0)
+        if modules[i].chunk_flags != APK_CHUNK_FLAG_NONE and modules[i].chunk_flags != APK_CHUNK_FLAG_STORED:
+            return ApkBuildResultV1(ok: false, error_code: "APK_BAD_CHUNK_FLAGS",
+                error_message: "module {modules[i].module_id} declares unknown chunk flags", bytes: empty, module_count: 0)
+        var j = i + 1
+        while j < n:
+            if modules[i].module_id == modules[j].module_id:
+                return ApkBuildResultV1(ok: false, error_code: "APK_DUP_MODULE",
+                    error_message: "duplicate module id: {modules[i].module_id}", bytes: empty, module_count: 0)
+            j = j + 1
+        i = i + 1
+
+    # design §12.2: assign each module to a frame. An empty cluster_id always
+    # gets a frame of its own; a non-empty one joins the frame already opened
+    # for that cluster id. Every member of a cluster must agree on the frame's
+    # kind/flags/alignment — a cluster that contradicts itself is a build
+    # error, never a silently-picked winner.
+    var mod_frame: [i64] = []
+    var mod_moff: [i64] = []
+    var f_cluster: [text] = []
+    var f_size: [i64] = []
+    var f_kind: [i64] = []
+    var f_flags: [i64] = []
+    var f_align: [i64] = []
+    i = 0
+    while i < n:
+        var fi = -1
+        if modules[i].cluster_id != "":
+            var k = 0
+            while k < f_cluster.len():
+                if f_cluster[k] == modules[i].cluster_id:
+                    fi = k
+                k = k + 1
+        if fi < 0:
+            fi = f_cluster.len()
+            f_cluster.push(modules[i].cluster_id)
+            f_size.push(0)
+            f_kind.push(modules[i].chunk_kind)
+            f_flags.push(modules[i].chunk_flags)
+            f_align.push(modules[i].alignment)
+        if f_kind[fi] != modules[i].chunk_kind or f_flags[fi] != modules[i].chunk_flags or f_align[fi] != modules[i].alignment:
+            return ApkBuildResultV1(ok: false, error_code: "APK_CLUSTER_CHUNK_CONFLICT",
+                error_message: "co-load cluster {modules[i].cluster_id} is contradictory: module {modules[i].module_id} declares kind/flags/alignment {modules[i].chunk_kind}/{modules[i].chunk_flags}/{modules[i].alignment}, the cluster already declares {f_kind[fi]}/{f_flags[fi]}/{f_align[fi]}",
+                bytes: empty, module_count: 0)
+        mod_frame.push(fi)
+        mod_moff.push(f_size[fi])
+        f_size[fi] = f_size[fi] + modules[i].payload.len()
+        i = i + 1
+
+    # build every FRAME independently. A whole-pack stream remains forbidden
+    # (§12.3): there is no compressor call that spans two frames.
+    val fn_count = f_cluster.len()
+    var bodies: [u8] = []
+    var f_boff: [i64] = []
+    var f_blen: [i64] = []
+    var f_crc: [i64] = []
+    var fi2 = 0
+    while fi2 < fn_count:
+        var raw: [u8] = []
+        var m = 0
+        while m < n:
+            if mod_frame[m] == fi2:
+                _apk_push_bytes(raw, modules[m].payload)
+            m = m + 1
+        var body: [u8] = []
+        if (f_flags[fi2] & APK_CHUNK_FLAG_STORED) != 0:
+            body = raw
+        else:
+            body = deflate_compress(raw)
+            if body.len() == 0 and raw.len() > 0:
+                return ApkBuildResultV1(ok: false, error_code: "APK_COMPRESS_FAILED",
+                    error_message: "deflate failed for frame {fi2}", bytes: empty, module_count: 0)
+        f_boff.push(bodies.len())
+        f_blen.push(body.len())
+        f_crc.push(_apk_crc(body))
+        _apk_push_bytes(bodies, body)
+        fi2 = fi2 + 1
+
+    # directory pass 1 (placeholder offsets) only to learn the directory size
+    var dir: [u8] = []
+    i = 0
+    while i < n:
+        _apk_push_dir_entry(dir, modules[i], f_cluster[mod_frame[i]], 0,
+            f_blen[mod_frame[i]], f_size[mod_frame[i]], mod_moff[i], mod_frame[i],
+            f_kind[mod_frame[i]], f_flags[mod_frame[i]], f_align[mod_frame[i]], f_crc[mod_frame[i]])
+        i = i + 1
+    val dir_size = dir.len()
+    val data_base = APK_HEADER_SIZE_V1 + dir_size
+
+    # lay the frames out, honouring each frame's declared alignment (§12.2
+    # direct mapping): a frame with alignment A begins at an absolute file
+    # offset that is a multiple of A.
+    var frames: [u8] = []
+    var f_abs: [i64] = []
+    fi2 = 0
+    while fi2 < fn_count:
+        var abs_off = data_base + frames.len()
+        val al = f_align[fi2]
+        if al > 1:
+            while (abs_off % al) != 0:
+                frames.push(0 as u8)
+                abs_off = data_base + frames.len()
+        f_abs.push(abs_off)
+        var t = 0
+        while t < f_blen[fi2]:
+            frames.push(bodies[f_boff[fi2] + t])
+            t = t + 1
+        fi2 = fi2 + 1
+
+    var dir2: [u8] = []
+    i = 0
+    while i < n:
+        _apk_push_dir_entry(dir2, modules[i], f_cluster[mod_frame[i]], f_abs[mod_frame[i]],
+            f_blen[mod_frame[i]], f_size[mod_frame[i]], mod_moff[i], mod_frame[i],
+            f_kind[mod_frame[i]], f_flags[mod_frame[i]], f_align[mod_frame[i]], f_crc[mod_frame[i]])
+        i = i + 1
+    if dir2.len() != dir_size:
+        return ApkBuildResultV1(ok: false, error_code: "APK_DIR_UNSTABLE",
+            error_message: "directory size changed between layout passes", bytes: empty, module_count: 0)
+
+    val total = data_base + frames.len()
+    var out: [u8] = []
+    _apk_push_bytes(out, text_to_bytes(APK_MAGIC_V1))
+    _apk_push_u16(out, APK_SCHEMA_V1)
+    _apk_push_u16(out, APK_FLAG_ASPECT_PACK)
+    _apk_push_u32(out, n)
+    _apk_push_u64(out, dir_size)
+    _apk_push_u64(out, total)
+    _apk_push_bytes(out, dir2)
+    _apk_push_bytes(out, frames)
+    ApkBuildResultV1(ok: true, error_code: "", error_message: "", bytes: out, module_count: n)
+
+fn _apk_push_dir_entry(dir: [u8], m: ApkModuleSourceV3, cluster_id: text,
+        payload_off: i64, comp_size: i64, uncomp_size: i64, member_off: i64,
+        chunk_id: i64, kind: i64, flags: i64, alignment: i64, crc: i64):
+    """One uncompressed §11.2 directory entry: the ModuleEntry identity fields
+    followed by the ChunkEntry fields of the frame the module lives in."""
+    _apk_push_text(dir, m.module_id)
+    _apk_push_text(dir, m.aspect_id)
+    _apk_push_text(dir, m.module_abi_hash)
+    _apk_push_text(dir, m.required_core_public_abi_hash)
+    _apk_push_text(dir, m.required_core_layout_hash)
+    _apk_push_text(dir, m.variant_fingerprint)
+    _apk_push_text(dir, cluster_id)
+    _apk_push_u64(dir, payload_off)
+    _apk_push_u64(dir, comp_size)
+    _apk_push_u64(dir, uncomp_size)
+    _apk_push_u64(dir, member_off)
+    _apk_push_u64(dir, m.payload.len())
+    _apk_push_u64(dir, chunk_id)
+    _apk_push_u32(dir, kind)
+    _apk_push_u32(dir, flags)
+    _apk_push_u32(dir, alignment)
+    _apk_push_u32(dir, crc)
+
+# ---------------------------------------------------------------- pack open
+
+fn _apk_open_error(code: text, message: text) -> ApkHandleV1:
+    ApkHandleV1(ok: false, error_code: code, error_message: message,
+        schema_version: 0, flags: 0, module_count: 0, dir_size: 0, total_size: 0)
+
+fn apk_open_pack_v1(data: [u8]) -> ApkHandleV1:
+    """Validate the pack header + geometry. Bounded: reads only the 32-byte
+    header. Fail-closed: bad magic, wrong flag (an ordinary SMF must be
+    REJECTED as a pack, and vice versa), truncation are explicit errors."""
+    if data.len() < APK_HEADER_SIZE_V1:
+        return _apk_open_error("APK_TRUNCATED_HEADER", "pack shorter than the fixed header")
+    val magic = text_to_bytes(APK_MAGIC_V1)
+    var i = 0
+    while i < 8:
+        if data[i] != magic[i]:
+            return _apk_open_error("APK_BAD_MAGIC", "pack magic is not SMFAPK1")
+        i = i + 1
+    val schema = _apk_read_u16(data, 8)
+    if schema != APK_SCHEMA_V1:
+        return _apk_open_error("APK_BAD_VERSION", "unsupported aspect pack schema version")
+    val flags = _apk_read_u16(data, 10)
+    if (flags & APK_FLAG_ASPECT_PACK) == 0:
+        return _apk_open_error("APK_NOT_ASPECT_PACK", "SMF_FLAG_ASPECT_PACK is not set; refusing to treat an ordinary module as a pack")
+    val module_count = _apk_read_u32(data, 12)
+    val dir_size = _apk_read_u64(data, 16)
+    val total_size = _apk_read_u64(data, 24)
+    if module_count <= 0 or module_count > 1048576:
+        return _apk_open_error("APK_BAD_GEOMETRY", "unreasonable module_count")
+    if total_size != data.len():
+        return _apk_open_error("APK_TRUNCATED_PACK", "declared total_size does not match available bytes")
+    if APK_HEADER_SIZE_V1 + dir_size > data.len():
+        return _apk_open_error("APK_TRUNCATED_PACK", "directory extends past the end of the pack")
+    ApkHandleV1(ok: true, error_code: "", error_message: "",
+        schema_version: schema, flags: flags, module_count: module_count,
+        dir_size: dir_size, total_size: total_size)
+
+# ---------------------------------------------------------------- module load
+
+fn _apk_load_error(code: text, message: text, examined: i64) -> ApkModuleLoadV1:
+    var empty: [u8] = []
+    ApkModuleLoadV1(ok: false, found: false, error_code: code, error_message: message,
+        module_id: "", aspect_id: "", module_abi_hash: "",
+        required_core_public_abi_hash: "", required_core_layout_hash: "",
+        variant_fingerprint: "", payload: empty,
+        modules_decompressed: 0, bytes_decompressed: 0, entries_examined: examined)
+
+fn _apk_dir_next(data: [u8], off: i64, dir_end: i64) -> [i64]:
+    """Parse ONE uncompressed §11.2 directory entry at `off`. Returns an empty
+    array when the entry is structurally corrupt. Result layout:
+    [id_off,id_len, as_off,as_len, mabi_off,mabi_len, cabi_off,cabi_len,
+     lay_off,lay_len, vfp_off,vfp_len, cl_off,cl_len, fix_off, next_off].
+    The 64-byte fixed block at fix_off is: payload_off u64, comp_size u64,
+    uncomp_size u64 (whole FRAME), member_off u64, member_len u64,
+    chunk_id u64, kind u32, flags u32, alignment u32, frame crc32 u32 (64 B)."""
+    var bad: [i64] = []
+    var out: [i64] = []
+    var cur = off
+    var t = 0
+    while t < 7:
+        if cur + 4 > dir_end:
+            return bad
+        val ln = _apk_read_u32(data, cur)
+        if ln < 0 or cur + 4 + ln > dir_end:
+            return bad
+        out.push(cur + 4)
+        out.push(ln)
+        cur = cur + 4 + ln
+        t = t + 1
+    if cur + 64 > dir_end:
+        return bad
+    out.push(cur)
+    out.push(cur + 64)
+    out
+
+fn apk_load_module_v1(data: [u8], handle: ApkHandleV1, module_id: text) -> ApkModuleLoadV1:
+    """Load EXACTLY ONE module from the pack. Walks only the uncompressed
+    directory; touches only the selected module's frame. When the module
+    belongs to a co-load cluster (design §12.2) that frame is the cluster's
+    single shared frame and the module's bytes are the recorded slice of it —
+    still exactly one inflate, never the whole pack. When the frame is STORED
+    (§12.2 page-aligned hot/startup chunk) nothing is decompressed at all, and
+    `modules_decompressed` / `bytes_decompressed` stay at 0 to say so."""
+    var empty: [u8] = []
+    if not handle.ok:
+        return _apk_load_error("APK_BAD_HANDLE", "load on an unopened pack", 0)
+    val dir_end = APK_HEADER_SIZE_V1 + handle.dir_size
+    var off = APK_HEADER_SIZE_V1
+    var examined = 0
+    var slot = 0
+    while slot < handle.module_count:
+        val f = _apk_dir_next(data, off, dir_end)
+        if f.len() == 0:
+            return _apk_load_error("APK_DIR_CORRUPT", "directory entry escapes the directory", examined)
+        val mid = _apk_read_text(data, f[0], f[1])
+        examined = examined + 1
+        if mid == module_id:
+            val fix_off = f[14]
+            val payload_off = _apk_read_u64(data, fix_off)
+            val comp_size = _apk_read_u64(data, fix_off + 8)
+            val uncomp_size = _apk_read_u64(data, fix_off + 16)
+            val member_off = _apk_read_u64(data, fix_off + 24)
+            val member_len = _apk_read_u64(data, fix_off + 32)
+            val flags = _apk_read_u32(data, fix_off + 52)
+            val alignment = _apk_read_u32(data, fix_off + 56)
+            val want_crc = _apk_read_u32(data, fix_off + 60)
+            if payload_off < dir_end or payload_off + comp_size > data.len():
+                return _apk_load_error("APK_TRUNCATED_PACK", "module payload lies outside the pack data area", examined)
+            if alignment > 1 and (payload_off % alignment) != 0:
+                return _apk_load_error("APK_CHUNK_MISALIGNED", "chunk declares alignment {alignment} but starts at {payload_off}", examined)
+            if member_off < 0 or member_len < 0 or member_off + member_len > uncomp_size:
+                return _apk_load_error("APK_CLUSTER_CORRUPT", "module slice lies outside its frame", examined)
+            var comp: [u8] = []
+            var i = 0
+            while i < comp_size:
+                comp.push(data[payload_off + i])
+                i = i + 1
+            if _apk_crc(comp) != want_crc:
+                return _apk_load_error("APK_MODULE_CORRUPT", "frame failed its checksum", examined)
+            var frame: [u8] = []
+            var did_decompress = 0
+            var decompressed_bytes = 0
+            if (flags & APK_CHUNK_FLAG_STORED) != 0:
+                if comp_size != uncomp_size:
+                    return _apk_load_error("APK_MODULE_CORRUPT", "stored chunk declares a different uncompressed size", examined)
+                frame = comp
+            else:
+                if uncomp_size > APK_MAX_MODULE_UNCOMPRESSED_SIZE:
+                    return _apk_load_error("APK_MODULE_TOO_LARGE", "declared uncompressed size {uncomp_size} exceeds the {APK_MAX_MODULE_UNCOMPRESSED_SIZE}-byte decompression limit; refusing to inflate", examined)
+                frame = deflate_decompress(comp)
+                did_decompress = 1
+                decompressed_bytes = comp_size
+            if frame.len() != uncomp_size:
+                return _apk_load_error("APK_MODULE_CORRUPT", "frame size does not match directory", examined)
+            var payload: [u8] = []
+            var mm = 0
+            while mm < member_len:
+                payload.push(frame[member_off + mm])
+                mm = mm + 1
+            return ApkModuleLoadV1(ok: true, found: true, error_code: "", error_message: "",
+                module_id: mid, aspect_id: _apk_read_text(data, f[2], f[3]),
+                module_abi_hash: _apk_read_text(data, f[4], f[5]),
+                required_core_public_abi_hash: _apk_read_text(data, f[6], f[7]),
+                required_core_layout_hash: _apk_read_text(data, f[8], f[9]),
+                variant_fingerprint: _apk_read_text(data, f[10], f[11]),
+                payload: payload,
+                modules_decompressed: did_decompress, bytes_decompressed: decompressed_bytes,
+                entries_examined: examined)
+        off = f[15]
+        slot = slot + 1
+    ApkModuleLoadV1(ok: true, found: false, error_code: "", error_message: "",
+        module_id: "", aspect_id: "", module_abi_hash: "",
+        required_core_public_abi_hash: "", required_core_layout_hash: "",
+        variant_fingerprint: "", payload: empty,
+        modules_decompressed: 0, bytes_decompressed: 0, entries_examined: examined)
+
+fn apk_pack_chunk_of_v1(data: [u8], handle: ApkHandleV1, module_id: text) -> ApkChunkEntryV1:
+    """design §11.2 ChunkEntry, read from the UNCOMPRESSED directory: which
+    chunk a module lives in and every recorded property of that chunk. Opens
+    no frame and decompresses nothing."""
+    var miss = ApkChunkEntryV1(ok: true, found: false, chunk_id: -1, kind: 0, flags: 0,
+        file_offset: 0, compressed_size: 0, uncompressed_size: 0, alignment: 0,
+        content_crc32: 0, cluster_id: "")
+    if not handle.ok:
+        return ApkChunkEntryV1(ok: false, found: false, chunk_id: -1, kind: 0, flags: 0,
+            file_offset: 0, compressed_size: 0, uncompressed_size: 0, alignment: 0,
+            content_crc32: 0, cluster_id: "")
+    val dir_end = APK_HEADER_SIZE_V1 + handle.dir_size
+    var off = APK_HEADER_SIZE_V1
+    var slot = 0
+    while slot < handle.module_count:
+        val f = _apk_dir_next(data, off, dir_end)
+        if f.len() == 0:
+            return ApkChunkEntryV1(ok: false, found: false, chunk_id: -1, kind: 0, flags: 0,
+                file_offset: 0, compressed_size: 0, uncompressed_size: 0, alignment: 0,
+                content_crc32: 0, cluster_id: "")
+        if _apk_read_text(data, f[0], f[1]) == module_id:
+            val fx = f[14]
+            return ApkChunkEntryV1(ok: true, found: true,
+                chunk_id: _apk_read_u64(data, fx + 40),
+                kind: _apk_read_u32(data, fx + 48),
+                flags: _apk_read_u32(data, fx + 52),
+                file_offset: _apk_read_u64(data, fx),
+                compressed_size: _apk_read_u64(data, fx + 8),
+                uncompressed_size: _apk_read_u64(data, fx + 16),
+                alignment: _apk_read_u32(data, fx + 56),
+                content_crc32: _apk_read_u32(data, fx + 60),
+                cluster_id: _apk_read_text(data, f[12], f[13]))
+        off = f[15]
+        slot = slot + 1
+    miss
+
+fn apk_pack_cluster_of_v1(data: [u8], handle: ApkHandleV1, module_id: text) -> text:
+    """design §12.2: the co-load cluster id a module belongs to, read from the
+    UNCOMPRESSED directory. Empty means the module has its own frame (or is
+    absent) — nothing is decompressed either way."""
+    apk_pack_chunk_of_v1(data, handle, module_id).cluster_id
+
+fn _apk_cluster_error(code: text, message: text, cluster_id: text) -> ApkClusterLoadV1:
+    var empty: [u8] = []
+    var ids: [text] = []
+    var offs: [i64] = []
+    var lens: [i64] = []
+    ApkClusterLoadV1(ok: false, found: false, error_code: code, error_message: message,
+        cluster_id: cluster_id, module_ids: ids, member_offs: offs, member_lens: lens,
+        blob: empty, member_count: 0, frames_inflated: 0, bytes_decompressed: 0)
+
+fn apk_load_cluster_v1(data: [u8], handle: ApkHandleV1, cluster_id: text) -> ApkClusterLoadV1:
+    """design §12.2 co-load cluster: touch the cluster's ONE shared frame
+    exactly once and return every member of it. That is the whole point of
+    clustering — N small related modules cost one inflate, not N — while
+    §12.3 still holds, because the frame is the cluster's, never the pack's."""
+    var empty: [u8] = []
+    if not handle.ok:
+        return _apk_cluster_error("APK_BAD_HANDLE", "cluster load on an unopened pack", cluster_id)
+    if cluster_id == "":
+        return _apk_cluster_error("APK_CLUSTER_EMPTY_ID", "an empty cluster id names no cluster; unclustered modules have their own frames", cluster_id)
+    val dir_end = APK_HEADER_SIZE_V1 + handle.dir_size
+    var off = APK_HEADER_SIZE_V1
+    var slot = 0
+    var ids: [text] = []
+    var offs: [i64] = []
+    var lens: [i64] = []
+    var payload_off = -1
+    var comp_size = 0
+    var uncomp_size = 0
+    var want_crc = 0
+    var flags = 0
+    while slot < handle.module_count:
+        val f = _apk_dir_next(data, off, dir_end)
+        if f.len() == 0:
+            return _apk_cluster_error("APK_DIR_CORRUPT", "directory entry escapes the directory", cluster_id)
+        if _apk_read_text(data, f[12], f[13]) == cluster_id:
+            val fx = f[14]
+            val p = _apk_read_u64(data, fx)
+            if payload_off < 0:
+                payload_off = p
+                comp_size = _apk_read_u64(data, fx + 8)
+                uncomp_size = _apk_read_u64(data, fx + 16)
+                flags = _apk_read_u32(data, fx + 52)
+                want_crc = _apk_read_u32(data, fx + 60)
+            if p != payload_off:
+                return _apk_cluster_error("APK_CLUSTER_CORRUPT", "cluster {cluster_id} spans more than one frame", cluster_id)
+            ids.push(_apk_read_text(data, f[0], f[1]))
+            offs.push(_apk_read_u64(data, fx + 24))
+            lens.push(_apk_read_u64(data, fx + 32))
+        off = f[15]
+        slot = slot + 1
+    if payload_off < 0:
+        var nids: [text] = []
+        var noffs: [i64] = []
+        var nlens: [i64] = []
+        return ApkClusterLoadV1(ok: true, found: false, error_code: "", error_message: "",
+            cluster_id: cluster_id, module_ids: nids, member_offs: noffs, member_lens: nlens,
+            blob: empty, member_count: 0, frames_inflated: 0, bytes_decompressed: 0)
+    if payload_off < dir_end or payload_off + comp_size > data.len():
+        return _apk_cluster_error("APK_TRUNCATED_PACK", "cluster frame lies outside the pack data area", cluster_id)
+    var comp: [u8] = []
+    var i = 0
+    while i < comp_size:
+        comp.push(data[payload_off + i])
+        i = i + 1
+    if _apk_crc(comp) != want_crc:
+        return _apk_cluster_error("APK_MODULE_CORRUPT", "cluster frame failed its checksum", cluster_id)
+    var blob: [u8] = []
+    var inflated = 0
+    var decompressed_bytes = 0
+    if (flags & APK_CHUNK_FLAG_STORED) != 0:
+        blob = comp
+    else:
+        if uncomp_size > APK_MAX_MODULE_UNCOMPRESSED_SIZE:
+            return _apk_cluster_error("APK_MODULE_TOO_LARGE", "declared cluster size {uncomp_size} exceeds the decompression limit; refusing to inflate", cluster_id)
+        blob = deflate_decompress(comp)
+        inflated = 1
+        decompressed_bytes = comp_size
+    if blob.len() != uncomp_size:
+        return _apk_cluster_error("APK_MODULE_CORRUPT", "decompressed cluster size does not match directory", cluster_id)
+    var k = 0
+    while k < ids.len():
+        if offs[k] < 0 or lens[k] < 0 or offs[k] + lens[k] > uncomp_size:
+            return _apk_cluster_error("APK_CLUSTER_CORRUPT", "member {ids[k]} lies outside its cluster frame", cluster_id)
+        k = k + 1
+    ApkClusterLoadV1(ok: true, found: true, error_code: "", error_message: "",
+        cluster_id: cluster_id, module_ids: ids, member_offs: offs, member_lens: lens,
+        blob: blob, member_count: ids.len(), frames_inflated: inflated,
+        bytes_decompressed: decompressed_bytes)
+
+fn apk_cluster_member_v1(load: ApkClusterLoadV1, module_id: text) -> [u8]:
+    """Slice one member out of an already-materialised cluster. No frame is
+    touched and nothing is decompressed here — apk_load_cluster_v1 already
+    did that exactly once for the whole cluster."""
+    var out: [u8] = []
+    var k = 0
+    while k < load.module_ids.len():
+        if load.module_ids[k] == module_id:
+            var m = 0
+            while m < load.member_lens[k]:
+                out.push(load.blob[load.member_offs[k] + m])
+                m = m + 1
+            return out
+        k = k + 1
+    out

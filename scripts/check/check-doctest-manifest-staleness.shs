@@ -19,8 +19,10 @@
 #      (compiler_rust/compiler/src/interpreter_extern/file_io.rs:289-294 ->
 #      meta.len(); runtime/simple_core/core_fs.spl:396-400 -> constant 0).
 #      Using it makes the invalidation predicate size==size AND size==size.
-#      rt_file_stat_mtime() is the correct accessor and is NOT flagged -- the
-#      match is on the literal "rt_file_stat(" including the paren.
+#      The correct flow acquires a stat handle with rt_stat_open(), reads it
+#      with rt_file_stat_mtime(), and releases it with rt_file_stat_free().
+#      Calling rt_file_stat_mtime() directly on a path is also invalid and is
+#      covered by the detector selftest.
 #   2. MANIFEST-COLUMNS. In a manifest with >=3 entry rows, the size and mtime
 #      columns must not be identical on every row. That equality is the on-disk
 #      fingerprint of invariant 1 having already been violated, and it survives
@@ -85,7 +87,20 @@ check_scanner() {
         echo "  FAIL  scanner-mtime: $_f uses rt_file_stat() ($_hits site(s)) -- that returns SIZE, not mtime"
         add_fail "scanner-mtime: $_hits rt_file_stat() site(s) in $_f"
     else
-        echo "  ok    scanner-mtime: $_f sources mtime from something other than rt_file_stat()"
+        _opens=$(grep -Ec '^[[:space:]]*val [A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*rt_stat_open\(' "$_f")
+        _open_rc=$?
+        _mtimes=$(grep -Ec '^[[:space:]]*val [A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*rt_file_stat_mtime\(' "$_f")
+        _mtime_rc=$?
+        _frees=$(grep -Ec '^[[:space:]]*rt_file_stat_free\(' "$_f")
+        _free_rc=$?
+        if [ "$_open_rc" -gt 1 ] || [ "$_mtime_rc" -gt 1 ] || [ "$_free_rc" -gt 1 ]; then
+            add_fail "scanner-mtime: stat-handle flow check failed on $_f"
+        elif [ "$_opens" -eq 0 ] || [ "$_mtimes" -eq 0 ] || [ "$_frees" -eq 0 ]; then
+            echo "  FAIL  scanner-mtime: $_f lacks complete rt_stat_open/rt_file_stat_mtime/rt_file_stat_free flow"
+            add_fail "scanner-mtime: incomplete stat-handle flow in $_f"
+        else
+            echo "  ok    scanner-mtime: $_f uses a complete stat-handle mtime flow"
+        fi
     fi
 }
 
@@ -189,8 +204,8 @@ emit_verdict() {
 
 # --------------------------------------------------------------------- selftest
 # Fatal, runs before every scan. Must-detect AND must-not-detect fixtures
-# (detector_standard rules 1 and 10). Fixture 1 and fixture 5 are the mutation
-# proof: they are the measured defects, replayed.
+# (detector_standard rules 1 and 10). Fixtures 1, 5, and 7 are mutation proof:
+# they replay the bad accessor, stale-row, and incomplete-handle defects.
 selftest() {
     _tmp=$(mktemp -d)
     _fails=0
@@ -213,14 +228,22 @@ selftest() {
 
     # --- fixture 2 (must-NOT-detect): scanner uses the real mtime accessor
     mkdir -p "$_tmp/f2"
-    printf 'val mtime = rt_file_stat_mtime(h)\n' > "$_tmp/f2/scanner.spl"
+    {
+        echo 'val h = rt_stat_open(path)'
+        echo 'val mtime = rt_file_stat_mtime(h)'
+        echo 'rt_file_stat_free(h)'
+    } > "$_tmp/f2/scanner.spl"
     run_scan "$_tmp/f2" "$_tmp/f2/scanner.spl" "$_tmp/f2/none.idx" >/dev/null
     emit_verdict >/dev/null; _rc=$?
     _expect "f2 scanner-uses-rt_file_stat_mtime must PASS" 0 "$_rc"
 
     # --- fixture 3 (must-DETECT): manifest whose mtime column duplicates size
     mkdir -p "$_tmp/f3"
-    printf 'val mtime = rt_file_stat_mtime(h)\n' > "$_tmp/f3/scanner.spl"
+    {
+        echo 'val h = rt_stat_open(path)'
+        echo 'val mtime = rt_file_stat_mtime(h)'
+        echo 'rt_file_stat_free(h)'
+    } > "$_tmp/f3/scanner.spl"
     : > "$_tmp/f3/a_spec.spl"; : > "$_tmp/f3/b_spec.spl"; : > "$_tmp/f3/c_spec.spl"
     {
         echo "# entries (path|size|mtime|...)"
@@ -235,7 +258,11 @@ selftest() {
 
     # --- fixture 4 (must-NOT-detect): healthy manifest, distinct columns
     mkdir -p "$_tmp/f4"
-    printf 'val mtime = rt_file_stat_mtime(h)\n' > "$_tmp/f4/scanner.spl"
+    {
+        echo 'val h = rt_stat_open(path)'
+        echo 'val mtime = rt_file_stat_mtime(h)'
+        echo 'rt_file_stat_free(h)'
+    } > "$_tmp/f4/scanner.spl"
     : > "$_tmp/f4/a_spec.spl"; : > "$_tmp/f4/b_spec.spl"; : > "$_tmp/f4/c_spec.spl"
     {
         echo "# entries (path|size|mtime|...)"
@@ -251,7 +278,11 @@ selftest() {
     # --- fixture 5 (must-DETECT): stale row for a DELETED source (the case-4
     #     replay -- discovery dispatched exactly such a path on 2026-08-17)
     mkdir -p "$_tmp/f5"
-    printf 'val mtime = rt_file_stat_mtime(h)\n' > "$_tmp/f5/scanner.spl"
+    {
+        echo 'val h = rt_stat_open(path)'
+        echo 'val mtime = rt_file_stat_mtime(h)'
+        echo 'rt_file_stat_free(h)'
+    } > "$_tmp/f5/scanner.spl"
     : > "$_tmp/f5/b_spec.spl"; : > "$_tmp/f5/c_spec.spl"
     {
         echo "# entries (path|size|mtime|...)"
@@ -269,6 +300,15 @@ selftest() {
     run_scan "$_tmp/f6" "$_tmp/f6/absent.spl" "$_tmp/f6/absent.idx" >/dev/null
     emit_verdict >/dev/null; _rc=$?
     _expect "f6 empty input must ERROR" 2 "$_rc"
+
+    # --- fixture 7 (must-DETECT): mtime accessor called without a stat handle.
+    # A name-only detector would accept this even though the path is not a
+    # valid rt_file_stat_mtime() handle.
+    mkdir -p "$_tmp/f7"
+    printf 'val mtime = rt_file_stat_mtime(path)\n' > "$_tmp/f7/scanner.spl"
+    run_scan "$_tmp/f7" "$_tmp/f7/scanner.spl" "$_tmp/f7/none.idx" >/dev/null
+    emit_verdict >/dev/null; _rc=$?
+    _expect "f7 mtime-without-stat-handle must FAIL" 1 "$_rc"
 
     rm -rf "$_tmp"
     if [ "$_fails" -gt 0 ]; then
@@ -303,7 +343,7 @@ if [ "$ST_RC" -ne 0 ]; then
     exit 2
 fi
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-    echo "PASS — 6 invariant(s) checked, 0 violations"
+    echo "PASS — 7 invariant(s) checked, 0 violations"
     exit 0
 fi
 

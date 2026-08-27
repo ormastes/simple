@@ -1,19 +1,19 @@
 # MCP / Tool-Server Startup Performance Guide
 
-Date: 2026-06-11. Launch-contract update: 2026-07-26.
+Date: 2026-06-11. Latest re-verification taken on linux x86_64 in the shared
+repo worktree after the rt-forward/interface-cache MCP fixes were pushed on
+2026-06-10.
 
 ## Why this guide
 
-Local `simple-mcp` and `simple-pipe-mcp` registrations now execute
-`bin/simple src/app/mcp/main.spl` directly. A 2026-07-26 macOS probe completed
-initialize, tools/list, and a quoted `node_repl` call in about **1.26 s**.
-Restarting the MCP client is sufficient after source changes; native MCP
-artifact builds are reserved for package/deployment/release lanes.
+`bin/simple_mcp_server` now answers a framed `initialize` + `tools/list`
+handshake in **1366 ms** while `bin/simple_lsp_mcp_server` does it in **50 ms**
+on the current local deploy. Both are native servers behind the same wrapper
+pattern. The remaining gap is not the language or the runtime — it is *how
+much work happens before the first response* and *how many times that work
+happens*.
 
-The native measurements below remain the distribution baseline. Simple LSP
-MCP continues to use its native wrapper.
-
-## Native distribution breakdown (2026-06-11)
+## Measured breakdown (2026-06-11)
 
 | Path | Handshake time | Note |
 |------|---------------|------|
@@ -136,8 +136,8 @@ That is the baseline to preserve when touching `src/app/mcp`,
 **Diagnosis knobs:**
 
 ```bash
-SIMPLE_LOADER_TRACE=1 bin/simple src/app/mcp/main.spl       # module load trace
-SIMPLE_PROFILE=1      bin/simple src/app/mcp/main.spl       # interpreter profile
+SIMPLE_LOADER_TRACE=1 bin/simple run src/app/mcp/main.spl   # module load trace
+SIMPLE_PROFILE=1      bin/simple run src/app/mcp/main.spl   # interpreter profile
 bin/simple deps normal src/app/mcp/main.spl                 # exclusive/shared per import
 ```
 
@@ -170,22 +170,6 @@ Startup gates (5000 ms in `check-mcp-native-smoke.shs`) bound *startup*, never
 add read timeouts to transport reads, and never route script startup through
 compile/JIT as a workaround for a slow fast path — fix the fast path or file
 a bug.
-
-## 2026-07-01 — script-mode parity gate
-
-Codex, Claude, and Gemini should launch the repo MCP scripts, but the scripts
-must not force `SIMPLE_MCP_TOOL_SET=all`; `auto` is the fast default and keeps
-dispatch callable. The focused diagnostic is:
-
-```bash
-sh scripts/check/check-mcp-script-mode-perf.shs
-MCP_SCRIPT_PERF_STRICT=1 sh scripts/check/check-mcp-script-mode-perf.shs
-```
-
-Current local result is still a fail against Python/Bun cold-stdio comparators:
-`simple_mcp` source/script median ~365 ms, `simple_lsp_mcp` ~60 ms, Python3
-~26 ms, Bun ~34 ms. Track the remaining gap in
-`doc/08_tracking/bug/mcp_script_mode_python_bun_parity_2026-07-01.md`.
 
 ## 2026-06-13 — core-default + dynload upgrade
 
@@ -238,17 +222,3 @@ without conflating it with the timing gate:
 A validator that assumes the tools/list response is the final frame reports
 `mcp_tools_count=0` against a core-first server even though the output is valid;
 the content-based frame selection above is the robust fix.
-
-## 2026-07-23 — local pure-Simple recovery deployment
-
-The locally deployed
-`bin/release/x86_64-unknown-linux-gnu/simple_mcp_server` passed a bounded framed
-`initialize`/`tools/list` sanity check as a compiled pure-Simple artifact. Its
-SHA-256 is
-`e189b71947d0ceaa29c6a0a2dac65c6e11a75f37403d2fe1ae19577da1a24212`.
-Keep production launch native-first with no silent source or Rust-seed fallback.
-
-The temporarily deployed Stage 2 compiler is recovery-only: it can rebuild
-native artifacts, but it does not provide the Stage 4 `run`, `test`, or SPipe
-docgen surface and is not full-CLI or release evidence. Promotion still requires
-the fresh Stage 4 essential-tools smoke and the bootstrap MCP acceptance gate.

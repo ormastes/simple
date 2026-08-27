@@ -49,7 +49,7 @@ wrappers can become SFFI calls once Simple has a stable syscall layer.
 Value boxing/unboxing layer (the Simple tagged-value ABI) plus string, array, I/O primitives:
 - Value constructors: `rt_value_int`, `rt_value_float`, `rt_value_bool`, `rt_value_nil`
 - Core string: `rt_string_new`, `rt_string_len`, `rt_string_data`, `rt_string_concat`,
-  `rt_string_char_code_at`, `rt_string_eq`
+  `rt_string_char_code_at`, `rt_string_eq`, `rt_text_eq_fast`
 - Print/IO: `rt_print`, `rt_println`, `rt_readline`, `rt_stdin_read_line`,
   `rt_stdout_write_text`, `rt_stdout_write`, `rt_stdout_flush`, `rt_stderr_write`,
   `rt_stderr_flush`

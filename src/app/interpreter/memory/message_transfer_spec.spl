@@ -19,6 +19,8 @@ from refc_binary import {
     BinaryRef,
     SMALL_BINARY_THRESHOLD
 }
+from message_transfer import {safe_send_int, safe_receive_int, SafeSuccess, Rejected}
+use std.common.structural.transfer.{ParallelExecutionDomain}
 
 describe "ValueWrapper - Inline Types":
     it "wraps nil":
@@ -60,7 +62,40 @@ describe "ValueWrapper - Inline Types":
         assert not wrapper.is_shared()
         assert wrapper.estimated_size() == 16  # 2 * 8 bytes
 
+describe "Canonical safe transport":
+    it "round-trips an integer through an envelope, not a pointer":
+        val packet = safe_send_int(42, ParallelExecutionDomain.Parent,
+            ParallelExecutionDomain.Actor)
+        assert packet.?
+        match safe_receive_int(packet.unwrap()):
+            case SafeSuccess(value): assert value == 42
+            case _: assert false
+
+    it "rejects forged or replayed wire data":
+        val packet = safe_send_int(7, ParallelExecutionDomain.Parent,
+            ParallelExecutionDomain.Actor)
+        assert packet.?
+        var forged = packet.unwrap()
+        forged.wire[0] = 0
+        match safe_receive_int(forged):
+            case Rejected: assert true
+            case _: assert false
+
+    it "rejects large text without a stable source address":
+        var transfer = MessageTransfer.new()
+        val result = transfer.wrap_text("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+        match result:
+            case InvalidValue: assert true
+            case _: assert false
+
 describe "ValueWrapper - Shared Types":
+    it "rejects a fabricated zero-id shared ref":
+        val ref = BinaryRef.new(0, 0, 1024)
+        val wrapper = ValueWrapper.SharedRef(ref)
+
+        assert not wrapper.is_shared()
+        assert wrapper.shared_refs().len() == 0
+
     it "wraps shared ref":
         val ref = BinaryRef.new(1, 0, 1024)
         val wrapper = ValueWrapper.SharedRef(ref)
@@ -355,6 +390,7 @@ describe "MailboxMessage":
 
         assert msg.id == 1
         assert msg.sender_id == Some(10)
+        assert msg.timestamp > 0
 
     it "reports size":
         val wrapper = ValueWrapper.InlineInt(42)

@@ -1,8 +1,7 @@
 # Bug: `.to_int()` on `.split()`-derived text + `??` fallback both return garbage (Rust seed interpreter)
 
 - **Date:** 2026-07-17
-- Status: OPEN (P2)
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status:** open (found incidentally while hardening `simple doc-coverage --missing`; worked around in pure Simple, not fixed here)
 - **Area:** `src/compiler_rust` interpreter fallback (tree-walking, `bin/simple run` / `src/compiler_rust/target/release/simple run`)
 
 ## Symptom
@@ -67,24 +66,6 @@ produced by `.split()` (as opposed to a string literal or a value read via
 an `Option<i64>` in that same situation. Not checked against the pure-Simple
 self-hosted interpreter/compiler (`src/compiler/`) or the native/JIT-compiled
 path -- only the Rust seed interpreter fallback was probed.
-
-## Second occurrence: `test/unit/lib/common/json_logic_spec.spl` (whole-suite `lib/common` triage, 2026-07-20)
-
-`"parses nested object and array values"` (1 of 12 examples): `val parsed =
-json_parse("{\"user\":{\"name\":\"Ada\",\"scores\":[1,2]}}")` then
-`json_to_number(json_path_get(parsed, "user.scores.1"))` → `expected nil to
-equal 2`. Traced to `src/lib/common/json/path_ops.spl`:
-`json_path_get` (line 31) calls `json_path_parse(path)` (line 15, splits the
-dotted path string into `[text]` components) and, for array components, does
-`val idx = part.to_int()` (line 53) on the split-derived `"1"` component —
-the exact same `text.to_int()`-on-`.split()`-result shape as the original
-repro above. `part.to_int()` returns `nil` for the genuinely-numeric `"1"`,
-so `json_path_get` returns `nil` at line 55 instead of descending into the
-array. `run` not yet probed for this call site specifically (only `test`
-verified so far); assumed same defect given identical shape to the
-already-confirmed repro. Left the spec unmodified — not a stale-test issue,
-`json_path_get`'s dotted-array-index feature is correctly implemented, it is
-blocked by this interpreter defect.
 
 ## Verification
 

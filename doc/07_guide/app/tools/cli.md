@@ -25,8 +25,8 @@ These options apply to all commands:
 | `--version` | `-V` | Print version and exit |
 | `--verbose` | `-v` | Enable verbose output |
 | `--backend=NAME` | | Code generation backend (`auto`, `cranelift`, `llvm`, `llvm-lib`) |
-| `--interpret` | | Force interpreter mode. **No-op on the deployed seed binary** — use `SIMPLE_EXECUTION_MODE=interpret`. See [execution engine selection](../../runtime/execution_engine_selection.md) |
-| `--no-jit` | | Disable JIT compilation. **Does not select the engine** — see [execution engine selection](../../runtime/execution_engine_selection.md) |
+| `--interpret` | | Force interpreter mode |
+| `--no-jit` | | Disable JIT compilation |
 | `--jit-threshold=N` | | JIT compilation threshold (default: 10) |
 | `--gc-log` | | Enable GC logging |
 | `--gc-off` | | Disable garbage collection |
@@ -69,8 +69,8 @@ simple build --release          # Optimized release build
 simple build --target=NAME      # Build specific target
 simple build --clean            # Clean build artifacts
 simple build fmt                # Format code
-simple lint <changed .spl files> # Run the pure-Simple source linter
-simple build check              # Rust clippy/rustfmt/test aggregate
+simple build lint               # Run linter
+simple build check              # All quality checks
 ```
 
 ### `compile`
@@ -131,12 +131,7 @@ Report documentation coverage:
 simple doc-coverage                 # Terminal report
 simple doc-coverage --format=md     # Markdown report
 simple doc-coverage --missing       # Show undocumented items
-simple doc-coverage "path with spaces" # One literal source root
 ```
-
-Normal reports treat a user path as one literal root. Shell quoting syntax and
-glob expansion are not part of the path language; the built-in default is the
-only multi-root request.
 
 ### Other Commands
 

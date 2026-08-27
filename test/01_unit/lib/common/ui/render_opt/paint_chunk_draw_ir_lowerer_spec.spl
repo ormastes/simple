@@ -1,0 +1,109 @@
+# @cover src/lib/common/ui/render_opt/paint_chunk_draw_ir_lowerer.spl 80%
+# @tag: unit, ui, render_perf, render_opt, o2
+
+use std.spec
+use common.ui.render_opt.property_trees.PaintChunks
+use common.ui.render_opt.paint_chunk_rasterizer.PaintChunkRects
+use common.ui.draw_ir.{
+    draw_ir_rect, draw_ir_embedding_config, draw_ir_source_manual
+}
+use common.ui.render_opt.draw_ir_delta.draw_ir_stable_apply
+use common.ui.render_opt.paint_chunk_draw_ir_lowerer.{
+    paint_chunk_draw_ir_lower_full, paint_chunk_draw_ir_lower_composition,
+    paint_chunk_draw_ir_full_transaction
+}
+
+fn lowerer_chunks() -> PaintChunks:
+    val chunks = PaintChunks.create()
+    # The first two chunks deliberately share one owner.  Stable command IDs
+    # belong to chunks, not owners, so both must survive in original order.
+    chunks.add_chunk_sized(4, 0, 1, 2, 0, 1, 0, 10)
+    chunks.add_chunk_sized(4, 1, 1, 2, 0, 1, 1, 10)
+    chunks.add_chunk_sized(9, 0, 1, 2, 0, 1, 2, 10)
+    chunks
+
+fn lowerer_rects() -> PaintChunkRects:
+    val rects = PaintChunkRects.create()
+    rects.add_rect(1, 2, 3, 4, 0xFF001122)
+    rects.add_rect(5, 6, 7, 8, 0xFF334455)
+    rects.add_rect(9, 10, 11, 12, 0xFF667788)
+    rects
+
+describe "PaintChunk full lowerer keeps producer-stable DrawIR order":
+    it "emits every valid chunk in exact source order, including repeated owners":
+        val lowered = paint_chunk_draw_ir_lower_full(
+            lowerer_chunks(), lowerer_rects(), ["one", "two", "three"])
+        assert_true(lowered.valid)
+        assert_true(lowered.reason == "")
+        assert_true(lowered.total_count == 3)
+        assert_true(lowered.emitted_count == 3)
+        assert_true(lowered.commands[0].component_id == "one")
+        assert_true(lowered.commands[1].component_id == "two")
+        assert_true(lowered.commands[2].component_id == "three")
+        assert_true(lowered.commands[1].x == 5)
+        assert_true(lowered.commands[1].height == 8)
+
+    it "fails closed for duplicate producer IDs instead of silently merging commands":
+        val lowered = paint_chunk_draw_ir_lower_full(
+            lowerer_chunks(), lowerer_rects(), ["one", "one", "three"])
+        assert_true(not lowered.valid)
+        assert_true(lowered.reason == "paint-chunk-draw-ir-duplicate-stable-id")
+        assert_true(lowered.commands.len() == 0)
+
+    it "fails closed for a mismatched producer ID shape":
+        val lowered = paint_chunk_draw_ir_lower_full(
+            lowerer_chunks(), lowerer_rects(), ["one", "two"])
+        assert_true(not lowered.valid)
+        assert_true(lowered.reason == "paint-chunk-draw-ir-shape-mismatch")
+        assert_true(lowered.emitted_count == 0)
+
+    it "rejects unrepresentable or empty rectangles before converting to DrawIR i32 fields":
+        val rects = lowerer_rects()
+        rects.rect_x[2] = 2147483648
+        val lowered = paint_chunk_draw_ir_lower_full(
+            lowerer_chunks(), rects, ["one", "two", "three"])
+        assert_true(not lowered.valid)
+        assert_true(lowered.reason == "paint-chunk-draw-ir-invalid-rect")
+        assert_true(lowered.commands.len() == 0)
+
+    it "wraps the complete lowering in one producer-owned composition without reordering":
+        val lowered = paint_chunk_draw_ir_lower_composition(
+            lowerer_chunks(), lowerer_rects(), ["one", "two", "three"],
+            "composition-2", "scene-2", "cpu", "paint-chunks",
+            draw_ir_embedding_config("surface-2", "root", 0, 0, 64, 32, 0, 1000, true),
+            draw_ir_source_manual())
+        assert_true(lowered.valid)
+        assert_true(lowered.composition != nil)
+        if val composition = lowered.composition:
+            assert_true(composition.composition_id == "composition-2")
+            assert_true(composition.batches.len() == 1)
+            assert_true(composition.batches[0].batch_id == "paint-chunks")
+            assert_true(composition.batches[0].commands[0].component_id == "one")
+            assert_true(composition.batches[0].commands[2].component_id == "three")
+        else:
+            assert_true(false)
+
+    it "derives complete upsert and remove operations before atomic retained publication":
+        val lowered = paint_chunk_draw_ir_lower_composition(
+            lowerer_chunks(), lowerer_rects(), ["one", "two", "three"],
+            "composition-2", "scene-2", "cpu", "paint-chunks",
+            draw_ir_embedding_config("surface-2", "root", 0, 0, 64, 32, 0, 1000, true),
+            draw_ir_source_manual())
+        val previous = [
+            draw_ir_rect("gone", 0, 0, 2, 2, 1u32),
+            draw_ir_rect("one", 99, 0, 2, 2, 2u32)
+        ]
+        val transaction = paint_chunk_draw_ir_full_transaction(
+            previous, "r1", "r2", lowered)
+        assert_true(transaction.valid)
+        assert_true(transaction.transaction != nil)
+        if val stable = transaction.transaction:
+            val applied = draw_ir_stable_apply(previous, "r1", stable)
+            assert_true(applied.valid)
+            assert_true(applied.revision == "r2")
+            assert_true(applied.commands.len() == 3)
+            assert_true(applied.commands[0].component_id == "one")
+            assert_true(applied.commands[0].x == 1)
+            assert_true(applied.commands[2].component_id == "three")
+        else:
+            assert_true(false)

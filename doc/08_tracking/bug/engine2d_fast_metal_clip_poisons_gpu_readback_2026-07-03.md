@@ -1,7 +1,6 @@
 # Bug: Engine2D fast Metal web lane always returns a 1x1 framebuffer (clip poisons GPU readback)
 
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- **Status:** fixed (2026-07-03)
 - **Component:** `src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl`
 - **Discovered via:** `examples/06_io/ui/wm_fullscreen_metal_gui.spl` web-engine phase
   (`scripts/check/check-macos-wm-fullscreen-metal-evidence.shs`) — the marker

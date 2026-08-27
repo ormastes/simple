@@ -97,11 +97,11 @@ record_check() {
 
 SOURCE_FILES="
 runtime_native.c
-runtime_contracts.c
 runtime_coverage_core.c
 runtime_framebuffer.c
 runtime_directx_core.c
 runtime_legacy_core.c
+runtime_mcp_core.c
 runtime_fork.c
 runtime_memtrack.c
 runtime_process.c
@@ -311,7 +311,7 @@ for symbol in simple_contract_check simple_contract_check_msg; do
         die "runtime-contracts-$symbol-provider-missing"
     record_check
 done
-for symbol in rt_coverage_enabled rt_coverage_clear rt_coverage_dump_sdn rt_coverage_free_sdn rt_coverage_decision_probe rt_coverage_condition_probe; do
+for symbol in rt_coverage_enabled rt_coverage_clear rt_coverage_dump_sdn rt_coverage_free_sdn rt_coverage_decision_probe rt_coverage_condition_probe rt_mcdc_collector_init_v1 rt_mcdc_record_vector_v1 rt_mcdc_configure_compiled_owner_v1 rt_mcdc_release_compiled_owner_v1 rt_mcdc_record_compiled_vector_v1 rt_mcdc_compiled_last_status_v1 rt_mcdc_dynamic_vector_patchpoint_v1 rt_mcdc_dynamic_bind_v1 rt_mcdc_dynamic_unbind_v1 rt_mcdc_dynamic_settled_v1 rt_mcdc_compiled_target_v1 rt_mcdc_dynamic_register_target_v1 rt_mcdc_dynamic_unregister_target_v1 rt_mcdc_collector_seal_v1 rt_mcdc_snapshot_v1 rt_mcdc_collector_reset_checked_v1; do
     nm_has_text_symbol "$TMP_DIR/archive.nm.txt" "$symbol" ||
         die "archive-$symbol-provider-missing"
     record_check
@@ -457,6 +457,22 @@ grep -q '^SELFCHECK PASSED (0 failures)$' "$HOST_PRIMITIVE_SELF_CHECK_LOG" ||
     die "rt-tls13-sha256-sleep-selfcheck-receipt-missing"
 record_check
 
+STRUCT_RECEIVER_SELF_CHECK_BIN="$TMP_DIR/rt_struct_receiver_valid_selfcheck"
+STRUCT_RECEIVER_SELF_CHECK_LOG="$TMP_DIR/rt_struct_receiver_valid_selfcheck.out"
+# This archive is the exact core-C-bootstrap provider used by the native
+# bootstrap lane.  Compile, link, and execute the guard pair against it so a
+# declaration/manifest-only change cannot mask a missing provider.
+# shellcheck disable=SC2086
+"$CC_PATH" -std=gnu11 -O1 \
+    "$RUNTIME_DIR/test/rt_struct_receiver_valid_selfcheck.c" \
+    "$ARCHIVE" $SELF_CHECK_LIBS -o "$STRUCT_RECEIVER_SELF_CHECK_BIN" ||
+    die "rt-struct-receiver-selfcheck-link-failed"
+"$STRUCT_RECEIVER_SELF_CHECK_BIN" >"$STRUCT_RECEIVER_SELF_CHECK_LOG" 2>&1 ||
+    die "rt-struct-receiver-selfcheck-failed"
+grep -q '^PASS concurrent_post_free_rejections=1024$' "$STRUCT_RECEIVER_SELF_CHECK_LOG" ||
+    die "rt-struct-receiver-selfcheck-receipt-missing"
+record_check
+
 # A run that reached here having executed fewer checks than the capsule
 # declares is a vacuous pass, not a pass. The floor is raised whenever a
 # check is added; it is never lowered to make a run green.
@@ -510,6 +526,10 @@ MANIFEST="$TMP_DIR/capsule.manifest"
     echo "archive_members_sha256=$(hash_file "$TMP_DIR/archive.members.txt")"
     echo "rt_string_free_archive_symbol=T"
     echo "rt_string_free_provider=runtime_native.o"
+    echo "rt_struct_alloc_provider=runtime_native.o"
+    echo "rt_struct_receiver_valid_provider=runtime_native.o"
+    echo "rt_struct_receiver_valid_selfcheck=pass"
+    echo "rt_struct_receiver_valid_selfcheck_output_sha256=$(hash_file "$STRUCT_RECEIVER_SELF_CHECK_LOG")"
     echo "rt_string_free_selfcheck=pass"
     echo "rt_string_free_selfcheck_output_sha256=$(hash_file "$SELF_CHECK_LOG")"
     echo "runtime_coverage_core_selfcheck=pass"

@@ -30,7 +30,6 @@ class StyleProps:
     overflow: text         # "visible", "hidden", "scroll"
     float_css: text        # "none", "left", "right"
     clear_css: text        # "none", "left", "right", "both"
-    overflow_wrap: text    # "normal", "break-word", "anywhere"
 
 impl StyleProps:
     static fn empty() -> StyleProps:
@@ -64,8 +63,7 @@ impl StyleProps:
             z_index: 0,
             overflow: "visible",
             float_css: "none",
-            clear_css: "none",
-            overflow_wrap: "normal"
+            clear_css: "none"
         )
 
 # =========================================================================
@@ -202,159 +200,39 @@ class BeDomNode:
     event_listener_capture: [bool]
 
     me add_event_listener_with_capture(event_type: text, action: text, capture: bool):
-        """Register a listener, reusing a removed listener tombstone."""
-        val normalized = normalize_dom_event_type(event_type)
-        var tombstone = -1
-        var i = 0
-        while i < self.event_listener_types.len():
-            if (
-                self.event_listener_types[i] == normalized and
-                self.event_listener_actions[i] == action and
-                self.event_listener_capture[i] == capture
-            ):
-                return
-            if tombstone < 0 and self.event_listener_types[i] == "":
-                tombstone = i
-            i = i + 1
-        if tombstone >= 0:
-            self.event_listener_types[tombstone] = normalized
-            self.event_listener_actions[tombstone] = action
-            self.event_listener_capture[tombstone] = capture
-            return
-        self.event_listener_types.push(normalized)
+        """Register a listener, appending to the parallel listener arrays."""
+        self.event_listener_types.push(event_type.trim().lower())
         self.event_listener_actions.push(action)
         self.event_listener_capture.push(capture)
 
-    me add_event_listener(event_type: text, action: text):
-        self.add_event_listener_with_capture(event_type, action, false)
-
-    me remove_event_listener_with_capture(
-        event_type: text, action: text, capture: bool
-    ):
-        val normalized = normalize_dom_event_type(event_type)
-        var i = 0
-        while i < self.event_listener_types.len():
-            if (
-                self.event_listener_types[i] == normalized and
-                self.event_listener_actions[i] == action and
-                self.event_listener_capture[i] == capture
-            ):
-                self.event_listener_types[i] = ""
-                self.event_listener_actions[i] = ""
-                self.event_listener_capture[i] = false
-                return
-            i = i + 1
-
-    me remove_event_listener(event_type: text, action: text):
-        self.remove_event_listener_with_capture(event_type, action, false)
-
 class BeDomEvent:
-    """Page event payload, deliberately independent of routing authority.
-
-    Browser/session dispatch carries typed routes separately so this DOM leaf
-    never imports the identity-index owner or authorizes by text.
-    """
     event_type: text
     namespace_uri: text
+    target_id: text
+    current_target_id: text
+    related_target_id: text
     bubbles: bool
     cancelable: bool
     default_prevented: bool
     propagation_stopped: bool
-    immediate_propagation_stopped: bool
-    target_id: text
-    target_tag: text
-    current_target_id: text
-    current_target_tag: text
-    related_target_id: text
-    client_x: i32
-    client_y: i32
-    screen_x: i32
-    screen_y: i32
-    button: i32
-    buttons: i32
-    pointer_id: i32
-    pointer_type: text
-    is_primary: bool
-    key: text
-    code: text
-    repeat: bool
-    alt_key: bool
-    ctrl_key: bool
-    meta_key: bool
-    shift_key: bool
-    input_data: text?
-    input_type: text
-    is_composing: bool
 
-    static fn create(
-        event_type: text, namespace_uri: text, bubbles: bool, cancelable: bool
-    ) -> BeDomEvent:
-        BeDomEvent(
-            event_type: normalize_dom_event_type(event_type),
-            namespace_uri: namespace_uri,
-            bubbles: bubbles,
-            cancelable: cancelable,
-            default_prevented: false,
-            propagation_stopped: false,
-            immediate_propagation_stopped: false,
-            target_id: "",
-            target_tag: "",
-            current_target_id: "",
-            current_target_tag: "",
-            related_target_id: "",
-            client_x: 0,
-            client_y: 0,
-            screen_x: 0,
-            screen_y: 0,
-            button: 0,
-            buttons: 0,
-            pointer_id: 0,
-            pointer_type: "",
-            is_primary: false,
-            key: "",
-            code: "",
-            repeat: false,
-            alt_key: false,
-            ctrl_key: false,
-            meta_key: false,
-            shift_key: false,
-            input_data: nil,
-            input_type: "",
-            is_composing: false
-        )
+    static fn create(event_type: text, namespace_uri: text, target_id: text, current_target_id: text, related_target_id: text, bubbles: bool, cancelable: bool) -> BeDomEvent:
+        BeDomEvent(event_type: event_type, namespace_uri: namespace_uri, target_id: target_id, current_target_id: current_target_id, related_target_id: related_target_id, bubbles: bubbles, cancelable: cancelable, default_prevented: false, propagation_stopped: false)
 
     me prevent_default():
-        if self.cancelable:
-            self.default_prevented = true
+        self.default_prevented = true
 
     me stop_propagation():
         self.propagation_stopped = true
 
-    me stop_immediate_propagation():
-        self.propagation_stopped = true
-        self.immediate_propagation_stopped = true
-
 class BeDomEventDispatch:
-    event: BeDomEvent
-    target_route_id: text
     actions: [text]
-    phases: [text]
-    current_target_ids: [text]
-    current_target_route_ids: [text]
-    default_action: text
-    default_action_allowed: bool
 
 fn normalize_dom_event_type(event_type: text) -> text:
-    val normalized = event_type.trim().lower()
-    if normalized == "online" or normalized == "offline":
-        return normalized
-    if normalized.starts_with("on") and normalized.len() > 2:
-        return normalized.substring(2, normalized.len())
-    normalized
+    event_type.trim().lower()
 
 fn be_dom_find_by_id(node: BeDomNode, id_value: text) -> BeDomNode?:
-    # Explicit parens: without them this parses as `get("id") ?? ("" == id_value)`.
-    if (node.attributes.get("id") ?? "") == id_value:
+    if node.attributes.get("id") ?? "" == id_value:
         return Some(node)
     for child in node.children:
         val found = be_dom_find_by_id(child, id_value)
@@ -372,36 +250,6 @@ fn be_dom_query_selector(node: BeDomNode, selector: text) -> BeDomNode?:
         if found.?:
             return found
     nil
-
-pub fn be_dom_debug_manual_tree_dump() -> text:
-    """Permanent debug entry point: builds a tiny BeDomNode tree by hand
-    (BeDomNode.element/.text_node + set_attr + add_child), bypassing the
-    HTML tokenizer/tree-builder entirely, then reads it back. Used to
-    bisect the JIT struct-field-read defect chased in doc/08_tracking/
-    bug/jit_run_file_pipeline_gaps_2026-07-30.md section 16: isolates
-    whether the corruption is inherent to the BeDomNode shape/
-    constructors, or specific to the tokenizer's construction path."""
-    var div = BeDomNode.element_with_id(1, "div")
-    div.set_attr("id", "marker")
-    div.set_attr("style", "font-family:Bungee;font-size:100px")
-    val txt = BeDomNode.text_node(2, "hi")
-    div.add_child(txt)
-    var root = BeDomNode.element_with_id(0, "#root")
-    root.add_child(div)
-    var out: [text] = []
-    _debug_walk_bedom2(root, 0, out)
-    out.join("\n")
-
-fn _debug_walk_bedom2(node: BeDomNode, depth: i32, out: [text]):
-    val style_val: text = node.get_attr("style")
-    out.push(
-        depth.to_text() + "|" + node.tag_name + "|style_len=" +
-        style_val.len().to_text() + "|childcount=" + node.children.len().to_text()
-    )
-    var i = 0
-    while i < node.children.len():
-        _debug_walk_bedom2(node.children[i], depth + 1, out)
-        i = i + 1
 
 fn be_dom_get_text_content(node: BeDomNode) -> text:
     if node.tag_name == "#text":
@@ -421,25 +269,10 @@ impl BeDomNode:
             attributes: {},
             style: StyleProps.empty(),
             children: [],
-            parent_id: -1,
-            event_listener_types: [],
-            event_listener_actions: [],
-            event_listener_capture: []
+            parent_id: -1
         )
 
-    # Named distinctly from `element(tag_name)` above rather than
-    # overloaded on arity: two `static fn element` co-compiled definitions
-    # with differing signatures corrupt every subsequently constructed/
-    # stored BeDomNode's struct-field reads under JIT (mirrors the
-    # already-documented compiler_cross_module_private_symbol_collision
-    # warning class -- "JIT call sites resolve by exact arg-type match...
-    # falling back to the last definition when types are ambiguous"),
-    # while the interpreter reads the identical tree correctly. Root-caused
-    # with an isolated repro with no tokenizer/rendering involved -- see
-    # doc/08_tracking/bug/jit_run_file_pipeline_gaps_2026-07-30.md
-    # section 16.2. This overload (not the single-arg one) was renamed
-    # since it has far fewer call sites (~15 vs ~250+).
-    static fn element_with_id(node_id: i64, tag_name: text) -> BeDomNode:
+    static fn element(node_id: i64, tag_name: text) -> BeDomNode:
         """Construct an element node."""
         BeDomNode(
             node_id: node_id,
@@ -448,10 +281,7 @@ impl BeDomNode:
             attributes: {},
             style: StyleProps.empty(),
             children: [],
-            parent_id: -1,
-            event_listener_types: [],
-            event_listener_actions: [],
-            event_listener_capture: []
+            parent_id: -1
         )
 
     static fn text_node(node_id: i64, data: text) -> BeDomNode:
@@ -463,15 +293,8 @@ impl BeDomNode:
             attributes: {},
             style: StyleProps.empty(),
             children: [],
-            parent_id: -1,
-            event_listener_types: [],
-            event_listener_actions: [],
-            event_listener_capture: []
+            parent_id: -1
         )
-
-    static fn text(data: text) -> BeDomNode:
-        """Construct a text node with auto node_id=0."""
-        BeDomNode.text_node(0, data)
 
     static fn document() -> BeDomNode:
         """Construct a root document node."""
@@ -482,10 +305,7 @@ impl BeDomNode:
             attributes: {},
             style: StyleProps.empty(),
             children: [],
-            parent_id: -1,
-            event_listener_types: [],
-            event_listener_actions: [],
-            event_listener_capture: []
+            parent_id: -1
         )
 
     fn is_element() -> bool:
@@ -497,25 +317,10 @@ impl BeDomNode:
     fn get_attr(name: text) -> text:
         self.attributes.get(name) ?? ""
 
-    fn has_attr(name: text) -> bool:
-        self.attributes.has(name)
-
-    me set_attr(name: text, value: text):
-        if name == "src":
-            self.attributes.remove("\u0000simple-render-image-src")
-        elif name == "poster":
-            self.attributes.remove("\u0000simple-render-image-poster")
-        elif name == "style":
-            self.attributes.remove("\u0000simple-render-image-style")
+    fn set_attr(name: text, value: text):
         self.attributes[name] = value
 
     me remove_attr(name: text):
-        if name == "src":
-            self.attributes.remove("\u0000simple-render-image-src")
-        elif name == "poster":
-            self.attributes.remove("\u0000simple-render-image-poster")
-        elif name == "style":
-            self.attributes.remove("\u0000simple-render-image-style")
         self.attributes.remove(name)
 
     me add_child(child: BeDomNode):
@@ -545,19 +350,19 @@ impl BeDomNode:
         val fpx = self.style.font_size
         # --- keyword / text-valued longhands -----------------------------
         if p == "display":
-            self.style.display = v
+            s.display = v
         elif p == "float":
-            self.style.float_css = v
+            s.float_css = v
         elif p == "clear":
-            self.style.clear_css = v
+            s.clear_css = v
         elif p == "overflow":
-            self.style.overflow = v
+            s.overflow = v
         elif p == "position":
-            self.style.position = v
+            s.position = v
         elif p == "color":
-            self.style.color = v
+            s.color = v
         elif p == "background-color":
-            self.style.background_color = v
+            s.background_color = v
         elif p == "font-weight":
             self.style.font_weight = v
         elif p == "font-family":

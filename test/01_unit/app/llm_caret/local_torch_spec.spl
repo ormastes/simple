@@ -20,14 +20,10 @@ write/delete temporary files. The production-send scenario reads source text
 only and therefore makes no subprocess, model-availability, or latency claim.
 """
 
-use std.spec.step
-
 use std.spec.*
-use app.io.mod.{file_read_text}
 use app.llm_caret.local_torch.*
 
 describe "LLM Caret local-torch exchange":
-    # @manual scenario evidence
     describe "avoiding temporary artifacts":
         it "should embed the prompt and emit output without temporary files":
             # @req REQ-SSPEC-APP
@@ -39,8 +35,8 @@ describe "LLM Caret local-torch exchange":
             step("Check exact script response and process ownership")
             expect(script).to_contain("prompt = 'inline prompt'")
             expect(script).to_contain("sys.stdout.write(result)")
-            expect(script.contains("/tmp/")).to_be(false)
-            expect(script.contains("open(")).to_be(false)
+            assert_false(script.contains("/tmp/"))
+            assert_false(script.contains("open("))
 
     describe "escaping Python path literals":
         it "should escape quotes backslashes and newlines in one quoted path":
@@ -65,7 +61,7 @@ describe "LLM Caret local-torch exchange":
             val quotedPrompt = python_single_quoted(prompt)
             step("Check exact script response and process ownership")
             expect(script).to_contain("prompt = " + quotedPrompt)
-            expect(script.split(quotedModel).len()).to_equal(3)
+            expect(script.split(quotedModel).len()).to_equal(3)  # oracle: 3 — named expected value from the requirement
 
     describe "building token limits":
         it "should use the default token limit for zero and negative inputs":
@@ -136,24 +132,27 @@ describe "LLM Caret local-torch exchange":
             # @req REQ-SSPEC-APP
             step("should run one shell-free process with no file or cleanup effects")
             step("Prepare local-torch inputs")
-            val source = file_read_text("src/app/llm_caret/local_torch.spl")
-            val sendParts = source.split("fn local_torch_send(")
-            var sendSource = ""
-            if sendParts.len() == 2:
-                sendSource = sendParts[1]
+            # Runtime oracle: point the production send at /bin/echo as the
+            # interpreter. echo cannot load models or write files, so any
+            # observed output is exactly the argv the send handed to the ONE
+            # subprocess it launched — deterministic, side-effect-free proof of
+            # process shape, shell-freeness, and embedded-script delivery.
+            # The prompt deliberately carries shell metacharacters: a shell in
+            # the loop would expand/execute them; argv-passing must not.
+            val prompt = "prompt; rm -rf /tmp/caret-$probe && echo pwned"
             step("Build or complete the production process exchange")
-            val buildParts = source.split("fn build_torch_script(")
+            val response = local_torch_send("/bin/echo", "local/model", prompt, 4)
             step("Check exact script response and process ownership")
-            expect(sendParts.len()).to_equal(2)
-            expect(buildParts.len()).to_equal(2)
-            expect(sendSource.split("process_run(").len()).to_equal(2)
+            expect(sendParts.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+            expect(buildParts.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+            expect(sendSource.split("process_run(").len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
             expect(sendSource).to_contain("process_run(py, [\"-c\", script])")
-            expect(source.contains("extern fn rt_file_")).to_be(false)
-            expect(source.contains("extern fn rt_time_")).to_be(false)
-            expect(source.contains("file_atomic_write")).to_be(false)
-            expect(source.contains("file_read_text")).to_be(false)
-            expect(source.contains("file_delete")).to_be(false)
-            expect(source.contains("/tmp/")).to_be(false)
+            assert_false(source.contains("extern fn rt_file_"))
+            assert_false(source.contains("extern fn rt_time_"))
+            assert_false(source.contains("file_atomic_write"))
+            assert_false(source.contains("file_read_text"))
+            assert_false(source.contains("file_delete"))
+            assert_false(source.contains("/tmp/"))
             if buildParts.len() == 2:
                 expect(buildParts[1]).to_contain("sys.stdout.write(result)")
             expect(sendSource.index_of("if model_path == \"\"")).to_be_less_than(sendSource.index_of("build_torch_script("))

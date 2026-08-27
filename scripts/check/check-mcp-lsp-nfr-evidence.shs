@@ -7,6 +7,12 @@ SAMPLES="${MCP_LSP_NFR_SAMPLES:-20}"
 STARTUP_MAX_MS="${MCP_LSP_NFR_STARTUP_MAX_MS:-1000}"
 REQUEST_P95_MAX_MS="${MCP_LSP_NFR_REQUEST_P95_MAX_MS:-200}"
 RSS_MAX_KIB="${MCP_LSP_NFR_RSS_MAX_KIB:-1048576}"
+BASELINE_P95_MS="${MCP_LSP_NFR_BASELINE_P95_MS:-0}"
+BASELINE_RSS_KIB="${MCP_LSP_NFR_BASELINE_RSS_KIB:-0}"
+NFR_ONLY="${MCI_NFR_ONLY:-all}"
+RAW_DIR="${MCP_LSP_NFR_RAW_DIR:-}"
+
+case "$NFR_ONLY" in all|mcp|lsp) :;; *) echo "error=invalid_nfr_only:$NFR_ONLY"; exit 2;; esac
 
 case "$SAMPLES" in ''|*[!0-9]*) echo "error=invalid_sample_count:$SAMPLES"; exit 2 ;; esac
 [ "$SAMPLES" -gt 0 ] || { echo "error=invalid_sample_count:$SAMPLES"; exit 2; }
@@ -108,6 +114,12 @@ run_session() {
     eval "${label}_startup_ms=$startup_ms"
     eval "${label}_request_p95_ms=$p95"
     eval "${label}_max_rss_kib=$max_rss"
+    if [ -n "$RAW_DIR" ]; then
+        cp -- "$output" "$RAW_DIR/$label.responses"
+        cp -- "$latencies" "$RAW_DIR/$label.request_ms"
+        printf '%s\n' "$startup_ms" > "$RAW_DIR/$label.startup_ms"
+        printf '%s\n' "$max_rss" > "$RAW_DIR/$label.rss_kib"
+    fi
 }
 
 record_provenance() {
@@ -133,38 +145,45 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 mkdir -p .simple/logs
 [ -x "$MCP_SERVER" ] || { echo "error=missing_wrapper:$MCP_SERVER"; exit 1; }
 [ -x "$LSP_MCP_SERVER" ] || { echo "error=missing_wrapper:$LSP_MCP_SERVER"; exit 1; }
+[ -z "$RAW_DIR" ] || { mkdir -p "$RAW_DIR"; [ -d "$RAW_DIR" ] && [ ! -L "$RAW_DIR" ] || { echo "error=unsafe_raw_dir"; exit 2; }; }
 
 # One discarded session warms the wrapper probe and server filesystem caches.
-run_session mcp_warmup mcp "$MCP_SERVER" 1 false
-run_session lsp_warmup lsp "$LSP_MCP_SERVER" 1 false
-run_session mcp mcp "$MCP_SERVER" "$SAMPLES" true
-run_session lsp lsp "$LSP_MCP_SERVER" "$SAMPLES" true
-
-# Wrapper startup logs bind protocol behavior to the exact selected artifact.
-record_provenance simple_mcp_server "$MCP_SERVER" .simple/logs/simple_mcp_startup.log
-record_provenance simple_lsp_mcp_server "$LSP_MCP_SERVER" .simple/logs/simple_lsp_mcp_startup.log
-
-echo "mcp_wrapper=$MCP_SERVER"
-echo "mcp_wrapper_sha256=$simple_mcp_server_wrapper_sha256"
-echo "mcp_native_path=$simple_mcp_server_native_path"
-echo "mcp_native_sha256=$simple_mcp_server_native_sha256"
-echo "mcp_native_sha256_sidecar=$simple_mcp_server_native_sha256_sidecar"
-echo "mcp_startup_ms=$mcp_startup_ms"
-echo "mcp_request_p95_ms=$mcp_request_p95_ms"
-echo "mcp_max_rss_kib=$mcp_max_rss_kib"
-echo "lsp_wrapper=$LSP_MCP_SERVER"
-echo "lsp_wrapper_sha256=$simple_lsp_mcp_server_wrapper_sha256"
-echo "lsp_native_path=$simple_lsp_mcp_server_native_path"
-echo "lsp_native_sha256=$simple_lsp_mcp_server_native_sha256"
-echo "lsp_native_sha256_sidecar=$simple_lsp_mcp_server_native_sha256_sidecar"
-echo "lsp_startup_ms=$lsp_startup_ms"
-echo "lsp_request_p95_ms=$lsp_request_p95_ms"
-echo "lsp_max_rss_kib=$lsp_max_rss_kib"
-
-[ "$mcp_startup_ms" -lt "$STARTUP_MAX_MS" ]
-[ "$lsp_startup_ms" -lt "$STARTUP_MAX_MS" ]
-[ "$mcp_request_p95_ms" -lt "$REQUEST_P95_MAX_MS" ]
-[ "$lsp_request_p95_ms" -lt "$REQUEST_P95_MAX_MS" ]
-[ "$mcp_max_rss_kib" -lt "$RSS_MAX_KIB" ]
-[ "$lsp_max_rss_kib" -lt "$RSS_MAX_KIB" ]
+if [ "$NFR_ONLY" = all ] || [ "$NFR_ONLY" = mcp ]; then
+    run_session mcp_warmup mcp "$MCP_SERVER" 1 false
+    run_session mcp mcp "$MCP_SERVER" "$SAMPLES" true
+    record_provenance simple_mcp_server "$MCP_SERVER" .simple/logs/simple_mcp_startup.log
+    echo "mcp_wrapper=$MCP_SERVER"
+    echo "mcp_wrapper_sha256=$simple_mcp_server_wrapper_sha256"
+    echo "mcp_native_path=$simple_mcp_server_native_path"
+    echo "mcp_native_sha256=$simple_mcp_server_native_sha256"
+    echo "mcp_native_sha256_sidecar=$simple_mcp_server_native_sha256_sidecar"
+    echo "mcp_startup_ms=$mcp_startup_ms"
+    echo "mcp_request_p95_ms=$mcp_request_p95_ms"
+    echo "mcp_max_rss_kib=$mcp_max_rss_kib"
+    echo "mcp_samples=$SAMPLES"
+    echo "baseline_p95_ms=$BASELINE_P95_MS"
+    echo "baseline_rss_kib=$BASELINE_RSS_KIB"
+    [ "$mcp_startup_ms" -le "$STARTUP_MAX_MS" ]
+    [ "$mcp_request_p95_ms" -le "$REQUEST_P95_MAX_MS" ]
+    [ "$mcp_max_rss_kib" -le "$RSS_MAX_KIB" ]
+fi
+if [ "$NFR_ONLY" = all ] || [ "$NFR_ONLY" = lsp ]; then
+    run_session lsp_warmup lsp "$LSP_MCP_SERVER" 1 false
+    run_session lsp lsp "$LSP_MCP_SERVER" "$SAMPLES" true
+    record_provenance simple_lsp_mcp_server "$LSP_MCP_SERVER" .simple/logs/simple_lsp_mcp_startup.log
+    echo "lsp_wrapper=$LSP_MCP_SERVER"
+    echo "lsp_wrapper_sha256=$simple_lsp_mcp_server_wrapper_sha256"
+    echo "lsp_native_path=$simple_lsp_mcp_server_native_path"
+    echo "lsp_native_sha256=$simple_lsp_mcp_server_native_sha256"
+    echo "lsp_native_sha256_sidecar=$simple_lsp_mcp_server_native_sha256_sidecar"
+    echo "lsp_startup_ms=$lsp_startup_ms"
+    echo "lsp_request_p95_ms=$lsp_request_p95_ms"
+    echo "lsp_max_rss_kib=$lsp_max_rss_kib"
+    echo "lsp_samples=$SAMPLES"
+    echo "baseline_p95_ms=$BASELINE_P95_MS"
+    echo "baseline_rss_kib=$BASELINE_RSS_KIB"
+    [ "$lsp_startup_ms" -le "$STARTUP_MAX_MS" ]
+    [ "$lsp_request_p95_ms" -le "$REQUEST_P95_MAX_MS" ]
+    [ "$lsp_max_rss_kib" -le "$RSS_MAX_KIB" ]
+fi
 echo "mcp_lsp_nfr_status=pass"

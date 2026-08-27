@@ -1,0 +1,84 @@
+"""x86 PS/2 input adapter for the architecture-neutral SimpleOS WM host."""
+
+use nogc_async_mut.wm.host.{WmHostEventPoll, wm_host_no_event}
+use std.common.window_protocol.window_protocol.{WmInputEvent}
+use std.common.window_protocol.geometry.{WindowId, Point, KeyCode, Modifiers, WmEventType}
+use os.kernel.arch_adapt.x86_port_io.{x86_port_inb, x86_port_outb}
+use os.services.wm.simpleos_wm_input_adapter.{SimpleOsWmInputAdapter, simpleos_wm_input_adapter}
+use os.services.wm.wm_host_2d_simpleos.{WmHost2dSimpleOs, wm_host_2d_simpleos_with_input}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
+
+fn _status_port() -> u16: 0x64
+fn _data_port() -> u16: 0x60
+
+fn _has_byte() -> bool:
+    (x86_port_inb(_status_port()) & 0x01) != 0
+
+fn _wait_write():
+    var i: u64 = 0
+    while i < 100000:
+        if (x86_port_inb(_status_port()) & 2) == 0: return
+        i = i + 1
+
+fn _wait_read():
+    var i: u64 = 0
+    while i < 100000:
+        if _has_byte(): return
+        i = i + 1
+
+fn _flush():
+    var i: u64 = 0
+    while i < 32:
+        if _has_byte(): x86_port_inb(_data_port())
+        i = i + 1
+
+pub fn simpleos_wm_x86_ps2_init() -> bool:
+    _flush()
+    _wait_write()
+    x86_port_outb(0x64, 0xAE)
+    _wait_write()
+    x86_port_outb(0x64, 0x20)
+    _wait_read()
+    val config = x86_port_inb(_data_port())
+    _wait_write()
+    x86_port_outb(0x64, 0x60)
+    _wait_write()
+    x86_port_outb(0x60, (config & 0xEF).to_u8())
+    _flush()
+    _wait_write()
+    x86_port_outb(0x60, 0xF4)
+    _wait_read()
+    val ack = x86_port_inb(_data_port())
+    _flush()
+    ack == 0xFA
+
+fn _poll() -> WmHostEventPoll:
+    if not _has_byte(): return wm_host_no_event("queue-empty")
+    val scancode = x86_port_inb(_data_port())
+    val code = (scancode & 0x7F).to_u32()
+    if (scancode & 0x80) != 0:
+        return WmHostEventPoll(
+            ok: true,
+            state: "key-up",
+            event: WmInputEvent(
+                event_type: WmEventType.KeyUp,
+                window_id: WindowId(value: 0u64),
+                point: Point.xy(0, 0),
+                key_code: KeyCode(code: code, name: "ps2"),
+                modifiers: Modifiers.none(),
+                scroll_dx: 0.0,
+                scroll_dy: 0.0,
+                committed_text: ""
+            )
+        )
+    WmHostEventPoll(
+        ok: true,
+        state: "key-down",
+        event: WmInputEvent.key_down(WindowId(value: 0u64), KeyCode(code: code, name: "ps2"), Modifiers.none())
+    )
+
+pub fn simpleos_wm_x86_ps2_input_adapter() -> SimpleOsWmInputAdapter:
+    simpleos_wm_input_adapter("x86-ps2", _poll)
+
+pub fn wm_host_2d_simpleos_x86_ps2(fb: FramebufferDriver) -> WmHost2dSimpleOs:
+    wm_host_2d_simpleos_with_input(fb, simpleos_wm_x86_ps2_input_adapter())

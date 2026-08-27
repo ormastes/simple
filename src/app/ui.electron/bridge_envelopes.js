@@ -24,61 +24,13 @@ function renderEnvelopeMetadata(msg) {
     };
 }
 
-// macOS `hiddenInset` windows underlap content beneath the native traffic-light
-// cluster; WM/MDI mode hides the native titlebar entirely. Reserve a 28px top
-// strip in that mode so content never jams against (or under) the native
-// controls, and make the strip a drag region so plain renders stay movable.
-function darwinHiddenInsetMode() {
-    return process.platform === 'darwin' && !process.env.SIMPLE_ELECTRON_TITLE;
-}
-
-const DARWIN_TOP_INSET_PX = 28;
-
-function darwinTopInsetScript() {
-    if (!darwinHiddenInsetMode()) return '';
-    return `
-        (function() {
-            var strip = document.getElementById('simple-electron-top-inset');
-            if (!strip) {
-                strip = document.createElement('div');
-                strip.id = 'simple-electron-top-inset';
-                strip.style.cssText = 'position:fixed;top:0;left:0;right:0;height:${DARWIN_TOP_INSET_PX}px;z-index:99998;-webkit-app-region:drag;background:transparent;';
-                document.body.appendChild(strip);
-            }
-            document.body.style.paddingTop = '${DARWIN_TOP_INSET_PX}px';
-        })();
-    `;
-}
-
 function renderEnvelopeScript(msg) {
     const metadata = renderEnvelopeMetadata(msg);
     const bodyHtml = msg.body_html || msg.html || '';
-    const rootAttrs = (msg.root_attrs || '').trim();
     const css = msg.css || '';
-    const renderProof = {
-        ...metadata,
-        body_html_length: bodyHtml.length,
-        css_length: css.length,
-        root_attrs_length: rootAttrs.length
-    };
     return `
-        window.__SIMPLE_WEB_RENDER_ENVELOPE__ = ${JSON.stringify(renderProof)};
+        window.__SIMPLE_WEB_RENDER_ENVELOPE__ = ${JSON.stringify(metadata)};
         (function() {
-            var root = document.documentElement;
-            var rootAttrs = ${JSON.stringify(rootAttrs)};
-            if (root && rootAttrs) {
-                var probe = document.createElement('div');
-                probe.innerHTML = '<span ' + rootAttrs + '></span>';
-                var source = probe.firstElementChild;
-                if (source) {
-                    var attrIndex = 0;
-                    while (attrIndex < source.attributes.length) {
-                        var attr = source.attributes[attrIndex];
-                        root.setAttribute(attr.name, attr.value);
-                        attrIndex = attrIndex + 1;
-                    }
-                }
-            }
             var cssText = ${JSON.stringify(css)};
             if (cssText) {
                 var styleEl = document.getElementById('simple-server-css');
@@ -98,7 +50,6 @@ function renderEnvelopeScript(msg) {
             }
             el.innerHTML = ${JSON.stringify(bodyHtml)};
         })();
-        ${darwinTopInsetScript()}
         window.dispatchEvent(new CustomEvent('simple-render', {
             detail: { html: ${JSON.stringify(bodyHtml)}, envelope: window.__SIMPLE_WEB_RENDER_ENVELOPE__ }
         }));
@@ -107,8 +58,6 @@ function renderEnvelopeScript(msg) {
 
 module.exports = {
     commonInputEnvelope,
-    darwinHiddenInsetMode,
-    darwinTopInsetScript,
     renderEnvelopeMetadata,
     renderEnvelopeScript
 };

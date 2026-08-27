@@ -1,3 +1,9 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+use std.spec.step
+
 use std.spec.{describe, it, expect}
 use std.common.compress.{CompressionError}
 use std.common.compress.zstd.{zstd_decompress_frame}
@@ -76,7 +82,10 @@ fn _exact_direct_weight_literals_payload() -> [u8]:
     [0x84u8, 0x43u8, 0x20u8, 0x10u8, 0x80u8, 0x0Du8]
 
 describe "zstd compressed blocks with zero sequences":
+    # @manual scenario evidence
     it "decodes a compressed block containing raw literals and nbSeq == 0":
+        # @req REQ-SSPEC-UNIT
+        step("decodes a compressed block containing raw literals and nbSeq == 0")
         val frame = _zstd_frame(3, _compressed_block([
             0x18u8,
             0x61u8, 0x62u8, 0x63u8,
@@ -87,6 +96,8 @@ describe "zstd compressed blocks with zero sequences":
         expect(decoded.unwrap()).to_equal([0x61u8, 0x62u8, 0x63u8])
 
     it "decodes a compressed block containing RLE literals and nbSeq == 0":
+        # @req REQ-SSPEC-UNIT
+        step("decodes a compressed block containing RLE literals and nbSeq == 0")
         val frame = _zstd_frame(4, _compressed_block([
             0x21u8,
             0x41u8,
@@ -97,6 +108,8 @@ describe "zstd compressed blocks with zero sequences":
         expect(decoded.unwrap()).to_equal([0x41u8, 0x41u8, 0x41u8, 0x41u8])
 
     it "rejects the host-rejected fresh-table single-stream direct-weight candidate":
+        # @req REQ-SSPEC-UNIT
+        step("rejects the host-rejected fresh-table single-stream direct-weight candidate")
         val frame = _zstd_frame(4, _compressed_block([
             0x42u8, 0x80u8, 0x01u8
         ] + _exact_direct_weight_literals_payload() + [
@@ -104,12 +117,9 @@ describe "zstd compressed blocks with zero sequences":
         ]))
         val decoded = zstd_decompress_frame(frame)
         expect(decoded.is_err()).to_equal(true)
-        # Fresh-table literals now decode through the real Huffman path; this
-        # host-rejected candidate fails closed because the Huffman stream leaves
-        # trailing bits (host zstd rejects it as Data corruption likewise).
-        _expect_compression_error(decoded.unwrap_err(), "CorruptStream", "trailing bits")
+        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "fresh-table compressed literals")
 
-    it "rejects malformed fresh-table four-stream compressed literals with a truncated jump table":
+    it "rejects fresh-table four-stream compressed literals until the path is host-validated":
         val frame = _zstd_frame(4, _compressed_block([
             0x46u8, 0x80u8, 0x01u8,
             0x84u8, 0x43u8, 0x20u8, 0x10u8,
@@ -118,21 +128,19 @@ describe "zstd compressed blocks with zero sequences":
         ]))
         val decoded = zstd_decompress_frame(frame)
         expect(decoded.is_err()).to_equal(true)
-        # Size_Format 1 selects 4 streams; this fixture is too small to hold the
-        # 6-byte jump table, so the real path fails closed on the jump table.
-        _expect_compression_error(decoded.unwrap_err(), "TruncatedInput", "4-stream jump table")
+        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "fresh-table compressed literals")
 
-    it "rejects malformed fresh-table four-stream direct-weight payloads behind the 4-byte header form":
+    it "rejects fresh-table single-stream direct-weight payloads behind the 4-byte header form":
         val frame = _zstd_frame(4, _compressed_block(_compressed_literals_header(2, 2, 4, 6) + _exact_direct_weight_literals_payload() + [
             0x00u8
         ]))
         val decoded = zstd_decompress_frame(frame)
         expect(decoded.is_err()).to_equal(true)
-        # Size_Format 2 also selects 4 streams; the payload cannot hold the jump
-        # table, so the real path fails closed on the jump table.
-        _expect_compression_error(decoded.unwrap_err(), "TruncatedInput", "4-stream jump table")
+        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "fresh-table compressed literals")
 
     it "rejects fresh-table single-stream direct-weight payloads with non-pinned literal bytes":
+        # @req REQ-SSPEC-UNIT
+        step("rejects fresh-table single-stream direct-weight payloads with non-pinned literal bytes")
         val frame = _zstd_frame(4, _compressed_block([
             0x42u8, 0x80u8, 0x01u8,
             0x84u8, 0x43u8, 0x20u8, 0x10u8,
@@ -141,11 +149,11 @@ describe "zstd compressed blocks with zero sequences":
         ]))
         val decoded = zstd_decompress_frame(frame)
         expect(decoded.is_err()).to_equal(true)
-        # The final Huffman code over-runs the bitstream end (host zstd rejects
-        # it as Data corruption); the real path fails closed on the over-read.
-        _expect_compression_error(decoded.unwrap_err(), "TruncatedInput", "bitstream bits")
+        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "fresh-table compressed literals")
 
     it "rejects fresh-table single-stream direct-weight payloads with non-pinned regenerated size":
+        # @req REQ-SSPEC-UNIT
+        step("rejects fresh-table single-stream direct-weight payloads with non-pinned regenerated size")
         val frame = _zstd_frame(5, _compressed_block([
             0x52u8, 0x80u8, 0x01u8
         ] + _exact_direct_weight_literals_payload() + [
@@ -153,19 +161,17 @@ describe "zstd compressed blocks with zero sequences":
         ]))
         val decoded = zstd_decompress_frame(frame)
         expect(decoded.is_err()).to_equal(true)
-        # Decoding the inflated regenerated size over-runs the bitstream end
-        # (host zstd rejects it likewise); the real path fails closed.
-        _expect_compression_error(decoded.unwrap_err(), "TruncatedInput", "bitstream bits")
+        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "fresh-table compressed literals")
 
-    it "rejects malformed fresh-table four-stream compressed literals with the 5-byte header form":
+    it "rejects fresh-table four-stream compressed literals with the 5-byte header form":
         val frame = _zstd_frame(4, _compressed_block(_unsupported_literals_payload(2, 3)))
         val decoded = zstd_decompress_frame(frame)
         expect(decoded.is_err()).to_equal(true)
-        # The inline weights describe an invalid (>11-bit) Huffman tree; the real
-        # path fails closed when building the decode table.
-        _expect_compression_error(decoded.unwrap_err(), "CorruptStream", "huf tree depth exceeds 11 bits")
+        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "fresh-table compressed literals")
 
     it "rejects sequence-bearing compressed blocks explicitly":
+        # @req REQ-SSPEC-UNIT
+        step("rejects sequence-bearing compressed blocks explicitly")
         val frame = _zstd_frame(3, _compressed_block([
             0x18u8,
             0x61u8, 0x62u8, 0x63u8,
@@ -176,6 +182,8 @@ describe "zstd compressed blocks with zero sequences":
         _expect_compression_error(decoded.unwrap_err(), "TruncatedInput", "sequence")
 
     it "rejects treeless single-stream compressed literals without prior Huffman state":
+        # @req REQ-SSPEC-UNIT
+        step("rejects treeless single-stream compressed literals without prior Huffman state")
         val frame = _zstd_frame(4, _compressed_block([
             0x43u8, 0x80u8, 0x01u8,
             0x84u8, 0x43u8, 0x20u8, 0x10u8,
@@ -187,6 +195,8 @@ describe "zstd compressed blocks with zero sequences":
         _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "treeless literals")
 
     it "rejects treeless four-stream compressed literals without prior Huffman state":
+        # @req REQ-SSPEC-UNIT
+        step("rejects treeless four-stream compressed literals without prior Huffman state")
         val frame = _zstd_frame(4, _compressed_block([
             0x47u8, 0x80u8, 0x01u8,
             0x84u8, 0x43u8, 0x20u8, 0x10u8,
@@ -198,18 +208,22 @@ describe "zstd compressed blocks with zero sequences":
         _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "treeless literals")
 
     it "rejects treeless single-stream compressed literals with the 4-byte header form":
+        # @req REQ-SSPEC-UNIT
+        step("rejects treeless single-stream compressed literals with the 4-byte header form")
         val frame = _zstd_frame(4, _compressed_block(_unsupported_literals_payload(3, 2)))
         val decoded = zstd_decompress_frame(frame)
         expect(decoded.is_err()).to_equal(true)
         _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "treeless literals")
 
     it "rejects treeless four-stream compressed literals with the 5-byte header form":
+        # @req REQ-SSPEC-UNIT
+        step("rejects treeless four-stream compressed literals with the 5-byte header form")
         val frame = _zstd_frame(4, _compressed_block(_unsupported_literals_payload(3, 3)))
         val decoded = zstd_decompress_frame(frame)
         expect(decoded.is_err()).to_equal(true)
         _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "treeless literals")
 
-    it "rejects the malformed FSE-compressed Huffman-weight fresh-table fixture":
+    it "keeps the former FSE-compressed Huffman-weight fresh-table fixture out of scope":
         val frame = _zstd_frame(1, _compressed_block([
             0x12u8, 0x80u8, 0x00u8,
             0x01u8,
@@ -218,6 +232,4 @@ describe "zstd compressed blocks with zero sequences":
         ]))
         val decoded = zstd_decompress_frame(frame)
         expect(decoded.is_err()).to_equal(true)
-        # The 1-byte FSE weight stream is too small for valid normalized counts;
-        # the real path fails closed while parsing the FSE table description.
-        _expect_compression_error(decoded.unwrap_err(), "TruncatedInput", "fse normalized counts")
+        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "fresh-table compressed literals")

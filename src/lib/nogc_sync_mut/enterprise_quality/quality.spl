@@ -1,0 +1,317 @@
+"""
+# Enterprise Quality — QC inspection plans, measurements, and nonconformance
+
+Quality vertical of the Simple Enterprise Suite over the durable enterprise
+store, following the FROZEN foundation contracts (`enterprise_sale/foundation.spl`
+and `enterprise_sale/rbac_registry.spl` are never edited). This is a STANDALONE
+inspection/NCR vertical: it does not read or modify `enterprise_manufacturing`.
+
+## Storage model (insert-only + pure fold)
+
+Three insert-only tables, no UPDATE anywhere:
+
+- `qc_plans (tenant_id, plan_id, sample_size, set_by)` — a re-plan APPENDS a row
+  and the LATEST row by insert order is the effective sampling size.
+- `qc_inspections (tenant_id, inspection_id, plan_id, lot_id, measured, verdict, by)`
+  — one row per recorded inspection.
+- `qc_ncr_events (tenant_id, ncr_id, event, detail, by)` — the NCR lifecycle as
+  an append-only event log (`raised` -> `dispositioned` -> `closed`).
+
+Every read is a pure fold over rows filtered on the session's authoritative
+tenant id, so tenant B can never observe tenant A's plans, inspections or NCRs.
+
+## Verdicts and the auto-raised NCR
+
+A recorded inspection carries a verdict of exactly `pass` or `fail`. A `fail`
+AUTOMATICALLY appends an NCR `raised` event in the SAME unit of work as the
+inspection row — an inspection can never be durable without its NCR. The NCR id
+is derived deterministically as `NCR-<inspection_id>`, so the link needs no
+extra column and a replay cannot mint a second NCR.
+
+## NCR lifecycle (state derived, never stored)
+
+`ncr_state` folds the event log and returns `none` (never raised), `open`
+(raised, no disposition), `dispositioned`, or `closed`. Only three dispositions
+are accepted: `rework`, `scrap`, `use-as-is`. Closing REQUIRES a recorded
+disposition: `ncr_close` on an `open` NCR is denied — the central rejection this
+vertical exists to enforce. Close-out records the signing actor, recoverable via
+`ncr_closed_by`.
+
+## Denial reasons come from the FROZEN closed set
+
+`foundation.reason_set` is a CLOSED vocabulary and is never extended by a
+vertical, so this module maps its domain denials onto existing members rather
+than minting new strings: an unknown plan or NCR denies `not-found`, and both
+"closing without a disposition" and "acting on an already-closed NCR" deny
+`invalid-transition`. Every returned reason therefore satisfies
+`reason_allowed`, which the spec asserts directly.
+
+## RBAC (reuse, not a new grant)
+
+All four guarded commands REUSE the existing `quality` role through the LOCAL
+`quality_role_allows` gate; `admin` passes for everything, matching the frozen
+blanket rule. The frozen `role_allows` table is NOT edited and
+`enterprise_sale/rbac_registry.spl` is deliberately NOT touched (its equivalence
+spec is byte-fenced to the frozen table). The frozen session -> rbac ->
+validation -> idempotency -> effects SEQUENCE is preserved exactly in every
+command. Audit hashing goes only through `records.audit_append` (the
+`enterprise_store.audit_hash.audit_sha256_hex` facade) — this module never
+imports `std.common.crypto.sha256`.
+
+Lane: .spipe/simple_enterprise_suite (W23-FAN, quality).
+"""
+
+use std.nogc_sync_mut.enterprise_store.store.{
+    EnterpriseStore, store_migrate, store_rows, store_insert_row,
+    uow_begin, uow_commit, uow_rollback
+}
+use std.nogc_sync_mut.enterprise_store.records.{
+    idempotency_seen, idempotency_result, idempotency_record,
+    outbox_append, audit_append
+}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext,
+    CommandEnvelope, CommandResult,
+    accepted, denied, session_valid
+}
+
+# =============================================================================
+# Schema — three insert-only tables
+# =============================================================================
+
+fn quality_setup(store: EnterpriseStore) -> bool:
+    store_migrate(store, "quality_001_plans",
+        "CREATE TABLE IF NOT EXISTS qc_plans (id INTEGER PRIMARY KEY, tenant_id TEXT, plan_id TEXT, sample_size TEXT, set_by TEXT)")
+    store_migrate(store, "quality_002_inspections",
+        "CREATE TABLE IF NOT EXISTS qc_inspections (id INTEGER PRIMARY KEY, tenant_id TEXT, inspection_id TEXT, plan_id TEXT, lot_id TEXT, measured TEXT, verdict TEXT, by_actor TEXT)")
+    store_migrate(store, "quality_003_ncr_events",
+        "CREATE TABLE IF NOT EXISTS qc_ncr_events (id INTEGER PRIMARY KEY, tenant_id TEXT, ncr_id TEXT, event TEXT, detail TEXT, by_actor TEXT)")
+
+# =============================================================================
+# RBAC — reuse the quality role (see module docstring)
+# =============================================================================
+
+# quality_role_allows gates every QC command. admin passes for everything
+# (matching the frozen blanket rule); the quality role is REUSED here.
+fn quality_role_allows(role: text, action: text) -> bool:
+    if role == "admin":
+        return true
+    if role == "quality":
+        return action == "qc.plan.set" or action == "qc.inspect.record" or action == "ncr.disposition.set" or action == "ncr.close"
+    false
+
+# =============================================================================
+# Pure domain helpers
+# =============================================================================
+
+# ncr_id_for derives the NCR id of a failed inspection deterministically.
+fn ncr_id_for(inspection_id: text) -> text:
+    "NCR-" + inspection_id
+
+# quality_verdict_valid accepts exactly the two recordable verdicts.
+fn quality_verdict_valid(verdict: text) -> bool:
+    verdict == "pass" or verdict == "fail"
+
+# quality_disposition_valid accepts exactly the three dispositions.
+fn quality_disposition_valid(disposition: text) -> bool:
+    disposition == "rework" or disposition == "scrap" or disposition == "use-as-is"
+
+# =============================================================================
+# Pure reads — folds over insert-only rows, tenant filtered
+# =============================================================================
+
+# qc_plan_sample_size returns the LATEST sampling size for a plan, or -1 when no
+# plan has ever been set for (tenant, plan_id).
+fn qc_plan_sample_size(store: EnterpriseStore, tenant_id: text, plan_id: text) -> i64:
+    var size: i64 = -1
+    val rows = store_rows(store, "qc_plans", "id, tenant_id, plan_id, sample_size, set_by")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "plan_id") == plan_id:
+            size = int(sqlite_row_get(row, "sample_size"))
+    size
+
+# qc_inspection_verdict returns the recorded verdict for an inspection id, or
+# "" when the inspection does not exist for that tenant.
+fn qc_inspection_verdict(store: EnterpriseStore, tenant_id: text, inspection_id: text) -> text:
+    var verdict: text = ""
+    val rows = store_rows(store, "qc_inspections", "id, tenant_id, inspection_id, plan_id, lot_id, measured, verdict, by_actor")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "inspection_id") == inspection_id:
+            verdict = sqlite_row_get(row, "verdict")
+    verdict
+
+# qc_inspection_count counts recorded inspections for a tenant's plan.
+fn qc_inspection_count(store: EnterpriseStore, tenant_id: text, plan_id: text) -> i64:
+    var n: i64 = 0
+    val rows = store_rows(store, "qc_inspections", "id, tenant_id, inspection_id, plan_id, lot_id, measured, verdict, by_actor")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "plan_id") == plan_id:
+            n = n + 1
+    n
+
+# ncr_disposition returns the LATEST recorded disposition for an NCR, or "" when
+# none has been recorded.
+fn ncr_disposition(store: EnterpriseStore, tenant_id: text, ncr_id: text) -> text:
+    var d: text = ""
+    val rows = store_rows(store, "qc_ncr_events", "id, tenant_id, ncr_id, event, detail, by_actor")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "ncr_id") == ncr_id and sqlite_row_get(row, "event") == "dispositioned":
+            d = sqlite_row_get(row, "detail")
+    d
+
+# ncr_closed_by returns the actor who signed the close-out, or "" when the NCR
+# is not closed.
+fn ncr_closed_by(store: EnterpriseStore, tenant_id: text, ncr_id: text) -> text:
+    var who: text = ""
+    val rows = store_rows(store, "qc_ncr_events", "id, tenant_id, ncr_id, event, detail, by_actor")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "ncr_id") == ncr_id and sqlite_row_get(row, "event") == "closed":
+            who = sqlite_row_get(row, "by_actor")
+    who
+
+# ncr_state derives the lifecycle state by folding the event log:
+# "none" (never raised) -> "open" -> "dispositioned" -> "closed".
+fn ncr_state(store: EnterpriseStore, tenant_id: text, ncr_id: text) -> text:
+    var state: text = "none"
+    val rows = store_rows(store, "qc_ncr_events", "id, tenant_id, ncr_id, event, detail, by_actor")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "ncr_id") == ncr_id:
+            val event = sqlite_row_get(row, "event")
+            if event == "raised":
+                state = "open"
+            if event == "dispositioned":
+                state = "dispositioned"
+            if event == "closed":
+                state = "closed"
+    state
+
+# =============================================================================
+# Guarded commands (frozen sequence: session -> rbac -> validation ->
+# idempotency -> effects in one UoW)
+# =============================================================================
+
+# qc_plan_set records an inspection plan with its sampling size. Insert-only: a
+# re-plan appends a row and the latest wins.
+fn qc_plan_set(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, plan_id: text, sample_size: i64) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", plan_id)
+    if not quality_role_allows(who.role, "qc.plan.set"):
+        return denied("forbidden", plan_id)
+    if plan_id == "" or sample_size <= 0:
+        return denied("invalid-record", plan_id)
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    val detail = plan_id + ":{sample_size}"
+    uow_begin(store)
+    if not store_insert_row(store,
+        "INSERT INTO qc_plans (tenant_id, plan_id, sample_size, set_by) VALUES (?, ?, ?, ?)",
+        [tenant.tenant_id, plan_id, "{sample_size}", who.actor_id]):
+        uow_rollback(store)
+        return denied("store-error", detail)
+    outbox_append(store, tenant.tenant_id, "qc.plan.set", detail)
+    audit_append(store, tenant.tenant_id, who.actor_id, "qc.plan.set", detail)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, detail)
+    uow_commit(store)
+    accepted(detail)
+
+# qc_inspect_record records one inspection measurement against an existing plan.
+# A "fail" verdict AUTO-RAISES the nonconformance report in the SAME UoW.
+fn qc_inspect_record(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, inspection_id: text, plan_id: text, lot_id: text, measured: i64, verdict: text) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", inspection_id)
+    if not quality_role_allows(who.role, "qc.inspect.record"):
+        return denied("forbidden", inspection_id)
+    if inspection_id == "" or lot_id == "" or not quality_verdict_valid(verdict):
+        return denied("invalid-record", inspection_id)
+    # state-dependent validation: the plan must exist for this tenant.
+    if qc_plan_sample_size(store, session.tenant_id, plan_id) <= 0:
+        return denied("not-found", plan_id)
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    val detail = inspection_id + "/" + lot_id + ":" + verdict
+    uow_begin(store)
+    if not store_insert_row(store,
+        "INSERT INTO qc_inspections (tenant_id, inspection_id, plan_id, lot_id, measured, verdict, by_actor) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [tenant.tenant_id, inspection_id, plan_id, lot_id, "{measured}", verdict, who.actor_id]):
+        uow_rollback(store)
+        return denied("store-error", detail)
+    if verdict == "fail":
+        if not store_insert_row(store,
+            "INSERT INTO qc_ncr_events (tenant_id, ncr_id, event, detail, by_actor) VALUES (?, ?, ?, ?, ?)",
+            [tenant.tenant_id, ncr_id_for(inspection_id), "raised", detail, who.actor_id]):
+            uow_rollback(store)
+            return denied("store-error", detail)
+        outbox_append(store, tenant.tenant_id, "ncr.raised", ncr_id_for(inspection_id))
+    outbox_append(store, tenant.tenant_id, "qc.inspect.record", detail)
+    audit_append(store, tenant.tenant_id, who.actor_id, "qc.inspect.record", detail)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, detail)
+    uow_commit(store)
+    accepted(detail)
+
+# ncr_disposition_set records the disposition of an OPEN nonconformance report.
+fn ncr_disposition_set(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, ncr_id: text, disposition: text) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", ncr_id)
+    if not quality_role_allows(who.role, "ncr.disposition.set"):
+        return denied("forbidden", ncr_id)
+    if ncr_id == "" or not quality_disposition_valid(disposition):
+        return denied("invalid-record", ncr_id)
+    val state = ncr_state(store, session.tenant_id, ncr_id)
+    if state == "none":
+        return denied("not-found", ncr_id)
+    if state == "closed":
+        return denied("invalid-transition", ncr_id)
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    val detail = disposition
+    uow_begin(store)
+    if not store_insert_row(store,
+        "INSERT INTO qc_ncr_events (tenant_id, ncr_id, event, detail, by_actor) VALUES (?, ?, ?, ?, ?)",
+        [tenant.tenant_id, ncr_id, "dispositioned", disposition, who.actor_id]):
+        uow_rollback(store)
+        return denied("store-error", detail)
+    outbox_append(store, tenant.tenant_id, "ncr.disposition.set", ncr_id + ":" + disposition)
+    audit_append(store, tenant.tenant_id, who.actor_id, "ncr.disposition.set", ncr_id + ":" + disposition)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, detail)
+    uow_commit(store)
+    accepted(detail)
+
+# ncr_close signs off and closes a DISPOSITIONED nonconformance report. Closing
+# an NCR that has no recorded disposition is denied with "invalid-transition".
+fn ncr_close(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, ncr_id: text) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", ncr_id)
+    if not quality_role_allows(who.role, "ncr.close"):
+        return denied("forbidden", ncr_id)
+    if ncr_id == "":
+        return denied("invalid-record", ncr_id)
+    val state = ncr_state(store, session.tenant_id, ncr_id)
+    if state == "none":
+        return denied("not-found", ncr_id)
+    if state == "closed":
+        return denied("invalid-transition", ncr_id)
+    # The central rule: no close-out without a disposition on record.
+    if state == "open" or ncr_disposition(store, session.tenant_id, ncr_id) == "":
+        return denied("invalid-transition", ncr_id)
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    val detail = ncr_id + ":" + ncr_disposition(store, session.tenant_id, ncr_id)
+    uow_begin(store)
+    if not store_insert_row(store,
+        "INSERT INTO qc_ncr_events (tenant_id, ncr_id, event, detail, by_actor) VALUES (?, ?, ?, ?, ?)",
+        [tenant.tenant_id, ncr_id, "closed", detail, who.actor_id]):
+        uow_rollback(store)
+        return denied("store-error", detail)
+    outbox_append(store, tenant.tenant_id, "ncr.close", detail)
+    audit_append(store, tenant.tenant_id, who.actor_id, "ncr.close", detail)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, detail)
+    uow_commit(store)
+    accepted(detail)
+
+export quality_setup
+export quality_role_allows
+export ncr_id_for, quality_verdict_valid, quality_disposition_valid
+export qc_plan_sample_size, qc_inspection_verdict, qc_inspection_count
+export ncr_state, ncr_disposition, ncr_closed_by
+export qc_plan_set, qc_inspect_record, ncr_disposition_set, ncr_close

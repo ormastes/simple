@@ -7,12 +7,12 @@
 use std.spec.step
 
 use std.io_runtime.{read_file}
-use std.common.torch.dyn_sffi_ops.{dyn_torch_available, dyn_torch_tensor_abs_result, dyn_torch_tensor_add_scalar_result, dyn_torch_tensor_arange_result, dyn_torch_tensor_argmax_result, dyn_torch_tensor_argmin_result, dyn_torch_tensor_clone_result, dyn_torch_tensor_contiguous_result, dyn_torch_tensor_det_result, dyn_torch_tensor_div_scalar_result, dyn_torch_tensor_dot_result, dyn_torch_tensor_empty_1d_result, dyn_torch_tensor_exp_result, dyn_torch_tensor_eye_result, dyn_torch_tensor_full_4d_result, dyn_torch_tensor_gelu_result, dyn_torch_tensor_inverse_result, dyn_torch_tensor_leaky_relu_result, dyn_torch_tensor_linalg_solve_result, dyn_torch_tensor_linspace_result, dyn_torch_tensor_log_result, dyn_torch_tensor_log_softmax_result, dyn_torch_tensor_matmul_result, dyn_torch_tensor_max_result, dyn_torch_tensor_max_dim_result, dyn_torch_tensor_mean_result, dyn_torch_tensor_mean_dim_result, dyn_torch_tensor_min_result, dyn_torch_tensor_min_dim_result, dyn_torch_tensor_mul_scalar_result, dyn_torch_tensor_neg_result, dyn_torch_tensor_norm_result, dyn_torch_tensor_ones_2d_result, dyn_torch_tensor_pow_result, dyn_torch_tensor_rand_2d_result, dyn_torch_tensor_randn_4d_result, dyn_torch_tensor_relu_result, dyn_torch_tensor_sigmoid_result, dyn_torch_tensor_slice_result, dyn_torch_tensor_softmax_result, dyn_torch_tensor_sqrt_result, dyn_torch_tensor_squeeze_dim_result, dyn_torch_tensor_std_result, dyn_torch_tensor_sub_scalar_result, dyn_torch_tensor_sum_result, dyn_torch_tensor_sum_dim_result, dyn_torch_tensor_tanh_result, dyn_torch_tensor_unsqueeze_result, dyn_torch_tensor_var_result, dyn_torch_tensor_zeros_1d_result}
+use std.common.torch.dyn_sffi_ops.{dyn_torch_available, dyn_torch_tensor_linalg_solve, dyn_torch_tensor_linalg_solve_result}
 
 fn source_text() -> text:
     read_file("src/lib/common/torch/dyn_sffi_ops.spl") ?? ""
 
-fn raw_torch_source() -> text:
+fn provider_source() -> text:
     read_file("src/lib/nogc_sync_mut/torch/sffi.spl") ?? ""
 
 fn rust_linalg_runtime_source() -> text:
@@ -24,30 +24,14 @@ fn cpp_runtime_source() -> text:
 fn cpp_header_source() -> text:
     read_file("src/runtime/torch_sffi.h") ?? ""
 
-# NOTE: seed `text.find` returns a BYTE offset while `text.slice` consumes a
-# CHAR offset. The library source has em-dashes (—) in comments before these
-# markers, so mixing find+slice skews extraction on this multibyte input.
-# `char_find` scans with slice so it returns a CHAR offset consistent with slice.
-fn char_find(haystack: text, needle: text) -> i64:
-    val n = haystack.len()
-    val m = needle.len()
-    if m == 0:
-        return 0
-    var i = 0
-    while i + m <= n:
-        if haystack.slice(i, i + m) == needle:
-            return i
-        i = i + 1
-    -1
-
 fn dyn_available_body(source: text) -> text:
     val marker = "fn dyn_torch_available() -> bool:"
-    val start = char_find(source, marker)
+    val start = source.find(marker)
     if start < 0:
         return ""
 
     val rest = source.slice(start, source.len())
-    val next = char_find(rest, "\nfn dyn_torch_tensor_free")
+    val next = rest.find("\nfn dyn_torch_tensor_free")
     if next < 0:
         return rest
 
@@ -55,12 +39,12 @@ fn dyn_available_body(source: text) -> text:
 
 fn dyn_linalg_solve_result_body(source: text) -> text:
     val marker = "fn dyn_torch_tensor_linalg_solve_result(a: i64, b: i64) -> DynTorchTensorResult:"
-    val start = char_find(source, marker)
+    val start = source.find(marker)
     if start < 0:
         return ""
 
     val rest = source.slice(start, source.len())
-    val next = char_find(rest, "\nfn dyn_torch_tensor_det")
+    val next = rest.find("\nfn dyn_torch_tensor_det")
     if next < 0:
         return rest
 
@@ -74,29 +58,81 @@ describe "dynamic torch SFFI readiness surface":
         val body = dyn_available_body(source_text())
 
         expect(body).to_contain("fn dyn_torch_available() -> bool:")
-        expect(body).to_contain("rt_torch_available()")
+        expect(body).to_contain("torch_sffi_available()")
         expect(body.contains("\n    false")).to_equal(false)
         expect(body.contains("return false")).to_equal(false)
+
+    it "keeps raw Torch ownership out of the common compatibility facade":
+        val source = source_text()
+        val provider = provider_source()
+
+        expect(source).to_contain("use std.nogc_sync_mut.torch.sffi.{")
+        expect(source.contains("rt_torch_")).to_equal(false)
+        expect(source.contains("extern fn")).to_equal(false)
+        expect(provider).to_contain("single Simple owner of the libtorch")
+        expect(provider).to_contain("extern fn rt_torch_available() -> bool")
+        expect(provider).to_contain("fn torch_sffi_available() -> bool:")
+
+    it "preserves operation and constructor parity through provider delegates":
+        val source = source_text()
+        val provider = provider_source()
+
+        expect(source).to_contain("torch_sffi_tensor_sum_dim(handle, dim, keepdim)")
+        expect(source).to_contain("torch_sffi_tensor_slice(handle, dim, start, end, step)")
+        expect(source).to_contain("torch_sffi_tensor_zeros(n, m, k, l, 4)")
+        expect(source).to_contain("torch_sffi_tensor_full(n, m, k, l, 4, fill)")
+        expect(provider).to_contain("rt_torch_tensor_zeros(dims)")
+        expect(provider).to_contain("rt_torch_tensor_full(dims, fill)")
+        expect(provider).to_contain("rt_torch_torchtensor_slice(handle, dim, start, end, step)")
 
     it "delegates linalg solve to the existing runtime SFFI instead of hardcoding failure":
         # @req REQ-SSPEC-LIB
         step("delegates linalg solve to the existing runtime SFFI instead of hardcoding failure")
         val source = source_text()
+        val provider = provider_source()
+
+        expect(source).to_contain("use std.nogc_sync_mut.torch.sffi.{")
+        expect(source.contains("rt_torch_")).to_equal(false)
+        expect(source.contains("extern fn")).to_equal(false)
+        expect(provider).to_contain("single Simple owner of the libtorch")
+        expect(provider).to_contain("extern fn rt_torch_available() -> bool")
+        expect(provider).to_contain("fn torch_sffi_available() -> bool:")
+
+    it "preserves operation and constructor parity through provider delegates":
+        val source = source_text()
+        val provider = provider_source()
+
+        expect(source).to_contain("torch_sffi_tensor_sum_dim(handle, dim, keepdim)")
+        expect(source).to_contain("torch_sffi_tensor_slice(handle, dim, start, end, step)")
+        expect(source).to_contain("torch_sffi_tensor_zeros(n, m, k, l, 4)")
+        expect(source).to_contain("torch_sffi_tensor_full(n, m, k, l, 4, fill)")
+        expect(provider).to_contain("rt_torch_tensor_zeros(dims)")
+        expect(provider).to_contain("rt_torch_tensor_full(dims, fill)")
+        expect(provider).to_contain("rt_torch_torchtensor_slice(handle, dim, start, end, step)")
+
+    it "delegates linalg solve to the existing runtime SFFI instead of hardcoding failure":
+        val source = source_text()
+        val body = dyn_linalg_solve_body(source)
         val result_body = dyn_linalg_solve_result_body(source)
 
-        expect(result_body).to_contain("if not rt_torch_available():")
+        expect(body).to_contain("fn dyn_torch_tensor_linalg_solve(a: i64, b: i64) -> i64:")
+        expect(body).to_contain("dyn_torch_tensor_linalg_solve_result(a, b).handle")
+        expect(result_body).to_contain("if not torch_sffi_available():")
         expect(result_body).to_contain("libtorch_unavailable")
         expect(result_body).to_contain("invalid_handle")
         expect(result_body).to_contain("runtime_returned_null_handle")
-        expect(result_body).to_contain("rt_torch_torchtensor_linalg_solve(a, b)")
-        expect(result_body.contains("not yet implemented")).to_equal(false)
-        expect(source.contains("fn dyn_torch_tensor_linalg_solve(a: i64, b: i64) -> i64:")).to_equal(false)
-        expect(source).to_contain("extern fn rt_torch_torchtensor_linalg_solve(a: i64, b: i64) -> i64")
+        expect(body).to_contain("torch_sffi_tensor_linalg_solve(a, b)")
+        expect(body.contains("not yet implemented")).to_equal(false)
+        expect(source.contains("extern fn rt_torch_torchtensor_linalg_solve")).to_equal(false)
+        expect(provider_source()).to_contain("extern fn rt_torch_torchtensor_linalg_solve(a: i64, b: i64) -> i64")
 
         val runtime = rust_linalg_runtime_source()
         expect(runtime).to_contain("pub extern \"C\" fn rt_torch_linalg_solve")
         expect(runtime).to_contain("pub extern \"C\" fn rt_torch_torchtensor_linalg_solve")
         expect(runtime).to_contain("rt_torch_linalg_solve(a_handle, b_handle)")
+
+    it "keeps linalg solve safe for invalid runtime handles":
+        expect(dyn_torch_tensor_linalg_solve(0, 0)).to_equal(0)
 
     it "exposes explicit linalg solve status for unavailable or invalid handles":
         # @req REQ-SSPEC-LIB

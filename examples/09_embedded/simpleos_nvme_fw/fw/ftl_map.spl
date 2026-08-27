@@ -13,7 +13,6 @@ use nvme_types.*
 val MAP_CACHE_CAP: i64 = 64
 val MAP_CACHE_ENTRY_BYTES: i64 = 32
 val MAP_CACHE_DRAM_BUDGET_BYTES: i64 = 2048
-val MAP_COUNTER_MAX: i64 = 1000000000000000000
 
 # ── pure free helpers (no mutation, array passed by value for reading only) ───
 
@@ -25,40 +24,23 @@ fn ftl_fill(size: i64, fill: i64) -> [i64]:
         i = i + 1
     arr
 
-fn ftl_map_cap_limit(cap: i64) -> i64:
-    if cap < 0:
-        return 0
-    if cap > MAP_CACHE_CAP:
-        return MAP_CACHE_CAP
-    cap
-
-fn ftl_map_array_cap(cap: i64, arr_len: i64) -> i64:
-    val lim: i64 = ftl_map_cap_limit(cap)
-    if lim > arr_len:
-        return arr_len
-    lim
-
 # Return index of slot with minimum c_age (LRU). Ties: lowest index wins.
 fn ftl_lru_slot(c_age: [i64], cap: i64) -> i64:
-    val lim: i64 = ftl_map_array_cap(cap, c_age.len())
-    if lim <= 0:
-        return UNMAP
     var lru: i64 = 0
     var min_age: i64 = c_age[0]
     var i: i64 = 1
-    while i < lim:
+    while i < cap:
         if c_age[i] < min_age:
             min_age = c_age[i]
             lru = i
         i = i + 1
     lru
 
-# Return cache slot index whose c_lba matches lba, or UNMAP if not present.
+# Return cache slot index whose c_lba matches lba, or -1 if not present.
 fn ftl_cache_find(c_lba: [i64], cap: i64, lba: i64) -> i64:
-    var found: i64 = UNMAP
+    var found: i64 = -1
     var i: i64 = 0
-    val lim: i64 = ftl_map_array_cap(cap, c_lba.len())
-    while i < lim:
+    while i < cap:
         if c_lba[i] == lba:
             found = i
         i = i + 1
@@ -114,12 +96,6 @@ fn ftl_map_new() -> L2pMap:
 # ── impl ──────────────────────────────────────────────────────────────────────
 
 impl L2pMap:
-    me l2p_ready(lba: i64) -> bool:
-        ftl_map_lba_valid(lba) and lba < me.l2p.len()
-
-    me cache_slot_ready(slot: i64) -> bool:
-        slot >= 0 and slot < me.c_lba.len() and slot < me.c_ppn.len() and slot < me.c_dirty.len() and slot < me.c_age.len()
-
     # Look up lba. Cache hit -> return cached ppn.
     # Cache miss -> evict LRU (dirty writeback if needed), load from l2p, return.
     me lookup(lba: i64) -> i64:
@@ -128,9 +104,9 @@ impl L2pMap:
         val found: i64 = ftl_cache_find(me.c_lba, me.cap, lba)
         var lru: i64 = 0
         var el: i64 = 0
-        if me.cache_slot_ready(found):
-            me.hits = ftl_map_counter_next(me.hits)
-            me.tick = ftl_map_counter_next(me.tick)
+        if found >= 0:
+            me.hits = me.hits + 1
+            me.tick = me.tick + 1
             me.c_age[found] = me.tick
             return ftl_map_sanitize_ppn(me.c_ppn[found])
         me.misses = ftl_map_counter_next(me.misses)
@@ -143,13 +119,13 @@ impl L2pMap:
             el = me.c_lba[lru]
             if me.l2p_ready(el) and ftl_map_ppn_valid(me.c_ppn[lru]):
                 me.l2p[el] = me.c_ppn[lru]
-            me.evicts = ftl_map_counter_next(me.evicts)
-        me.tick = ftl_map_counter_next(me.tick)
+            me.evicts = me.evicts + 1
+        me.tick = me.tick + 1
         me.c_lba[lru] = lba
-        me.c_ppn[lru] = ftl_map_sanitize_ppn(me.l2p[lba])
+        me.c_ppn[lru] = me.l2p[lba]
         me.c_dirty[lru] = 0
         me.c_age[lru] = me.tick
-        me.c_ppn[lru]
+        me.l2p[lba]
 
     # Write lba->ppn into cache (dirty). Does NOT touch l2p directly.
     # Evicts LRU with dirty writeback if cache is full and lba not already cached.
@@ -161,12 +137,12 @@ impl L2pMap:
         val found: i64 = ftl_cache_find(me.c_lba, me.cap, lba)
         var lru: i64 = 0
         var el: i64 = 0
-        if me.cache_slot_ready(found):
-            me.tick = ftl_map_counter_next(me.tick)
+        if found >= 0:
+            me.tick = me.tick + 1
             me.c_ppn[found] = ppn
             me.c_dirty[found] = 1
             me.c_age[found] = me.tick
-        if not me.cache_slot_ready(found):
+        if found < 0:
             lru = ftl_lru_slot(me.c_age, me.cap)
             if lru == UNMAP:
                 me.l2p[lba] = ppn
@@ -177,8 +153,8 @@ impl L2pMap:
                 el = me.c_lba[lru]
                 if me.l2p_ready(el) and ftl_map_ppn_valid(me.c_ppn[lru]):
                     me.l2p[el] = me.c_ppn[lru]
-                me.evicts = ftl_map_counter_next(me.evicts)
-            me.tick = ftl_map_counter_next(me.tick)
+                me.evicts = me.evicts + 1
+            me.tick = me.tick + 1
             me.c_lba[lru] = lba
             me.c_ppn[lru] = ppn
             me.c_dirty[lru] = 1
@@ -219,18 +195,12 @@ impl L2pMap:
             i = i + 1
 
     me hit_count() -> i64:
-        if me.hits < 0:
-            return 0
         me.hits
 
     me miss_count() -> i64:
-        if me.misses < 0:
-            return 0
         me.misses
 
     me evict_count() -> i64:
-        if me.evicts < 0:
-            return 0
         me.evicts
 
 # ── selftest ──────────────────────────────────────────────────────────────────

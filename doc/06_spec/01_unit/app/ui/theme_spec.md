@@ -1,6 +1,29 @@
 # Theme Specification
 
-> Tests covering ThemePalette, light(), dark(), high_contrast(), Typography, default(), Spacing, default(), BorderRadius, default(), Theme, light(), dark(), high_contrast(), to_css_variables(), Shadow, none(), elevation levels.
+> 1. expect true  # primary = 0x1976D2
+
+<!-- sdn-diagram:id=theme_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=theme_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+theme_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=theme_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,18 +42,16 @@
 
 #### creates light theme with correct primary color
 
-- creates light theme with correct primary color
+1. expect true  # primary = 0x1976D2
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates light theme with correct primary color")
 expect true  # primary = 0x1976D2 (blue)
 ```
 
@@ -38,18 +59,13 @@ expect true  # primary = 0x1976D2 (blue)
 
 #### has white surface color
 
-- has white surface color
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("has white surface color")
 expect true  # surface = 0xFFFFFF
 ```
 
@@ -57,18 +73,13 @@ expect true  # surface = 0xFFFFFF
 
 #### has dark text for readability
 
-- has dark text for readability
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("has dark text for readability")
 expect true  # text_primary = 0x212121
 ```
 
@@ -78,18 +89,13 @@ expect true  # text_primary = 0x212121
 
 #### creates dark theme with lighter primary color
 
-- creates dark theme with lighter primary color
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates dark theme with lighter primary color")
 expect true  # primary = 0x90CAF9
 ```
 
@@ -97,18 +103,13 @@ expect true  # primary = 0x90CAF9
 
 #### has dark surface color
 
-- has dark surface color
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("has dark surface color")
 expect true  # surface = 0x1E1E1E
 ```
 
@@ -116,18 +117,13 @@ expect true  # surface = 0x1E1E1E
 
 #### has white text for contrast
 
-- has white text for contrast
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("has white text for contrast")
 expect true  # text_primary = 0xFFFFFF
 ```
 
@@ -137,18 +133,13 @@ expect true  # text_primary = 0xFFFFFF
 
 #### uses pure colors for accessibility
 
-- uses pure colors for accessibility
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("uses pure colors for accessibility")
 expect true  # primary = 0x0000FF, error = 0xFF0000
 ```
 
@@ -160,18 +151,13 @@ expect true  # primary = 0x0000FF, error = 0xFF0000
 
 #### uses system font family
 
-- uses system font family
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("uses system font family")
 expect true  # font_family contains "system-ui"
 ```
 
@@ -179,18 +165,13 @@ expect true  # font_family contains "system-ui"
 
 #### has base font size of 16px
 
-- has base font size of 16px
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("has base font size of 16px")
 expect true  # font_size_base == 16
 ```
 
@@ -198,18 +179,13 @@ expect true  # font_size_base == 16
 
 #### has normal line height of 1.5
 
-- has normal line height of 1.5
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("has normal line height of 1.5")
 expect true  # line_height_normal == 1.5
 ```
 
@@ -217,18 +193,13 @@ expect true  # line_height_normal == 1.5
 
 #### provides various font sizes
 
-- provides various font sizes
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("provides various font sizes")
 expect true  # xs=12, sm=14, lg=18, xl=20
 ```
 
@@ -240,18 +211,13 @@ expect true  # xs=12, sm=14, lg=18, xl=20
 
 #### follows 4px base scale
 
-- follows 4px base scale
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("follows 4px base scale")
 expect true  # xs=4, sm=8, md=16, lg=24
 ```
 
@@ -259,18 +225,13 @@ expect true  # xs=4, sm=8, md=16, lg=24
 
 #### provides larger sizes
 
-- provides larger sizes
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("provides larger sizes")
 expect true  # xl=32, xxl=48
 ```
 
@@ -282,18 +243,13 @@ expect true  # xl=32, xxl=48
 
 #### provides range of radius values
 
-- provides range of radius values
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("provides range of radius values")
 expect true  # none=0, sm=2, md=4, lg=8
 ```
 
@@ -301,18 +257,13 @@ expect true  # none=0, sm=2, md=4, lg=8
 
 #### has full radius for circular elements
 
-- has full radius for circular elements
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("has full radius for circular elements")
 expect true  # full=9999
 ```
 
@@ -324,18 +275,13 @@ expect true  # full=9999
 
 #### creates complete light theme
 
-- creates complete light theme
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates complete light theme")
 expect true  # name="Light", all components initialized
 ```
 
@@ -345,18 +291,13 @@ expect true  # name="Light", all components initialized
 
 #### creates complete dark theme
 
-- creates complete dark theme
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates complete dark theme")
 expect true  # name="Dark", dark background
 ```
 
@@ -366,18 +307,13 @@ expect true  # name="Dark", dark background
 
 #### creates high contrast theme
 
-- creates high contrast theme
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates high contrast theme")
 expect true  # name="High Contrast"
 ```
 
@@ -387,18 +323,13 @@ expect true  # name="High Contrast"
 
 #### generates valid CSS custom properties
 
-- generates valid CSS custom properties
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("generates valid CSS custom properties")
 expect true  # contains --color-primary, --font-family, etc.
 ```
 
@@ -410,18 +341,13 @@ expect true  # contains --color-primary, --font-family, etc.
 
 #### creates zero shadow
 
-- creates zero shadow
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates zero shadow")
 expect true  # offset=0, blur=0, spread=0
 ```
 
@@ -431,18 +357,13 @@ expect true  # offset=0, blur=0, spread=0
 
 #### increases blur with elevation
 
-- increases blur with elevation
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("increases blur with elevation")
 expect true  # sm < md < lg < xl
 ```
 
@@ -450,18 +371,13 @@ expect true  # sm < md < lg < xl
 
 #### increases y-offset with elevation
 
-- increases y-offset with elevation
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("increases y-offset with elevation")
 expect true  # sm.offset_y < lg.offset_y
 ```
 
@@ -474,12 +390,12 @@ expect true  # sm.offset_y < lg.offset_y
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/theme_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering ThemePalette, light(), dark(), high_contrast(), Typography, default(), Spacing, default(), BorderRadius, default(), Theme, light(), dark(), high_contrast(), to_css_variables(), Shadow, none(), elevation levels.
+Tests covering:
 - ThemePalette
 - light()
 - dark()
@@ -511,51 +427,3 @@ Tests covering ThemePalette, light(), dark(), high_contrast(), Typography, defau
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `6d4c2cd2ca98759d98cdc2f8934958a92bf7ba3228b286e09fdd1d22c780acd9`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `6d4c2cd2ca98759d98cdc2f8934958a92bf7ba3228b286e09fdd1d22c780acd9`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `6d4c2cd2ca98759d98cdc2f8934958a92bf7ba3228b286e09fdd1d22c780acd9`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/ui/theme_spec.spl
-mirror: doc/06_spec/01_unit/app/ui/theme_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/ui/theme_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/ui/theme_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/ui/theme_spec.spl:23:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates light theme with correct primary color' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui/theme_spec.spl:27:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has white surface color' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui/theme_spec.spl:31:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has dark text for readability' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

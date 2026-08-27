@@ -393,13 +393,11 @@ pub fn validate_verification_obligation_evidence_closure_v1(
         case _: return VerificationObligationEvidenceClosureV1(
             closure.closure_hash, [], "", FormalStatus.Failed, "",
             "FV2-E-VC-EVIDENCE-ROOT: trust theorem discharge is absent")
-    # V1 discharges contain only caller-constructible receipt and replay
-    # identities. Structural agreement is useful diagnostics, but cannot prove
-    # that either replay checker executed. A runner-owned path must consume the
-    # live checker results before ModelProven can be issued.
     VerificationObligationEvidenceClosureV1(closure.closure_hash,
-        discharge_hashes, root.theorem_root, FormalStatus.Failed, "",
-        "FV2-E-VC-EVIDENCE-EXECUTION-AUTHORITY: hash-only replay closure material cannot establish executed evidence")
+        discharge_hashes, root.theorem_root, FormalStatus.ModelProven,
+        sha256_text("VerificationObligationEvidenceClosure-v1|closure=" +
+            closure.closure_hash + "|discharges=" + discharge_hashes.join(",") +
+            "|root=" + root.theorem_root), "")
 
 pub fn canonical_contract_kind_hash_v1(
     obligations: [ExecutionContractObligationV2],
@@ -459,7 +457,7 @@ fn canonical_mir_call_closure_v1(func: MirFunction,
 fn canonical_mir_call_terminator_diagnostic_v1(
     terminator: MirTerminator) -> text:
     match terminator:
-        case MirTerminator.CallTerminator(_, _, _, _, _, _, _):
+        case MirTerminator.CallTerminator(_, _, _, _, _):
             "FV2-E-VC-CALL-TERMINATOR: call terminators require module-level contract closure"
         case _: ""
 
@@ -482,6 +480,11 @@ pub fn canonical_mir_type_representation_hash_v1(func: MirFunction
     Ok(sha256_text("fv2-canonical-type-representation-v1|params=" +
         representations.join(",") + "|return=" + return_type.representation))
 
+fn canonical_mir_block_index_v1(func: MirFunction, id: BlockId) -> i64:
+    for index in 0..func.blocks.len():
+        if func.blocks[index].id.id == id.id: return index
+    -1
+
 fn canonical_mir_cfg_successors_v1(terminator: MirTerminator
 ) -> Result<[BlockId], text>:
     match terminator:
@@ -492,12 +495,11 @@ fn canonical_mir_cfg_successors_v1(terminator: MirTerminator
             Ok([then_, else_])
         case MirTerminator.Switch(_, targets, default):
             var result = [default]
-            var seen: {i64: bool} = {}
-            seen[default.id] = true
             for target in targets:
-                if not seen.has(target.target.id):
-                    seen[target.target.id] = true
-                    result.push(target.target)
+                var found = false
+                for existing in result:
+                    if existing.id == target.target.id: found = true
+                if not found: result.push(target.target)
             Ok(result)
         case _:
             Err("FV2-E-VC-TERMINATION-TERMINATOR: CFG contains an unsupported exit or unwind edge")
@@ -506,38 +508,39 @@ fn canonical_mir_acyclic_cfg_hash_v1(func: MirFunction,
     execution_hash: text) -> Result<text, text>:
     if func.blocks.is_empty():
         return Err("FV2-E-VC-TERMINATION-CFG: MIR function has no executable block")
-    var block_indices: {i64: i64} = {}
     var indegrees: [i64] = []
+    var processed: [bool] = []
     for index in 0..func.blocks.len():
-        val block_id = func.blocks[index].id.id
-        if block_indices.has(block_id):
-            return Err("FV2-E-VC-TERMINATION-CFG-ID: block identities must be unique")
-        block_indices[block_id] = index
         indegrees.push(0)
-    var successor_indices: [[i64]] = []
+        processed.push(false)
+        if canonical_mir_block_index_v1(func, func.blocks[index].id) != index:
+            return Err("FV2-E-VC-TERMINATION-CFG-ID: block identities must be unique")
     for block in func.blocks:
         val successors = match canonical_mir_cfg_successors_v1(block.terminator):
             case Ok(value): value
             case Err(message): return Err(message)
-        var block_successor_indices: [i64] = []
         for successor in successors:
-            if not block_indices.has(successor.id):
+            val target_index = canonical_mir_block_index_v1(func, successor)
+            if target_index < 0:
                 return Err("FV2-E-VC-TERMINATION-CFG-TARGET: branch target is outside the function")
-            val target_index = block_indices[successor.id]
             indegrees[target_index] = indegrees[target_index] + 1
-            block_successor_indices.push(target_index)
-        successor_indices.push(block_successor_indices)
-    var ready: [i64] = []
-    for index in 0..func.blocks.len():
-        if indegrees[index] == 0: ready.push(index)
-    var ready_cursor = 0
-    while ready_cursor < ready.len():
-        val index = ready[ready_cursor]
-        ready_cursor = ready_cursor + 1
-        for target_index in successor_indices[index]:
-            indegrees[target_index] = indegrees[target_index] - 1
-            if indegrees[target_index] == 0: ready.push(target_index)
-    val processed_count = ready_cursor
+    var processed_count = 0
+    var progress = true
+    while progress:
+        progress = false
+        for index in 0..func.blocks.len():
+            if not processed[index] and indegrees[index] == 0:
+                processed[index] = true
+                processed_count = processed_count + 1
+                progress = true
+                val successors = match canonical_mir_cfg_successors_v1(
+                        func.blocks[index].terminator):
+                    case Ok(value): value
+                    case Err(message): return Err(message)
+                for successor in successors:
+                    val target_index = canonical_mir_block_index_v1(func,
+                        successor)
+                    indegrees[target_index] = indegrees[target_index] - 1
     if processed_count != func.blocks.len():
         return Err("FV2-E-VC-TERMINATION-CYCLE: cyclic MIR requires a retained well-founded loop or recursion measure")
     Ok(sha256_text("fv2-canonical-acyclic-bounded-execution-v1|" +

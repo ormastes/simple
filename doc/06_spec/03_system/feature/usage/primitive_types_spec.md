@@ -2,6 +2,29 @@
 
 > Tests for primitive types, type suffixes, union types, type aliases, and generic types.
 
+<!-- sdn-diagram:id=primitive_types_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=primitive_types_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+primitive_types_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=primitive_types_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 21 | 21 | 0 | 0 |
@@ -21,7 +44,7 @@ Tests for primitive types, type suffixes, union types, type aliases, and generic
 | Category | Language \| Types |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/primitive_types_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -32,8 +55,6 @@ and generic types.
 ## Syntax
 
 ```simple
-use std.spec.step
-
 val x = 42i32                             # Type suffix
 type Number = i64                         # Type alias
 fn process(x: i64 | str) -> i64: ...      # Union type
@@ -46,22 +67,13 @@ fn identity<T>(x: T) -> T: x              # Generic function
 
 #### compares enum variants
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- compares enum variants
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("compares enum variants")
 enum Color:
     Red
     Green
@@ -80,18 +92,17 @@ expect result == 0
 
 #### accepts union type parameter
 
-- accepts union type parameter
+1. fn test
+2. expect test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("accepts union type parameter")
 fn test(x: i64 | str) -> i64:
     return 42
 expect test(10) == 42
@@ -103,18 +114,17 @@ expect test(10) == 42
 
 #### uses simple type alias
 
-- uses simple type alias
+1. fn double
+2. expect double
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses simple type alias")
 type Number = i64
 fn double(x: Number) -> Number:
     return x * 2
@@ -127,18 +137,17 @@ expect double(21) == 42
 
 #### accepts optional parameter
 
-- accepts optional parameter
+1. fn maybe value
+2. expect maybe value
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("accepts optional parameter")
 fn maybe_value(x: i64?) -> i64:
     return 5
 expect maybe_value(10) == 5
@@ -150,18 +159,17 @@ expect maybe_value(10) == 5
 
 #### defines identity function
 
-- defines identity function
+1. fn identity<T>
+2. expect identity
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("defines identity function")
 fn identity<T>(x: T) -> T:
     return x
 expect identity(42) == 42
@@ -171,18 +179,17 @@ expect identity(42) == 42
 
 #### uses two type parameters
 
-- uses two type parameters
+1. fn first<A, B>
+2. fn second<A, B>
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses two type parameters")
 fn first<A, B>(a: A, b: B) -> A:
     return a
 fn second<A, B>(a: A, b: B) -> B:
@@ -198,18 +205,13 @@ expect x + y == 50
 
 #### creates generic struct
 
-- creates generic struct
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates generic struct")
 struct Box<T>:
     value: T
 val b = Box { value: 42 }
@@ -222,18 +224,16 @@ expect b.value == 42
 
 #### unwraps Some value
 
-- unwraps Some value
+1. expect opt unwrap
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("unwraps Some value")
 val opt = Some(42)
 expect opt.unwrap() == 42
 ```
@@ -242,18 +242,16 @@ expect opt.unwrap() == 42
 
 #### unwraps None with default
 
-- unwraps None with default
+1. expect opt unwrap or
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("unwraps None with default")
 val opt = None
 expect opt.unwrap_or(99) == 99
 ```
@@ -262,18 +260,13 @@ expect opt.unwrap_or(99) == 99
 
 #### checks is_some
 
-- checks is_some
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("checks is_some")
 val opt = Some(1)
 var result = 0
 if opt.is_some():
@@ -285,18 +278,13 @@ expect result == 1
 
 #### checks is_none
 
-- checks is_none
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("checks is_none")
 val opt = None
 var result = 0
 if opt.is_none():
@@ -308,18 +296,16 @@ expect result == 1
 
 #### maps Some value
 
-- maps Some value
+1. expect res unwrap
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("maps Some value")
 val opt = Some(10)
 val res = opt.map(_1 * 2)
 expect res.unwrap() == 20
@@ -331,18 +317,13 @@ expect res.unwrap() == 20
 
 #### uses i32 suffix
 
-- uses i32 suffix
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses i32 suffix")
 val x = 42i32
 expect x == 42
 ```
@@ -351,18 +332,13 @@ expect x == 42
 
 #### uses i64 suffix
 
-- uses i64 suffix
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses i64 suffix")
 val x = 100i64
 expect x == 100
 ```
@@ -371,18 +347,13 @@ expect x == 100
 
 #### uses u32 suffix
 
-- uses u32 suffix
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses u32 suffix")
 val x = 255u32
 expect x == 255
 ```
@@ -391,18 +362,16 @@ expect x == 255
 
 #### uses unit suffix km
 
-- uses unit suffix km
+1. expect distance value
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses unit suffix km")
 val distance = 100_km
 expect distance.value() == 100
 ```
@@ -411,18 +380,16 @@ expect distance.value() == 100
 
 #### uses unit suffix in expression
 
-- uses unit suffix in expression
+1. expect
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses unit suffix in expression")
 val a = 50_m
 val b = 30_m
 expect (a + b).value() == 80
@@ -432,18 +399,13 @@ expect (a + b).value() == 80
 
 #### uses f64 suffix
 
-- uses f64 suffix
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses f64 suffix")
 val x = 3.15f64
 expect 1 == 1  # parsing test
 ```
@@ -452,18 +414,13 @@ expect 1 == 1  # parsing test
 
 #### uses f32 suffix
 
-- uses f32 suffix
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses f32 suffix")
 val x = 1.5f32
 expect 1 == 1  # parsing test
 ```
@@ -474,18 +431,13 @@ expect 1 == 1  # parsing test
 
 #### matches exhaustively without wildcard
 
-- matches exhaustively without wildcard
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches exhaustively without wildcard")
 @strong
 enum Status:
     Active
@@ -507,18 +459,13 @@ expect r == 1
 
 #### allows wildcard in weak enum
 
-- allows wildcard in weak enum
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("allows wildcard in weak enum")
 enum Status:
     Active
     Inactive
@@ -547,51 +494,3 @@ expect result == 1
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `b966cb68c2a0e554a5fba8e9d2476b1371406dacb1cf24590f4d3e0310bdac31`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `b966cb68c2a0e554a5fba8e9d2476b1371406dacb1cf24590f4d3e0310bdac31`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `b966cb68c2a0e554a5fba8e9d2476b1371406dacb1cf24590f4d3e0310bdac31`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/primitive_types_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/primitive_types_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/primitive_types_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/primitive_types_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/primitive_types_spec.spl:41:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compares enum variants' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/primitive_types_spec.spl:65:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'accepts union type parameter' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/primitive_types_spec.spl:97:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'uses simple type alias' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

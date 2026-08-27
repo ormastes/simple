@@ -1,6 +1,29 @@
 # Block Model Specification
 
-> Tests covering markdown block model.
+> <details>
+
+<!-- sdn-diagram:id=block_model_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=block_model_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+block_model_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=block_model_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,32 +40,13 @@
 
 #### parses source ranges and common markdown block kinds
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- parses source ranges and common markdown block kinds
-   - Expected: model.block_count() equals `6`
-   - Expected: model.block_at(0).kind equals `heading`
-   - Expected: model.block_at(0).from_line equals `0`
-   - Expected: model.block_at(1).kind equals `paragraph`
-   - Expected: model.block_at(2).kind equals `list`
-   - Expected: model.block_at(3).kind equals `table`
-   - Expected: model.block_at(3).from_line equals `6`
-   - Expected: model.block_at(3).to_line equals `8`
-   - Expected: model.block_at(4).kind equals `callout`
-   - Expected: model.block_at(5).kind equals `embed`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("parses source ranges and common markdown block kinds")
 val source = "# Title\n\nParagraph text\n\n- [ ] Task\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\n> [!NOTE]- Folded\n> Body\n\n![Diagram](assets/a.png)\n\n```sdn-graph\nA -> B\n```"
 val model = BlockModel.from_markdown(source)
 
@@ -62,27 +66,27 @@ expect(model.block_at(5).kind).to_equal("embed")
 
 #### tracks active block and cursor mapping
 
-- tracks active block and cursor mapping
+- var model = BlockModel from markdown
    - Expected: model.block_for_line(2) equals `1`
    - Expected: bm_cursor_block_index(model, 5) equals `2`
    - Expected: bm_cursor_block_changed(model, 2) is true
+- model activate block
    - Expected: model.active_block equals `1`
    - Expected: model.is_active(1) is true
    - Expected: bm_cursor_block_changed(model, 2) is false
    - Expected: bm_active_block_range(model) equals `2`
    - Expected: render_block_line_span(model.block_at(1)) equals `2`
+- model deactivate block
    - Expected: model.active_block equals `-1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("tracks active block and cursor mapping")
 var model = BlockModel.from_markdown("# Title\n\nFirst paragraph\nsecond line\n\n## Next")
 
 expect(model.block_for_line(2)).to_equal(1)
@@ -104,7 +108,9 @@ expect(model.active_block).to_equal(-1)
 
 #### rebuilds blocks and resets active state
 
-- rebuilds blocks and resets active state
+- var model = BlockModel from markdown
+- model activate block
+- model rebuild
    - Expected: model.block_count() equals `1`
    - Expected: model.block_at(0).kind equals `paragraph`
    - Expected: model.active_block equals `-1`
@@ -114,12 +120,10 @@ expect(model.active_block).to_equal(-1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("rebuilds blocks and resets active state")
 var model = BlockModel.from_markdown("# Old")
 model.activate_block(0)
 model.rebuild("plain\ntext")
@@ -139,12 +143,12 @@ expect(model.next_id).to_equal(2)
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/editor/block_model_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering markdown block model.
+Tests covering:
 - markdown block model
 
 ## Scenario Summary
@@ -159,54 +163,3 @@ Tests covering markdown block model.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-LIB`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `a1f81951094f254d1d6e4355e7035fa6d40d62269994416b04afe580221116f2`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `a1f81951094f254d1d6e4355e7035fa6d40d62269994416b04afe580221116f2`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `a1f81951094f254d1d6e4355e7035fa6d40d62269994416b04afe580221116f2`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/01_unit/lib/editor/block_model_spec.spl
-mirror: doc/06_spec/01_unit/lib/editor/block_model_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/editor/block_model_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/editor/block_model_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/editor/block_model_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 13 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/lib/editor/block_model_spec.spl:19:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses source ranges and common markdown block kinds' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/editor/block_model_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'tracks active block and cursor mapping' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/editor/block_model_spec.spl:55:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rebuilds blocks and resets active state' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -20,7 +20,8 @@ use std.nogc_sync_mut.torch.sffi.{
     rt_torch_torchtensor_div,
     rt_torch_torchtensor_sqrt,
     rt_torch_torchtensor_free,
-    rt_torch_tensor_from_data
+    rt_torch_tensor_from_data,
+    rt_torch_torchtensor_mean
 }
 
 # ============================================================================
@@ -47,9 +48,12 @@ class MSELoss:
         Falls back to element-wise computation if SFFI unavailable.
         """
         # Use PyTorch's built-in MSE loss via SFFI
-        val loss_val = rt_torch_nn_mse_loss(pred.handle, target.handle)
+        val loss_val = unsafe(capabilities: [ffi]):
+            rt_torch_nn_mse_loss(pred.handle, target.handle)
         # Wrap scalar result as 0-d tensor
-        Tensor.from_handle(rt_torch_tensor_from_data([loss_val], [1]))
+        val loss_handle = unsafe(capabilities: [ffi]):
+            rt_torch_tensor_from_data([loss_val], [1])
+        Tensor.from_handle(loss_handle)
 
 
 class CrossEntropyLoss:
@@ -74,8 +78,11 @@ class CrossEntropyLoss:
             logits: Predicted class scores (batch_size, num_classes)
             targets: Target class indices (batch_size,)
         """
-        val loss_val = rt_torch_nn_cross_entropy(logits.handle, targets.handle)
-        Tensor.from_handle(rt_torch_tensor_from_data([loss_val], [1]))
+        val loss_val = unsafe(capabilities: [ffi]):
+            rt_torch_nn_cross_entropy(logits.handle, targets.handle)
+        val loss_handle = unsafe(capabilities: [ffi]):
+            rt_torch_tensor_from_data([loss_val], [1])
+        Tensor.from_handle(loss_handle)
 
 
 # ============================================================================
@@ -112,7 +119,7 @@ class SGD:
             velocities: velocities_list
         )
 
-    me step():
+    fn step():
         """Update parameters using SGD with momentum.
 
         For each parameter with a gradient:
@@ -122,20 +129,29 @@ class SGD:
         var i = 0
         while i < self.parameters.len():
             val param = self.parameters[i]
-            val grad_handle = rt_torch_autograd_grad(param.handle)
+            val grad_handle = unsafe(capabilities: [ffi]):
+                rt_torch_autograd_grad(param.handle)
             if grad_handle != 0:
                 # velocity = momentum * velocity + lr * grad
-                val v_scaled = rt_torch_torchtensor_mul_scalar(self.velocities[i].handle, self.momentum)
-                val g_scaled = rt_torch_torchtensor_mul_scalar(grad_handle, self.lr)
-                val v_new_handle = rt_torch_torchtensor_add(v_scaled, g_scaled)
-                rt_torch_torchtensor_free(v_scaled)
-                rt_torch_torchtensor_free(g_scaled)
+                val v_scaled = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_mul_scalar(self.velocities[i].handle, self.momentum)
+                val g_scaled = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_mul_scalar(grad_handle, self.lr)
+                val v_new_handle = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_add(v_scaled, g_scaled)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(v_scaled)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(g_scaled)
                 # Update stored velocity
-                rt_torch_torchtensor_free(self.velocities[i].handle)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(self.velocities[i].handle)
                 self.velocities[i] = Tensor.from_handle(v_new_handle)
                 # param = param - velocity
-                val new_param = rt_torch_torchtensor_sub(param.handle, v_new_handle)
-                rt_torch_torchtensor_free(param.handle)
+                val new_param = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_sub(param.handle, v_new_handle)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(param.handle)
                 self.parameters[i] = Tensor.from_handle(new_param)
             i = i + 1
 
@@ -202,26 +218,41 @@ class Adam:
         var i = 0
         while i < self.parameters.len():
             val param = self.parameters[i]
-            val grad_handle = rt_torch_autograd_grad(param.handle)
+            val grad_handle = unsafe(capabilities: [ffi]):
+                rt_torch_autograd_grad(param.handle)
             if grad_handle != 0:
                 # m = beta1 * m + (1 - beta1) * grad
-                val m_old_scaled = rt_torch_torchtensor_mul_scalar(self.m[i].handle, self.beta1)
-                val g_scaled = rt_torch_torchtensor_mul_scalar(grad_handle, 1 - self.beta1)
-                val m_new = rt_torch_torchtensor_add(m_old_scaled, g_scaled)
-                rt_torch_torchtensor_free(m_old_scaled)
-                rt_torch_torchtensor_free(g_scaled)
-                rt_torch_torchtensor_free(self.m[i].handle)
+                val m_old_scaled = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_mul_scalar(self.m[i].handle, self.beta1)
+                val g_scaled = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_mul_scalar(grad_handle, 1 - self.beta1)
+                val m_new = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_add(m_old_scaled, g_scaled)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(m_old_scaled)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(g_scaled)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(self.m[i].handle)
                 self.m[i] = Tensor.from_handle(m_new)
 
                 # v = beta2 * v + (1 - beta2) * grad^2
-                val v_old_scaled = rt_torch_torchtensor_mul_scalar(self.v[i].handle, self.beta2)
-                val grad_sq = rt_torch_torchtensor_mul(grad_handle, grad_handle)
-                val g2_scaled = rt_torch_torchtensor_mul_scalar(grad_sq, 1 - self.beta2)
-                val v_new = rt_torch_torchtensor_add(v_old_scaled, g2_scaled)
-                rt_torch_torchtensor_free(v_old_scaled)
-                rt_torch_torchtensor_free(grad_sq)
-                rt_torch_torchtensor_free(g2_scaled)
-                rt_torch_torchtensor_free(self.v[i].handle)
+                val v_old_scaled = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_mul_scalar(self.v[i].handle, self.beta2)
+                val grad_sq = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_mul(grad_handle, grad_handle)
+                val g2_scaled = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_mul_scalar(grad_sq, 1 - self.beta2)
+                val v_new = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_add(v_old_scaled, g2_scaled)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(v_old_scaled)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(grad_sq)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(g2_scaled)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(self.v[i].handle)
                 self.v[i] = Tensor.from_handle(v_new)
 
                 # Bias correction: m_hat = m / (1 - beta1^t), v_hat = v / (1 - beta2^t)
@@ -232,23 +263,37 @@ class Adam:
                     beta1_t = beta1_t * self.beta1
                     beta2_t = beta2_t * self.beta2
                     k = k + 1
-                val m_hat = rt_torch_torchtensor_mul_scalar(m_new, 1.0 / (1.0 - beta1_t))
-                val v_hat = rt_torch_torchtensor_mul_scalar(v_new, 1.0 / (1.0 - beta2_t))
+                val m_hat = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_mul_scalar(m_new, 1.0 / (1.0 - beta1_t))
+                val v_hat = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_mul_scalar(v_new, 1.0 / (1.0 - beta2_t))
 
                 # param = param - lr * m_hat / (sqrt(v_hat) + eps)
-                val v_sqrt = rt_torch_torchtensor_sqrt(v_hat)
-                val denom = rt_torch_torchtensor_add_scalar(v_sqrt, self.eps)
-                val update = rt_torch_torchtensor_div(m_hat, denom)
-                val update_scaled = rt_torch_torchtensor_mul_scalar(update, self.lr)
-                val new_param = rt_torch_torchtensor_sub(param.handle, update_scaled)
+                val v_sqrt = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_sqrt(v_hat)
+                val denom = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_add_scalar(v_sqrt, self.eps)
+                val update = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_div(m_hat, denom)
+                val update_scaled = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_mul_scalar(update, self.lr)
+                val new_param = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_sub(param.handle, update_scaled)
 
-                rt_torch_torchtensor_free(m_hat)
-                rt_torch_torchtensor_free(v_hat)
-                rt_torch_torchtensor_free(v_sqrt)
-                rt_torch_torchtensor_free(denom)
-                rt_torch_torchtensor_free(update)
-                rt_torch_torchtensor_free(update_scaled)
-                rt_torch_torchtensor_free(param.handle)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(m_hat)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(v_hat)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(v_sqrt)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(denom)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(update)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(update_scaled)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(param.handle)
                 self.parameters[i] = Tensor.from_handle(new_param)
             i = i + 1
 
@@ -291,7 +336,7 @@ class RMSprop:
             v: v_list
         )
 
-    me step():
+    fn step():
         """Update parameters using RMSprop.
 
         For each parameter with a gradient:
@@ -301,31 +346,50 @@ class RMSprop:
         var i = 0
         while i < self.parameters.len():
             val param = self.parameters[i]
-            val grad_handle = rt_torch_autograd_grad(param.handle)
+            val grad_handle = unsafe(capabilities: [ffi]):
+                rt_torch_autograd_grad(param.handle)
             if grad_handle != 0:
                 # v = alpha * v + (1 - alpha) * grad^2
-                val v_old_scaled = rt_torch_torchtensor_mul_scalar(self.v[i].handle, self.alpha)
-                val grad_sq = rt_torch_torchtensor_mul(grad_handle, grad_handle)
-                val g2_scaled = rt_torch_torchtensor_mul_scalar(grad_sq, 1 - self.alpha)
-                val v_new = rt_torch_torchtensor_add(v_old_scaled, g2_scaled)
-                rt_torch_torchtensor_free(v_old_scaled)
-                rt_torch_torchtensor_free(grad_sq)
-                rt_torch_torchtensor_free(g2_scaled)
-                rt_torch_torchtensor_free(self.v[i].handle)
+                val v_old_scaled = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_mul_scalar(self.v[i].handle, self.alpha)
+                val grad_sq = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_mul(grad_handle, grad_handle)
+                val g2_scaled = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_mul_scalar(grad_sq, 1 - self.alpha)
+                val v_new = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_add(v_old_scaled, g2_scaled)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(v_old_scaled)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(grad_sq)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(g2_scaled)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(self.v[i].handle)
                 self.v[i] = Tensor.from_handle(v_new)
 
                 # param = param - lr * grad / (sqrt(v) + eps)
-                val v_sqrt = rt_torch_torchtensor_sqrt(v_new)
-                val denom = rt_torch_torchtensor_add_scalar(v_sqrt, self.eps)
-                val update = rt_torch_torchtensor_div(grad_handle, denom)
-                val update_scaled = rt_torch_torchtensor_mul_scalar(update, self.lr)
-                val new_param = rt_torch_torchtensor_sub(param.handle, update_scaled)
+                val v_sqrt = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_sqrt(v_new)
+                val denom = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_add_scalar(v_sqrt, self.eps)
+                val update = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_div(grad_handle, denom)
+                val update_scaled = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_mul_scalar(update, self.lr)
+                val new_param = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_sub(param.handle, update_scaled)
 
-                rt_torch_torchtensor_free(v_sqrt)
-                rt_torch_torchtensor_free(denom)
-                rt_torch_torchtensor_free(update)
-                rt_torch_torchtensor_free(update_scaled)
-                rt_torch_torchtensor_free(param.handle)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(v_sqrt)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(denom)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(update)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(update_scaled)
+                unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_free(param.handle)
                 self.parameters[i] = Tensor.from_handle(new_param)
             i = i + 1
 
@@ -362,15 +426,18 @@ class Stream:
 
     fn drop():
         # Unconditional free — unique ownership
-        rt_torch_torchstream_free(self.handle)
+        unsafe(capabilities: [ffi]):
+            rt_torch_torchstream_free(self.handle)
 
     fn synchronize():
         """Synchronize stream (wait for all operations to complete)."""
-        rt_torch_torchstream_sync(self.handle)
+        unsafe(capabilities: [ffi]):
+            rt_torch_torchstream_sync(self.handle)
 
     fn query() -> bool:
         """Check if all operations in stream have completed."""
-        rt_torch_torchstream_query(self.handle)
+        unsafe(capabilities: [ffi]):
+            rt_torch_torchstream_query(self.handle)
 
 
 # ============================================================================
@@ -449,13 +516,15 @@ struct NogradGuard:
 
     static fn enter() -> NogradGuard:
         """Enter a no-grad context and return a guard that restores it."""
-        rt_torch_autograd_no_grad_begin()
+        unsafe(capabilities: [ffi]):
+            rt_torch_autograd_no_grad_begin()
         NogradGuard(_active: true)
 
     fn drop():
         """Restore gradient tracking state. Called automatically at scope exit."""
         if self._active:
-            rt_torch_autograd_no_grad_end()
+            unsafe(capabilities: [ffi]):
+                rt_torch_autograd_no_grad_end()
 
 # ============================================================================
 # Utility Functions

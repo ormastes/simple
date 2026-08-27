@@ -1,6 +1,30 @@
 # Executable Source Specification
 
-> Tests covering executable source.
+> <details>
+
+<!-- sdn-diagram:id=executable_source_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=executable_source_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+executable_source_spec -> std
+executable_source_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=executable_source_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,24 +41,13 @@
 
 #### resolves the canonical rv64 proof binary path
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- resolves the canonical rv64 proof binary path
-   - Expected: result.is_ok() is true
-   - Expected: image.is_ok() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("resolves the canonical rv64 proof binary path")
 val result = resolve_executable_bytes(RV64_PROOF_BINARY_PATH, Architecture.Riscv64)
 expect(result.is_ok()).to_equal(true)
 val image = load_riscv_executable(result.unwrap(), Architecture.Riscv64)
@@ -45,20 +58,13 @@ expect(image.is_ok()).to_equal(true)
 
 #### resolves rv64 bytes for known binaries
 
-- resolves rv64 bytes for known binaries
-   - Expected: result.is_ok() is true
-   - Expected: image.is_ok() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("resolves rv64 bytes for known binaries")
 val result = resolve_executable_bytes("/sys/services/vfs", Architecture.Riscv64)
 expect(result.is_ok()).to_equal(true)
 val image = load_riscv_executable(result.unwrap(), Architecture.Riscv64)
@@ -69,20 +75,13 @@ expect(image.is_ok()).to_equal(true)
 
 #### resolves rv32 bytes for known binaries
 
-- resolves rv32 bytes for known binaries
-   - Expected: result.is_ok() is true
-   - Expected: image.is_ok() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("resolves rv32 bytes for known binaries")
 val result = resolve_executable_bytes("/sys/apps/desktop", Architecture.Riscv32)
 expect(result.is_ok()).to_equal(true)
 val image = load_riscv_executable(result.unwrap(), Architecture.Riscv32)
@@ -93,20 +92,13 @@ expect(image.is_ok()).to_equal(true)
 
 #### resolves the canonical rv32 proof binary path
 
-- resolves the canonical rv32 proof binary path
-   - Expected: result.is_ok() is true
-   - Expected: image.is_ok() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("resolves the canonical rv32 proof binary path")
 val result = resolve_executable_bytes(RV32_PROOF_BINARY_PATH, Architecture.Riscv32)
 expect(result.is_ok()).to_equal(true)
 val image = load_riscv_executable(result.unwrap(), Architecture.Riscv32)
@@ -117,22 +109,26 @@ expect(image.is_ok()).to_equal(true)
 
 #### resolves x86_64 synthetic initramfs bytes by exact path
 
-- resolves x86_64 synthetic initramfs bytes by exact path
+1.  clear synthetic initramfs for test
+2. payload push
+3. payload push
+4. payload push
+5. payload push
+6.  set synthetic initramfs for test
    - Expected: result.is_ok() is true
    - Expected: bytes.len() equals `4`
    - Expected: bytes[0] equals `0x11.to_u8()`
    - Expected: bytes[3] equals `0x44.to_u8()`
+7.  clear synthetic initramfs for test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("resolves x86_64 synthetic initramfs bytes by exact path")
 _clear_synthetic_initramfs_for_test()
 var payload: [u8] = []
 payload.push(0x11.to_u8())
@@ -154,21 +150,27 @@ _clear_synthetic_initramfs_for_test()
 
 #### canonicalizes info path bytes through the VFS executable reader
 
-- canonicalizes info path bytes through the VFS executable reader
+1.  clear synthetic vfs for test
+2. path bytes push
+3. payload push
+4. payload push
+5. payload push
+6. payload push
+7. payload push
+8.  set synthetic vfs file for test
    - Expected: result.is_ok() is true
    - Expected: bytes.len() equals `5`
    - Expected: bytes[4] equals `0x10.to_u8()`
+9.  clear synthetic vfs for test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("canonicalizes info path bytes through the VFS executable reader")
 _clear_synthetic_vfs_for_test()
 var path_bytes: [u8] = []
 for ch in "/sys/apps/info":
@@ -193,19 +195,13 @@ _clear_synthetic_vfs_for_test()
 
 #### rejects unknown binary paths
 
-- rejects unknown binary paths
-   - Expected: result.is_err() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("rejects unknown binary paths")
 val result = resolve_executable_bytes("/sys/apps/missing", Architecture.Riscv64)
 expect(result.is_err()).to_equal(true)
 ```
@@ -214,19 +210,13 @@ expect(result.is_err()).to_equal(true)
 
 #### rejects unsupported host architectures
 
-- rejects unsupported host architectures
-   - Expected: result.is_err() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("rejects unsupported host architectures")
 val result = resolve_executable_bytes("/sys/services/vfs", Architecture.X86_64)
 expect(result.is_err()).to_equal(true)
 ```
@@ -240,12 +230,12 @@ expect(result.is_err()).to_equal(true)
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/kernel/loader/executable_source_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering executable source.
+Tests covering:
 - executable source
 
 ## Scenario Summary
@@ -260,54 +250,3 @@ Tests covering executable source.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-OS`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `790055113090ca5fa2d478fbdc2bef975f74e4c84fa94267fd06b907307101f0`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `790055113090ca5fa2d478fbdc2bef975f74e4c84fa94267fd06b907307101f0`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `790055113090ca5fa2d478fbdc2bef975f74e4c84fa94267fd06b907307101f0`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
-
-SSpec documentization score: 88/100
-source: test/01_unit/os/kernel/loader/executable_source_spec.spl
-mirror: doc/06_spec/01_unit/os/kernel/loader/executable_source_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=80
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/os/kernel/loader/executable_source_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/kernel/loader/executable_source_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/os/kernel/loader/executable_source_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/os/kernel/loader/executable_source_spec.spl:27:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'resolves the canonical rv64 proof binary path' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/os/kernel/loader/executable_source_spec.spl:35:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'resolves rv64 bytes for known binaries' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/os/kernel/loader/executable_source_spec.spl:43:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'resolves rv32 bytes for known binaries' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -1,4 +1,5 @@
 # CLI argument parsing, version/target reporting, OS build/run/test dispatch, and global-flag handling.
+use app.cli.main.*
 # Simple Language - Unified CLI (Written in Simple)
 #
 # This is the main entry point for the Simple CLI, written in Simple itself.
@@ -10,26 +11,39 @@
 #   simple file.smf     - Run compiled binary
 #   simple -c "code"    - Run code string
 
+# Bootstrap helper: avoid undefined 'code' symbol during minimal semantic pass
+val code = 0
+val out = ""
+# Minimal stubs for interpreter path
+val shell_path = ""
+val shell_args = []
+val stdout = ""
+val stderr = ""
+
 # Direct sub-module imports (bypass app.io.mod hub for faster startup)
 use app.io.env_ops.{env_get}
-use app.io.cli_ops.{cli_get_args}
-use app.io.cli_commands.{cli_run_lex}
+use app.io.cli_ops.{cli_get_args, cli_run_lex}
 use app.io.cli_ops.{fault_set_stack_overflow_detection, fault_set_max_recursion_depth, fault_set_timeout, fault_set_execution_limit}
-use app.io.cli_ops.{_cli_eprint}
 use app.io.cli_commands.{cli_handle_linkers, cli_run_file}
 use app.cli.cli_helpers.{print_cli_help, read_sdn_run_config}
 
-# `dashboard` is a deprecated alias for the real LLM agent dashboard (`agents`).
-# Both delegate to src/app/llm_dashboard/main.spl (TUI by default, --web/--ios
-# for the web surface) — no dead "moved to simple-ide" stub left.
+use app.stats.dynamic.{run_stats}
+use compiler.tools.leak_check.main.{run_leak_check}
+# dashboard and llm_dashboard migrated to simple-ide submodule
 fn run_dashboard(args: [text]) -> i64:
-    for arg in args:
-        if arg == "--help" or arg == "-h" or arg == "help":
-            print "Note: 'dashboard' is a deprecated alias for 'agents' (LLM dashboard)."
-    run_llm_dashboard(args)
-
+    print "Dashboard moved to simple-ide. See examples/10_tooling/simple_ide/"
+    return 1
 fn run_llm_dashboard(args: [text]) -> i64:
-    cli_run_file("src/app/llm_dashboard/main.spl", args, false, false)
+    print "LLM Dashboard moved to simple-ide. See examples/10_tooling/simple_ide/"
+    return 1
+use os.qemu_runner.{OsTarget, get_target, get_all_targets, arch_from_name,
+    build_os, run_os, run_os_debug_gui, test_os, test_all_architectures, arch_display_name,
+    get_scenario, build_scenario, run_scenario, test_scenario}
+
+#   simple compile src.spl [-o out.smf]  - Compile to SMF
+#   simple watch file.spl  - Watch and auto-recompile
+
+use app.cli.cli_helpers (print_cli_help, handle_init, read_sdn_run_config, sdn_line_indent, strip_sdn_quotes, check_self_contained)
 
 # True only when arg is the CLI entry script itself (interpreted mode:
 # `bin/simple src/app/cli/main.spl args...`). A bare ends_with("main.spl")
@@ -38,39 +52,29 @@ fn run_llm_dashboard(args: [text]) -> i64:
 fn arg_is_cli_entry_script(arg: text) -> bool:
     if arg.ends_with("/app/cli/main.spl"):
         return true
-    if arg == "src/app/cli/main.spl":
+    if arg == "src/app/cli/main.spl" or arg == "app/cli/main.spl":
         return true
     if arg == "app/cli/main.spl":
         return true
-    if arg.ends_with("/app/cli/_CliMain/main_and_help.spl"):
-        return true
-    if arg == "src/app/cli/_CliMain/main_and_help.spl":
-        return true
-    if arg == "app/cli/_CliMain/main_and_help.spl":
-        return true
     if arg.ends_with("/app/cli/bootstrap_main.spl"):
         return true
-    if arg == "src/app/cli/bootstrap_main.spl":
-        return true
-    return false
+    arg == "src/app/cli/bootstrap_main.spl"
 
 # Extract CLI args, skipping program name and script path
-fn copy_cli_args_from(raw_args: [text], start_idx: i64) -> [text]:
-    var args: [text] = []
-    var i = start_idx
-    while i < raw_args.len():
-        args.push(raw_args[i])
-        i = i + 1
-    args
-
 fn get_cli_args() -> [text]:
     val raw_args = cli_get_args()
-    if raw_args == nil:
-        return []
-    if raw_args.len() > 1:
-        if arg_is_cli_entry_script(raw_args[1]):
-            return copy_cli_args_from(raw_args, 2)
-    copy_cli_args_from(raw_args, 1)
+    var all_args: [text] = []
+    if raw_args != nil:
+        all_args = raw_args
+    var start_idx = 1
+    if all_args.len() > 1 and arg_is_cli_entry_script(all_args[1]):
+        start_idx = 2
+    var args: [text] = []
+    var i = start_idx
+    while i < all_args.len():
+        args.push(all_args[i])
+        i = i + 1
+    args
 
 # =========================================================================
 # Version and Help - implemented in Simple
@@ -117,15 +121,343 @@ fn print_targets():
 # =========================================================================
 fn print_linkers():
     val _ = cli_handle_linkers()
+    ()
+
+# =========================================================================
+# SimpleOS wrapper path
+# =========================================================================
+
+fn os_parse_arch_arg(args: [text]) -> text:
+    """Extract --arch=<name> or --target=<name> from args. Returns x86_64 by default."""
+    for arg in args:
+        if arg.starts_with("--arch="):
+            val value = arg[7:]
+            return if value == "": "__missing_arch__" else: value
+        if arg.starts_with("--target="):
+            val value = arg[9:]
+            return if value == "": "__missing_arch__" else: value
+    var i = 0
+    while i < args.len():
+        if args[i] == "--arch" or args[i] == "--target":
+            if i + 1 >= args.len():
+                return "__missing_arch__"
+            val value = args[i + 1]
+            if value.starts_with("-"):
+                return "__missing_arch__"
+            return value
+        i = i + 1
+    "x86_64"
+
+fn os_has_flag(args: [text], flag: text) -> bool:
+    for arg in args:
+        if arg == flag:
+            return true
+    false
+
+fn os_parse_log_arg(args: [text]) -> text:
+    var mode = "on"
+    var seen = false
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg.starts_with("--log="):
+            val value = arg[6:]
+            if value == "":
+                return "__missing__"
+            if value != "on" and value != "off":
+                return "__invalid__:{value}"
+            mode = value
+            seen = true
+        elif arg == "--log":
+            if i + 1 >= args.len():
+                return "__missing__"
+            val value = args[i + 1]
+            if value.starts_with("-"):
+                return "__missing__"
+            if value != "on" and value != "off":
+                return "__invalid__:{value}"
+            mode = value
+            seen = true
+            i = i + 1
+        elif arg.starts_with("--log"):
+            return "__invalid_option__:{arg}"
+        i = i + 1
+    if seen:
+        return mode
+    "on"
+
+fn os_log_arg_error(log_mode: text) -> text:
+    if log_mode == "__missing__":
+        return "Error: --log requires a value ('on' or 'off')"
+    if log_mode.starts_with("__invalid_option__:"):
+        val arg = log_mode[19:]
+        return "Error: invalid log option '{arg}' (expected --log or --log=<on|off>)"
+    if log_mode.starts_with("__invalid__:"):
+        val value = log_mode[12:]
+        return "Error: invalid --log value '{value}' (expected 'on' or 'off')"
+    ""
+
+fn print_os_help():
+    print "SimpleOS — Multi-Architecture OS Build & Run"
+    print ""
+    print "Usage:"
+    print "  simple os <command> [options]"
+    print ""
+    print "Commands:"
+    print "  build              Build the OS kernel"
+    print "  run                Build and run in QEMU"
+    print "  test               Build and run boot smoke test"
+    print "  targets            List supported architectures"
+    print ""
+    print "Options:"
+    print "  --arch=<name>      Target architecture (default: x86_64)"
+    print "  --target=<name>    Alias for --arch"
+    print "  --all              Test all architectures (with 'test' command)"
+    print "  --scenario=<name>  Named QEMU scenario (for run/test/build)"
+    print "  --debug-gui        Keep GUI targets windowed while exposing serial logs"
+    print "  --log=<on|off>     Compile normal OS logging in or out (default: on)"
+    print ""
+    print "Architectures:"
+    print "  x86_64   x86_32   riscv64   riscv32   arm64   arm32"
+
+fn print_os_targets():
+    print "Supported SimpleOS architectures:"
+    print ""
+    val targets: [OsTarget] = get_all_targets()
+    for target in targets:
+        val name = arch_display_name(target.arch)
+        print "  {name}  ->  {target.target_triple}  ({target.qemu_system})"
+    print ""
+    print "Default: x86_64"
+
+fn _export_os_log_mode_inline(log_mode: text) -> bool:
+    if env_set("SIMPLE_OS_LOG_MODE", log_mode):
+        return true
+    print "Error: could not export SIMPLE_OS_LOG_MODE={log_mode}"
+    false
+
+fn _restore_os_log_mode_inline(old_log_mode: text):
+    env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
+
+fn os_parse_scenario_arg(args: [text]) -> text:
+    for arg in args:
+        if arg.starts_with("--scenario="):
+            val value = arg[11:]
+            return if value == "": "__missing_scenario__" else: value
+    var i = 0
+    while i < args.len():
+        if args[i] == "--scenario":
+            if i + 1 >= args.len():
+                return "__missing_scenario__"
+            val value = args[i + 1]
+            if value.starts_with("-"):
+                return "__missing_scenario__"
+            return value
+        i = i + 1
+    ""
+
+fn _os_arch_arg_error(arch_name: text) -> text:
+    if arch_name == "__missing_arch__":
+        return "Error: --arch/--target requires a value"
+    ""
+
+fn _os_scenario_arg_error(scenario_name: text) -> text:
+    if scenario_name == "__missing_scenario__":
+        return "Error: --scenario requires a value"
+    ""
+
+fn handle_os_build_inline(args: [text]) -> i64:
+    val log_mode = os_parse_log_arg(args)
+    val log_error = os_log_arg_error(log_mode)
+    if log_error != "":
+        print log_error
+        return 1
+    val old_log_mode = env_get("SIMPLE_OS_LOG_MODE") ?? ""
+    if not _export_os_log_mode_inline(log_mode):
+        return 1
+    val scenario_name = os_parse_scenario_arg(args)
+    val scenario_error = _os_scenario_arg_error(scenario_name)
+    if scenario_error != "":
+        _restore_os_log_mode_inline(old_log_mode)
+        print scenario_error
+        return 1
+    if scenario_name != "":
+        val scenario = get_scenario(scenario_name)
+        if scenario == nil:
+            _restore_os_log_mode_inline(old_log_mode)
+            print "Error: unknown scenario '{scenario_name}'"
+            return 1
+        val ok = build_scenario(scenario)
+        _restore_os_log_mode_inline(old_log_mode)
+        return if ok: 0 else: 1
+
+    val arch_name = os_parse_arch_arg(args)
+    val arch_error = _os_arch_arg_error(arch_name)
+    if arch_error != "":
+        _restore_os_log_mode_inline(old_log_mode)
+        print arch_error
+        return 1
+    val arch = arch_from_name(arch_name)
+    match arch:
+        Some(arch_value):
+            val target = get_qemu_target(arch_value)
+            val ok = build_os(target)
+            _restore_os_log_mode_inline(old_log_mode)
+            if ok: 0 else: 1
+        nil:
+            _restore_os_log_mode_inline(old_log_mode)
+            print "Error: unknown architecture '{arch_name}'"
+            print "Run 'simple os targets' for supported architectures."
+            1
+
+fn handle_os_run_inline(args: [text]) -> i64:
+    val log_mode = os_parse_log_arg(args)
+    val log_error = os_log_arg_error(log_mode)
+    if log_error != "":
+        print log_error
+        return 1
+    val old_log_mode = env_get("SIMPLE_OS_LOG_MODE") ?? ""
+    if not _export_os_log_mode_inline(log_mode):
+        return 1
+    val scenario_name = os_parse_scenario_arg(args)
+    val scenario_error = _os_scenario_arg_error(scenario_name)
+    if scenario_error != "":
+        _restore_os_log_mode_inline(old_log_mode)
+        print scenario_error
+        return 1
+    if scenario_name != "":
+        val scenario = get_scenario(scenario_name)
+        if scenario == nil:
+            _restore_os_log_mode_inline(old_log_mode)
+            print "Error: unknown scenario '{scenario_name}'"
+            return 1
+        val built = build_scenario(scenario)
+        if not built:
+            _restore_os_log_mode_inline(old_log_mode)
+            print "Error: build failed for scenario {scenario_name}"
+            return 1
+        val ok = run_scenario(scenario)
+        _restore_os_log_mode_inline(old_log_mode)
+        return if ok: 0 else: 1
+
+    val arch_name = os_parse_arch_arg(args)
+    val arch_error = _os_arch_arg_error(arch_name)
+    if arch_error != "":
+        _restore_os_log_mode_inline(old_log_mode)
+        print arch_error
+        return 1
+    val debug_gui = os_has_flag(args, "--debug-gui")
+    val arch = arch_from_name(arch_name)
+    match arch:
+        Some(arch_value):
+            val target = get_qemu_target(arch_value)
+            val built = build_os(target)
+            if not built:
+                _restore_os_log_mode_inline(old_log_mode)
+                print "Error: build failed for {arch_display_name(target.arch)}"
+                return 1
+            val ok = if debug_gui: run_os_debug_gui(target) else: run_os(target)
+            _restore_os_log_mode_inline(old_log_mode)
+            if ok: 0 else: 1
+        nil:
+            _restore_os_log_mode_inline(old_log_mode)
+            print "Error: unknown architecture '{arch_name}'"
+            print "Run 'simple os targets' for supported architectures."
+            1
+
+fn handle_os_test_inline(args: [text]) -> i64:
+    val log_mode = os_parse_log_arg(args)
+    val log_error = os_log_arg_error(log_mode)
+    if log_error != "":
+        print log_error
+        return 1
+    val old_log_mode = env_get("SIMPLE_OS_LOG_MODE") ?? ""
+    if not _export_os_log_mode_inline(log_mode):
+        return 1
+    if os_has_flag(args, "--all"):
+        val ok = test_all_architectures()
+        _restore_os_log_mode_inline(old_log_mode)
+        if ok: 0 else: 1
+    else:
+        val scenario_name = os_parse_scenario_arg(args)
+        val scenario_error = _os_scenario_arg_error(scenario_name)
+        if scenario_error != "":
+            _restore_os_log_mode_inline(old_log_mode)
+            print scenario_error
+            return 1
+        if scenario_name != "":
+            val scenario = get_scenario(scenario_name)
+            if scenario == nil:
+                _restore_os_log_mode_inline(old_log_mode)
+                print "Error: unknown scenario '{scenario_name}'"
+                return 1
+            val built = build_scenario(scenario)
+            if not built:
+                _restore_os_log_mode_inline(old_log_mode)
+                print "Error: build failed for scenario {scenario_name}"
+                return 1
+            val ok = test_scenario(scenario, scenario_test_timeout_ms(scenario))
+            _restore_os_log_mode_inline(old_log_mode)
+            return if ok: 0 else: 1
+
+        val arch_name = os_parse_arch_arg(args)
+        val arch_error = _os_arch_arg_error(arch_name)
+        if arch_error != "":
+            _restore_os_log_mode_inline(old_log_mode)
+            print arch_error
+            return 1
+        val arch = arch_from_name(arch_name)
+        match arch:
+            Some(arch_value):
+                val target = get_qemu_target(arch_value)
+                val built = build_os(target)
+                if not built:
+                    _restore_os_log_mode_inline(old_log_mode)
+                    print "Error: build failed for {arch_display_name(target.arch)}"
+                    return 1
+                val ok = test_os(target, 10000)
+                _restore_os_log_mode_inline(old_log_mode)
+                if ok: 0 else: 1
+            nil:
+                _restore_os_log_mode_inline(old_log_mode)
+                print "Error: unknown architecture '{arch_name}'"
+                print "Run 'simple os targets' for supported architectures."
+                1
+
+fn handle_os_inline(args: [text]) -> i64:
+    if args.len() == 0:
+        print_os_help()
+        return 0
+
+    val subcmd = args[0]
+    val rest = if args.len() > 1: args[1:] else: []
+    match subcmd:
+        "build":
+            handle_os_build_inline(rest)
+        "run":
+            handle_os_run_inline(rest)
+        "test":
+            handle_os_test_inline(rest)
+        "targets":
+            print_os_targets()
+            0
+        "-h" | "--help" | "help":
+            print_os_help()
+            0
+        _:
+            print "Error: unknown os subcommand '{subcmd}'"
+            print ""
+            print_os_help()
+            1
 
 # =========================================================================
 # Error messages - implemented in Simple
 # =========================================================================
 fn print_error(msg: text):
-    print "ERROR: " + msg
+    error("cli", msg)
 
 fn print_error_with_help(msg: text):
-    print "ERROR: " + msg
+    error("cli", msg)
     print ""
     print_cli_help()
 
@@ -152,8 +484,6 @@ struct GlobalFlags:
     run_config: text
     no_jit: bool
     jit_threshold: i64
-    mem_infra_requested: [text]
-    mem_infra_strict: bool
 
 struct CoreFlags:
     gc_log: bool
@@ -183,10 +513,16 @@ fn parse_cli_nonnegative_or_default(value: text, default_value: i64) -> i64:
             return default_value
     return trimmed.to_int() ?? default_value
 
-fn parse_core_flags(args: [text]) -> CoreFlags:
+fn parse_global_flags(args: [text]) -> GlobalFlags:
     var gc_log = false
     var gc_off = false
     var use_notui = false
+    var max_recursion_depth = 0
+    var timeout_secs = 0
+    var execution_limit = 0
+    var stack_overflow_detection = false
+    var has_stack_overflow_flag = false
+    var backend = "auto"
     var force_interpret = false
     var interpreter_mode = "optimized"
     var run_config = ""
@@ -225,19 +561,7 @@ fn parse_core_flags(args: [text]) -> CoreFlags:
         elif arg == "--run-config" and i + 1 < args.len():
             i = i + 1
             run_config = args[i]
-        i = i + 1
-
-    return CoreFlags(gc_log: gc_log, gc_off: gc_off, use_notui: use_notui,
-        force_interpret: force_interpret, interpreter_mode: interpreter_mode,
-        run_config: run_config, no_jit: no_jit, jit_threshold: jit_threshold)
-
-fn parse_backend_flags(args: [text]) -> BackendFlags:
-    var backend = "auto"
-
-    var i = 0
-    while i < args.len():
-        val arg = args[i]
-        if arg.starts_with("--backend="):
+        elif arg.starts_with("--backend="):
             backend = arg[10:]
         elif arg == "--backend" and i + 1 < args.len():
             i = i + 1
@@ -246,27 +570,13 @@ fn parse_backend_flags(args: [text]) -> BackendFlags:
             backend = "llvm"
         elif arg.starts_with("--fixed-be="):
             val fixed_backend = arg[11:]
-            if fixed_backend == "":
-                backend = "llvm"
-            else:
-                backend = fixed_backend
-        i = i + 1
-
-    return BackendFlags(backend: backend)
-
-fn parse_limit_flags(args: [text]) -> LimitFlags:
-    var max_recursion_depth = 0
-    var timeout_secs = 0
-    var execution_limit = 0
-    var stack_overflow_detection = false
-
-    var i = 0
-    while i < args.len():
-        val arg = args[i]
-        if arg == "--stack-overflow-detection":
+            backend = if fixed_backend == "": "llvm" else: fixed_backend
+        elif arg == "--stack-overflow-detection":
             stack_overflow_detection = true
+            has_stack_overflow_flag = true
         elif arg == "--no-stack-overflow-detection":
             stack_overflow_detection = false
+            has_stack_overflow_flag = true
         elif arg.starts_with("--max-recursion-depth="):
             val val_str = arg[21:]
             max_recursion_depth = parse_cli_nonnegative_or_default(val_str, max_recursion_depth)
@@ -299,36 +609,11 @@ fn parse_global_flags(args: [text]) -> GlobalFlags:
     var force_interpret = core.force_interpret
     var interpreter_mode = core.interpreter_mode
     var run_config = core.run_config
-    var mem_infra_requested: [text] = []
-    var mem_infra_strict = false
 
-    var mem_index: i64 = 0
-    while mem_index < args.len():
-        val arg = args[mem_index]
-        var requested = ""
-        if arg.starts_with("--mem-infra="):
-            requested = arg[12:]
-        elif arg == "--mem-infra" and mem_index + 1 < args.len():
-            mem_index = mem_index + 1
-            requested = args[mem_index]
-        elif arg == "--mem-infra-strict":
-            mem_infra_strict = true
-        if requested != "":
-            for name in requested.split(","):
-                if name != "":
-                    mem_infra_requested.push(name)
-        mem_index = mem_index + 1
-
-    # Check SIMPLE_EXECUTION_MODE env var as fallback.
-    #
-    # Engine selection must never fail open: an unrecognized value used to fall
-    # through to the JIT silently, so a typo (or the `interpreter` spelling the
-    # Rust seed accepts) produced JIT results while the caller believed they had
-    # pinned the interpreter. Accept both spellings and warn on anything else.
-    # See doc/07_guide/runtime/execution_engine_selection.md
+    # Check SIMPLE_EXECUTION_MODE env var as fallback
     if not force_interpret and backend == "auto":
         val env_mode = env_get("SIMPLE_EXECUTION_MODE")
-        if env_mode == "interpret" or env_mode == "interpreter":
+        if env_mode == "interpret":
             force_interpret = true
         elif env_mode == "interpret-optimized":
             force_interpret = true
@@ -341,16 +626,6 @@ fn parse_global_flags(args: [text]) -> GlobalFlags:
             backend = "vhdl"
         elif env_mode == "jit":
             backend = "auto"
-        elif env_mode != "" and env_mode != nil:
-            _cli_eprint("warning: SIMPLE_EXECUTION_MODE=\"{env_mode}\" is not a recognized execution mode; running with the default JIT. Valid: interpret, interpreter, interpret-optimized, jit, cranelift, llvm, vhdl.")
-
-    # SIMPLE_NO_JIT=1 is a long-documented knob (and the `--no-jit` flag sets it),
-    # but it only ever reached the interpreter's JIT threshold — it never selected
-    # the engine, so A/B runs done with it silently compared JIT against JIT.
-    # Treat it as a real request for the interpreter.
-    if not force_interpret and backend == "auto":
-        if core.no_jit or env_get("SIMPLE_NO_JIT") == "1":
-            force_interpret = true
 
     # Read run-config from simple.sdn if not set via CLI/env
     if run_config == "":
@@ -367,14 +642,12 @@ fn parse_global_flags(args: [text]) -> GlobalFlags:
         interpreter_mode = "classic"
         force_interpret = true
 
-    return GlobalFlags(gc_log: core.gc_log, gc_off: core.gc_off, use_notui: core.use_notui,
-        max_recursion_depth: limits.max_recursion_depth, timeout_secs: limits.timeout_secs,
-        execution_limit: limits.execution_limit, stack_overflow_detection: limits.stack_overflow_detection,
+    GlobalFlags(gc_log: gc_log, gc_off: gc_off, use_notui: use_notui,
+        max_recursion_depth: max_recursion_depth, timeout_secs: timeout_secs,
+        execution_limit: execution_limit, stack_overflow_detection: stack_overflow_detection,
         backend: backend, force_interpret: force_interpret,
         interpreter_mode: interpreter_mode, run_config: run_config,
-        no_jit: core.no_jit, jit_threshold: core.jit_threshold,
-        mem_infra_requested: mem_infra_requested,
-        mem_infra_strict: mem_infra_strict)
+        no_jit: core.no_jit, jit_threshold: core.jit_threshold)
 
 fn apply_fault_detection(flags: GlobalFlags):
     if flags.max_recursion_depth > 0:

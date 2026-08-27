@@ -2,12 +2,10 @@
 
 > Tests covering file_read has a single return type, app.io.mod re-exports both byte-read shapes.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+### No definition of file_read returns an optional
 
-<details>
-<summary>Full Scenario Manual</summary>
+1. List files defining `file_read` with an optional return; expect an empty list.
+2. Count them; expect zero.
 
 # File Read Single Return Type Specification
 

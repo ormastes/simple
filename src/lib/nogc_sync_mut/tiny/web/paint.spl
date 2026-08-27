@@ -18,9 +18,91 @@ class TinyPaintRecord:
     color: i32
     text_value: text
 
+    static fn empty() -> TinyPaintRecord:
+        TinyPaintRecord(opcode: 0, bounds: TinyRect.empty(), color: 0, text_value: "")
+
 class TinyWebPaintResult:
     status: TinyStatus
     records: [TinyPaintRecord]
+    record_count: i32
+
+class TinyWebPaintArena:
+    records: [TinyPaintRecord]
+    record_count: i32
+    capacity: i32
+    allocation_count: i32
+    reuse_count: i32
+
+    static fn bounded(capacity: i32) -> TinyWebPaintArena:
+        var records: [TinyPaintRecord] = []
+        var index = 0
+        while index < capacity:
+            records.push(TinyPaintRecord.empty())
+            index = index + 1
+        TinyWebPaintArena(
+            records: records, record_count: 0, capacity: capacity,
+            allocation_count: 1, reuse_count: 0,
+        )
+
+    me reset():
+        self.record_count = 0
+        self.reuse_count = self.reuse_count + 1
+
+    me append(record: TinyPaintRecord) -> TinyStatus:
+        if self.record_count >= self.capacity:
+            return TinyStatus.error(TINY_ERR_CAPACITY, self.record_count)
+        self.records[self.record_count] = record
+        self.record_count = self.record_count + 1
+        TinyStatus.ok()
+
+    fn result(status: TinyStatus) -> TinyWebPaintResult:
+        TinyWebPaintResult(status: status, records: self.records, record_count: self.record_count)
+
+    me paint(layout: TinyWebLayoutResult) -> TinyWebPaintResult:
+        self.reset()
+        if not layout.status.is_ok(): return self.result(layout.status)
+        if layout.style_count != layout.node_count or layout.rendered_count != layout.node_count:
+            return self.result(TinyStatus.error(TINY_ERR_INVALID, layout.node_count))
+        var index = 0
+        while index < layout.node_count:
+            val node = layout.nodes[index]
+            if not layout.rendered[index]:
+                index = index + 1
+                continue
+            val style = layout.styles[index]
+            val styled_fill = style.background_color.len() > 0
+            val should_fill = styled_fill or node.kind == TINY_WEB_BODY or node.kind == TINY_WEB_DIV or node.kind == TINY_WEB_P or node.kind == TINY_WEB_BUTTON or node.kind == TINY_WEB_INPUT
+            val should_border = style.border > 0 or node.kind == TINY_WEB_BUTTON or node.kind == TINY_WEB_INPUT
+            val should_value_text = node.kind == TINY_WEB_INPUT and node.text_value.len() > 0
+            var required = 0
+            if should_fill: required = required + 1
+            if should_border: required = required + 1
+            if node.kind == TINY_WEB_TEXT: required = required + 1
+            if should_value_text: required = required + 1
+            if self.record_count + required > self.capacity:
+                return self.result(TinyStatus.error(TINY_ERR_CAPACITY, self.record_count + required))
+            if should_fill:
+                var fallback = -460552
+                if node.kind == TINY_WEB_BODY: fallback = -1
+                if node.kind == TINY_WEB_BUTTON or node.kind == TINY_WEB_INPUT: fallback = -2039584
+                val appended = self.append(TinyPaintRecord(opcode: TINY_PAINT_FILL_RECT, bounds: node.bounds, color: tiny_web_css_color(style.background_color, fallback), text_value: ""))
+                if not appended.is_ok(): return self.result(appended)
+            if should_border:
+                val appended = self.append(TinyPaintRecord(opcode: TINY_PAINT_BORDER_RECT, bounds: node.bounds, color: -14671840, text_value: ""))
+                if not appended.is_ok(): return self.result(appended)
+            if node.kind == TINY_WEB_TEXT:
+                val appended = self.append(TinyPaintRecord(opcode: TINY_PAINT_GLYPH_RUN, bounds: node.bounds, color: tiny_web_css_color(style.color, -15724528), text_value: node.text_value))
+                if not appended.is_ok(): return self.result(appended)
+            if should_value_text:
+                var text_width = node.bounds.width - 8
+                var text_height = node.bounds.height - 8
+                if text_width < 0: text_width = 0
+                if text_height < 0: text_height = 0
+                val value_bounds = TinyRect(x: node.bounds.x + 4, y: node.bounds.y + 4, width: text_width, height: text_height)
+                val appended = self.append(TinyPaintRecord(opcode: TINY_PAINT_GLYPH_RUN, bounds: value_bounds, color: tiny_web_css_color(style.color, -15724528), text_value: node.text_value))
+                if not appended.is_ok(): return self.result(appended)
+            index = index + 1
+        self.result(TinyStatus.ok())
 
 class TinyWebDrawResult:
     status: TinyStatus
@@ -28,47 +110,8 @@ class TinyWebDrawResult:
     word_count: i32
 
 fn tiny_web_paint(layout: TinyWebLayoutResult, max_records: i32) -> TinyWebPaintResult:
-    if not layout.status.is_ok():
-        return TinyWebPaintResult(status: layout.status, records: [])
-    if layout.styles.len() != layout.nodes.len() or layout.rendered.len() != layout.nodes.len():
-        return TinyWebPaintResult(status: TinyStatus.error(TINY_ERR_INVALID, layout.nodes.len()), records: [])
-    var records: [TinyPaintRecord] = []
-    var index = 0
-    while index < layout.nodes.len():
-        val node = layout.nodes[index]
-        if index < layout.rendered.len() and not layout.rendered[index]:
-            index = index + 1
-            continue
-        val style = layout.styles[index]
-        val styled_fill = style.background_color.len() > 0
-        val should_fill = styled_fill or node.kind == TINY_WEB_BODY or node.kind == TINY_WEB_DIV or node.kind == TINY_WEB_P or node.kind == TINY_WEB_BUTTON or node.kind == TINY_WEB_INPUT
-        val should_border = style.border > 0 or node.kind == TINY_WEB_BUTTON or node.kind == TINY_WEB_INPUT
-        val should_value_text = node.kind == TINY_WEB_INPUT and node.text_value.len() > 0
-        var required = 0
-        if should_fill: required = required + 1
-        if should_border: required = required + 1
-        if node.kind == TINY_WEB_TEXT: required = required + 1
-        if should_value_text: required = required + 1
-        if records.len() + required > max_records:
-            return TinyWebPaintResult(status: TinyStatus.error(TINY_ERR_CAPACITY, records.len() + required), records: records)
-        if should_fill:
-            var fallback = -460552
-            if node.kind == TINY_WEB_BODY: fallback = -1
-            if node.kind == TINY_WEB_BUTTON or node.kind == TINY_WEB_INPUT: fallback = -2039584
-            records.push(TinyPaintRecord(opcode: TINY_PAINT_FILL_RECT, bounds: node.bounds, color: tiny_web_css_color(style.background_color, fallback), text_value: ""))
-        if should_border:
-            records.push(TinyPaintRecord(opcode: TINY_PAINT_BORDER_RECT, bounds: node.bounds, color: -14671840, text_value: ""))
-        if node.kind == TINY_WEB_TEXT:
-            records.push(TinyPaintRecord(opcode: TINY_PAINT_GLYPH_RUN, bounds: node.bounds, color: tiny_web_css_color(style.color, -15724528), text_value: node.text_value))
-        if should_value_text:
-            var text_width = node.bounds.width - 8
-            var text_height = node.bounds.height - 8
-            if text_width < 0: text_width = 0
-            if text_height < 0: text_height = 0
-            val value_bounds = TinyRect(x: node.bounds.x + 4, y: node.bounds.y + 4, width: text_width, height: text_height)
-            records.push(TinyPaintRecord(opcode: TINY_PAINT_GLYPH_RUN, bounds: value_bounds, color: tiny_web_css_color(style.color, -15724528), text_value: node.text_value))
-        index = index + 1
-    TinyWebPaintResult(status: TinyStatus.ok(), records: records)
+    var arena = TinyWebPaintArena.bounded(max_records)
+    arena.paint(layout)
 
 fn tiny_web_css_color(value: text, fallback: i32) -> i32:
     val color = value.trim().lower()
@@ -92,7 +135,10 @@ fn tiny_web_paint_to_draw(paint: TinyWebPaintResult, capacity_words: i32) -> Tin
     if not paint.status.is_ok():
         return TinyWebDrawResult(status: paint.status, stream: [], word_count: 0)
     var writer = TinyDrawWriter.create(capacity_words)
-    for record in paint.records:
+    var record_index = 0
+    while record_index < paint.record_count:
+        val record = paint.records[record_index]
+        record_index = record_index + 1
         var status = TinyStatus.ok()
         if record.opcode == TINY_PAINT_FILL_RECT:
             status = writer.fill_rect(record.bounds.x, record.bounds.y, record.bounds.width, record.bounds.height, record.color)

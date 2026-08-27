@@ -1,6 +1,30 @@
 # Llvm Parity Specification
 
-> Tests covering LLVM Backend Parity (llvm-lib vs llvm), compilation succeeds on both backends, both backends produce object code, optimization levels, auto backend selection.
+> <details>
+
+<!-- sdn-diagram:id=llvm_parity_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=llvm_parity_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+llvm_parity_spec -> std
+llvm_parity_spec -> compiler
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=llvm_parity_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,19 +43,13 @@
 
 #### compiles empty module via llvm
 
-- compiles empty module via llvm
-   - Expected: result.is_ok() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("compiles empty module via llvm")
 val caps = get_llvm_capabilities()
 if not caps.llvm_backend_available:
     val pending_reason = "llc not available"
@@ -45,19 +63,13 @@ expect(result.is_ok()).to_equal(true)
 
 #### compiles empty module via llvm-lib
 
-- compiles empty module via llvm-lib
-   - Expected: result.is_ok() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("compiles empty module via llvm-lib")
 val caps = get_llvm_capabilities()
 if not caps.llvm_lib_backend_available:
     val pending_reason = "libLLVM not available"
@@ -73,19 +85,13 @@ expect(result.is_ok()).to_equal(true)
 
 #### llvm produces non-empty object code
 
-- llvm produces non-empty object code
-   - Expected: compiled.object_code.len() > 0 is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("llvm produces non-empty object code")
 val caps = get_llvm_capabilities()
 if not caps.llvm_backend_available:
     val pending_reason = "llc not available"
@@ -101,19 +107,13 @@ if result.is_ok():
 
 #### llvm-lib produces non-empty object code
 
-- llvm-lib produces non-empty object code
-   - Expected: compiled.object_code.len() > 0 is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("llvm-lib produces non-empty object code")
 val caps = get_llvm_capabilities()
 if not caps.llvm_lib_backend_available:
     val pending_reason = "libLLVM not available"
@@ -131,19 +131,13 @@ if result.is_ok():
 
 #### llvm handles debug optimization
 
-- llvm handles debug optimization
-   - Expected: result.is_ok() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("llvm handles debug optimization")
 val caps = get_llvm_capabilities()
 if not caps.llvm_backend_available:
     val pending_reason = "llc not available"
@@ -157,19 +151,13 @@ expect(result.is_ok()).to_equal(true)
 
 #### llvm-lib handles debug optimization
 
-- llvm-lib handles debug optimization
-   - Expected: result.is_ok() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("llvm-lib handles debug optimization")
 val caps = get_llvm_capabilities()
 if not caps.llvm_lib_backend_available:
     val pending_reason = "libLLVM not available"
@@ -185,19 +173,13 @@ expect(result.is_ok()).to_equal(true)
 
 #### auto selects an available LLVM backend
 
-- auto selects an available LLVM backend
-   - Expected: result.is_ok() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("auto selects an available LLVM backend")
 val caps = get_llvm_capabilities()
 if not caps.has_any_llvm():
     val pending_reason = "no LLVM backend available"
@@ -216,12 +198,12 @@ expect(result.is_ok()).to_equal(true)
 | Category | Compiler |
 | Status | Active |
 | Source | `test/02_integration/compiler/llvm_parity_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering LLVM Backend Parity (llvm-lib vs llvm), compilation succeeds on both backends, both backends produce object code, optimization levels, auto backend selection.
+Tests covering:
 - LLVM Backend Parity (llvm-lib vs llvm)
 - compilation succeeds on both backends
 - both backends produce object code
@@ -240,51 +222,3 @@ Tests covering LLVM Backend Parity (llvm-lib vs llvm), compilation succeeds on b
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-INTEGRATION`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `1d992ba171b3cce6901c0519d3809c23066c694646e4dddaaa506c8b9450345b`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `1d992ba171b3cce6901c0519d3809c23066c694646e4dddaaa506c8b9450345b`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `1d992ba171b3cce6901c0519d3809c23066c694646e4dddaaa506c8b9450345b`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/02_integration/compiler/llvm_parity_spec.spl
-mirror: doc/06_spec/02_integration/compiler/llvm_parity_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/compiler/llvm_parity_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/compiler/llvm_parity_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/02_integration/compiler/llvm_parity_spec.spl:53:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compiles empty module via llvm' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/compiler/llvm_parity_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compiles empty module via llvm-lib' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/compiler/llvm_parity_spec.spl:76:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'llvm produces non-empty object code' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -1,0 +1,121 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-011 REQ-016 REQ-017
+
+use std.spec.*
+use app.test.hal_environment_socket_executor.*
+use std.common.structural.environment_instruction.*
+
+fn socket_policy(capability_id: i64, endpoint: text = "127.0.0.1:18080") -> HostedSocketEndpointPolicyV1:
+    HostedSocketEndpointPolicyV1(capability_id: capability_id,
+        endpoint: endpoint, max_send_bytes: 32, max_receive_bytes: 32,
+        timeout_ms: 100, allow_privileged_port: false, sealed: true)
+
+fn env_policy(opcode: EnvOpcodeV1, capability_id: i64) -> EnvExecutorPolicyV1:
+    env_executor_policy_v1(env_opcode_mask_v1(opcode), 1 << capability_id,
+        0, 0, false, false, true)
+
+fn instruction(sequence: i64, opcode: EnvOpcodeV1, capability_id: i64,
+               argument_length: i64, result_capacity: i64) -> EnvInstructionV1:
+    env_instruction_v1(71, sequence, opcode, capability_id, 0,
+        0, argument_length, argument_length, 0,
+        result_capacity, result_capacity)
+
+describe "bounded socket environment capture and replay":
+    it "accepts only bounded loopback endpoints under explicit capability policy":
+        expect(hosted_socket_endpoint_policy_v1_well_formed(
+            socket_policy(14))).to_be(true)
+        expect(hosted_socket_endpoint_policy_v1_well_formed(
+            socket_policy(14, "10.0.0.1:18080"))).to_be(false)
+        expect(hosted_socket_endpoint_policy_v1_well_formed(
+            socket_policy(14, "127.0.0.1:80"))).to_be(false)
+
+    it "commits a captured exchange in exact open send receive close order":
+        val request: [u8] = [1u8, 2u8, 3u8]
+        val response: [u8] = [9u8, 8u8]
+        val capture = hosted_prepare_socket_exchange_from_capture_v1(
+            socket_policy(14), request, response)
+        var cursor = hosted_socket_transcript_cursor_v1()
+        var open_result: [u8] = [0u8]
+        var send_result: [u8] = [0u8; 8]
+        var receive_result: [u8] = [0u8; 2]
+        var close_result: [u8] = [0u8]
+        val endpoint = capture.endpoint_bytes
+
+        val opened = hosted_socket_transcript_execute_v1(
+            capture, cursor, env_policy(EnvOpcodeV1.SocketOpen, 14),
+            instruction(0, EnvOpcodeV1.SocketOpen, 14, endpoint.len(), 1),
+            endpoint, open_result)
+        cursor = opened.cursor
+        val sent = hosted_socket_transcript_execute_v1(
+            capture, cursor, env_policy(EnvOpcodeV1.SocketSend, 14),
+            instruction(1, EnvOpcodeV1.SocketSend, 14, request.len(), 8),
+            request, send_result)
+        cursor = sent.cursor
+        val received = hosted_socket_transcript_execute_v1(
+            capture, cursor, env_policy(EnvOpcodeV1.SocketReceive, 14),
+            instruction(2, EnvOpcodeV1.SocketReceive, 14, 0, response.len()),
+            [], receive_result)
+        cursor = received.cursor
+        val closed = hosted_socket_transcript_execute_v1(
+            capture, cursor, env_policy(EnvOpcodeV1.SocketClose, 14),
+            instruction(3, EnvOpcodeV1.SocketClose, 14, 0, 1),
+            [], close_result)
+        cursor = closed.cursor
+
+        expect(opened.receipt.applied).to_be(true)
+        expect(sent.receipt.applied).to_be(true)
+        expect(received.receipt.applied).to_be(true)
+        expect(closed.receipt.applied).to_be(true)
+        expect(receive_result).to_equal(response)
+        expect(hosted_socket_transcript_complete_v1(cursor)).to_be(true)
+        expect(closed.receipt.allocation_count_after_seal).to_equal(0)
+
+    it "rejects reordered or capability-divergent operations without advancing":
+        val capture = hosted_prepare_socket_exchange_from_capture_v1(
+            socket_policy(14), [1u8], [2u8])
+        val cursor = hosted_socket_transcript_cursor_v1()
+        var result: [u8] = [77u8]
+        val reordered = hosted_socket_transcript_execute_v1(
+            capture, cursor, env_policy(EnvOpcodeV1.SocketClose, 14),
+            instruction(3, EnvOpcodeV1.SocketClose, 14, 0, 1), [], result)
+        val wrong_capability = hosted_socket_transcript_execute_v1(
+            capture, cursor, env_policy(EnvOpcodeV1.SocketOpen, 13),
+            instruction(0, EnvOpcodeV1.SocketOpen, 13,
+                        capture.endpoint_bytes.len(), 1),
+            capture.endpoint_bytes, result)
+
+        expect(env_instruction_status_to_i64(
+            reordered.receipt.observation.status)).to_equal(
+                env_instruction_status_to_i64(EnvInstructionStatusV1.Diverged))
+        expect(env_instruction_status_to_i64(
+            wrong_capability.receipt.observation.status)).to_equal(
+                env_instruction_status_to_i64(EnvInstructionStatusV1.Diverged))
+        expect(reordered.cursor.next_sequence).to_equal(0)
+        expect(wrong_capability.cursor.next_sequence).to_equal(0)
+        expect(result[0]).to_equal(77u8)
+
+    it "replays exact captured receive bytes with no second network effect":
+        val capture = hosted_prepare_socket_exchange_from_capture_v1(
+            socket_policy(14), [1u8], [4u8, 5u8])
+        val op = instruction(2, EnvOpcodeV1.SocketReceive, 14, 0, 2)
+        val cursor = HostedSocketTranscriptCursorV1(
+            next_sequence: 2, consumed_count: 2, sealed: true)
+        var recorded: [u8] = [0u8; 2]
+        var replayed: [u8] = [0u8; 2]
+        val captured = hosted_socket_transcript_execute_v1(
+            capture, cursor, env_policy(EnvOpcodeV1.SocketReceive, 14),
+            op, [], recorded)
+        val replay = env_replay_exact_v1(
+            op, op, captured.receipt.observation, [], recorded, replayed)
+
+        expect(captured.receipt.physical_effect).to_be(false)
+        expect(replay.applied).to_be(true)
+        expect(replay.physical_effect).to_be(false)
+        expect(replay.allocation_count_after_seal).to_equal(0)
+        expect(replayed).to_equal(recorded)
+        expect(env_replay_observations_equivalent(
+            captured.receipt.observation, replay.observation)).to_be(true)
+        expect(captured.receipt.observation.interaction_digest_hi
+            != 0).to_be(true)
+        expect(captured.receipt.observation.interaction_digest_lo
+            != 0).to_be(true)

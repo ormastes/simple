@@ -2,6 +2,29 @@
 
 > Verifies JIT pipeline end-to-end on GHDL RV32 simulation (no hardware required).
 
+<!-- sdn-diagram:id=ghdl_rv32_composite_runner_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=ghdl_rv32_composite_runner_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+ghdl_rv32_composite_runner_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=ghdl_rv32_composite_runner_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 7 | 7 | 0 | 0 |
@@ -20,7 +43,7 @@ Verifies JIT pipeline end-to-end on GHDL RV32 simulation (no hardware required).
 | Category | Other |
 | Status | Active |
 | Source | `test/02_integration/remote_jit/ghdl_rv32_composite_runner_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Verifies JIT pipeline end-to-end on GHDL RV32 simulation (no hardware required).
@@ -31,24 +54,13 @@ Verifies JIT pipeline end-to-end on GHDL RV32 simulation (no hardware required).
 
 #### reports capability status for GHDL semihost lane
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- reports capability status for GHDL semihost lane
-   - Expected: report.lane_id equals `ghdl_rv32_semihost`
-   - Expected: report.is_acceptable() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("reports capability status for GHDL semihost lane")
 val report = probe_ghdl()
 expect(report.lane_id).to_equal("ghdl_rv32_semihost")
 expect(report.is_acceptable()).to_equal(true)
@@ -58,20 +70,13 @@ expect(report.is_acceptable()).to_equal(true)
 
 #### reports capability status for GHDL mailbox lane
 
-- reports capability status for GHDL mailbox lane
-   - Expected: report.lane_id equals `ghdl_rv32_mailbox`
-   - Expected: report.is_acceptable() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("reports capability status for GHDL mailbox lane")
 val report = probe_ghdl_mailbox()
 expect(report.lane_id).to_equal("ghdl_rv32_mailbox")
 expect(report.is_acceptable()).to_equal(true)
@@ -81,19 +86,13 @@ expect(report.is_acceptable()).to_equal(true)
 
 #### refuses manager creation before connect
 
-- refuses manager creation before connect
-   - Expected: mgr.is_err() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("refuses manager creation before connect")
 val adapter = GhdlRv32Adapter.new()
 val mgr = adapter.create_manager()
 expect(mgr.is_err()).to_equal(true)
@@ -104,19 +103,17 @@ expect(mgr.err().unwrap()).to_contain("not connected")
 
 #### mailbox adapter rejects execute without elf
 
-- mailbox adapter rejects execute without elf
+1. var adapter = GhdlRv32MailboxAdapter new
    - Expected: result.is_err() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("mailbox adapter rejects execute without elf")
 var adapter = GhdlRv32MailboxAdapter.new()
 val result = adapter.execute()
 expect(result.is_err()).to_equal(true)
@@ -130,19 +127,13 @@ expect(result.err().unwrap()).to_contain("no ELF path")
 
 #### reports compile failure for invalid source _(slow)_
 
-- reports compile failure for invalid source
-   - Expected: compiled.is_ok() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("reports compile failure for invalid source")
 # NOTE: CompilerBridge.compile() is currently a stub that always returns Ok.
 # This test documents the intended contract: invalid source should fail.
 # When the real compiler pipeline lands, change the assertion to is_err().
@@ -162,19 +153,24 @@ expect(compiled.is_ok()).to_equal(true)
 
 #### runs return-zero on GHDL RV32 _(slow)_
 
-- runs return-zero on GHDL RV32
+1. print "[skip] {ghdl skip reason
+2. var adapter = GhdlRv32Adapter new
+3. print "[skip] connect failed: {conn err
+4. adapter disconnect
+5. adapter disconnect
+6. var manager = mgr ok unwrap
+7. adapter disconnect
+8. print "[skip] exec failed: {result err
    - Expected: result.ok.unwrap().return_value equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("runs return-zero on GHDL RV32")
 if not ghdl_tools_ready():
     print "[skip] {ghdl_skip_reason()}"
     return
@@ -214,19 +210,24 @@ else:
 
 #### runs return-42 on GHDL RV32 _(slow)_
 
-- runs return-42 on GHDL RV32
+1. print "[skip] {ghdl skip reason
+2. var adapter = GhdlRv32Adapter new
+3. print "[skip] connect failed: {conn err
+4. adapter disconnect
+5. adapter disconnect
+6. var manager = mgr ok unwrap
+7. adapter disconnect
+8. print "[skip] exec failed: {result err
    - Expected: result.ok.unwrap().return_value equals `42`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("runs return-42 on GHDL RV32")
 if not ghdl_tools_ready():
     print "[skip] {ghdl_skip_reason()}"
     return
@@ -273,54 +274,3 @@ else:
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-INTEGRATION`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `daa159a262a843a23f20e91d1545b431457ba1e96287178acf31315109978673`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `daa159a262a843a23f20e91d1545b431457ba1e96287178acf31315109978673`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `daa159a262a843a23f20e91d1545b431457ba1e96287178acf31315109978673`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
-
-SSpec documentization score: 88/100
-source: test/02_integration/remote_jit/ghdl_rv32_composite_runner_spec.spl
-mirror: doc/06_spec/02_integration/remote_jit/ghdl_rv32_composite_runner_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=80
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/remote_jit/ghdl_rv32_composite_runner_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/remote_jit/ghdl_rv32_composite_runner_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/02_integration/remote_jit/ghdl_rv32_composite_runner_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/02_integration/remote_jit/ghdl_rv32_composite_runner_spec.spl:30:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reports capability status for GHDL semihost lane' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/remote_jit/ghdl_rv32_composite_runner_spec.spl:37:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reports capability status for GHDL mailbox lane' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/remote_jit/ghdl_rv32_composite_runner_spec.spl:44:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'refuses manager creation before connect' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

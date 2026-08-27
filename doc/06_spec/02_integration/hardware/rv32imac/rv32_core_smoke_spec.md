@@ -2,6 +2,30 @@
 
 > Smoke tests for the RV32IMAC core. Verifies basic instruction execution through GHDL simulation: NOP, ADD, branch, load/store.
 
+<!-- sdn-diagram:id=rv32_core_smoke_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=rv32_core_smoke_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+rv32_core_smoke_spec -> std
+rv32_core_smoke_spec -> hardware
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=rv32_core_smoke_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 25 | 25 | 0 | 0 |

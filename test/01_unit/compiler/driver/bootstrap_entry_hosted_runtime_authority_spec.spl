@@ -1,0 +1,30 @@
+# Reproducing spec for the Stage 1 bootstrap link failure of 2026-08-18:
+#
+#   mod_3.o: in function `cli__bootstrap_main__run_rt_native_build':
+#   undefined reference to `rt_native_build'
+#
+# Cause is LANE SELECTION, not a missing core-ABI entry. `rt_native_build` IS
+# the native-build driver; its only implementation is the hosted Rust crate
+# `simple-native-all`, so no C body can exist. The seed already authorises the
+# hosted archive for this entry, but the branch was reachable only when an
+# explicit `--runtime-path` was supplied, and the bare `build bootstrap` stage
+# driver never supplies one. This spec FAILED before the authority was wired.
+use std.spec
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+describe "bootstrap entry hosted runtime authority":
+    it "declares a hosted-only extern that the core-c lane cannot define":
+        val entry = file_read("src/app/cli/bootstrap_main.spl")
+        val contract = file_read("scripts/check/bootstrap_hosted_only_externs.txt")
+        val native_all = file_read("src/compiler_rust/native_all/src/lib.rs")
+        expect(entry).to_contain("extern fn rt_native_build")
+        expect(contract).to_contain("rt_native_build")
+        expect(native_all).to_contain("pub extern \"C\" fn rt_native_build")
+
+    it "provisions a hosted native-all authority for the bootstrap entry without --runtime-path":
+        val config = file_read("src/compiler_rust/compiler/src/pipeline/native_project/config.rs")
+        expect(config).to_contain("fn bootstrap_hosted_native_all_runtime(")
+        expect(config).to_contain("bootstrap_hosted_native_all_runtime(self.config.runtime_path.as_deref()")
+        expect(config).to_contain("simple-native-all")
+        # the runtime_path-only gate that made Stage 1 unlinkable is gone
+        expect(config.contains("let native_all = rp.join(native_all_name);")).to_equal(false)

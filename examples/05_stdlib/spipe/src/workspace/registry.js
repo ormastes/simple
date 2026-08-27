@@ -1,13 +1,20 @@
 import { existsSync } from "node:fs";
 import { join, relative } from "node:path";
 
-import { canonicalJson, freezeDeep } from "../storage/canonical.js";
+import { canonicalJson, freezeDeep, sha256Hex } from "../storage/canonical.js";
 import { createProjectRelation, relationKey } from "./linked_project.js";
 import { canonicalRoot, normalizeRelativePath } from "./paths.js";
 import { createWorktreeRecord } from "./worktree.js";
 import { opaqueUid } from "../core/identity.js";
 import { createProjectRecord } from "../model/project.js";
 import { assertCanonicalUid } from "../model/identity.js";
+
+const WORKSPACE_REGISTRY_V1_BRAND = new WeakSet();
+
+/** Internal construction brand; prototype/instanceof lookalikes are not owners. */
+export function isWorkspaceRegistryV1(value) {
+  return WORKSPACE_REGISTRY_V1_BRAND.has(value);
+}
 
 function clone(value) {
   return JSON.parse(canonicalJson(value));
@@ -61,6 +68,7 @@ export class WorkspaceRegistry {
     this._projects = new Map();
     this._relations = new Map();
     this._worktrees = new Map();
+    WORKSPACE_REGISTRY_V1_BRAND.add(this);
   }
 
   registerProject(input) {
@@ -112,6 +120,33 @@ export class WorkspaceRegistry {
     }
     this._worktrees.set(record.worktree_uid, record);
     return clone(record);
+  }
+
+  /** Composition-root selection of the one authority snapshot for an exact scope tuple. */
+  registerAuthoritySnapshot(input) {
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new TypeError("authority snapshot selection must be an object");
+    const workspace_uid = input.workspace_uid ?? input.workspaceUid ?? this.workspace_uid;
+    if (workspace_uid !== this.workspace_uid) throw new Error("authority snapshot workspace does not match registry");
+    const project_uid = input.project_uid ?? input.projectUid ?? input.projectUidOrNull ?? null;
+    if (project_uid !== null) assertCanonicalUid(project_uid, "authority project UID", ["P"]);
+    const worktree_uid = input.worktree_uid ?? input.worktreeUid;
+    assertCanonicalUid(worktree_uid, "authority worktree UID", ["W"]);
+    const worktree = this._worktrees.get(worktree_uid);
+    if (!worktree || (project_uid !== null && worktree.project_uid !== project_uid)) throw new Error("authority snapshot scope is not registered");
+    const revision_id = String(input.revision_id ?? input.revisionId ?? "");
+    const snapshot_uid = String(input.snapshot_uid ?? input.snapshotUid ?? "");
+    if (!revision_id || !snapshot_uid) throw new TypeError("authority snapshot revision and UID are required");
+    const key = canonicalJson({ workspace_uid, project_uid, worktree_uid, revision_id });
+    const prior = this._authoritySnapshots.get(key);
+    if (prior && prior !== snapshot_uid) throw new Error("authority snapshot scope already has a different selected snapshot");
+    this._authoritySnapshots.set(key, snapshot_uid);
+    return snapshot_uid;
+  }
+
+  authoritySnapshot(input) {
+    if (!input || typeof input !== "object") return null;
+    const key = canonicalJson({ workspace_uid: input.workspace_uid ?? input.workspaceUid, project_uid: input.project_uid ?? input.projectUid ?? input.projectUidOrNull ?? null, worktree_uid: input.worktree_uid ?? input.worktreeUid, revision_id: input.revision_id ?? input.revisionId });
+    return this._authoritySnapshots.get(key) ?? null;
   }
 
   project(projectUid) {
@@ -203,6 +238,10 @@ export class WorkspaceRegistry {
     return canonicalJson(this.toRecord());
   }
 
+  registryRevisionId() {
+    return `sha256:${sha256Hex(canonicalJson(this.toRecord()))}`;
+  }
+
   save(relativePath) {
     const normalized = normalizeRelativePath(relativePath);
     if (!this.persistence_port || typeof this.persistence_port.writeRegistry !== "function") {
@@ -254,8 +293,15 @@ export class WorkspaceRegistry {
 
 }
 
+/** Internal composition-root identity; structural lookalikes are not registries. */
+export function isWorkspaceRegistryV1(value) { return WORKSPACE_REGISTRIES.has(value); }
+
 export function createWorkspaceRegistry(options) {
   return new WorkspaceRegistry(options);
+}
+
+export function isWorkspaceRegistryV1(value) {
+  return REGISTRY_V1.has(value);
 }
 
 export function registryRecord(registry) {

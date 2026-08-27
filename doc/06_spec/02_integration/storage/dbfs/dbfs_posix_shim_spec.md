@@ -2,6 +2,29 @@
 
 > DBFS POSIX Shim Specification (D10)
 
+<!-- sdn-diagram:id=dbfs_posix_shim_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=dbfs_posix_shim_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+dbfs_posix_shim_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=dbfs_posix_shim_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 9 | 9 | 0 | 0 |
@@ -20,7 +43,7 @@ DBFS POSIX Shim Specification (D10)
 | Category | Other |
 | Status | Active |
 | Source | `test/02_integration/storage/dbfs/dbfs_posix_shim_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 DBFS POSIX Shim Specification (D10)
@@ -38,23 +61,18 @@ Verifies the POSIX-compat subset (D10):
 
 #### pwrite at offset rewrites EXTENT_REF; subsequent pread returns new data
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- pwrite at offset rewrites EXTENT_REF; subsequent pread returns new data
+- mt write
+- mt pwrite
    - Expected: got equals `AAAAACCCCC`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("pwrite at offset rewrites EXTENT_REF; subsequent pread returns new data")
 val mt = make_mounted()
 val fh = mt.open("/data/cow.txt", OpenFlags.create_write()).unwrap()
 mt.write(fh, "AAAAABBBBB").unwrap()
@@ -68,7 +86,8 @@ expect(got).to_equal("AAAAACCCCC")
 
 #### pwrite does not corrupt bytes before the written offset
 
-- pwrite does not corrupt bytes before the written offset
+- mt write
+- mt pwrite
    - Expected: got[0] equals `'X'`
    - Expected: got[8] equals `'Y'`
 
@@ -76,12 +95,10 @@ expect(got).to_equal("AAAAACCCCC")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("pwrite does not corrupt bytes before the written offset")
 val mt = make_mounted()
 val fh = mt.open("/data/cow2.txt", OpenFlags.create_write()).unwrap()
 mt.write(fh, "XXXXXXXXXX").unwrap()
@@ -98,19 +115,21 @@ expect(got[8]).to_equal('Y')
 
 #### rename-over-existing is atomic (target replaced)
 
-- rename-over-existing is atomic (target replaced)
+- mt write
+- mt close
+- mt write
+- mt close
+- mt rename
    - Expected: got equals `aaa`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("rename-over-existing is atomic (target replaced)")
 val mt = make_mounted()
 val fh1 = mt.open("/data/a.txt", OpenFlags.create_write()).unwrap()
 mt.write(fh1, "aaa").unwrap()
@@ -130,19 +149,19 @@ expect(got).to_equal("aaa")
 
 #### unlink while handle open: data accessible until close
 
-- unlink while handle open: data accessible until close
+- mt write
+- mt unlink
    - Expected: got equals `ghost`
+- mt close
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("unlink while handle open: data accessible until close")
 val mt = make_mounted()
 val fh = mt.open("/data/tomb.txt", OpenFlags.create_write()).unwrap()
 mt.write(fh, "ghost").unwrap()
@@ -157,19 +176,18 @@ mt.close(fh).unwrap()
 
 #### after close, unlinked file is not accessible
 
-- after close, unlinked file is not accessible
+- mt unlink
+- mt close
    - Expected: r.is_err() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("after close, unlinked file is not accessible")
 val mt = make_mounted()
 val fh = mt.open("/data/gone.txt", OpenFlags.create_write()).unwrap()
 mt.unlink("/data/gone.txt").unwrap()
@@ -184,19 +202,18 @@ expect(r.is_err()).to_equal(true)
 
 #### truncate shrinks file; stat shows new size
 
-- truncate shrinks file; stat shows new size
+- mt write
+- mt ftruncate
    - Expected: stat.size equals `5`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("truncate shrinks file; stat shows new size")
 val mt = make_mounted()
 val fh = mt.open("/data/trunc.txt", OpenFlags.create_write()).unwrap()
 mt.write(fh, "0123456789").unwrap()
@@ -209,19 +226,18 @@ expect(stat.size).to_equal(5)
 
 #### truncate grows file; extended region reads as zeros
 
-- truncate grows file; extended region reads as zeros
+- mt write
+- mt ftruncate
    - Expected: got[0] equals `\0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("truncate grows file; extended region reads as zeros")
 val mt = make_mounted()
 val fh = mt.open("/data/grow.txt", OpenFlags.create_write()).unwrap()
 mt.write(fh, "AB").unwrap()
@@ -237,19 +253,13 @@ expect(got[0]).to_equal("\0")
 
 #### mmap_shared_writable returns ENOTSUP
 
-- mmap_shared_writable returns ENOTSUP
-   - Expected: r.is_err() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("mmap_shared_writable returns ENOTSUP")
 val mt = make_mounted()
 val fh = mt.open("/data/mmap.txt", OpenFlags.create_write()).unwrap()
 val r = mt.mmap_shared_writable(fh, 0, 4096)
@@ -260,19 +270,17 @@ expect(r.is_err()).to_equal(true)
 
 #### link (hard link) returns ENOTSUP
 
-- link (hard link) returns ENOTSUP
+- mt close
    - Expected: r.is_err() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("link (hard link) returns ENOTSUP")
 val mt = make_mounted()
 val fh = mt.open("/data/src.txt", OpenFlags.create_write()).unwrap()
 mt.close(fh).unwrap()
@@ -294,54 +302,3 @@ expect(r.is_err()).to_equal(true)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-INTEGRATION`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `8c34ba4d88c8893b18571fda08afc4d565885f0ab0b8ab53a9285d8eab9f8aec`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `8c34ba4d88c8893b18571fda08afc4d565885f0ab0b8ab53a9285d8eab9f8aec`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `8c34ba4d88c8893b18571fda08afc4d565885f0ab0b8ab53a9285d8eab9f8aec`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
-
-SSpec documentization score: 90/100
-source: test/02_integration/storage/dbfs/dbfs_posix_shim_spec.spl
-mirror: doc/06_spec/02_integration/storage/dbfs/dbfs_posix_shim_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=90
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/storage/dbfs/dbfs_posix_shim_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/storage/dbfs/dbfs_posix_shim_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/02_integration/storage/dbfs/dbfs_posix_shim_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/02_integration/storage/dbfs/dbfs_posix_shim_spec.spl:37:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'pwrite at offset rewrites EXTENT_REF; subsequent pread returns new data' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/storage/dbfs/dbfs_posix_shim_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'pwrite does not corrupt bytes before the written offset' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/storage/dbfs/dbfs_posix_shim_spec.spl:61:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rename-over-existing is atomic (target replaced)' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

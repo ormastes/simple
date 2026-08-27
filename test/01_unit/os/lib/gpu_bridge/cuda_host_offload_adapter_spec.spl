@@ -1,0 +1,84 @@
+# @cover src/os/lib/gpu_bridge/cuda_host_offload_adapter.spl 80%
+# @tag: unit, simpleos, processing-ir, cuda, ivshmem
+
+use std.spec.{describe, it, step, expect}
+use common.gpu.simpleos_host_gpu_protocol.{
+    SIMPLEOS_HOST_GPU_PROTOCOL_VERSION,
+    SIMPLEOS_HOST_GPU_STATUS_PASS,
+    SIMPLEOS_HOST_GPU_STATUS_FAIL,
+    SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST,
+    SIMPLEOS_HOST_GPU_BACKEND_CUDA,
+    SIMPLEOS_HOST_GPU_BACKEND_VULKAN,
+    SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA,
+    SIMPLEOS_HOST_GPU_READBACK_DEVICE,
+    SIMPLEOS_HOST_GPU_READBACK_CPU
+}
+use os.lib.gpu_bridge.host_gpu_ivshmem.{
+    HostGpuIvshmemReceipt,
+    HostGpuIvshmemHelloReceipt
+}
+use os.lib.gpu_bridge.cuda_host_offload_adapter.{CudaHostOffloadAdapter}
+
+fn hello(processing_mask: i64, status: i64, reason: i64,
+         published: bool, completed: bool, version: i64) -> HostGpuIvshmemHelloReceipt:
+    HostGpuIvshmemHelloReceipt(
+        published: published, completed: completed, status: status, reason: reason,
+        generation: 1, render_mask: 1, processing_mask: processing_mask,
+        max_payload_bytes: 65536, max_readback_bytes: 1024,
+        version: version, elapsed_us: 1, capability_mask: 0)
+
+fn receipt(backend: i64, source: i64, run_id_hash: i64,
+           frame_id: i64, identity: i64, handle: i64) -> HostGpuIvshmemReceipt:
+    HostGpuIvshmemReceipt(
+        completed: true, status: SIMPLEOS_HOST_GPU_STATUS_PASS, reason: 0,
+        generation: 7, native_handle: handle, output_addr: 4096u64,
+        output_bytes: 16, output_checksum: 28, elapsed_us: 3,
+        readback_source: source, device_identity: identity,
+        run_id_hash: run_id_hash, frame_id: frame_id, backend_code: backend)
+
+describe "CUDA host offload adapter":
+    it "should preserve CUDA identity while accepting a negotiated processing capability":
+        # @covers CUDA_NEGOTIATED:true
+        step("Probe the GPU environment")
+        val adapter = CudaHostOffloadAdapter.create(4096u64, 100)
+        expect(adapter.backend_name()).to_equal("cuda")
+        expect(adapter.backend_code()).to_equal(SIMPLEOS_HOST_GPU_BACKEND_CUDA)
+        expect(adapter.backend_code()).to_equal(4)
+        expect(adapter.negotiated(hello(SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA, SIMPLEOS_HOST_GPU_STATUS_PASS, 0, true, true, SIMPLEOS_HOST_GPU_PROTOCOL_VERSION))).to_equal(true)
+
+    it "should reject incomplete failed stale or non-CUDA negotiation":
+        # @covers CUDA_NEGOTIATED:false
+        step("Lower shared processing IR")
+        val adapter = CudaHostOffloadAdapter.create(4096u64, 100)
+        expect(adapter.negotiated(hello(0, SIMPLEOS_HOST_GPU_STATUS_PASS, 0, true, true, SIMPLEOS_HOST_GPU_PROTOCOL_VERSION))).to_equal(false)
+        expect(adapter.negotiated(hello(SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA, SIMPLEOS_HOST_GPU_STATUS_FAIL, 1, true, true, SIMPLEOS_HOST_GPU_PROTOCOL_VERSION))).to_equal(false)
+        expect(adapter.negotiated(hello(SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA, SIMPLEOS_HOST_GPU_STATUS_PASS, 0, false, true, SIMPLEOS_HOST_GPU_PROTOCOL_VERSION))).to_equal(false)
+        expect(adapter.negotiated(hello(SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA, SIMPLEOS_HOST_GPU_STATUS_PASS, 0, true, false, SIMPLEOS_HOST_GPU_PROTOCOL_VERSION))).to_equal(false)
+        expect(adapter.negotiated(hello(SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA, SIMPLEOS_HOST_GPU_STATUS_PASS, 0, true, true, 99))).to_equal(false)
+
+    it "should fail invalid submissions before touching ivshmem":
+        # @covers CUDA_INVALID_SUBMIT:true
+        step("Submit through the selected Vulkan device")
+        val missing = CudaHostOffloadAdapter.create(0u64, 100)
+        val invalid_base = missing.submit_fill_u32(7, 31, 9, 4, 7u32)
+        expect(invalid_base.completed).to_equal(false)
+        expect(invalid_base.status).to_equal(SIMPLEOS_HOST_GPU_STATUS_FAIL)
+        expect(invalid_base.reason).to_equal(SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST)
+        val adapter = CudaHostOffloadAdapter.create(4096u64, 100)
+        expect(adapter.submit_fill_u32(0, 31, 9, 4, 7u32).completed).to_equal(false)
+        expect(adapter.submit_fill_u32(7, 0, 9, 4, 7u32).completed).to_equal(false)
+        expect(adapter.submit_fill_u32(7, 31, 9, 0, 7u32).completed).to_equal(false)
+        val no_timeout = CudaHostOffloadAdapter.create(4096u64, 0)
+        expect(no_timeout.submit_fill_u32(7, 31, 9, 4, 7u32).completed).to_equal(false)
+
+    it "should admit only correlated CUDA device-origin readback":
+        step("Verify device-origin readback")
+        val adapter = CudaHostOffloadAdapter.create(4096u64, 100)
+        val good = receipt(SIMPLEOS_HOST_GPU_BACKEND_CUDA, SIMPLEOS_HOST_GPU_READBACK_DEVICE, 31, 9, 17, 3)
+        expect(adapter.device_receipt_valid(good, 7, 31, 9, 16)).to_equal(true)
+        expect(adapter.device_receipt_valid(receipt(SIMPLEOS_HOST_GPU_BACKEND_VULKAN, SIMPLEOS_HOST_GPU_READBACK_DEVICE, 31, 9, 17, 3), 7, 31, 9, 16)).to_equal(false)
+        expect(adapter.device_receipt_valid(receipt(SIMPLEOS_HOST_GPU_BACKEND_CUDA, SIMPLEOS_HOST_GPU_READBACK_CPU, 31, 9, 17, 3), 7, 31, 9, 16)).to_equal(false)
+        expect(adapter.device_receipt_valid(receipt(SIMPLEOS_HOST_GPU_BACKEND_CUDA, SIMPLEOS_HOST_GPU_READBACK_DEVICE, 32, 9, 17, 3), 7, 31, 9, 16)).to_equal(false)
+        expect(adapter.device_receipt_valid(receipt(SIMPLEOS_HOST_GPU_BACKEND_CUDA, SIMPLEOS_HOST_GPU_READBACK_DEVICE, 31, 10, 17, 3), 7, 31, 9, 16)).to_equal(false)
+        expect(adapter.device_receipt_valid(receipt(SIMPLEOS_HOST_GPU_BACKEND_CUDA, SIMPLEOS_HOST_GPU_READBACK_DEVICE, 31, 9, 0, 3), 7, 31, 9, 16)).to_equal(false)
+        expect(adapter.device_receipt_valid(receipt(SIMPLEOS_HOST_GPU_BACKEND_CUDA, SIMPLEOS_HOST_GPU_READBACK_DEVICE, 31, 9, 17, 0), 7, 31, 9, 16)).to_equal(false)

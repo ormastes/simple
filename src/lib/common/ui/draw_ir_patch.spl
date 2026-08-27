@@ -2,8 +2,8 @@
 #
 # Additive companion to draw_ir_diff.spl (Phase-4 slice item 7, see
 # doc/03_plan/ui/unified_2d_engine/web_wm_gpu_3d_review_2026-07-20.md). This
-# does NOT change DrawIrCommand or DrawIrDiffReport shape/schema -- existing
-# report consumers remain source-compatible. This module reuses the same
+# does NOT change DrawIrCommand or DrawIrDiffReport semantics -- the diff
+# report stays for its existing consumers. This module reuses the same
 # component_id -> flat-index maps (DrawIrCommandIndex) that draw_ir_diff.spl
 # builds, so patch generation is O(N+M) instead of a nested linear scan.
 #
@@ -18,13 +18,11 @@
 # patch.target_revision so a chain of applies can keep using composition_id
 # as the revision.
 #
-# Batch scoping: apply() collapses the result into a single batch reusing
-# the base composition's first batch's metadata (schema/batch_id/
-# backend_target/source/embedding). Multi-batch structural preservation
-# (splitting the result back across multiple original batches) is out of
-# scope for this slice -- the round-trip oracle compares flattened commands,
-# not batch containers. This is a documented, deliberate limitation, not a
-# silent gap.
+# Batch scoping: a patch retains target batch metadata and command counts,
+# while commands remain the existing flat insert/update/remove delta payload.
+# Apply first rebuilds the authoritative flat target list, then repartitions it
+# into those target batches. This preserves embedding and render-target
+# boundaries without storing a second full command snapshot in the patch.
 #
 # Known limitations (documented, not silent):
 # - component_id is assumed unique per composition (matches the existing
@@ -79,6 +77,8 @@ struct DrawIrPatch:
     target_revision: text
     operations: [DrawIrPatchOp]
     damage_rects: [DrawIrRect]
+    target_batches: [DrawIrBatch]
+    target_batch_command_counts: [i32]
 
 struct DrawIrPatchApplyResult:
     ok: bool
@@ -248,9 +248,10 @@ fn _draw_ir_patch_push_damage(damage: mut [DrawIrRect], old_bounds: DrawIrRect, 
 #
 # `misc_changed` covers fields that draw_ir_patch_commands_equal (the
 # round-trip oracle) compares but that have no dedicated op kind in this
-# slice's fixed 6-kind vocabulary: color, kind, parent_id, and glyph_run.
-# Without a carrier, a color-only or glyph-only change would detect zero ops
-# and the apply-side survivor path would keep the stale command. UpdateStyle
+# slice's fixed 6-kind vocabulary: color, kind, parent_id. Without a carrier,
+# a color-only change (the most common in-place UI diff: hover/selection/
+# theme) would detect zero ops and the apply-side survivor path would keep
+# the stale command, silently breaking the round-trip invariant. UpdateStyle
 # is reused as that carrier since it already always ships the full updated
 # command payload.
 fn _draw_ir_patch_build_forward_ops(baseline_index: DrawIrCommandIndex, current_index: DrawIrCommandIndex, operations: mut [DrawIrPatchOp], damage: mut [DrawIrRect]):
@@ -340,6 +341,25 @@ fn _draw_ir_patch_build_remove_ops(baseline_index: DrawIrCommandIndex, current_i
             _draw_ir_patch_push_damage(damage, old_bounds, draw_ir_no_rect())
         j = j + 1
 
+fn _draw_ir_patch_target_batch_templates(composition: DrawIrComposition) -> [DrawIrBatch]:
+    var templates: [DrawIrBatch] = []
+    for batch in composition.batches:
+        templates.push(DrawIrBatch(
+            schema: batch.schema,
+            batch_id: batch.batch_id,
+            backend_target: batch.backend_target,
+            source: batch.source,
+            embedding: batch.embedding,
+            commands: []
+        ))
+    templates
+
+fn _draw_ir_patch_target_batch_counts(composition: DrawIrComposition) -> [i32]:
+    var counts: [i32] = []
+    for batch in composition.batches:
+        counts.push(batch.commands.len())
+    counts
+
 fn draw_ir_patch_between(old_composition: DrawIrComposition, old_rev: text, new_composition: DrawIrComposition, new_rev: text) -> DrawIrPatch:
     val baseline_index = draw_ir_build_command_index(old_composition)
     val current_index = draw_ir_build_command_index(new_composition)
@@ -351,7 +371,9 @@ fn draw_ir_patch_between(old_composition: DrawIrComposition, old_rev: text, new_
         base_revision: old_rev,
         target_revision: new_rev,
         operations: operations,
-        damage_rects: damage
+        damage_rects: damage,
+        target_batches: _draw_ir_patch_target_batch_templates(new_composition),
+        target_batch_command_counts: _draw_ir_patch_target_batch_counts(new_composition)
     )
 
 fn _draw_ir_patch_result_length(base_index: DrawIrCommandIndex, patch: DrawIrPatch) -> i32:
@@ -401,11 +423,42 @@ fn _draw_ir_patch_apply_commands(base_index: DrawIrCommandIndex, patch: DrawIrPa
                 result[op.new_index] = payload
     result
 
-fn _draw_ir_patch_base_batch(composition: DrawIrComposition) -> DrawIrBatch:
-    val batches = composition.batches
-    if batches.len() > 0:
-        return batches[0]
-    draw_ir_batch("patched", composition.backend_target, draw_ir_embedding_config("", "", 0, 0, 0, 0, 0, 1000, false), [])
+fn _draw_ir_patch_target_layout_valid(patch: DrawIrPatch, command_count: i32) -> bool:
+    if patch.target_batches.len() != patch.target_batch_command_counts.len():
+        return false
+    var total: i32 = 0
+    var index: i32 = 0
+    while index < patch.target_batch_command_counts.len():
+        val count = patch.target_batch_command_counts[index]
+        if count < 0 or total > command_count - count:
+            return false
+        total = total + count
+        index = index + 1
+    total == command_count
+
+fn _draw_ir_patch_apply_batches(commands: [DrawIrCommand], patch: DrawIrPatch) -> [DrawIrBatch]:
+    var batches: [DrawIrBatch] = []
+    var command_offset: i32 = 0
+    var batch_index: i32 = 0
+    while batch_index < patch.target_batches.len():
+        val template = patch.target_batches[batch_index]
+        val count = patch.target_batch_command_counts[batch_index]
+        var batch_commands: [DrawIrCommand] = []
+        var local_index: i32 = 0
+        while local_index < count:
+            batch_commands.push(commands[command_offset + local_index])
+            local_index = local_index + 1
+        batches.push(DrawIrBatch(
+            schema: template.schema,
+            batch_id: template.batch_id,
+            backend_target: template.backend_target,
+            source: template.source,
+            embedding: template.embedding,
+            commands: batch_commands
+        ))
+        command_offset = command_offset + count
+        batch_index = batch_index + 1
+    batches
 
 fn draw_ir_patch_apply(composition: DrawIrComposition, patch: DrawIrPatch) -> DrawIrPatchApplyResult:
     if composition.composition_id != patch.base_revision:
@@ -416,29 +469,21 @@ fn draw_ir_patch_apply(composition: DrawIrComposition, patch: DrawIrPatch) -> Dr
         )
     val base_index = draw_ir_build_command_index(composition)
     val commands = _draw_ir_patch_apply_commands(base_index, patch)
-    val base_batch = _draw_ir_patch_base_batch(composition)
-    val patched_batch = DrawIrBatch(
-        schema: base_batch.schema,
-        batch_id: base_batch.batch_id,
-        backend_target: base_batch.backend_target,
-        source: base_batch.source,
-        embedding: base_batch.embedding,
-        commands: commands
-    )
+    if not _draw_ir_patch_target_layout_valid(patch, commands.len()):
+        return DrawIrPatchApplyResult(
+            ok: false, reason: "invalid target batch layout", composition: composition)
     val patched_composition = DrawIrComposition(
         schema: composition.schema,
         composition_id: patch.target_revision,
         scene_key: composition.scene_key,
         backend_target: composition.backend_target,
-        batches: [patched_batch]
+        batches: _draw_ir_patch_apply_batches(commands, patch)
     )
     DrawIrPatchApplyResult(ok: true, reason: "", composition: patched_composition)
 
 # Round-trip oracle helper: flattens both compositions to their ordered
-# command lists and compares field-by-field. Batch containers are
-# deliberately NOT compared (see module doc: apply() collapses to a single
-# batch), which matches the "command-by-command" contract this helper is
-# named for.
+# command lists and compares field-for-field. Callers that require embedding
+# boundary parity additionally check the batch containers explicitly.
 fn draw_ir_patch_commands_equal(a: DrawIrComposition, b: DrawIrComposition) -> bool:
     val a_index = draw_ir_build_command_index(a)
     val b_index = draw_ir_build_command_index(b)

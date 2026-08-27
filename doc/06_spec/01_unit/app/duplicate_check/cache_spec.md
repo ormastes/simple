@@ -1,6 +1,30 @@
 # Cache Specification
 
-> Tests covering TokenCacheManager creation, File modification time, Token caching, Cache operations, Cache statistics.
+> <details>
+
+<!-- sdn-diagram:id=cache_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=cache_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+cache_spec -> compiler
+cache_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=cache_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,22 +41,13 @@
 
 #### creates empty cache manager
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- creates empty cache manager
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("creates empty cache manager")
 val manager = new_token_cache_manager()
 val stats = get_cache_stats(manager)
 expect(stats).to_contain("0 files")
@@ -44,18 +59,17 @@ expect(stats).to_contain("0 files")
 
 #### gets mtime for existing file
 
-- gets mtime for existing file
+1. create test file
+2. delete test file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("gets mtime for existing file")
 val test_file = "/tmp/test_cache_mtime.txt"
 create_test_file(test_file, "test content")
 
@@ -69,19 +83,13 @@ delete_test_file(test_file)
 
 #### returns 0 for non-existent file
 
-- returns 0 for non-existent file
-   - Expected: mtime equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("returns 0 for non-existent file")
 val mtime = get_file_mtime("/tmp/nonexistent_file_xyz.txt")
 expect(mtime).to_equal(0)
 ```
@@ -92,19 +100,20 @@ expect(mtime).to_equal(0)
 
 #### caches tokens on first access
 
-- caches tokens on first access
+1. create test file
+2. fn tokenize fn
+3. create sample tokens
    - Expected: tokens1.len() equals `2`
+4. delete test file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("caches tokens on first access")
 val manager = new_token_cache_manager()
 val test_file = "/tmp/test_cache_tokens.spl"
 create_test_file(test_file, "fn test(): 42")
@@ -123,19 +132,20 @@ delete_test_file(test_file)
 
 #### returns cached tokens without re-tokenizing
 
-- returns cached tokens without re-tokenizing
+1. create test file
+2. fn tokenize fn
+3. create sample tokens
    - Expected: tokens1.len() equals `tokens2.len()`
+4. delete test file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("returns cached tokens without re-tokenizing")
 val manager = new_token_cache_manager()
 val test_file = "/tmp/test_cache_reuse.spl"
 create_test_file(test_file, "fn test(): 42")
@@ -156,18 +166,22 @@ delete_test_file(test_file)
 
 #### invalidates cache when file changes
 
-- invalidates cache when file changes
+1. create test file
+2. fn tokenize fn
+3. SimpleToken
+4. SimpleToken
+5. create test file
+   - Expected: tokens1[1].value == tokens2[1].value is false
+6. delete test file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("invalidates cache when file changes")
 val manager = new_token_cache_manager()
 val test_file = "/tmp/test_cache_invalidate.spl"
 
@@ -186,7 +200,7 @@ create_test_file(test_file, "fn test(): 99")
 
 val tokens2 = get_tokens_cached(manager, test_file, tokenize_fn)
 
-expect(tokens1[1].value).to_not_equal(tokens2[1].value)
+expect(tokens1[1].value == tokens2[1].value).to_equal(false)
 
 delete_test_file(test_file)
 ```
@@ -197,18 +211,22 @@ delete_test_file(test_file)
 
 #### invalidates specific file
 
-- invalidates specific file
+1. create test file
+2. create test file
+3. fn tokenize fn
+4. create sample tokens
+5. invalidate file
+6. delete test file
+7. delete test file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("invalidates specific file")
 val manager = new_token_cache_manager()
 val test_file1 = "/tmp/test_cache_inv1.spl"
 val test_file2 = "/tmp/test_cache_inv2.spl"
@@ -238,18 +256,20 @@ delete_test_file(test_file2)
 
 #### clears all cache entries
 
-- clears all cache entries
+1. create test file
+2. fn tokenize fn
+3. create sample tokens
+4. clear cache
+5. delete test file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("clears all cache entries")
 val manager = new_token_cache_manager()
 val test_file = "/tmp/test_cache_clear.spl"
 
@@ -277,18 +297,19 @@ delete_test_file(test_file)
 
 #### reports correct token count
 
-- reports correct token count
+1. create test file
+2. fn tokenize fn
+3. create sample tokens
+4. delete test file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("reports correct token count")
 val manager = new_token_cache_manager()
 val test_file = "/tmp/test_cache_stats.spl"
 
@@ -315,12 +336,12 @@ delete_test_file(test_file)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/duplicate_check/cache_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering TokenCacheManager creation, File modification time, Token caching, Cache operations, Cache statistics.
+Tests covering:
 - TokenCacheManager creation
 - File modification time
 - Token caching
@@ -339,54 +360,3 @@ Tests covering TokenCacheManager creation, File modification time, Token caching
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-APP`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `2e9f41fd7b6f87ebdc023aba567345437447d97db082c79256b432e49cdfb6d4`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `2e9f41fd7b6f87ebdc023aba567345437447d97db082c79256b432e49cdfb6d4`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `2e9f41fd7b6f87ebdc023aba567345437447d97db082c79256b432e49cdfb6d4`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
-
-SSpec documentization score: 88/100
-source: test/01_unit/app/duplicate_check/cache_spec.spl
-mirror: doc/06_spec/01_unit/app/duplicate_check/cache_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=80
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/duplicate_check/cache_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/duplicate_check/cache_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/duplicate_check/cache_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/app/duplicate_check/cache_spec.spl:40:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates empty cache manager' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/duplicate_check/cache_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'gets mtime for existing file' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/duplicate_check/cache_spec.spl:59:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns 0 for non-existent file' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

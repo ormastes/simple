@@ -1,8 +1,12 @@
 # Stage 4 bootstrap aborted because Rust inputs changed
 
-**Status:** blocked before Simple source discovery. **Observed:** 2026-08-15.
-**Status:** RESOLVED AS INTENDED FAIL-CLOSED AUTHORITY REJECTION.
-**Observed:** 2026-08-15. **Audited:** 2026-08-17.
+**Status:** historical provenance abort cleared; refreshed frozen baseline
+verified. **Observed:** 2026-08-15.
+
+The currently authorized manifest contains 27,070 entries, has SHA-256
+`cdb15cf755ee14ba561d6dede841ba077a848a6fca9e5ef46863beb456dc5586`,
+and passed a complete 27,070/27,070 verification. The abort below remains the
+original incident record, not the current bootstrap frontier.
 
 The canonical `bootstrap-from-scratch.sh --full-bootstrap --deploy` attempt
 aborted while preparing the Rust seed with:
@@ -55,6 +59,7 @@ change must abort. Other agents may edit documentation or unrelated projects,
 but must not edit compiler, runtime, bootstrap, or shared build inputs until the
 transaction completes.
 
+## Frozen retry outcome
 
 ## Triage 2026-08-17 — DEFERRED, blocker recorded
 
@@ -65,31 +70,6 @@ change detection can be re-measured without actually entering the stage.
 Status unchanged. Recorded so future sweeps skip this in O(1) instead of
 re-deriving the same blocker.
 
-## 2026-08-17 closure audit
-
-The abort was the required safety behavior, not a missing Stage-4 compiler
-fix. The current Rust-authority transaction fingerprints inputs before Cargo,
-after Cargo, and again while holding publication authority immediately before
-commit. The fingerprint covers all non-target files under `src/compiler_rust`,
-discovered Cargo path dependencies inside the checkout, hosted runtime inputs,
-`Cargo.lock`, `VERSION`, selected platform/backend/features, LLVM authority,
-the resolved `rustc` and `cargo` binaries plus version output, target C tools,
-and all four exact Cargo build recipes. Symlinked inputs and dependencies
-escaping the checkout are rejected. A mismatch at either post-build boundary
-aborts before authority publication, which is exactly what protected the
-2026-08-15 run from publishing a stale seed.
-
-The adjacent failure path is also fail-closed: fingerprint helper errors retain
-the phase, status, private scratch directory, and stderr manifest; a later
-successful fingerprint removes stale error evidence. Focused bounded evidence:
-
-`sh test/01_unit/scripts/bootstrap_fingerprint_tmp_contract_test.shs`
-
-passed once with `bootstrap fingerprint tmp contract: PASS`, including the
-simulated ENOSPC rejection and recovery case. No admitted bounded continuation
-artifact was present, so no full bootstrap was started. A future retry only
-needs a stable ownership window for the already-enforced input set; weakening
-or bypassing the mismatch gate would reintroduce the defect.
 ## Status re-check 2026-08-17 — STILL BLOCKED, precondition re-measured
 
 binary identity: `readlink -f bin/simple` = `/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`; `stat -c '%s %y'` = `59537240 2026-08-17 12:58:51.339525019 +0000`

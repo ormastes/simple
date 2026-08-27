@@ -4,10 +4,32 @@
 # Uses Option/nil pattern for operations that may fail.
 # Mock implementations return simulated values.
 
-mod file_system.types
-mod file_system.file_ops
-mod file_system.dir_ops
-mod file_system.path_ops
+use file_system.types.{FileInfo as FsFileInfo}
+use file_system.file_ops.{file_exists as fs_file_exists}
+use file_system.dir_ops.{dir_exists as fs_dir_exists}
+use file_system.path_ops.{path_extension as fs_path_extension, path_basename as fs_path_basename}
+
+# Private direct-forward leaves retain bootstrap compatibility without making
+# any exported metadata API unsafe or adding intermediate allocation.
+@unsafe(reason: "private bootstrap-compatible imported file predicate boundary", capabilities: [ffi])
+fn _metadata_file_exists(path: text) -> bool:
+    fs_file_exists(path)
+
+@unsafe(reason: "private bootstrap-compatible imported directory predicate boundary", capabilities: [ffi])
+fn _metadata_dir_exists(path: text) -> bool:
+    fs_dir_exists(path)
+
+@unsafe(reason: "private bootstrap-compatible imported extension boundary", capabilities: [ffi])
+fn _metadata_path_extension(path: text) -> text:
+    fs_path_extension(path)
+
+@unsafe(reason: "private bootstrap-compatible imported basename boundary", capabilities: [ffi])
+fn _metadata_path_basename(path: text) -> text:
+    fs_path_basename(path)
+
+@unsafe(reason: "private bootstrap-compatible imported metadata construction boundary", capabilities: [ffi])
+fn _metadata_file_info(path: text, size: i64, modified_time: i64, is_file: bool, is_directory: bool, is_symlink: bool, permissions: i64) -> FsFileInfo:
+    FsFileInfo(path: path, size: size, modified_time: modified_time, is_file: is_file, is_directory: is_directory, is_symlink: is_symlink, permissions: permissions)
 
 fn file_size(path: text) -> i64?:
     """Get file size in bytes.
@@ -18,7 +40,7 @@ fn file_size(path: text) -> i64?:
     Returns:
         Some(size) or nil on error
     """
-    if not file_ops.file_exists(path):
+    if not _metadata_file_exists(path):
         return nil
     # Mock: return simulated size
     Some(1024)
@@ -32,7 +54,7 @@ fn file_modified_time(path: text) -> i64?:
     Returns:
         Some(timestamp) or nil on error
     """
-    if not file_ops.file_exists(path):
+    if not _metadata_file_exists(path):
         return nil
     Some(1700000000)
 
@@ -45,7 +67,7 @@ fn file_created_time(path: text) -> i64?:
     Returns:
         Some(timestamp) or nil on error
     """
-    if not file_ops.file_exists(path):
+    if not _metadata_file_exists(path):
         return nil
     Some(1700000000)
 
@@ -58,11 +80,11 @@ fn file_accessed_time(path: text) -> i64?:
     Returns:
         Some(timestamp) or nil on error
     """
-    if not file_ops.file_exists(path):
+    if not _metadata_file_exists(path):
         return nil
     Some(1700000000)
 
-fn file_info(path: text) -> types.FileInfo?:
+fn file_info(path: text) -> FsFileInfo?:
     """Get comprehensive file information.
 
     Args:
@@ -71,18 +93,10 @@ fn file_info(path: text) -> types.FileInfo?:
     Returns:
         Some(FileInfo) or nil on error
     """
-    if not file_ops.file_exists(path):
+    if not _metadata_file_exists(path):
         return nil
 
-    val info = types.FileInfo(
-        path: path,
-        size: 1024,
-        modified_time: 1700000000,
-        is_file: file_is_file(path),
-        is_directory: file_is_directory(path),
-        is_symlink: file_is_symlink(path),
-        permissions: 755
-    )
+    val info = _metadata_file_info(path, 1024, 1700000000, file_is_file(path), file_is_directory(path), file_is_symlink(path), 755)
     Some(info)
 
 fn file_is_file(path: text) -> bool:
@@ -94,10 +108,10 @@ fn file_is_file(path: text) -> bool:
     Returns:
         true if regular file
     """
-    if not file_ops.file_exists(path):
+    if not _metadata_file_exists(path):
         return false
     # Mock: check if has extension
-    path_ops.path_extension(path) != ""
+    _metadata_path_extension(path) != ""
 
 fn file_is_directory(path: text) -> bool:
     """Check if path is a directory.
@@ -108,7 +122,7 @@ fn file_is_directory(path: text) -> bool:
     Returns:
         true if directory
     """
-    dir_ops.dir_exists(path)
+    _metadata_dir_exists(path)
 
 fn file_is_symlink(path: text) -> bool:
     """Check if path is a symbolic link.
@@ -131,7 +145,7 @@ fn file_is_readable(path: text) -> bool:
     Returns:
         true if readable
     """
-    file_ops.file_exists(path)
+    _metadata_file_exists(path)
 
 fn file_is_writable(path: text) -> bool:
     """Check if file is writable.
@@ -142,7 +156,7 @@ fn file_is_writable(path: text) -> bool:
     Returns:
         true if writable
     """
-    file_ops.file_exists(path)
+    _metadata_file_exists(path)
 
 fn file_is_executable(path: text) -> bool:
     """Check if file is executable.
@@ -153,10 +167,10 @@ fn file_is_executable(path: text) -> bool:
     Returns:
         true if executable
     """
-    if not file_ops.file_exists(path):
+    if not _metadata_file_exists(path):
         return false
     # Mock: check for common executable extensions
-    val ext = path_ops.path_extension(path)
+    val ext = _metadata_path_extension(path)
     ext == "sh" or ext == "exe" or ext == "bin"
 
 fn file_is_hidden(path: text) -> bool:
@@ -168,10 +182,9 @@ fn file_is_hidden(path: text) -> bool:
     Returns:
         true if hidden
     """
-    val name = path_ops.path_basename(path)
+    val name = _metadata_path_basename(path)
     name.starts_with(".")
 
 # ============================================================================
 # Exports
 # ============================================================================
-

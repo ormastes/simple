@@ -1,20 +1,8 @@
 # MCP Server Setup and Usage
 
-The Simple MCP (Model Context Protocol) server exposes code intelligence,
-debugging, build, VCS, analysis, and UI access to Claude Code and Claude Desktop.
-
-**Tool count is determined by the running server's `tools/list`, not by this
-page.** Measured 2026-08-21, both the deployed native artifact
-(`bin/release/linux-x86_64/simple_mcp_server`) and source mode
-(`bin/simple src/app/mcp/main.spl`) return the same **3 aggregate dispatch
-tools** -- `simple_pipe`, `simple_search`, `node_repl` -- where `simple_pipe`
-fans out over the spipe/context/codebase/search/ponytail surfaces. The Tool
-Reference below catalogues the individual capabilities reachable *through* those
-surfaces; it is not a flat count of top-level `tools/list` entries.
-
-(This paragraph previously claimed "151 tools, 3 resources, and 2 prompts". That
-figure did not match any running server and is removed rather than re-guessed --
-run the handshake if you need the current number.)
+The Simple MCP (Model Context Protocol) server currently provides 151 tools, 3
+resources, and 2 prompts for code intelligence, debugging, build, VCS,
+analysis, and UI access -- accessible from Claude Code and Claude Desktop.
 
 Writing or migrating a server: use the McpServer facade — see
 `mcp_framework.md` (+tldr) and the ~30-line example in
@@ -43,8 +31,8 @@ The MCP server is configured via `.mcp.json` in the project root (auto-detected 
 {
   "mcpServers": {
     "simple-mcp": {
-      "command": "bin/simple",
-      "args": ["src/app/mcp/main.spl"]
+      "command": "bin/simple_mcp_server",
+      "args": []
     }
   }
 }
@@ -77,8 +65,8 @@ Configure in the Claude Desktop config file:
 {
   "mcpServers": {
     "simple-lang": {
-      "command": "/path/to/simple/bin/simple",
-      "args": ["/path/to/simple/src/app/mcp/main.spl"],
+      "command": "/path/to/simple/bin/simple_mcp_server",
+      "args": [],
       "env": {
         "SIMPLE_PROJECT_ROOT": "/path/to/simple"
       }
@@ -103,8 +91,8 @@ Restart Claude Desktop after config changes.
 > before/after timing from `.spipe/mcp-failures-interpreter-perf/state.md`.
 
 ```bash
-# Check the source-hosted Simple MCP entry
-bin/simple check src/app/mcp
+# Test server startup
+echo '{"jsonrpc":"2.0","id":"2","method":"tools/list"}' | bin/simple_mcp_server
 
 # Run integration tests
 SIMPLE_LIB=src bin/simple test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter
@@ -113,16 +101,13 @@ SIMPLE_LIB=src bin/simple test test/02_integration/app/mcp_stdio_integration_spe
 For local command-wrapper coverage, use the command-line handshake system spec:
 
 ```bash
-SIMPLE_LIB=src bin/simple test test/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.spl --mode=interpreter --clean --fail-fast
+bin/simple check test/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.spl
 bin/simple test test/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.spl --native
 ```
 
-That spec launches the pure-Simple MCP script, runs `--json` readiness, sends
-`initialize`, `notifications/initialized`, and `tools/list`,
-and requires two successful core feature calls inside the configured time
-limit. Bootstrap Stage 5 separately applies the same fail-closed protocol to
-the exact fresh MCP and LSP artifact pair before deploy, including successful
-`simple_status` and `lsp_symbols` calls. The helper is pure Simple
+That spec launches each Simple-created MCP wrapper, runs `--json` readiness,
+sends `initialize`, `notifications/initialized`, and `tools/list`, and requires
+the response inside the configured time limit. The helper is pure Simple
 stdlib code: no Node.js wrapper and no direct `rt_*` extern declarations. The
 matching plan and generated/manual page are:
 
@@ -134,7 +119,6 @@ When updating MCP specs, also regenerate and review their scenario manuals:
 ```bash
 bin/simple spipe-docgen test/03_system/feature/app/mcp_protocol_runtime_spec.spl --output doc/06_spec
 bin/simple spipe-docgen test/02_integration/app/mcp_stdio_integration_spec.spl --output doc/06_spec
-bin/release/simple spipe-docgen test/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.spl --output doc/06_spec
 ```
 
 The generated manual should be useful without opening the test source. If it
@@ -144,7 +128,7 @@ shows raw test mechanics as the primary content, revise step helpers,
 ### Repair Broken Tool Discovery
 
 If an MCP client starts the server but refuses to load tools, first verify the
-script protocol output instead of rebuilding a native artifact:
+native protocol output instead of reinstalling blindly:
 
 ```bash
 bin/simple check src/app/mcp
@@ -184,13 +168,13 @@ If schema validation fails:
    metadata. Static fallback schemas should stay conservative and valid; rich
    per-tool schemas belong in the tool table.
 
-4. Recheck the source-hosted server:
+4. Rebuild and rerun the native smoke:
 
    ```bash
    bin/simple check src/app/mcp
    bin/simple check src/app/simple_lsp_mcp
    SIMPLE_LIB=src bin/simple test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter
-   bin/simple src/app/mcp/main.spl
+   scripts/check/check-mcp-native-smoke.shs
    ```
 
 5. If the npm package or registry wrapper changed, also run the core-lane
@@ -216,7 +200,7 @@ Do not publish npm, registry metadata, or plugin bundles while either
 Claude Code / Claude Desktop
     | JSON-RPC 2.0 over stdio
     v
-bin/simple src/app/mcp/main.spl
+bin/simple_mcp_server
     |-> Tool handlers (lazy loaded)
     |-> Bug/Feature/Test DB resources
     |-> Debug session manager
@@ -225,14 +209,10 @@ bin/simple src/app/mcp/main.spl
 - **Protocol**: JSON-RPC 2.0 over stdio
 - **MCP Version**: 2025-06-18
 - **Startup**: < 1s (optimized single-process)
-- **Tool count**: determined from the running script's `tools/list`
-- **Simple MCP launch behavior**: local Claude, Codex, and Gemini registrations
-  execute `bin/simple src/app/mcp/main.spl`. Source changes therefore take
-  effect after the MCP client restarts; rebuilding `simple_mcp_server` is not
-  part of the normal Simple MCP development loop.
-- **Native packaging**: `bin/simple_mcp_server` and the Stage 5 native smoke
-  remain distribution/release evidence only. Simple LSP MCP retains its
-  separate native-wrapper policy.
+- **Tool count**: 151 tools in the current source fallback path
+- **Wrapper fallback**: `bin/simple_mcp_server` delegates to the native binary
+  first, then falls back to the source MCP entrypoint when native `tools/list`
+  is stale or a `play_wm_text_*` request needs the current source handlers.
 
 ---
 
@@ -326,12 +306,6 @@ bin/simple src/app/mcp/main.spl
 | `simple_ponytail` | Over-engineering audit or simplification report |
 | `simple_search` | Code search (required: query) |
 
-For codebase-memory MCP usage, the production surface is the existing read-only
-MCP resources plus these analysis tools. Do not add a separate memory MCP
-server for repo-local code context unless this surface is proven insufficient.
-`simple_codebase` or "simple codebase" is operator shorthand for this surface,
-not a separate MCP tool.
-
 `simple_context` shares the `src/app/context` implementation with the CLI. The
 CLI accepts:
 
@@ -346,8 +320,8 @@ CLI accepts:
 - `context --sql --query=<text> --db=<path> --source-filter=<text>` to narrow
   persisted SQL query results by stored source path.
 
-The MCP tool accepts `file`, optional `target`, `format` (`text`, `markdown`/`md`,
-or `json`), `index=true`, `query`, `sql=true`, `db`, and `source_filter`. `file` is
+The MCP tool accepts `file`, optional `target`, `format` (`text`, `markdown`, or
+`json`), `index=true`, `query`, `sql=true`, `db`, and `source_filter`. `file` is
 optional only for the `sql=true` plus non-empty `query` shape; ordinary context
 generation still requires a source file. These fields are forwarded to the
 existing `context` CLI subprocess so source-mode MCP does not import the large
@@ -357,21 +331,16 @@ The SQL-backed context path uses the existing `app.io.sqlite_sffi` facade. In
 interpreter mode the compiler provides a narrow `rt_sqlite_*` subset for context
 indexing/querying: open/close, create table, delete, prepared insert/bind,
 select explicit columns, count, ordered rows, and simple `LIKE`. It is not a
-general SQL planner. Query text is filtered literally after SQL returns
-candidate rows, so `%`, `_`, and backslash are literal characters rather than
-caller-controlled wildcards.
-Public context output must render explicit statuses such
+general SQL planner. Public context output must render explicit statuses such
 as `ready`, `empty_query`, `no_matches`, or `unavailable`; it must not expose the
 internal absence marker.
 
 `simple_ponytail` reuses the shared Ponytail audit rules used by the CLI-facing
 helpers. It accepts `file`, optional `format` (`text`, `markdown`, or `json`),
 and optional `mode`: `audit` returns the default over-engineering audit, while
-`simplification` returns concrete cut/replace suggestions. For plugin
-compatibility, `review` is accepted as an alias for `audit`, and `simplify` is
-accepted as an alias for `simplification`; responses report the canonical mode.
-JSON responses expose both `audit` and `report` fields so older audit clients
-and newer generic report clients can read the same result.
+`simplification` returns concrete cut/replace suggestions. JSON responses expose
+both `audit` and `report` fields so older audit clients and newer generic report
+clients can read the same result.
 
 ### UI Access (11 tools)
 
@@ -435,29 +404,6 @@ bin/simple query sem-query 'FIND fn WHERE return_type = "i64"'
 bin/simple query sem-query 'FIND fn WHERE name starts_with "parse_" AND param_count > 2'
 ```
 
-### LLM Caret Infrastructure (9 tools)
-
-Mail / wiki / file-server tools bridged from LLM Caret
-(`src/app/llm_caret/tools.spl`) via `src/app/mcp/main_lazy_caret_tools.spl`.
-Each call runs the one-shot child `src/app/llm_caret/tool_cli.spl` (the server
-startup path never imports the caret module graph). Config comes from
-`$LLM_CARET_CONFIG` (an `llm_caret.sdn`); **mutating tools are denied unless
-the call passes `confirm: true`**. See
-`doc/07_guide/app/llm_caret_usage.md` § "Using caret tools from Claude Code /
-Codex via MCP".
-
-| Tool | Description | Required Params |
-|------|-------------|-----------------|
-| `caret_mail_list` | List mailbox messages (IMAP, read-only) | |
-| `caret_mail_read` | Read one mail by uid (read-only) | uid |
-| `caret_mail_send` | Send a mail (SMTP). MUTATING | to, subject, body, confirm |
-| `caret_wiki_search` | Search wiki (Confluence or local markdown) | query |
-| `caret_wiki_read` | Read one wiki page (read-only) | page_id |
-| `caret_wiki_write` | Create/update a wiki page. MUTATING | body, confirm |
-| `caret_storage_ls` | List objects (MinIO, read-only) | |
-| `caret_storage_get` | Fetch one object as text (read-only) | key |
-| `caret_storage_put` | Upload text as an object. MUTATING | key, content, confirm |
-
 ---
 
 ## Resources (URIs)
@@ -507,19 +453,27 @@ Codex via MCP".
   `mcp_wm_text_tools_present=true` for the common WM text tools.
 
 **Stale LSP MCP binary (server behaves old / wrong version):**
-- Reinstall the project wrappers and run the native smoke:
+- `.mcp.json` and `config/mcp/install.shs` launch `simple-lsp-mcp` from
+  `bin/release/linux-x86_64/simple_lsp_mcp_server`, but builds deploy to
+  `bin/release/x86_64-unknown-linux-gnu/` and `build/bootstrap/mcp-package/`.
+  The launch path is not refreshed by a rebuild and can go stale.
+- Diagnose: probe `serverInfo.version` and compare with the wrapper:
   ```bash
-  sh config/mcp/install.shs
-  sh scripts/check/check-mcp-native-smoke.shs
+  printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1"}}}\n' \
+    | bin/release/linux-x86_64/simple_lsp_mcp_server | grep -o '"version":"[0-9.]*"'
+  bin/simple_lsp_mcp_server --version
   ```
-- The wrappers probe canonical release candidates. Inspect
-  `.simple/logs/simple_lsp_mcp_startup.log` and
-  `.simple/logs/simple_lsp_mcp_stderr.log` for `native_probe_failed` (and the
-  corresponding `simple_mcp_*` logs for the MCP server).
-- Unset or correct an explicit `SIMPLE_LSP_MCP_NATIVE` or `SIMPLE_MCP_NATIVE`
-  override, then restart the MCP client after the smoke passes.
-- For deployment-path details, see
-  [MCP/LSP MCP deploy-path fix](lsp_mcp_deploy_path_fix.md).
+- Fix: re-copy the fresh build over the launch path. Direct `cp` fails with
+  "Text file busy" while a session is running the server — copy to a temp name
+  and `mv` over it (rename is safe against a running process):
+  ```bash
+  cp bin/release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server bin/release/linux-x86_64/simple_lsp_mcp_server.new
+  mv -f bin/release/linux-x86_64/simple_lsp_mcp_server.new bin/release/linux-x86_64/simple_lsp_mcp_server
+  ```
+- Running sessions keep the old inode; reconnect MCP (or restart the session)
+  to pick up the new binary. Stale-candidate probes also show up as
+  `timeout: the monitored command dumped core` in `.simple/logs/simple_lsp_mcp_stderr.log`
+  and `native_probe_failed` lines in `.simple/logs/simple_lsp_mcp_startup.log`.
 
 ---
 

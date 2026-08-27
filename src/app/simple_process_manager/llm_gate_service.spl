@@ -11,7 +11,6 @@ service invokes `notify.notify_user` so SPM raises the toast/audit row.
 Feature: spm-winfs-llm-suite AC-5 / AC-6.
 """
 
-use lib.common.privilege.id_path.{id_path_intern}
 use lib.common.privilege.authority_token.{AuthorityToken, AuthorityLevel}
 use lib.common.privilege.principal.{Principal, PrincipalKind}
 use lib.common.llm.content_authority.{ContentAuthority, ReleaseDecision, release_gate}
@@ -53,23 +52,23 @@ class LlmGateService:
                 error: rel.kind)
         # Reader clearance is high enough — run the output gate on the bytes.
         val token = _token_for_reader(reader_principal, reader_clearance)
-        val scan = self.gate.scan_and_gate(content_bytes, token)
-        val out_bytes = self.gate.filter_response_body(content_bytes, token)
-        if scan.kind == "Pass":
+        val filtered = self.gate.filter_response_body(content_bytes, token)
+        val kind = filtered.decision.kind
+        if kind == "Pass":
             return ReleaseOutcome(
                 ok: true,
-                bytes: out_bytes,
+                bytes: filtered.body,
                 decision_kind: "Release",
                 reasons: [],
                 error: "")
         # Hold or Deny — redacted bytes + notify.
-        self._fire_notify("gate_" + scan.kind, reader_principal)
+        self._fire_notify("gate_" + kind, reader_principal)
         ReleaseOutcome(
             ok: false,
-            bytes: out_bytes,
-            decision_kind: scan.kind,
-            reasons: scan.reasons,
-            error: scan.kind)
+            bytes: filtered.body,
+            decision_kind: kind,
+            reasons: filtered.redactions,
+            error: kind)
 
     # -- helpers -----------------------------------------------------------
 
@@ -86,6 +85,6 @@ class LlmGateService:
 
 fn _token_for_reader(principal: Principal, level: AuthorityLevel) -> AuthorityToken:
     AuthorityToken.mock(
-        id_path: id_path_intern("id.user." + principal.id),
+        id_path: lib.common.privilege.id_path.id_path_intern("id.user." + principal.id),
         level: level,
         principal: principal)

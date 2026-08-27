@@ -1,0 +1,50 @@
+use std.io_runtime.{read_file_text}
+use std.spec
+
+describe "retained staged-tree provider v1 source contract":
+    it "keeps enumeration and body reads descriptor relative and bounded":
+        val native = read_file_text("src/runtime/runtime_native.c")
+        expect(native).to_contain("fstatat(directory_fd, names[index], &observed, AT_SYMLINK_NOFOLLOW)")
+        expect(native).to_contain("openat(directory_fd, names[index], O_RDONLY | O_CLOEXEC | O_NOFOLLOW")
+        expect(native).to_contain("pread(session->entries[slot].fd, array->data, wanted, (off_t)offset)")
+        expect(native).to_contain("RT_STAGED_TREE_SESSION_MAX_V1 8")
+        expect(native).to_contain("RT_STAGED_TREE_ENTRY_MAX_V1 4096")
+        expect(native).to_contain("row->kind == 1 ? 0 : (int64_t)row->identity.st_size")
+
+    it "binds public reads to the exact admitted row and streaming digest":
+        val facade = read_file_text(
+            "src/os/installer/staged_root_tree_retained_provider_v1.spl")
+        expect(facade).to_contain("me validate_file(entry: StagedRootTreeEntryV1)")
+        expect(facade).to_contain("path_result.unwrap() != entry.relative_path")
+        expect(facade).to_contain("digest != entry.provider_digest_sha256")
+        expect(facade).to_contain("me read_file(lease: StagedRootTreeRetainedValidationV1")
+        expect(facade).to_contain("me finish_file(lease: StagedRootTreeRetainedValidationV1")
+        expect(facade).to_contain("me abort_file(lease: StagedRootTreeRetainedValidationV1)")
+        expect(facade).to_contain("streamed_digest_sha256")
+
+    it "uses bulk path transfer and authenticates every post-open operation":
+        val facade = read_file_text(
+            "src/os/installer/staged_root_tree_retained_provider_v1.spl")
+        val native = read_file_text("src/runtime/runtime_native.c")
+        expect(facade.contains("path_byte")).to_equal(false)
+        expect(native).to_contain("rt_staged_tree_provider_path_v1")
+        expect(native).to_contain("rt_staged_tree_provider_digest_v1")
+        expect(native).to_contain("session->receipt == (uint64_t)receipt")
+        expect(native).to_contain("rt_staged_tree_next_handle_v1 <= (uint64_t)INT64_MAX")
+        expect(native).to_contain("if (registered) return (int64_t)session->handle")
+
+    it "keeps Rust and pure-Simple text ABI registries aligned":
+        val pure_registry = read_file_text("src/compiler/50.mir/text_extern_abi.spl")
+        val rust_registry = read_file_text(
+            "src/compiler_rust/compiler/src/codegen/runtime_sffi.rs")
+        expect(pure_registry).to_contain("case \"rt_staged_tree_provider_open_v1\":")
+        expect(pure_registry).to_contain("case \"rt_staged_tree_provider_finish_v1\":")
+        expect(rust_registry).to_contain("rt_staged_tree_provider_digest_v1")
+
+    it "closes once and quarantines failed descriptor release":
+        val facade = read_file_text(
+            "src/os/installer/staged_root_tree_retained_provider_v1.spl")
+        val native = read_file_text("src/runtime/runtime_native.c")
+        expect(facade).to_contain("retained-tree-provider-already-closed")
+        expect(facade).to_contain("self._quarantined = true")
+        expect(native).to_contain("else session->quarantined = 1")

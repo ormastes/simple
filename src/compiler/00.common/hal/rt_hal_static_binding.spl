@@ -1,0 +1,308 @@
+# Closed compile-time binding table for @rt(hal) operations.
+#
+# The ten rows are the REQ-015 representative production operations. Rows
+# without a frozen coordinator ABI are validation metadata only: they name the
+# real resolved leaf but cannot be rewritten or compared. Lookup is a bounded
+# O(10) manifest pass and adds no runtime lookup, allocation, or dispatch.
+
+enum RtHalResultAbiV1:
+    Unsupported
+    ScalarI64
+    ScalarI32
+    ScalarU32
+    Text
+    OptionalText
+    BytesU8
+
+struct RtHalStaticBindingV1:
+    known: bool
+    operation: text
+    raw_symbol: text
+    direct_symbol: text
+    compare_symbol: text
+    canonical_signature: text
+    result_abi: RtHalResultAbiV1
+    direct_rewrite_supported: bool
+    compare_supported: bool
+    tagged_operation_id: i64
+    environment_opcode_code: i64
+    environment_capability_id: i64
+    automatic_extraction_supported: bool
+    diagnostic: text
+
+val RT_HAL_CLOCK_TAGGED_OPERATION_ID_V1: i64 = 101
+val RT_HAL_ENVIRONMENT_TAGGED_OPERATION_ID_V1: i64 = 102
+val RT_HAL_TYPED_ENV_OPERATION_BASE_V1: i64 = 1000
+
+fn _rt_hal_typed_environment_operation_id_v1(opcode_code: i64) -> i64:
+    RT_HAL_TYPED_ENV_OPERATION_BASE_V1 + opcode_code
+
+fn rt_hal_manifest_operation_v1(manifest: text) -> text:
+    val prefix = "rt-hal-v1|operation="
+    if not manifest.starts_with(prefix): return ""
+    val tail = manifest.substring(prefix.len(), manifest.len())
+    val separator = tail.find("|")
+    if separator < 0: return tail
+    tail.substring(0, separator)
+
+fn rt_hal_manifest_provider_mask_v1(manifest: text) -> i64:
+    val marker = "|providers="
+    val start = manifest.find(marker)
+    if start < 0: return 0
+    val tail_start = start + marker.len()
+    val tail = manifest.substring(tail_start, manifest.len())
+    val separator = tail.find("|")
+    val raw = if separator < 0: tail else: tail.substring(0, separator)
+    if raw.len() != 1: return 0
+    val ch = raw[0]
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    0
+
+fn rt_hal_provider_mask_compares_v1(mask: i64) -> bool:
+    mask > 0 and (mask & (mask - 1)) != 0
+
+fn rt_hal_manifest_is_static_direct_v1(
+        manifest: text, binding: RtHalStaticBindingV1) -> bool:
+    val provider_mask = rt_hal_manifest_provider_mask_v1(manifest)
+    provider_mask > 0 and not rt_hal_provider_mask_compares_v1(provider_mask)
+        and binding.direct_rewrite_supported
+
+fn rt_hal_binding_requires_device_execution_route_v1(
+        binding: RtHalStaticBindingV1) -> bool:
+    binding.known and binding.operation.ends_with(".safe.v1")
+        and binding.environment_opcode_code >= 16
+        and binding.environment_opcode_code <= 23
+
+fn _rt_hal_metadata_binding_v1(operation: text, raw_symbol: text,
+                               signature: text,
+                               result_abi: RtHalResultAbiV1,
+                               opcode_code: i64,
+                               capability_id: i64,
+                               tagged_operation_id: i64 = 0) -> RtHalStaticBindingV1:
+    RtHalStaticBindingV1(
+        true, operation, raw_symbol, "", "", signature, result_abi,
+        false, false,
+        if tagged_operation_id > 0: tagged_operation_id
+        else: _rt_hal_typed_environment_operation_id_v1(opcode_code),
+        opcode_code, capability_id, true,
+        "E-RT-HAL-BIND-003: " + operation +
+        " has no frozen direct-rewrite/comparison ABI; validation metadata only")
+
+fn _rt_hal_buffer_binding_v3(
+        operation: text, raw_symbol: text, direct_symbol: text,
+        compare_symbol: text, opcode_code: i64, capability_id: i64,
+        tagged_operation_id: i64 = 0) -> RtHalStaticBindingV1:
+    RtHalStaticBindingV1(
+        true, operation, raw_symbol, direct_symbol, compare_symbol,
+        "fn(i64,i64,i32,i32,i64,i64,*u8,i64,*mut u8,i64,i64,i64,i64,i64,i64)->i32",
+        RtHalResultAbiV1.ScalarI32, true, true,
+        if tagged_operation_id > 0: tagged_operation_id
+        else: _rt_hal_typed_environment_operation_id_v1(opcode_code),
+        opcode_code, capability_id, true, "")
+
+fn _rt_hal_device_exec_binding_v1(
+        operation: text, raw_symbol: text, direct_symbol: text,
+        compare_symbol: text, opcode_code: i64,
+        capability_id: i64) -> RtHalStaticBindingV1:
+    RtHalStaticBindingV1(
+        true, operation, raw_symbol, direct_symbol, compare_symbol,
+        "fn(u64,i64,i64,i64,i64,i64,i64,i64,i64,i64,i64,i64,*u8,i64,*mut u8,i64,i64,i64,i64,i64,i64)->i32",
+        RtHalResultAbiV1.ScalarI32, true, true,
+        _rt_hal_typed_environment_operation_id_v1(opcode_code),
+        opcode_code, capability_id, true, "")
+
+fn _rt_hal_runtime_capability_metadata_binding_v1(
+        operation: text, raw_symbol: text, signature: text,
+        opcode_code: i64) -> RtHalStaticBindingV1:
+    RtHalStaticBindingV1(true, operation, raw_symbol, "", "", signature,
+        RtHalResultAbiV1.Unsupported, false, false,
+        _rt_hal_typed_environment_operation_id_v1(opcode_code), opcode_code,
+        0, true,
+        "E-RT-HAL-BIND-007: safe device tag has no ABI-compatible production execution route; planning metadata must not compile as executed HAL")
+
+fn rt_hal_static_binding_v1(operation: text) -> RtHalStaticBindingV1:
+    if operation.ends_with(".exec.v1"):
+        if operation == "io.interrupt.mask.exec.v1":
+            return _rt_hal_device_exec_binding_v1(operation,
+                "_hal_irq_mask_exec_v1_raw", "rt_hal_irq_mask_exec_direct_v1",
+                "rt_hal_irq_mask_exec_compare_v1", 16, 15)
+        if operation == "io.interrupt.acknowledge.exec.v1":
+            return _rt_hal_device_exec_binding_v1(operation,
+                "_hal_irq_acknowledge_exec_v1_raw",
+                "rt_hal_irq_acknowledge_exec_direct_v1",
+                "rt_hal_irq_acknowledge_exec_compare_v1", 17, 15)
+        if operation == "io.mmio.read.exec.v1":
+            return _rt_hal_device_exec_binding_v1(operation,
+                "_hal_mmio_read_exec_v1_raw", "rt_hal_mmio_read_exec_direct_v1",
+                "rt_hal_mmio_read_exec_compare_v1", 18, 16)
+        if operation == "io.mmio.write.exec.v1":
+            return _rt_hal_device_exec_binding_v1(operation,
+                "_hal_mmio_write_exec_v1_raw", "rt_hal_mmio_write_exec_direct_v1",
+                "rt_hal_mmio_write_exec_compare_v1", 19, 16)
+        if operation == "io.dma.map.exec.v1":
+            return _rt_hal_device_exec_binding_v1(operation,
+                "_hal_dma_map_exec_v1_raw", "rt_hal_dma_map_exec_direct_v1",
+                "rt_hal_dma_map_exec_compare_v1", 20, 17)
+        if operation == "io.dma.submit.exec.v1":
+            return _rt_hal_device_exec_binding_v1(operation,
+                "_hal_dma_submit_exec_v1_raw", "rt_hal_dma_submit_exec_direct_v1",
+                "rt_hal_dma_submit_exec_compare_v1", 21, 17)
+        if operation == "io.dma.poll.exec.v1":
+            return _rt_hal_device_exec_binding_v1(operation,
+                "_hal_dma_poll_exec_v1_raw", "rt_hal_dma_poll_exec_direct_v1",
+                "rt_hal_dma_poll_exec_compare_v1", 22, 17)
+        if operation == "io.dma.unmap.exec.v1":
+            return _rt_hal_device_exec_binding_v1(operation,
+                "_hal_dma_unmap_exec_v1_raw", "rt_hal_dma_unmap_exec_direct_v1",
+                "rt_hal_dma_unmap_exec_compare_v1", 23, 17)
+    if operation == "io.file.read.buffer_v3":
+        return _rt_hal_buffer_binding_v3(operation,
+            "_hal_file_read_buffer_v3_raw",
+            "rt_hal_file_read_buffer_direct_v3",
+            "rt_hal_file_read_buffer_compare_v3", 1, 2)
+    if operation == "io.stream.read.buffer_v3":
+        return _rt_hal_buffer_binding_v3(operation,
+            "_hal_stream_read_buffer_v3_raw",
+            "rt_hal_stream_read_buffer_direct_v3",
+            "rt_hal_stream_read_buffer_compare_v3", 4, 5)
+    if operation == "io.stream.write.buffer_v3":
+        return _rt_hal_buffer_binding_v3(operation,
+            "_hal_stream_write_buffer_v3_raw",
+            "rt_hal_stream_write_buffer_direct_v3",
+            "rt_hal_stream_write_buffer_compare_v3", 5, 6)
+    if operation == "io.environment.get.buffer_v3":
+        return _rt_hal_buffer_binding_v3(operation,
+            "_hal_environment_get_buffer_v3_raw",
+            "rt_hal_environment_get_buffer_direct_v3",
+            "rt_hal_environment_get_buffer_compare_v3", 9, 10,
+            RT_HAL_ENVIRONMENT_TAGGED_OPERATION_ID_V1)
+    if operation == "io.random.fill.buffer_v3":
+        return _rt_hal_buffer_binding_v3(operation,
+            "_hal_random_fill_buffer_v3_raw",
+            "rt_hal_random_fill_buffer_direct_v3",
+            "rt_hal_random_fill_buffer_compare_v3", 11, 12)
+    if operation == "io.process.wait.buffer_v3":
+        return _rt_hal_buffer_binding_v3(operation,
+            "rt_hal_process_wait_buffer_direct_v3",
+            "rt_hal_process_wait_buffer_direct_v3",
+            "rt_hal_process_wait_buffer_compare_v3", 7, 8)
+    if operation == "io.socket.connect_timeout.buffer_v3":
+        return _rt_hal_buffer_binding_v3(operation,
+            "rt_hal_socket_connect_timeout_buffer_direct_v3",
+            "rt_hal_socket_connect_timeout_buffer_direct_v3",
+            "rt_hal_socket_connect_timeout_buffer_compare_v3", 12, 13)
+    if operation == "io.interrupt.mask.safe.v1":
+        return _rt_hal_runtime_capability_metadata_binding_v1(operation,
+            "rt_hal_irq_mask_v1",
+            "fn(RtHalDeviceAccessOwnerV1,i64)->RtHalDeviceRequestV1", 16)
+    if operation == "io.interrupt.acknowledge.safe.v1":
+        return _rt_hal_runtime_capability_metadata_binding_v1(operation,
+            "rt_hal_irq_acknowledge_v1",
+            "fn(RtHalDeviceAccessOwnerV1,i64,RtHalReadOnceTokenV1)->RtHalDeviceRequestV1", 17)
+    if operation == "io.mmio.read.safe.v1":
+        return _rt_hal_runtime_capability_metadata_binding_v1(operation,
+            "rt_hal_mmio_read_v1",
+            "fn(RtHalDeviceAccessOwnerV1,i64,i64,RtHalCallerOwnedRegionV1,RtHalReadOnceTokenV1)->RtHalDeviceRequestV1", 18)
+    if operation == "io.mmio.write.safe.v1":
+        return _rt_hal_runtime_capability_metadata_binding_v1(operation,
+            "rt_hal_mmio_write_v1",
+            "fn(RtHalDeviceAccessOwnerV1,i64,i64,RtHalCallerOwnedRegionV1)->RtHalDeviceRequestV1", 19)
+    if operation == "io.dma.map.safe.v1":
+        return _rt_hal_runtime_capability_metadata_binding_v1(operation,
+            "rt_hal_dma_map_v1",
+            "fn(RtHalDeviceAccessOwnerV1,i64,i64,RtHalCallerOwnedRegionV1)->RtHalDeviceRequestV1", 20)
+    if operation == "io.dma.submit.safe.v1":
+        return _rt_hal_runtime_capability_metadata_binding_v1(operation,
+            "rt_hal_dma_submit_v1",
+            "fn(RtHalDeviceAccessOwnerV1,i64,i64,RtHalCallerOwnedRegionV1)->RtHalDeviceRequestV1", 21)
+    if operation == "io.dma.poll.safe.v1":
+        return _rt_hal_runtime_capability_metadata_binding_v1(operation,
+            "rt_hal_dma_poll_v1",
+            "fn(RtHalDeviceAccessOwnerV1,i64,i64,RtHalCallerOwnedRegionV1,RtHalReadOnceTokenV1)->RtHalDeviceRequestV1", 22)
+    if operation == "io.dma.unmap.safe.v1":
+        return _rt_hal_runtime_capability_metadata_binding_v1(operation,
+            "rt_hal_dma_unmap_v1",
+            "fn(RtHalDeviceAccessOwnerV1,i64,i64,RtHalCallerOwnedRegionV1)->RtHalDeviceRequestV1", 23)
+    if operation == "io.file.read.v1":
+        return _rt_hal_metadata_binding_v1(operation, "rt_io_file_read",
+            "fn(i64,i64)->[u8]", RtHalResultAbiV1.BytesU8, 1, 9)
+    if operation == "io.stream.read.v1":
+        return _rt_hal_metadata_binding_v1(operation, "rt_process_read_stdout",
+            "fn(i64)->text", RtHalResultAbiV1.Text, 4, 10)
+    if operation == "io.process.wait.v1":
+        return _rt_hal_metadata_binding_v1(operation, "rt_process_wait",
+            "fn(i64,i64)->i64", RtHalResultAbiV1.ScalarI64, 7, 13)
+    if operation == "io.environment.get.v1":
+        return _rt_hal_metadata_binding_v1(operation, "rt_env_get",
+            "fn(text)->text?", RtHalResultAbiV1.OptionalText, 9, 8,
+            RT_HAL_ENVIRONMENT_TAGGED_OPERATION_ID_V1)
+    if operation == "io.clock.monotonic_nanos.v1":
+        return RtHalStaticBindingV1(
+            true, operation, "hal_clock_monotonic_nanos_v1",
+            "rt_time_now_nanos", "rt_hal_clock_dispatch_compare_v2",
+            "fn()->i64", RtHalResultAbiV1.ScalarI64, true, true,
+            RT_HAL_CLOCK_TAGGED_OPERATION_ID_V1, 10, 11, true, "")
+    if operation == "io.random.fill.v1":
+        return _rt_hal_metadata_binding_v1(operation, "rt_entropy_fill",
+            "fn([u8])->i64", RtHalResultAbiV1.ScalarI64, 11, 12)
+    if operation == "io.socket.connect_timeout.v1":
+        return _rt_hal_metadata_binding_v1(operation, "rt_io_tcp_connect_timeout",
+            "fn(text,i64)->i64", RtHalResultAbiV1.ScalarI64, 12, 14)
+    if operation == "io.interrupt.acknowledge.v1":
+        return _rt_hal_metadata_binding_v1(operation, "plic_claim",
+            "fn()->i32", RtHalResultAbiV1.ScalarI32, 17, 15)
+    if operation == "io.mmio.read_u32.v1":
+        return _rt_hal_metadata_binding_v1(operation, "rt_mmio_read_u32",
+            "fn(u64)->u32", RtHalResultAbiV1.ScalarU32, 18, 16)
+    if operation == "io.dma.map.v1":
+        return _rt_hal_metadata_binding_v1(operation, "rt_dma_alloc",
+            "fn(i64,i32)->i64", RtHalResultAbiV1.ScalarI64, 20, 17)
+    RtHalStaticBindingV1(
+        false, operation, "", "", "", "", RtHalResultAbiV1.Unsupported,
+        false, false, 0, -1, 0, false,
+        "E-RT-HAL-BIND-001: no closed compiler binding for @rt(hal) operation '" + operation + "'")
+
+fn rt_hal_binding_signature_key_diagnostic_v1(
+        binding: RtHalStaticBindingV1, actual_signature: text) -> text:
+    if not binding.known: return binding.diagnostic
+    if actual_signature != binding.canonical_signature:
+        return "E-RT-HAL-BIND-002: " + binding.operation + " requires " +
+            binding.canonical_signature + ", received " + actual_signature
+    ""
+
+# Compatibility entrypoint for the original scalar/text callers. Exact
+# compiler validation uses rt_hal_binding_signature_key_diagnostic_v1.
+fn rt_hal_binding_signature_diagnostic_v1(
+        binding: RtHalStaticBindingV1, parameter_count: i64,
+        returns_i64: bool, returns_text: bool) -> text:
+    var result = "unsupported"
+    if returns_i64: result = "i64"
+    if returns_text: result = "text"
+    var signature = "fn("
+    var index: i64 = 0
+    while index < parameter_count:
+        if index > 0: signature = signature + ","
+        if binding.operation == "io.environment.get.v1":
+            signature = signature + "text"
+        else:
+            signature = signature + "?"
+        index = index + 1
+    signature = signature + ")->" + result
+    rt_hal_binding_signature_key_diagnostic_v1(binding, signature)
+
+export RtHalResultAbiV1, RtHalStaticBindingV1
+export RT_HAL_CLOCK_TAGGED_OPERATION_ID_V1
+export RT_HAL_ENVIRONMENT_TAGGED_OPERATION_ID_V1
+export RT_HAL_TYPED_ENV_OPERATION_BASE_V1
+export rt_hal_manifest_operation_v1, rt_hal_manifest_provider_mask_v1
+export rt_hal_manifest_is_static_direct_v1
+export rt_hal_binding_requires_device_execution_route_v1
+export rt_hal_provider_mask_compares_v1, rt_hal_static_binding_v1
+export rt_hal_binding_signature_diagnostic_v1
+export rt_hal_binding_signature_key_diagnostic_v1

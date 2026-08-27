@@ -68,13 +68,96 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-4
-# @req REQ-SSPEC-BROWSER_ENGINE
-step("AC-3: new event loop has zero pending timers")
-# evidence(protocol_json): asserted result fields below are the complete typed oracle
-val el = _make_empty_loop()
-val count = el.pending_timer_count()
-expect(count).to_equal(0)  # oracle: count must equal 0 — authoritative contract constant
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.script.event_loop.{
+    EventLoop, EVENT_LOOP_MAX_PENDING_TASKS
+}
+
+# ===========================================================================
+# Helper functions
+# ===========================================================================
+
+fn _make_empty_loop() -> EventLoop:
+    return EventLoop.new()
+
+fn _loop_with_one_raf() -> EventLoop:
+    var el = EventLoop.new()
+    el.schedule_raf(42)
+    return el
+
+fn _loop_with_two_rafs() -> EventLoop:
+    var el = EventLoop.new()
+    el.schedule_raf(10)
+    el.schedule_raf(20)
+    return el
+
+# ===========================================================================
+# Specs
+# ===========================================================================
+
+describe "EventLoop":
+    describe "AC-3: creation":
+        it "AC-3: new event loop has zero pending timers":
+            val el = _make_empty_loop()
+            val count = el.pending_timer_count()
+            expect(count).to_equal(0)
+
+        it "AC-3: new event loop has zero pending rAF callbacks":
+            val el = _make_empty_loop()
+            val count = el.pending_raf_count()
+            expect(count).to_equal(0)
+
+    describe "AC-3: rAF scheduling":
+        it "AC-3: schedule_raf increments pending rAF count":
+            val el = _loop_with_one_raf()
+            val count = el.pending_raf_count()
+            expect(count).to_equal(1)
+
+        it "AC-3: two schedule_raf calls produce count of 2":
+            val el = _loop_with_two_rafs()
+            val count = el.pending_raf_count()
+            expect(count).to_equal(2)
+
+        it "SEC-RAF-001: should bound adversarial rAF registration without disabling animation":
+            step("Queue callbacks beyond one frame's retained work budget")
+            var el = EventLoop.new()
+            var i = 0
+            while i < EVENT_LOOP_MAX_PENDING_TASKS + 1:
+                el.schedule_raf(i)
+                i = i + 1
+            expect(el.pending_raf_count()).to_equal(EVENT_LOOP_MAX_PENDING_TASKS)
+            step("Drain the frame and admit a later animation callback")
+            expect(el.drain_raf().len()).to_equal(EVENT_LOOP_MAX_PENDING_TASKS)
+            el.schedule_raf(999)
+            expect(el.pending_raf_count()).to_equal(1)
+
+    describe "SEC-TIMER-001: timer queue retention":
+        it "should reject a timer beyond the retained task budget":
+            step("Queue timers beyond the shared event-loop work budget")
+            var el = EventLoop.new()
+            var i = 0
+            var last_id = 0
+            while i < EVENT_LOOP_MAX_PENDING_TASKS + 1:
+                last_id = el.schedule_timer(i, 1000000, 0)
+                i = i + 1
+            expect(el.pending_timer_count()).to_equal(EVENT_LOOP_MAX_PENDING_TASKS)
+            expect(last_id).to_equal(-1)
+
+    describe "AC-3: timer cancellation":
+        it "AC-3: cancel_timer on absent id leaves timer count unchanged":
+            val el = _make_empty_loop()
+            el.cancel_timer(999)
+            val count = el.pending_timer_count()
+            expect(count).to_equal(0)
+
+    describe "AC-3: macrotask ordering — timers fire only after deadline":
+        it "AC-3: timer with future deadline does not increment expired count before tick":
+            val el = _make_empty_loop()
+            # A timer set 10 seconds in the future should not have fired yet
+            val future_us = 10000000000
+            val fired = el.expired_timer_count_before(future_us)
+            expect(fired).to_equal(0)
 ```
 
 </details>

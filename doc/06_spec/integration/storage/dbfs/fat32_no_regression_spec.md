@@ -20,7 +20,7 @@ FAT32 Hosted Seam Specification
 | Category | Other |
 | Status | Active |
 | Source | `test/integration/storage/dbfs/fat32_no_regression_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 FAT32 Hosted Seam Specification
@@ -41,7 +41,6 @@ Verifies the currently implemented FAT32 mount-table surface:
 
 
 - shared FAT32 driver registers without error
-   - Expected: boot_driver.driver_name() equals `Fat32Driver`
 
 
 <details>
@@ -55,7 +54,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("shared FAT32 driver registers without error")
 val mt = make_fat32_mounted()
 val boot_driver = mt.resolve_driver("/boot").unwrap()
-expect(boot_driver.driver_name()).to_equal("Fat32Driver")
+assert_equal(boot_driver.driver_name(), "Fat32Driver")
 ```
 
 </details>
@@ -63,11 +62,6 @@ expect(boot_driver.driver_name()).to_equal("Fat32Driver")
 #### stays on the shared FsFat32Driver surface
 
 - stays on the shared FsFat32Driver surface
-   - Expected: source does not contain `use os.services.fat32.fat32`
-   - Expected: source does not contain ` " + legacy_type + ".new(`
-   - Expected: source does not contain `=" + legacy_type + ".new(`
-   - Expected: source does not contain `(" + legacy_type + ".new(`
-   - Expected: source contains `FsFat32Driver.new(`
 
 
 <details>
@@ -81,11 +75,11 @@ Reproduction: this block contains the complete executable scenario source.
 step("stays on the shared FsFat32Driver surface")
 val source = read_file("test/integration/storage/dbfs/fat32_no_regression_spec.spl")
 val legacy_type = "Fat32" + "Driver"
-expect(source.contains("use os.services.fat32.fat32")).to_equal(false)
-expect(source.contains(" " + legacy_type + ".new(")).to_equal(false)
-expect(source.contains("=" + legacy_type + ".new(")).to_equal(false)
-expect(source.contains("(" + legacy_type + ".new(")).to_equal(false)
-expect(source.contains("FsFat32Driver.new(")).to_equal(true)
+assert_equal(source.contains("use os.services.fat32.fat32"), false)
+assert_equal(source.contains(" " + legacy_type + ".new("), false)
+assert_equal(source.contains("=" + legacy_type + ".new("), false)
+assert_equal(source.contains("(" + legacy_type + ".new("), false)
+assert_equal(source.contains("FsFat32Driver.new("), true)
 ```
 
 </details>
@@ -95,8 +89,6 @@ expect(source.contains("FsFat32Driver.new(")).to_equal(true)
 #### FAT32 and DBFS can both be mounted simultaneously
 
 - FAT32 and DBFS can both be mounted simultaneously
-   - Expected: boot_driver.driver_name() equals `Fat32Driver`
-   - Expected: data_driver.driver_name() equals `DbFsDriver`
 
 
 <details>
@@ -115,8 +107,8 @@ val dbfs = DbFsDriver.new_hosted()
 mt.mount("/data", DriverInstance.DbFs(dbfs), MountOptions.default()).unwrap()
 val boot_driver = mt.resolve_driver("/boot").unwrap()
 val data_driver = mt.resolve_driver("/data/file.txt").unwrap()
-expect(boot_driver.driver_name()).to_equal("Fat32Driver")
-expect(data_driver.driver_name()).to_equal("DbFsDriver")
+assert_equal(boot_driver.driver_name(), "Fat32Driver")
+assert_equal(data_driver.driver_name(), "DbFsDriver")
 ```
 
 </details>
@@ -145,36 +137,32 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `80a6babff5ff1adc96ad17b29f2bf52681799aa0ae9fa076853bd969af15f3b9`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `8b56e7667d04162bff2be0ad16b40cb9c7c73a2a5c7d3f6a2c2e52e0d98804f4`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `80a6babff5ff1adc96ad17b29f2bf52681799aa0ae9fa076853bd969af15f3b9`.
+Source SHA-256: `8b56e7667d04162bff2be0ad16b40cb9c7c73a2a5c7d3f6a2c2e52e0d98804f4`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `80a6babff5ff1adc96ad17b29f2bf52681799aa0ae9fa076853bd969af15f3b9`  
+Source SHA-256: `8b56e7667d04162bff2be0ad16b40cb9c7c73a2a5c7d3f6a2c2e52e0d98804f4`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 92/100
 source: test/integration/storage/dbfs/fat32_no_regression_spec.spl
 mirror: doc/06_spec/integration/storage/dbfs/fat32_no_regression_spec.md (current)
-findings: 6 blockers: 1
-  narrative=100 structure=100 oracle=50
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
   traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=82; blocker cap makes effective=49
 doc/06_spec/integration/storage/dbfs/fat32_no_regression_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
 doc/06_spec/integration/storage/dbfs/fat32_no_regression_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/integration/storage/dbfs/fat32_no_regression_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
 test/integration/storage/dbfs/fat32_no_regression_spec.spl:87:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'shared FAT32 driver registers without error' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.

@@ -1,0 +1,132 @@
+#!/bin/sh
+# Retained packed-byte interpreter RSS gate.
+#
+# This is an evidence gate, not a benchmark convenience wrapper.  Every row
+# is a fresh Simple interpreter process, and every process must emit the
+# runtime's signed actual-mode receipt.  A missing receipt is UNAVAILABLE and
+# never gets replaced with a native run (or a JIT/native fallback).
+#
+# The RSS limit is deliberately absolute: total process max RSS must be no
+# more than four times the requested payload.  There is no baseline-RSS
+# subtraction, because subtracting an independently measured process hides
+# interpreter overhead and allocator retention.
+
+set -u
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT_DIR" || exit 1
+
+SIMPLE_BINARY=${SIMPLE_BINARY:-bin/simple}
+FIXTURE=${FIXTURE:-test/05_perf/bytes_push_1mib.spl}
+BUILD_DIR=${BUILD_DIR:-build/interpreter-packed-byte-rss}
+SAMPLES=${SAMPLES:-5}
+TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-300}
+EXPECTED_RECEIPT='simple_execution_mode_v1 requested=interpreter actual=interpreter fallback=false'
+
+fail() {
+    echo "STATUS: FAIL reason=$1 build_dir=$BUILD_DIR" >&2
+    exit 1
+}
+
+unavailable() {
+    echo "STATUS: UNAVAILABLE reason=$1 build_dir=$BUILD_DIR" >&2
+    exit 2
+}
+
+is_uint() {
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+[ -x "$SIMPLE_BINARY" ] || unavailable interpreter-binary-missing
+[ -f "$FIXTURE" ] || fail fixture-missing
+[ -x /usr/bin/time ] || unavailable usr-bin-time-missing
+command -v timeout >/dev/null 2>&1 || unavailable timeout-missing
+command -v sha256sum >/dev/null 2>&1 || unavailable sha256sum-missing
+is_uint "$SAMPLES" && [ "$SAMPLES" -ge 3 ] || fail invalid-samples
+is_uint "$TIMEOUT_SECONDS" && [ "$TIMEOUT_SECONDS" -gt 0 ] || fail invalid-timeout
+
+mkdir -p "$BUILD_DIR/raw" || fail build-dir-create
+printf 'schema=interpreter_packed_byte_rss_v1\nrequested_mode=interpreter\nactual_mode=interpreter\nfallback=false\nsamples=%s\n' "$SAMPLES" >"$BUILD_DIR/manifest.env" || fail manifest-create
+
+run_row() {
+    label=$1
+    payload=$2
+    slug=$3
+    raw="$BUILD_DIR/raw/$slug.samples"
+    sorted="$BUILD_DIR/raw/$slug.sorted"
+    out="$BUILD_DIR/raw/$slug.stdout"
+    err="$BUILD_DIR/raw/$slug.stderr"
+    time_log="$BUILD_DIR/raw/$slug.time"
+    : >"$raw" || fail raw-create
+
+    sample=1
+    while [ "$sample" -le "$SAMPLES" ]; do
+        # The env and receipt checks are intentionally inside the measured
+        # child.  The command never names a native artifact or compile path.
+        if ! /usr/bin/time -f '%M' -o "$time_log" \
+            timeout --foreground --signal=TERM --kill-after=5s "$TIMEOUT_SECONDS" \
+            env SIMPLE_NO_BOOTSTRAP_DELEGATE=1 \
+                SIMPLE_EXECUTION_MODE=interpreter \
+                SIMPLE_EXECUTION_MODE_RECEIPT=1 \
+                PERF_BYTE_SIZE="$payload" \
+                "$SIMPLE_BINARY" run "$FIXTURE" >"$out" 2>"$err"; then
+            fail "interpreter-run-$slug-sample-$sample"
+        fi
+
+        # Exactly one canonical receipt is required.  This is the fallback
+        # proof: requested and actual mode agree, and fallback is false.
+        [ "$(grep -Fxc "$EXPECTED_RECEIPT" "$err" 2>/dev/null || true)" -eq 1 ] || \
+            unavailable "interpreter-receipt-unavailable-$slug-sample-$sample"
+        [ "$(grep -c '^simple_execution_mode_v1 ' "$err" 2>/dev/null || true)" -eq 1 ] || \
+            unavailable "interpreter-receipt-count-$slug-sample-$sample"
+        grep -Fq 'fallback=true' "$err" && fail "fallback-reported-$slug-sample-$sample"
+        grep -Eiq 'jit[- ]fallback|native fallback|native-build|native artifact' "$err" && \
+            fail "fallback-marker-$slug-sample-$sample"
+
+        # The fixture's row is the content oracle: exact requested length and
+        # exact zero-fill checksum.  Do not accept a merely successful exit.
+        receipt=$(sed -n "s/^$label: len=\([0-9][0-9]*\) elapsed_ms=\([0-9][0-9]*\) zero_fill_checksum=\([0-9][0-9]*\)$/\1|\2|\3/p" "$out")
+        [ "$(printf '%s\n' "$receipt" | awk 'NF { n++ } END { print n+0 }')" -eq 1 ] || \
+            fail "byte-receipt-shape-$slug-sample-$sample"
+        actual_len=$(printf '%s\n' "$receipt" | cut -d'|' -f1)
+        elapsed_ms=$(printf '%s\n' "$receipt" | cut -d'|' -f2)
+        checksum=$(printf '%s\n' "$receipt" | cut -d'|' -f3)
+        [ "$actual_len" = "$payload" ] || fail "length-mismatch-$slug-sample-$sample"
+        [ "$checksum" = 0 ] || fail "checksum-mismatch-$slug-sample-$sample"
+        is_uint "$elapsed_ms" || fail "elapsed-missing-$slug-sample-$sample"
+
+        rss_kib=$(sed -n '1p' "$time_log")
+        is_uint "$rss_kib" && [ "$rss_kib" -gt 0 ] || fail "rss-missing-$slug-sample-$sample"
+        printf '%s|%s|%s|%s|%s\n' "$sample" "$payload" "$rss_kib" "$elapsed_ms" "$checksum" >>"$raw" || fail raw-write
+        sample=$((sample + 1))
+    done
+
+    sort -t'|' -k3,3n "$raw" >"$sorted" || fail raw-sort
+    p50_line=$(( (SAMPLES + 1) / 2 ))
+    p95_line=$(( (SAMPLES * 95 + 99) / 100 ))
+    p50_rss=$(sed -n "${p50_line}p" "$sorted" | cut -d'|' -f3)
+    p95_rss=$(sed -n "${p95_line}p" "$sorted" | cut -d'|' -f3)
+    max_rss=$(sed -n '$p' "$sorted" | cut -d'|' -f3)
+    is_uint "$p50_rss" && is_uint "$p95_rss" && is_uint "$max_rss" || fail "rss-statistics-$slug"
+
+    # Compare bytes using integer arithmetic.  max_rss is total process RSS,
+    # not a payload-minus-control delta.
+    rss_bytes=$((max_rss * 1024))
+    budget_bytes=$((payload * 4))
+    [ "$rss_bytes" -le "$budget_bytes" ] || fail "max-rss-over-4x-payload-$slug"
+
+    raw_sha256=$(sha256sum "$raw" | awk '{print $1}')
+    printf 'row=byte_rss_v1|payload_bytes=%s|samples=%s|p50_rss_kib=%s|p95_rss_kib=%s|max_rss_kib=%s|rss_bytes=%s|budget_bytes=%s|raw_relpath=raw/%s.samples|raw_sha256=%s|length=%s|checksum=%s|status=pass\n' \
+        "$payload" "$SAMPLES" "$p50_rss" "$p95_rss" "$max_rss" "$rss_bytes" "$budget_bytes" "$slug" "$raw_sha256" "$payload" 0 >>"$BUILD_DIR/manifest.env" || fail manifest-row
+    echo "PASS row=$slug payload_bytes=$payload samples=$SAMPLES p50_rss_kib=$p50_rss p95_rss_kib=$p95_rss max_rss_kib=$max_rss budget_bytes=$budget_bytes raw=raw/$slug.samples"
+}
+
+run_row '1 MiB' 1048576 1mib
+run_row '4 MiB' 4194304 4mib
+run_row '32 MiB' 33554432 32mib
+
+echo "STATUS: PASS schema=interpreter_packed_byte_rss_v1 actual_mode=interpreter fallback=false rows=3 build_dir=$BUILD_DIR"
+exit 0

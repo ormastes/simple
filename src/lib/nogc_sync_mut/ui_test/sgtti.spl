@@ -6,6 +6,7 @@
 use common.ui.access.{ui_access_snapshot_from_state}
 use common.ui.access_types.{UiAccessNode, UiAccessProp, UiAccessSurface}
 use common.ui.draw_ir.{DrawIrBatch, DrawIrComposition, DrawIrCommand, DrawIrRect}
+use common.ui.id_suggest.{ui_id_suggestions, ui_id_suggestion_hint}
 use common.ui.widget.{UIState}
 use common.ui.win_text_access.{
     WinTextSnapshot,
@@ -247,6 +248,10 @@ pub class SgttiTestDriver:
             return Ok(true)
         Err(result.message)
 
+    # Legacy first-match lookup kept for compatibility only.
+    # It silently returns the FIRST node whose canonical_id (then widget_id)
+    # matches, hiding duplicates. New code must use resolve_strict(id),
+    # which errors on unknown ids (with suggestions) and on ambiguity.
     fn _find_node(id: text) -> UiAccessNode?:
         for node in self.snapshot.access.nodes:
             if node.canonical_id == id:
@@ -256,8 +261,82 @@ pub class SgttiTestDriver:
                 return node
         nil
 
+    # See _find_node comment: prefer resolve_strict(id) in new code.
     fn find_element(id: text) -> UiAccessNode?:
         self._find_node(id)
+
+    # Strict resolution over the UNION of both id tiers: a node matches when
+    # its canonical_id OR its widget_id equals `id`. The tiers are unioned
+    # BEFORE the cardinality decision, so a widget id that collides with a
+    # different node's canonical id is reported ambiguous rather than silently
+    # resolving — the arch doc's exactly-one-or-error law is absolute and
+    # tier-blind. 0 matches -> unknown-id error with <=3 suggestions.
+    # >1 matches -> ambiguity error listing all canonical ids. Never first-match.
+    fn resolve_strict(id: text) -> Result<UiAccessNode, text>:
+        var matches: [UiAccessNode] = []
+        for node in self.snapshot.access.nodes:
+            if node.canonical_id == id:
+                matches = matches.push(node)
+        if matches.len() == 0:
+            for node in self.snapshot.access.nodes:
+                if node.widget_id == id:
+                    matches = matches.push(node)
+        if matches.len() == 1:
+            return Ok(matches[0])
+        if matches.len() == 0:
+            return Err(_sgtti_unknown_id_message(id, self.snapshot.access.nodes))
+        var ids: text = ""
+        for m in matches:
+            if ids != "":
+                ids = ids + ", "
+            ids = ids + m.canonical_id
+        Err("ambiguous ui id: {id} ({matches.len()} matches: {ids})")
+
+    # Layout rect + center-point pointer anchor for a resolved node, read from
+    # the node's x/y/width/height props (present on draw_ir-sourced nodes).
+    # Nodes without those props return has_geometry=false — no invented geometry.
+    fn geometry(id: text) -> Result<SgttiGeometry, text>:
+        val node = self.resolve_strict(id)?
+        Ok(sgtti_node_geometry(node))
+
+# UIE1001 unknown-id text. Suggestions come from the ONE shared algorithm in
+# std.common.ui.id_suggest (edit distance <= 2, containment fallback, deduped,
+# sorted, <= 3) so this diagnostic and the manifest-side resolver's UIE1001
+# never disagree. Candidates are both id tiers: widget ids and canonical ids.
+fn _sgtti_unknown_id_message(id: text, nodes: [UiAccessNode]) -> text:
+    var candidates: [text] = []
+    for node in nodes:
+        candidates = candidates.push(node.widget_id)
+        candidates = candidates.push(node.canonical_id)
+    val suggestions = ui_id_suggestions(id, candidates)
+    val hint = ui_id_suggestion_hint(suggestions)
+    if nodes.len() == 0:
+        return "unknown ui id: {id} (snapshot has no nodes)"
+    if hint == "":
+        return "unknown ui id: {id} (no similar id in snapshot)"
+    "unknown ui id: {id}; did you mean: {hint}"
+
+pub struct SgttiGeometry:
+    has_geometry: bool
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    center_x: i32
+    center_y: i32
+
+fn sgtti_node_geometry(node: UiAccessNode) -> SgttiGeometry:
+    val xs = _sgtti_prop_value(node, "x")
+    val ys = _sgtti_prop_value(node, "y")
+    val ws = _sgtti_prop_value(node, "width")
+    val hs = _sgtti_prop_value(node, "height")
+    if xs == "" or ys == "" or ws == "" or hs == "":
+        return SgttiGeometry(has_geometry: false, x: 0, y: 0, width: 0, height: 0, center_x: 0, center_y: 0)
+    val x = xs.to_i32()
+    val y = ys.to_i32()
+    val w = ws.to_i32()
+    val h = hs.to_i32()
+    SgttiGeometry(has_geometry: true, x: x, y: y, width: w, height: h, center_x: x + w / 2, center_y: y + h / 2)
 
 fn expect_draw(driver: SgttiTestDriver, id: text, assertion: text) -> Result<bool, text>:
     driver.expect_draw(id, assertion)

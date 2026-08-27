@@ -1,6 +1,29 @@
 # List Utils Specification
 
-> Tests covering List Utilities, Reverse, Chunk, Interleave, Rotation, Deduplication, Flatten, Windows, Intersperse, Slicing, Comparison, Sorting Check.
+> 1. expect array equals
+
+<!-- sdn-diagram:id=list_utils_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=list_utils_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+list_utils_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=list_utils_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,18 +42,16 @@
 
 #### reverses list
 
-- reverses list
+1. expect array equals
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("reverses list")
 expect array_equals(array_reverse([1, 2, 3, 4]), [4, 3, 2, 1])
 ```
 
@@ -38,18 +59,16 @@ expect array_equals(array_reverse([1, 2, 3, 4]), [4, 3, 2, 1])
 
 #### handles single element
 
-- handles single element
+1. expect array equals
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles single element")
 expect array_equals(array_reverse([1]), [1])
 ```
 
@@ -57,18 +76,16 @@ expect array_equals(array_reverse([1]), [1])
 
 #### handles empty list
 
-- handles empty list
+1. expect array reverse
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles empty list")
 val empty: [i64] = []
 expect array_reverse(empty).len() == 0
 ```
@@ -79,18 +96,16 @@ expect array_reverse(empty).len() == 0
 
 #### chunks list into parts
 
-- chunks list into parts
+1. expect chunks list len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("chunks list into parts")
 val chunks_list = array_chunk([1, 2, 3, 4, 5], 2)
 expect chunks_list.len() == 3
 ```
@@ -99,18 +114,16 @@ expect chunks_list.len() == 3
 
 #### handles exact fit
 
-- handles exact fit
+1. expect chunks list len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles exact fit")
 val chunks_list = array_chunk([1, 2, 3, 4], 2)
 expect chunks_list.len() == 2
 ```
@@ -119,18 +132,16 @@ expect chunks_list.len() == 2
 
 #### handles size larger than list
 
-- handles size larger than list
+1. expect chunks list len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles size larger than list")
 val chunks_list = array_chunk([1, 2], 5)
 expect chunks_list.len() == 1
 ```
@@ -141,18 +152,16 @@ expect chunks_list.len() == 1
 
 #### interleaves equal length lists
 
-- interleaves equal length lists
+1. expect array equals
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("interleaves equal length lists")
 val result = array_interleave([1, 2, 3], [4, 5, 6])
 expect array_equals(result, [1, 4, 2, 5, 3, 6])
 ```
@@ -161,18 +170,16 @@ expect array_equals(result, [1, 4, 2, 5, 3, 6])
 
 #### handles different lengths
 
-- handles different lengths
+1. expect result len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles different lengths")
 val result = array_interleave([1, 2], [3, 4, 5, 6])
 expect result.len() == 6
 ```
@@ -183,18 +190,16 @@ expect result.len() == 6
 
 #### rotates left
 
-- rotates left
+1. expect array equals
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("rotates left")
 expect array_equals(array_rotate_left([1, 2, 3, 4, 5], 2), [3, 4, 5, 1, 2])
 ```
 
@@ -202,18 +207,16 @@ expect array_equals(array_rotate_left([1, 2, 3, 4, 5], 2), [3, 4, 5, 1, 2])
 
 #### rotates left by zero
 
-- rotates left by zero
+1. expect array equals
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("rotates left by zero")
 expect array_equals(array_rotate_left([1, 2, 3], 0), [1, 2, 3])
 ```
 
@@ -221,18 +224,16 @@ expect array_equals(array_rotate_left([1, 2, 3], 0), [1, 2, 3])
 
 #### rotates right
 
-- rotates right
+1. expect array equals
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("rotates right")
 expect array_equals(array_rotate_right([1, 2, 3, 4, 5], 2), [4, 5, 1, 2, 3])
 ```
 
@@ -242,18 +243,16 @@ expect array_equals(array_rotate_right([1, 2, 3, 4, 5], 2), [4, 5, 1, 2, 3])
 
 #### removes consecutive duplicates
 
-- removes consecutive duplicates
+1. expect array equals
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("removes consecutive duplicates")
 expect array_equals(array_dedup([1, 1, 2, 2, 3, 3]), [1, 2, 3])
 ```
 
@@ -261,18 +260,16 @@ expect array_equals(array_dedup([1, 1, 2, 2, 3, 3]), [1, 2, 3])
 
 #### keeps non-consecutive duplicates
 
-- keeps non-consecutive duplicates
+1. expect array equals
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("keeps non-consecutive duplicates")
 expect array_equals(array_dedup([1, 2, 1, 2]), [1, 2, 1, 2])
 ```
 
@@ -280,18 +277,16 @@ expect array_equals(array_dedup([1, 2, 1, 2]), [1, 2, 1, 2])
 
 #### dedup_all removes all duplicates
 
-- dedup_all removes all duplicates
+1. expect array equals
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("dedup_all removes all duplicates")
 expect array_equals(array_dedup_all([1, 2, 1, 3, 2]), [1, 2, 3])
 ```
 
@@ -301,18 +296,16 @@ expect array_equals(array_dedup_all([1, 2, 1, 3, 2]), [1, 2, 3])
 
 #### flattens nested lists
 
-- flattens nested lists
+1. expect array equals
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("flattens nested lists")
 val nested = [[1, 2], [3, 4], [5]]
 expect array_equals(array_flatten(nested), [1, 2, 3, 4, 5])
 ```
@@ -321,18 +314,16 @@ expect array_equals(array_flatten(nested), [1, 2, 3, 4, 5])
 
 #### handles empty nested list
 
-- handles empty nested list
+1. expect array flatten
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles empty nested list")
 val empty: [[i64]] = []
 expect array_flatten(empty).len() == 0
 ```
@@ -343,18 +334,16 @@ expect array_flatten(empty).len() == 0
 
 #### creates sliding windows
 
-- creates sliding windows
+1. expect wins len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates sliding windows")
 val wins = array_windows([1, 2, 3, 4], 2)
 expect wins.len() == 3
 ```
@@ -363,18 +352,16 @@ expect wins.len() == 3
 
 #### handles size too large
 
-- handles size too large
+1. expect wins len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles size too large")
 val wins = array_windows([1, 2], 5)
 expect wins.len() == 0
 ```
@@ -385,18 +372,16 @@ expect wins.len() == 0
 
 #### inserts separator between elements
 
-- inserts separator between elements
+1. expect array equals
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("inserts separator between elements")
 expect array_equals(array_intersperse([1, 2, 3], 0), [1, 0, 2, 0, 3])
 ```
 
@@ -404,18 +389,16 @@ expect array_equals(array_intersperse([1, 2, 3], 0), [1, 0, 2, 0, 3])
 
 #### handles single element
 
-- handles single element
+1. expect array equals
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles single element")
 expect array_equals(array_intersperse([1], 0), [1])
 ```
 
@@ -425,18 +408,16 @@ expect array_equals(array_intersperse([1], 0), [1])
 
 #### take gets first n elements
 
-- take gets first n elements
+1. expect array equals
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("take gets first n elements")
 expect array_equals(array_take([1, 2, 3, 4, 5], 3), [1, 2, 3])
 ```
 
@@ -444,18 +425,16 @@ expect array_equals(array_take([1, 2, 3, 4, 5], 3), [1, 2, 3])
 
 #### take handles oversized n
 
-- take handles oversized n
+1. expect array equals
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("take handles oversized n")
 expect array_equals(array_take([1, 2], 5), [1, 2])
 ```
 
@@ -463,18 +442,16 @@ expect array_equals(array_take([1, 2], 5), [1, 2])
 
 #### drop removes first n elements
 
-- drop removes first n elements
+1. expect array equals
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("drop removes first n elements")
 expect array_equals(array_drop([1, 2, 3, 4, 5], 2), [3, 4, 5])
 ```
 
@@ -482,18 +459,16 @@ expect array_equals(array_drop([1, 2, 3, 4, 5], 2), [3, 4, 5])
 
 #### drop handles oversized n
 
-- drop handles oversized n
+1. expect dropped len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("drop handles oversized n")
 val dropped = array_drop([1, 2], 5)
 expect dropped.len() == 0
 ```
@@ -504,18 +479,16 @@ expect dropped.len() == 0
 
 #### list_equals returns true for equal
 
-- list_equals returns true for equal
+1. expect array equals
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("list_equals returns true for equal")
 expect array_equals([1, 2, 3], [1, 2, 3])
 ```
 
@@ -523,18 +496,17 @@ expect array_equals([1, 2, 3], [1, 2, 3])
 
 #### list_equals returns false for different
 
-- list_equals returns false for different
+1. expect not array equals
+2. expect not array equals
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("list_equals returns false for different")
 expect not array_equals([1, 2], [1, 2, 3])
 expect not array_equals([1, 2, 3], [1, 3, 2])
 ```
@@ -545,18 +517,16 @@ expect not array_equals([1, 2, 3], [1, 3, 2])
 
 #### is_sorted detects sorted
 
-- is_sorted detects sorted
+1. expect array is sorted
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("is_sorted detects sorted")
 expect array_is_sorted([1, 2, 3, 4])
 ```
 
@@ -564,18 +534,16 @@ expect array_is_sorted([1, 2, 3, 4])
 
 #### is_sorted detects unsorted
 
-- is_sorted detects unsorted
+1. expect not array is sorted
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("is_sorted detects unsorted")
 expect not array_is_sorted([1, 3, 2, 4])
 ```
 
@@ -583,18 +551,16 @@ expect not array_is_sorted([1, 3, 2, 4])
 
 #### is_sorted handles empty
 
-- is_sorted handles empty
+1. expect array is sorted
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("is_sorted handles empty")
 val empty: [i64] = []
 expect array_is_sorted(empty)
 ```
@@ -603,18 +569,16 @@ expect array_is_sorted(empty)
 
 #### is_sorted handles single element
 
-- is_sorted handles single element
+1. expect array is sorted
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("is_sorted handles single element")
 expect array_is_sorted([1])
 ```
 
@@ -627,12 +591,12 @@ expect array_is_sorted([1])
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/tooling/list_utils_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering List Utilities, Reverse, Chunk, Interleave, Rotation, Deduplication, Flatten, Windows, Intersperse, Slicing, Comparison, Sorting Check.
+Tests covering:
 - List Utilities
 - Reverse
 - Chunk
@@ -658,51 +622,3 @@ Tests covering List Utilities, Reverse, Chunk, Interleave, Rotation, Deduplicati
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `74f5aa4a07809e59f41858ac120b1c4b1e7ca3b84a0d75df154b105eaa5673f7`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `74f5aa4a07809e59f41858ac120b1c4b1e7ca3b84a0d75df154b105eaa5673f7`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `74f5aa4a07809e59f41858ac120b1c4b1e7ca3b84a0d75df154b105eaa5673f7`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/tooling/list_utils_spec.spl
-mirror: doc/06_spec/01_unit/app/tooling/list_utils_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/tooling/list_utils_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/tooling/list_utils_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/tooling/list_utils_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reverses list' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/tooling/list_utils_spec.spl:41:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles single element' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/tooling/list_utils_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles empty list' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

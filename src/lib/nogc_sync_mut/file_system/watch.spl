@@ -4,11 +4,23 @@
 # Mock implementation for demonstration purposes.
 # Real implementation would use platform-specific APIs (inotify, FSEvents, etc).
 
-mod file_system.types
-mod file_system.file_ops
-mod file_system.metadata
+use file_system.types.{FileWatcher as FsFileWatcher}
+use file_system.file_ops.{file_exists as fs_file_exists}
+use file_system.metadata.{file_modified_time as fs_file_modified_time}
 
-fn watch_create(path: text) -> types.FileWatcher?:
+@unsafe(reason: "private bootstrap-compatible imported file predicate boundary", capabilities: [ffi])
+fn _watch_file_exists(path: text) -> bool:
+    fs_file_exists(path)
+
+@unsafe(reason: "private bootstrap-compatible imported modification-time boundary", capabilities: [ffi])
+fn _watch_modified_time(path: text) -> i64?:
+    fs_file_modified_time(path)
+
+@unsafe(reason: "private bootstrap-compatible imported watcher construction boundary", capabilities: [ffi])
+fn _watch_value(path: text, modified: i64) -> FsFileWatcher:
+    FsFileWatcher(path: path, last_modified: modified)
+
+fn watch_create(path: text) -> FsFileWatcher?:
     """Create file watcher.
 
     Args:
@@ -17,18 +29,18 @@ fn watch_create(path: text) -> types.FileWatcher?:
     Returns:
         Some(FileWatcher) or nil on error
     """
-    if not file_ops.file_exists(path):
+    if not _watch_file_exists(path):
         return nil
 
-    val modified_opt = metadata.file_modified_time(path)
+    val modified_opt = _watch_modified_time(path)
     match modified_opt:
         Some(modified):
-            val watcher = types.FileWatcher(path: path, last_modified: modified)
+            val watcher = _watch_value(path, modified)
             Some(watcher)
         nil:
             nil
 
-fn watch_check(watcher: types.FileWatcher) -> bool:
+fn watch_check(watcher: FsFileWatcher) -> bool:
     """Check if file has changed.
 
     Args:
@@ -37,20 +49,20 @@ fn watch_check(watcher: types.FileWatcher) -> bool:
     Returns:
         true if changed
     """
-    val modified_opt = metadata.file_modified_time(watcher.path)
+    val modified_opt = _watch_modified_time(watcher.path)
     match modified_opt:
         Some(modified):
             modified != watcher.last_modified
         nil:
             false
 
-me watch_update(watcher: types.FileWatcher):
+me watch_update(watcher: FsFileWatcher):
     """Update watcher timestamp.
 
     Args:
         watcher: FileWatcher handle (mutable)
     """
-    val modified_opt = metadata.file_modified_time(watcher.path)
+    val modified_opt = _watch_modified_time(watcher.path)
     match modified_opt:
         Some(modified):
             watcher.last_modified = modified

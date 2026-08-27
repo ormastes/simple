@@ -37,16 +37,47 @@ Selected by user request on 2026-08-11.
   from its classifier and reserved-encoding gates—not from a sentinel
   canonical instruction value.
 
-Out of scope: scalar pipeline, complete ISA/Zc decode, aspect execution, PPA
-rewrites, MMU/Linux, Debug 1.0, trace, vector, dual issue, and OoO.
+The original foundation slice excluded scalar execution. The user's subsequent
+mission-critical Gen2 implementation request explicitly expands this active
+lane with the following requirements; it does not retroactively qualify the
+foundation evidence:
 
-## Related artifacts
+- REQ-G2-012: Materialize one typed scalar completion protocol and exactly one
+  architectural retirement owner. ALU, control, and LSU providers must hold a
+  complete normalized payload until atomic acceptance, preserve event identity,
+  aggregate implementation faults, and never source architectural order.
+- REQ-G2-013: Materialize the declarative M/Zmmul provider without runtime
+  XLEN or provider selection. The projection must bind the concrete instruction,
+  registers, operation, profile, provider, RV32/RV64 width, and structural
+  receipt; Zmmul must reject divide/remainder. The iterative owner must hold
+  completion under backpressure and implement division-by-zero, signed overflow,
+  high-half signedness, and RV64 W-result rules exactly.
+- REQ-G2-014: Materialize ECALL and EBREAK as real scalar execution providers.
+  ECALL must select architectural causes 8/9/11 from the accepted U/S/M
+  privilege, EBREAK must select cause 3, both must suppress register/memory/
+  redirect effects, and both must enter the same atomic trap and sole-retirement
+  path as every other scalar provider. Reserved privilege encoding 2 must fail
+  closed as illegal instruction with the original instruction in `tval`.
+- REQ-G2-015: Complete the shared scalar-I integer execution projection for
+  RV32/RV64 upper-immediate, comparison, logical/arithmetic shift, and RV64
+  word-result rows. Register shift counts must be masked architecturally,
+  arithmetic shift must preserve sign, and every RV64 word result must be
+  truncated to 32 bits then sign-extended exactly once.
+- REQ-G2-016: Materialize a typed, fail-closed Zicsr access projection for all
+  six CSR instruction forms. The projection must bind the concrete instruction,
+  CSR address, register operand, privilege class, read-only class, and external
+  CSR-bank presence/read value before producing read/write intent. It must
+  preserve CSRRW `rd=x0` read suppression, CSRRS/CSRRC zero-source write
+  suppression, immediate semantics, and illegal-instruction cause/tval on
+  absent, underprivileged, reserved-class, read-only-write, or register-binding
+  failure. This projection is not Zicsr product support until a stateful atomic
+  CSR owner is composed through the sole-retirement path.
+- REQ-G2-017: Materialize exact `FENCE` and `FENCE.I` rows as a one-entry typed
+  accepted-effect owner. It must preserve `fm`/`pred`/`succ`, require an
+  explicit ordering or instruction-stream-invalidation acknowledgement before
+  retirement, hold effect and completion under backpressure, reject reserved
+  encodings, and never issue an effect for illegal or identity-mismatched
+  events. `FENCE.I` remains gated by the explicit `Zifencei` product profile.
 
-- NFR requirements: `doc/02_requirements/nfr/riscv_gen2_hwir_foundation.md`
-- Parallel execution plan: `doc/03_plan/agent_tasks/riscv_gen2_hwir_foundation.md`
-- Qualification test plan: `doc/03_plan/sys_test/riscv_gen2_hwir_foundation.md`
-- Architecture: `doc/04_architecture/riscv_gen2_hwir_foundation.md`
-- Detail design: `doc/05_design/riscv_gen2_hwir_foundation.md`
-- System-scenario manual:
-  `doc/06_spec/03_system/app/hardware/feature/riscv_gen2_hwir_foundation_spec.md`
-- SPipe state: `.spipe/riscv_gen2_hwir_foundation/state.md`
+Still out of scope for this foundation document: complete profile compliance,
+PPA qualification, MMU/Linux, Debug 1.0, trace, vector, dual issue, and OoO.

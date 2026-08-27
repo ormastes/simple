@@ -1,0 +1,169 @@
+# Typed still-integrity and review-motion metadata for scenario evidence.
+#
+# Encoded motion is for human review. Event receipts, validated still
+# keyframes, and artifact integrity remain the verification oracles.
+
+pub struct ScenarioArtifactIntegrity:
+    path: text
+    format: text
+    mime: text
+    width: i64
+    height: i64
+    byte_size: i64
+    checksum: text
+    producer: text
+    producer_version: text
+    source_revision: text
+    host: text
+    target: text
+    capture_ready: bool
+    baseline_identity: text
+    comparison_result: text
+    required: bool
+
+pub struct ScenarioMotionEvent:
+    sequence: i64
+    time_ms: i64
+    kind: text
+    target: text
+    value: text
+    status: text
+
+pub struct ScenarioMotionKeyframe:
+    time_ms: i64
+    artifact_path: text
+    oracle: text
+    status: text
+
+pub struct ScenarioMotionEvidence:
+    duration_ms: i64
+    events: [ScenarioMotionEvent]
+    keyframes: [ScenarioMotionKeyframe]
+    transcript_path: text
+    review_media_path: text
+
+fn _format_matches_mime(format: text, mime: text) -> bool:
+    if format == "png":
+        return mime == "image/png"
+    if format == "webp":
+        return mime == "image/webp"
+    if format == "svg":
+        return mime == "image/svg+xml"
+    if format == "avif":
+        return mime == "image/avif"
+    if format == "webm":
+        return mime == "video/webm"
+    if format == "txt" or format == "log":
+        return mime == "text/plain"
+    if format == "ansi":
+        return mime == "text/plain" or mime == "text/x-ansi" or mime == "application/x-ansi"
+    if format == "html":
+        return mime == "text/html"
+    if format == "json":
+        return mime == "application/json"
+    if format == "bin":
+        return mime == "application/octet-stream"
+    if format == "sdn":
+        return mime == "application/x-sdn" or mime == "text/plain"
+    false
+
+fn _is_still_format(format: text) -> bool:
+    format == "png" or format == "webp" or format == "svg" or format == "avif"
+
+fn _is_safe_relative_artifact_path(path: text) -> bool:
+    if path == "" or path.starts_with("/") or path.starts_with("\\"):
+        return false
+    if path.contains("?") or path.contains("#"):
+        return false
+    val first_component = path.split("/")[0]
+    if first_component.contains(":"):
+        return false
+    for component in path.split("/"):
+        if component == "." or component == "..":
+            return false
+    for component in path.split("\\"):
+        if component == "." or component == "..":
+            return false
+    true
+
+pub fn scenario_artifact_integrity_validate(
+    integrity: ScenarioArtifactIntegrity
+) -> text:
+    if not _is_safe_relative_artifact_path(integrity.path):
+        return "unsafe_artifact_path"
+    if not _format_matches_mime(integrity.format, integrity.mime):
+        return "format_mime_mismatch"
+    if _is_still_format(integrity.format):
+        if integrity.width <= 0 or integrity.height <= 0:
+            return "invalid_dimensions"
+        if integrity.baseline_identity == "":
+            return "missing_baseline_identity"
+    elif integrity.format == "webm":
+        if ((integrity.width == 0 and integrity.height != 0) or
+            (integrity.width != 0 and integrity.height == 0) or
+            integrity.width < 0 or integrity.height < 0):
+            return "invalid_dimensions"
+    elif integrity.width != 0 or integrity.height != 0:
+        return "nonvisual_dimensions"
+    if integrity.byte_size <= 0:
+        return "invalid_byte_size"
+    if integrity.checksum == "":
+        return "missing_checksum"
+    if integrity.producer == "" or integrity.producer_version == "":
+        return "missing_producer"
+    if integrity.source_revision == "":
+        return "missing_source_revision"
+    if integrity.host == "" or integrity.target == "":
+        return "missing_host_or_target"
+    if integrity.required and not integrity.capture_ready:
+        return "required_capture_not_ready"
+    if integrity.comparison_result != "pass" and integrity.comparison_result != "fail" and integrity.comparison_result != "not-compared":
+        return "invalid_comparison_result"
+    "ok"
+
+fn _contains_path(paths: [text], expected: text) -> bool:
+    for path in paths:
+        if path == expected:
+            return true
+    false
+
+pub fn scenario_motion_evidence_validate(
+    evidence: ScenarioMotionEvidence,
+    transcript_present: bool,
+    review_media_size_bytes: i64,
+    validated_still_paths: [text]
+) -> text:
+    if evidence.duration_ms < 0 or evidence.duration_ms > 10000:
+        return "duration_out_of_bounds"
+    if evidence.events.len() == 0:
+        return "missing_events"
+    if evidence.keyframes.len() < 2:
+        return "missing_keyframes"
+    if evidence.transcript_path == "" or not transcript_present:
+        return "missing_transcript"
+    if evidence.review_media_path == "":
+        if review_media_size_bytes != 0:
+            return "unexpected_review_media_size"
+    elif review_media_size_bytes <= 0 or review_media_size_bytes > 8388608:
+        return "review_media_size_out_of_bounds"
+
+    var previous_sequence = -1
+    var previous_event_time = -1
+    for event in evidence.events:
+        if event.sequence <= previous_sequence or event.time_ms < previous_event_time:
+            return "motion_event_order_invalid"
+        if event.time_ms < 0 or event.time_ms > evidence.duration_ms:
+            return "motion_event_time_invalid"
+        if event.kind == "" or event.target == "" or event.status == "":
+            return "motion_event_incomplete"
+        previous_sequence = event.sequence
+        previous_event_time = event.time_ms
+
+    for keyframe in evidence.keyframes:
+        if keyframe.time_ms < 0 or keyframe.time_ms > evidence.duration_ms:
+            return "motion_keyframe_time_invalid"
+        if keyframe.artifact_path == "" or keyframe.oracle == "" or keyframe.status == "":
+            return "motion_keyframe_incomplete"
+        if not _contains_path(validated_still_paths, keyframe.artifact_path):
+            return "motion_keyframe_unvalidated"
+    "ok"

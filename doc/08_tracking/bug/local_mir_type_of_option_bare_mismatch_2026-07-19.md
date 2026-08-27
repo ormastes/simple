@@ -1,7 +1,6 @@
 # `local_mir_type_of` returned `Some(MirType)` through a bare nilable contract
 
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status:** ROOT FIXED; `local_mir_type_of` now returns a bare `MirType` or
   `nil`, and both wrapper-dependent callers use the nilable contract.
 - **Fixed victim:** 2026-07-19, `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`
   (`lower_array_lit`), lane W2 (native-smoke-matrix `array_index_rw`).

@@ -2,12 +2,15 @@
 
 > Tests covering mixed sequential HWIR datapath and explicit LSU geometry.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+## Purpose and scope
 
-<details>
-<summary>Full Scenario Manual</summary>
+This focused source-level unit specification constructs one RV32 strict
+sequential HWIR module whose combinational datapath feeds guarded state. It
+checks the emitted VHDL text for a typed 32-bit add, 8-bit truncation, 32-bit
+sign extension, equality comparison, mux selection, and the selected value's
+assignment into the state register. It also checks that explicit LSU bus and
+mask geometry is validated independently of the selected core width and that
+the RV32/RV64 product defaults expose their respective bus widths.
 
 # Hwir Mixed Sequential Datapath Specification
 
@@ -15,7 +18,7 @@
 
 ### mixed sequential HWIR datapath and explicit LSU geometry
 
-#### should render typed add truncate sign extension compare and select before state
+## Requirement traceability
 
 - should render typed add truncate sign extension compare and select before state
 - Construct a typed combinational datapath feeding guarded sequential state

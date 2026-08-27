@@ -5,12 +5,13 @@
 
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirTerminator}
-use compiler.backend.backend.backend_types.{CompileError}
+use compiler.backend.backend_api.*
 use compiler.backend.vhdl.vhdl_builder.{VhdlBuilder}
 use .vhdl.vhdl_builder.{VhdlBuilder}
-use .vhdl.vhdl_helpers.{vhdl_sanitize_identifier, vhdl_function_is_hardware_entity, vhdl_helper_is_procedure, vhdl_helper_collision_message}
+use compiler.backend.vhdl.vhdl_helpers.{vhdl_sanitize_identifier, vhdl_function_is_hardware_entity, vhdl_helper_is_procedure, vhdl_helper_collision_message}
 use compiler.common.diagnostics.span.{Span}
 use .vhdl_backend.{VhdlBackend}
+use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
 
 impl VhdlBackend:
     fn helper_function_by_name(name: text) -> Result<MirFunction, CompileError>:
@@ -43,7 +44,7 @@ impl VhdlBackend:
                 match local.name:
                     case Some(name): vhdl_sanitize_identifier(name)
                     case None: "arg{idx}"
-            case Return:
+            case Ret:
                 "return_value"
             case Var | Temp:
                 match local.name:
@@ -88,21 +89,20 @@ impl VhdlBackend:
         builder.emit_line(sig)
         Ok(())
 
-    me prepare_helper_context(func: MirFunction):
+    fn prepare_helper_context(func: MirFunction):
         self.active_local_names = {}
         self.active_local_types = {}
         self.active_local_kinds = {}
         self.active_blocks = {}
         self.active_local_memory_type_names = {}
-        self.active_inline_exprs = {}
         for block in func.blocks:
-            self.active_blocks[block.id.id] = block
+            self.active_blocks = self.active_blocks.set(block.id.id, block)
         for local in func.locals:
-            self.active_local_names[local.id.id] = self.helper_local_name(local)
-            self.active_local_types[local.id.id] = local.type_
-            self.active_local_kinds[local.id.id] = local.kind
+            self.active_local_names = self.active_local_names.set(local.id.id, self.helper_local_name(local))
+            self.active_local_types = self.active_local_types.set(local.id.id, local.type_)
+            self.active_local_kinds = self.active_local_kinds.set(local.id.id, local.kind)
 
-    fn emit_helper_body(mut builder: VhdlBuilder, func: MirFunction) -> Result<(), CompileError>:
+    fn emit_helper_body(builder: VhdlBuilder, func: MirFunction) -> Result<(), CompileError>:
         self.prepare_helper_context(func)
         val sig = match self.helper_signature(func, false):
             case Ok(value): value
@@ -140,7 +140,27 @@ impl VhdlBackend:
         Ok(())
 
     fn emit_helper_block(builder: VhdlBuilder, func: MirFunction, block_id: BlockId) -> Result<(), CompileError>:
-        self.compile_helper_control_block(builder, func, block_id, [])
+        val block = match self.block_by_id(block_id):
+            case Ok(value): value
+            case Err(err): return Err(err)
+        for inst in block.instructions:
+            match self.compile_helper_instruction(builder, inst):
+                case Ok(_): pass
+                case Err(err): return Err(err)
+        match block.terminator:
+            case Ret(value):
+                match value:
+                    case Some(operand):
+                        val value_expr = match self.helper_operand_to_vhdl(operand):
+                            case Ok(result): result
+                            case Err(err): return Err(err)
+                        builder.emit_line("return {value_expr};")
+                    case None:
+                        if not vhdl_helper_is_procedure(func):
+                            builder.emit_line("return return_value;")
+                Ok(())
+            case _:
+                Err(self.backend_error("Unsupported VHDL helper subprogram terminator: {block.terminator}; helpers must be single-block pure combinational returns"))
 
     fn helper_operand_to_vhdl(operand: MirOperand) -> Result<text, CompileError>:
         match operand.kind:
@@ -181,32 +201,25 @@ impl VhdlBackend:
         val target = match self.call_target_name(func):
             case Ok(value): value
             case Err(err): return Err(err)
-        val helper_lookup = self.active_helper_name_by_source.get(target)
-        var helper_name = ""
-        if helper_lookup == nil:
-            # NOTE: native dict `.get()` returns a corrupt payload on a hit; use
-            # contains_key + indexed read. See doc/07_guide/language/dict_native_pitfalls.md
-            if self.active_function_by_name.contains_key(target):
-                val known = self.active_function_by_name[target]
-                if vhdl_function_is_hardware_entity(known):
-                    return Err(self.backend_error("VHDL helper call `{target}` targets a hardware entity; instantiate entities with VhdlPortMap instead of subprogram calls"))
-            return Err(self.backend_error("Synthesizable VHDL backend does not support generic Call lowering for `{target}`; only planned pure combinational helpers can be called"))
-        else:
-            helper_name = helper_lookup
+        val helper_name = match self.active_helper_name_by_source.get(target):
+            case Some(value): value
+            case None:
+                match self.active_function_by_name.get(target):
+                    case Some(known):
+                        if vhdl_function_is_hardware_entity(known):
+                            return Err(self.backend_error("VHDL helper call `{target}` targets a hardware entity; instantiate entities with VhdlPortMap instead of subprogram calls"))
+                    case None: ()
+                return Err(self.backend_error("Synthesizable VHDL backend does not support generic Call lowering for `{target}`; only planned pure combinational helpers can be called"))
         var arg_exprs: [text] = []
         for arg in args:
-            val arg_result = if in_helper:
-                self.helper_operand_to_vhdl(arg)
-            else:
-                self.operand_to_vhdl(arg)
-            val arg_expr = match arg_result:
+            val arg_expr = match if in_helper: self.helper_operand_to_vhdl(arg) else: self.operand_to_vhdl(arg):
                 case Ok(value): value
                 case Err(err): return Err(err)
             arg_exprs = arg_exprs.push(arg_expr)
         if arg_exprs.len() == 0:
-            Ok(helper_name)
+            Ok(helper_name.unwrap())
         else:
-            Ok("{helper_name}({arg_exprs.join(\", \")})")
+            Ok("{helper_name.unwrap()}({arg_exprs.join(\", \")})")
 
     fn emit_entity_helper_call(builder: VhdlBuilder, dest: LocalId?, func: MirOperand, args: [MirOperand]) -> Result<(), CompileError>:
         val expr = match self.helper_call_expr(func, args, false):
@@ -286,8 +299,6 @@ impl VhdlBackend:
                     case Ok(result): result
                     case Err(err): return Err(err)
                 self.emit_helper_dest_assign(builder, dest, "{base_name}.{field_name}")
-            case SetField(base, field, value):
-                self.emit_local_record_field_assign(builder, base, field, value, true)
             case Call(dest, func, args):
                 val expr = match self.helper_call_expr(func, args, true):
                     case Ok(result): result
@@ -328,3 +339,4 @@ impl VhdlBackend:
                 Ok(())
             case _:
                 Err(self.unsupported_vhdl_helper_instruction_error(inst))
+

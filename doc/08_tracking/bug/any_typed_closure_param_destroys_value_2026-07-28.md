@@ -2,8 +2,7 @@
 
 - **Filed:** 2026-07-28
 - **Severity:** high — silent data loss, no error, no warning
-- Status: OPEN (P1)
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- **Status:** open
 - **Found via:** SF4 mutex-guard lane (its `with_lock` signature is built on this)
 
 ## Symptom

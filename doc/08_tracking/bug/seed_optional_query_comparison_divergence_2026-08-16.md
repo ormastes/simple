@@ -5,9 +5,29 @@
 - **Area**: compiler_rust (seed interpreter), lib/gc_async_mut/gpu/browser_engine
 - **Related**: `src/lib/gc_async_mut/gpu/browser_engine/net/h1_client.spl` (TLS handshake guard), `src/lib/gc_async_mut/gpu/browser_engine/net/entity/request_types.spl` (BROWSER_MAX_RESOURCE_BYTES)
 
-## Divergence A — `.?` operator semantic mismatch with self-hosted
+## Divergence A — `x.? == false` dead guards — RECLASSIFIED 2026-08-16: not a compiler divergence, a call-site idiom trap
 
-**Seed behavior:** The `.?` optional-query operator yields the wrapped value if present, or `nil` if absent — not a boolean. This is semantically correct for optional chaining *values*, but becomes a trap when used in boolean comparisons.
+**RECLASSIFIED:** `.?` returning `T?` (value-or-nil, never a bool) is the
+DOCUMENTED language semantics
+(`doc/07_guide/quick_reference/syntax_quick_reference.md` § "Existence Check
+(`.?`) — Returns `T?`") and is implemented identically by BOTH compilers: the
+seed (`interpreter/expr.rs` `Expr::ExistsCheck`, whose comment cites the
+value-return contract) and the self-hosted compiler
+(`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl` `case ExistsCheck`,
+whose comment explicitly forbids collapsing to a bool — that was a past
+regression). The original claim below that "the self-hosted compiler correctly
+returns a bool" was WRONG: `.?` returned bool in an older language version
+(see `exists_check_value_return_spec.spl` — "After the `.?` return-type
+change"), and the census sites are legacy idiom from before that change. The
+guards are dead under EVERY compiler, so the fix belongs at the call sites:
+`x.? == false` → `x.? == nil`, `x.? == true` → `x.? != nil` (keeping `.?` so
+empty text/array/dict still count as absent). Exception: a `bool?` receiver
+passes its bool through, so there the idiom is live and stays. Census
+conversion executed tree-wide 2026-08-16; pinning specs:
+`test/03_system/feature/usage/exists_check_bool_comparison_trap_spec.spl`
+(8/8 under the seed) and `seed_semantic_divergences.rs` items A.
+
+**Seed behavior (original analysis, terminology stale):** The `.?` optional-query operator yields the wrapped value if present, or `nil` if absent — not a boolean. This is semantically correct for optional chaining *values*, but becomes a trap when used in boolean comparisons.
 
 Probe output from seed interpreter:
 ```
@@ -18,7 +38,7 @@ filled .? == true => false
 filled .? == false => false
 ```
 
-Therefore `x.? == false` **never fires** regardless of whether x is nil or filled. The self-hosted compiler correctly returns a `bool` (either `true` or `nil` has no `== false` overload).
+Therefore `x.? == false` **never fires** regardless of whether x is nil or filled — under both compilers. (This paragraph originally claimed the self-hosted compiler returns a `bool` here; that was wrong — see the reclassification above.)
 
 **Impact:** At `src/lib/gc_async_mut/gpu/browser_engine/net/h1_client.spl:279`, the TLS handshake was guarded by:
 ```
@@ -64,7 +84,7 @@ src/os/tools/proc/kill_tool.spl
 src/os/tools/proc/nice_tool.spl
 ```
 
-**Recommended fix:** Add a lint rule banning `.? == false` / `.? == true` patterns (since `.?` never yields a boolean under any compiler). Convert all 43 sites to `== nil` / `!= nil` for optional tests. Every unfixed site is a latent dead-guard under the seed.
+**Recommended fix:** Add a lint rule banning `.? == false` / `.? == true` patterns (since `.?` never yields a boolean under any compiler). Convert all 43 sites to `== nil` / `!= nil` for optional tests. Every unfixed site is a latent dead-guard under every compiler.
 
 ## Divergence B — Module-private `val` imports bind to a non-int sentinel
 

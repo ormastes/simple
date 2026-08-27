@@ -22,8 +22,8 @@ use compiler.backend.backend.backend_types.{CodegenTarget, BackendCompileOptions
 use compiler.backend.error_conversion.{is_result_type, map_result_type, emit_error_type_definitions, emit_error_converting_wrapper}
 use compiler.backend.callback_trampoline.{is_callback_type, build_callback_typedef, emit_callback_typedef, emit_callback_trampoline, CallbackTypedef}
 use compiler.types.type_layout.{LayoutVerification, LayoutAttr, layoutattr_c_repr, verify_c_layout, generate_runtime_layout_asserts}
-use compiler.hir.hir_definitions.{HirField}
-use compiler.hir.hir_types.{HirType}
+from hir_definitions import {HirField}
+from hir_types import {HirType}
 
 # ============================================================================
 # Utility
@@ -40,6 +40,39 @@ fn sanitize_c_name(name: text) -> text:
     s = s.split("::").join("_")
     s
 
+# A `Const(Str(symbol), FuncPtr(..))` is MIR's representation of a statically
+# resolved call target.  It is not a C string value: rendering it through
+# `translate_const_value` produces `(const char*)...`, which then turns an
+# ordinary helper call into an invalid C++ call expression.  Keep this
+# recognizer deliberately narrower than general operand lowering.  Dynamic
+# function values must reach `CallIndirect`, where their ABI is explicit.
+fn c_backend_c_direct_symbol_valid(name: text) -> bool:
+    if name.len() == 0:
+        return false
+    var index = 0
+    while index < name.len():
+        val ch = name[index:index + 1]
+        val letter = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z")
+        val digit = ch >= "0" and ch <= "9"
+        if index == 0:
+            if not letter and ch != "_":
+                return false
+        elif not letter and not digit and ch != "_":
+            return false
+        index = index + 1
+    true
+
+fn c_backend_direct_func_symbol(operand: MirOperand) -> text?:
+    match operand.kind:
+        case Const(Str(name), type_):
+            match type_.kind:
+                case FuncPtr(_):
+                    if c_backend_c_direct_symbol_valid(name): Some(name) else: nil
+                case _:
+                    nil
+        case _:
+            nil
+
 # ============================================================================
 # MIR to C++ Translator
 # ============================================================================
@@ -49,9 +82,9 @@ class MirToC:
     builder: CIRBuilder
     type_mapper: CTypeMapper
     local_map: Dict
-    local_types: Dict<i64, text>
-    stack_slots: Dict<i64, text>
-    stack_slot_sizes: Dict<i64, i64>
+    local_types: Dict
+    stack_slots: Dict
+    stack_slot_sizes: Dict
     string_counter: i64
 
 impl MirToC:
@@ -90,7 +123,7 @@ impl MirToC:
         self.builder.emit_impl_file_header()
 
         # Emit shared library lifecycle preamble
-        self.emit_shared_library_preamble()
+        self.emit_shared_library_preamble(module)
 
         # Emit named type definitions (sanitizes generic names like Box<i64> -> Box_i64)
         self.emit_type_definitions(module)
@@ -443,7 +476,7 @@ impl MirToC:
                 self.builder.emit_assign(dest_name, r"(void*)__simple_runtime_broadcast_pow((void*)" + left_val + r", (void*)" + right_val + r")")
 
             case Offset:
-                self.builder.emit_assign(dest_name, r"(" + ty + r")((char*)(intptr_t)" + left_val + r" + " + right_val + r")")
+                self.builder.emit_assign(dest_name, r"(int64_t)((char*)(intptr_t)" + left_val + r" + " + right_val + r")")
 
     # === Unary Operations ===
 
@@ -477,6 +510,12 @@ impl MirToC:
                         self.ensure_stack_slot(dest.id, operands.len() * 8)
                     case GpuSharedAlloc(dest, type_, size):
                         self.ensure_stack_slot(dest.id, size)
+                    case GpuSharedAllocInit(_, _, _, _):
+                        # Do not reinterpret atomic workgroup initialization as
+                        # an ordinary host stack slot. Fail before reserving
+                        # storage; instruction lowering reports the same stable
+                        # typed diagnostic if this prepass is ever bypassed.
+                        self._unsupported_c_inst("GpuSharedAllocInit", inst.span)
                     case Const(dest, value, type_):
                         val sz = self.const_composite_size(value)
                         if sz > 0:
@@ -492,19 +531,17 @@ impl MirToC:
 
     me ensure_stack_slot(local_id: i64, requested_size: i64) -> text:
         val required = self.normalized_slot_size(requested_size)
-        # contains_key + index read, never `.get()`.
-        # See doc/07_guide/language/dict_native_pitfalls.md
-        if self.stack_slots.contains_key(local_id):
-            val existing = self.stack_slots[local_id]
-            val current = self.stack_slot_sizes[local_id]
-            if required > current:
+        match self.stack_slots.get(local_id):
+            case Some(existing):
+                val current = self.stack_slot_sizes[local_id]
+                if required > current:
+                    self.stack_slot_sizes[local_id] = required
+                existing
+            case nil:
+                val slot_name = self.slot_name_for_local(local_id)
+                self.stack_slots[local_id] = slot_name
                 self.stack_slot_sizes[local_id] = required
-            existing
-        else:
-            val slot_name = self.slot_name_for_local(local_id)
-            self.stack_slots[local_id] = slot_name
-            self.stack_slot_sizes[local_id] = required
-            slot_name
+                slot_name
 
     me emit_pointer_assign(dest_local_id: i64, ptr_expr: text):
         val dest_name = self.get_local(dest_local_id)
@@ -621,9 +658,9 @@ impl MirToC:
         r"_l" + id
 
     fn get_local_type(id: i64) -> text:
-        # contains_key + index read, never `.get()`.
-        # See doc/07_guide/language/dict_native_pitfalls.md
-        if self.local_types.contains_key(id): self.local_types[id] else: "int64_t"
+        match self.local_types.get(id):
+            case Some(ty): ty
+            case nil: "int64_t"
 
     me get_local_type_from_body(body: MirBody, id: i64) -> text:
         if id < body.locals.len():

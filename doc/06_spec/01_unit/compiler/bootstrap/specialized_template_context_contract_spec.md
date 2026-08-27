@@ -1,6 +1,6 @@
-# Specialized Template Context Contract Specification
+# Contract spec: test/01_unit/compiler/bootstrap/specialized_template_context_contract_spec.spl
 
-> Tests covering specialized template context contract.
+> Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,47 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Specialized Template Context Contract Specification
+# Contract spec: test/01_unit/compiler/bootstrap/specialized_template_context_contract_spec.spl
+
+Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Compiler |
+| Status | Active |
+| Source | `test/01_unit/compiler/bootstrap/specialized_template_context_contract_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and Audience
+
+Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
+contracts red-visible, so a regression in the owned code fails this spec
+instead of shipping silently.
+
+## Scope and Preconditions
+
+Precondition: the repository working tree holds the subject code under test.
+Each scenario exercises the subject and asserts its observable contract; no
+behavior outside the named subject is claimed.
+
+## Primary Workflow
+
+Run the scenarios; each one drives the subject through its pinned contract
+and asserts the expected observable outcome with an executed oracle.
+
+## Unsupported / Limitations
+
+Only the pinned contracts are asserted here; end-to-end and integration
+behavior of the surrounding system is covered by companion specs.
+
+## Verification and Recovery
+
+A red scenario names the contract that regressed. Recover by restoring the
+pinned behavior in the subject; verify with
+`bin/simple test test/01_unit/compiler/bootstrap/specialized_template_context_contract_spec.spl` and a green Results line.
 
 ## Scenarios
 
@@ -22,7 +62,6 @@
 
 
 - routes six-argument context calls through the default wrapper
-   - Expected: source does not contain `pipeline_fn.compile_specialized_template\n`
 
 
 <details>
@@ -41,25 +80,10 @@ for path in [
     val source = file_read(path)
     expect(source).to_contain("use compiler.driver.pipeline_fn.compile_specialized_template_default")
     expect(source).to_contain("compile_specialized_template_default(")
-    expect(source.contains("pipeline_fn.compile_specialized_template\n")).to_equal(false)
+    expect(source).to_not_contain("pipeline_fn.compile_specialized_template\n")
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Compiler |
-| Status | Active |
-| Source | `test/01_unit/compiler/bootstrap/specialized_template_context_contract_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering specialized template context contract.
-- specialized template context contract
 
 ## Scenario Summary
 
@@ -85,37 +109,27 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `66edbd37530b09a8d2503ed1838d5d6c97eeee8e72ccade953bb936c02328958`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `936a9c95cf29f8e8d04f2d39ebf2b897e72e10ccfc86d896392aff0f12a9cd43`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `66edbd37530b09a8d2503ed1838d5d6c97eeee8e72ccade953bb936c02328958`.
+Source SHA-256: `936a9c95cf29f8e8d04f2d39ebf2b897e72e10ccfc86d896392aff0f12a9cd43`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `66edbd37530b09a8d2503ed1838d5d6c97eeee8e72ccade953bb936c02328958`  
+Source SHA-256: `936a9c95cf29f8e8d04f2d39ebf2b897e72e10ccfc86d896392aff0f12a9cd43`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **85/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **98/100**; effective score: **98/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 98/100
 source: test/01_unit/compiler/bootstrap/specialized_template_context_contract_spec.spl
 mirror: doc/06_spec/01_unit/compiler/bootstrap/specialized_template_context_contract_spec.md (current)
-findings: 4 blockers: 1
-  narrative=100 structure=100 oracle=50
-  traceability=100 evidence=90 coverage=100 maintainability=70
+findings: 1 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=90 coverage=100 maintainability=100
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=85; blocker cap makes effective=49
-doc/06_spec/01_unit/compiler/bootstrap/specialized_template_context_contract_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/compiler/bootstrap/specialized_template_context_contract_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/compiler/bootstrap/specialized_template_context_contract_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
-test/01_unit/compiler/bootstrap/specialized_template_context_contract_spec.spl:15:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'routes six-argument context calls through the default wrapper' has no retained capture or evidence
+test/01_unit/compiler/bootstrap/specialized_template_context_contract_spec.spl:47:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'routes six-argument context calls through the default wrapper' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

@@ -46,10 +46,10 @@ instead of rediscovering them per glyph bug.
   (codegen root causes) and [wm_gui_window_drawing](../wm_gui_window_drawing/skill.md)
   feature expert (Aqua theme + chrome consumer of this pipeline).
 
-## Native-Lane Landmine Classes (2026-07-19 rasterizer campaign, +2 on 2026-08-04/05)
+## Native-Lane Landmine Classes (2026-07-19 rasterizer campaign)
 
-Eight boring-construct recipes, backed by 6 filed compiler bugs (recipes
-2-4 share one doc), all specific to `--target x86_64-unknown-none
+Six boring-construct recipes, backed by 4 filed compiler bugs (recipes 2-4
+share one doc), all specific to `--target x86_64-unknown-none
 --entry-closure --mode dynload` (cranelift); none reproduce under the
 hosted interpreter/JIT. Prefer the boring form over a clever one in any
 code that must run on this lane:
@@ -97,39 +97,6 @@ code that must run on this lane:
    (engine.spl) is IN FLIGHT, not yet landed** — do not cite it as shipped
    until confirmed on origin.
 
-7. **`val x = match opt: Some(v): v / None: ...` extracts the nil sentinel** —
-   [sfnt_fvar_option_match_nil_baremetal_2026-08-04.md](../../../../doc/08_tracking/bug/sfnt_fvar_option_match_nil_baremetal_2026-08-04.md).
-   The **value-position** Option match compiles to two discriminant-hash
-   checks plus a fall-through default that loads the nil sentinel `0x3`
-   (`movl $0x3, %eax`); a live `Some` matched neither check, so the very
-   next field read tripped the nil guard — `runtime error: field access on
-   nil receiver`, ud2. Hit in `parse_fvar_axes`
-   (sfnt.spl) on the SimpleOS WM lane: the guest died immediately after the
-   NVMe font load, before any glyph work. **Statement-form** matches on the
-   *same* `Option<OtTable>` in `validate_default_glyf_font` work fine — only
-   extraction-into-`val` mis-discriminates. Recipe: don't bind a match result
-   to a `val` on this lane; use a statement match, or drop Option entirely
-   for a flat found-flag + scalar-field scan (what the fix does).
-   Locate this class fast: `llvm-symbolizer --obj=<kernel.elf> 0x<rip>` turns
-   the bare `[fault] rip=` serial line straight into the Simple function name.
-
-8. **A 3-or-more-operand `text` `+` chain silently drops its operands** —
-   [freestanding_text_concat_chain_drops_operands_2026-08-05.md](../../../../doc/08_tracking/bug/freestanding_text_concat_chain_drops_operands_2026-08-05.md).
-   Measured on the guest with two live locals (`name` len 11, `prop_val`
-   len 3): `a + ":"` → len 12 (**correct**); `a + ":" + b` → len **-1**;
-   `a + ":" + b + "\n"` → len **1** (only the trailing literal survives);
-   `"{a}:{b}\n"` → len 16 (**correct**). No diagnostic, no fault — just a
-   corrupt string. Recipe: **use string interpolation** for any 3+ piece
-   join on this lane; a single two-operand `+` is still safe. Blast radius
-   is wide because the shape is so ordinary: it wiped the entire CSS
-   custom-property table (all 45 entries became a bare `"\n"`), so every
-   `var(...)` in the theme resolved to empty, which silently corrupted the
-   WM's two-layer background and failed the material-provenance gate — a
-   failure that presented three layers away from its cause.
-   Sibling hazard found alongside it: `index_of` on a `substring(...)`
-   slice returns a bogus `0` instead of `-1` (the untagged-slice trap
-   `find_from`'s own docstring warns about) — use `find_from(s, needle, 0)`.
-
 Shares a signature with the general BoxInt `<<3` tag-shift family
 (2026-07-04 seed ANY-channel enum-handle mangling) — same "tagged value
 read at the wrong shift" shape, different call sites.
@@ -167,28 +134,13 @@ read at the wrong shift" shape, different call sites.
 ## Gotchas
 
 - A fix that works hosted (interpreter/JIT) says nothing about the
-  freestanding native lane — all 8 recipes above are freestanding-only.
+  freestanding native lane — all 6 recipes above are freestanding-only.
   Re-probe via serial / gated `_probe_debug()` output after any change to
   this pipeline that must run on SimpleOS baremetal.
 - Two miscompiled reads can cancel and look correct — verify a fix by
   disassembly or a fresh probe value, not by "the number looks right now."
 - Per repo rule: a boring/compact construct that silently fails on this
   lane must be fixed or filed, not silently worked around without a doc.
-
-## Chrome differential lane (2026-08-15, green)
-
-A vector-font differential lane compares Simple's glyph output against real
-Chrome:
-
-- Tool: `tools/vector_font_diff/` — `run_vector_font_diff.shs` drives
-  `chrome_vector_font_dump.js` (Chrome side) and
-  `simple_vector_font_dump.spl` (Simple side), diffing dumps under `out/`
-  (`chrome.json` / `simple.json` / `summary.txt`).
-- Gate: `test/03_system/browser_engine/chrome_vector_font_differential_spec.spl`.
-  Run: `SIMPLE_TIMEOUT_SECONDS=600 bin/simple test --no-session-daemon
-  test/03_system/browser_engine/chrome_vector_font_differential_spec.spl`.
-- This follows the counterpart-conformance discipline (one differential
-  pipeline; see [counterpart_conformance](../counterpart_conformance/skill.md)).
 
 ## Update Rule
 

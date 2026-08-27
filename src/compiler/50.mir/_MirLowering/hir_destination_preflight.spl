@@ -1,0 +1,519 @@
+# Full reachable destination-HIR graph preflight. This owner reads scalar rows
+# only; the canonical aggregate never crosses the HIR/MIR boundary.
+use compiler.hir.hir_lowering.hir_destination_registry_reader.*
+use compiler.hir.hir_lowering.hir_destination_graph.*
+use compiler.hir.hir_lowering.hir_destination_block_values.*
+use compiler.hir.hir_lowering.hir_destination_symbols.{HD_SYMBOL_KIND_CLASS,
+    HD_SYMBOL_KIND_STRUCT, HD_SYMBOL_KIND_ENUM}
+use compiler.mir._MirLowering.hir_destination_receipt.*
+use compiler.mir._MirLowering.hir_destination_dispatch.*
+
+struct HirDestinationPreflight:
+    epoch: i64 = 1
+    kinds: [i64] = []
+    rows: [i64] = []
+    exits: [bool] = []
+    expr_color: [i64] = []
+    expr_purity: [i64] = []
+    stmt_color: [i64] = []
+    type_color: [i64] = []
+    pattern_color: [i64] = []
+    effect_color: [i64] = []
+    dim_color: [i64] = []
+    aux_color: [i64] = []
+    block_color: [i64] = []
+    bv_color: [i64] = []
+    active_expr_count: i64 = 0
+    active_stmt_count: i64 = 0
+    active_type_count: i64 = 0
+    active_pattern_count: i64 = 0
+    active_effect_count: i64 = 0
+    active_dim_count: i64 = 0
+    active_aux_count: i64 = 0
+    active_block_count: i64 = 0
+    active_bv_count: i64 = 0
+    reachable_expr_row_limit: i64 = 0
+    failed: bool = false
+
+impl HirDestinationPreflight:
+    me reset(r: MirDestinationFunctionReceipt):
+        while self.kinds.len() > 0: self.kinds.pop()
+        while self.rows.len() > 0: self.rows.pop()
+        while self.exits.len() > 0: self.exits.pop()
+        self.failed = false
+        self.reachable_expr_row_limit = 0
+        self.epoch = self.epoch + 1
+        if self.epoch <= 0:
+            # Remote wraparound: clear once before reusing epoch one.
+            var reset_i = 0
+            while reset_i < self.expr_color.len(): self.expr_color[reset_i] = 0; reset_i = reset_i + 1
+            reset_i = 0; while reset_i < self.expr_purity.len(): self.expr_purity[reset_i] = 0; reset_i = reset_i + 1
+            reset_i = 0; while reset_i < self.stmt_color.len(): self.stmt_color[reset_i] = 0; reset_i = reset_i + 1
+            reset_i = 0; while reset_i < self.type_color.len(): self.type_color[reset_i] = 0; reset_i = reset_i + 1
+            reset_i = 0; while reset_i < self.pattern_color.len(): self.pattern_color[reset_i] = 0; reset_i = reset_i + 1
+            reset_i = 0; while reset_i < self.effect_color.len(): self.effect_color[reset_i] = 0; reset_i = reset_i + 1
+            reset_i = 0; while reset_i < self.dim_color.len(): self.dim_color[reset_i] = 0; reset_i = reset_i + 1
+            reset_i = 0; while reset_i < self.aux_color.len(): self.aux_color[reset_i] = 0; reset_i = reset_i + 1
+            reset_i = 0; while reset_i < self.block_color.len(): self.block_color[reset_i] = 0; reset_i = reset_i + 1
+            reset_i = 0; while reset_i < self.bv_color.len(): self.bv_color[reset_i] = 0; reset_i = reset_i + 1
+            self.epoch = 1
+        val expr_count = hdr_count(r.slot, r.generation, HD_RANGE_EXPR)
+        val stmt_count = hdr_count(r.slot, r.generation, HD_RANGE_STMT)
+        val type_count = hdr_count(r.slot, r.generation, HD_RANGE_TYPE)
+        val pattern_count = hdr_count(r.slot, r.generation, HD_RANGE_PATTERN)
+        val effect_count = hdr_count(r.slot, r.generation, HD_RANGE_EFFECT)
+        val dim_count = hdr_count(r.slot, r.generation, HD_RANGE_DIM)
+        val aux_count = hdr_count(r.slot, r.generation, HD_RANGE_AUX)
+        val block_count = hdr_count(r.slot, r.generation, HD_RANGE_BLOCK)
+        val bv_count = hdr_count(r.slot, r.generation, 20)
+        self.active_expr_count = expr_count; self.active_stmt_count = stmt_count
+        self.active_type_count = type_count; self.active_pattern_count = pattern_count
+        self.active_effect_count = effect_count; self.active_dim_count = dim_count
+        self.active_aux_count = aux_count; self.active_block_count = block_count
+        self.active_bv_count = bv_count
+        while self.expr_color.len() < expr_count: self.expr_color.push(0)
+        while self.expr_purity.len() < expr_count: self.expr_purity.push(0)
+        while self.stmt_color.len() < stmt_count: self.stmt_color.push(0)
+        while self.type_color.len() < type_count: self.type_color.push(0)
+        while self.pattern_color.len() < pattern_count: self.pattern_color.push(0)
+        while self.effect_color.len() < effect_count: self.effect_color.push(0)
+        while self.dim_color.len() < dim_count: self.dim_color.push(0)
+        while self.aux_color.len() < aux_count: self.aux_color.push(0)
+        while self.block_color.len() < block_count: self.block_color.push(0)
+        while self.bv_color.len() < bv_count: self.bv_color.push(0)
+
+    fn count_for(kind: i64) -> i64:
+        if kind == HD_RANGE_EXPR: return self.active_expr_count
+        if kind == HD_RANGE_STMT: return self.active_stmt_count
+        if kind == HD_RANGE_TYPE: return self.active_type_count
+        if kind == HD_RANGE_PATTERN: return self.active_pattern_count
+        if kind == HD_RANGE_EFFECT: return self.active_effect_count
+        if kind == HD_RANGE_DIM: return self.active_dim_count
+        if kind == HD_RANGE_AUX: return self.active_aux_count
+        if kind == HD_RANGE_BLOCK: return self.active_block_count
+        if kind == 20: return self.active_bv_count
+        0
+
+    fn color(kind: i64, row: i64) -> i64:
+        if row < 0 or row >= self.count_for(kind): return -1
+        val mark = if kind == HD_RANGE_EXPR: self.expr_color[row]
+            elif kind == HD_RANGE_STMT: self.stmt_color[row]
+            elif kind == HD_RANGE_TYPE: self.type_color[row]
+            elif kind == HD_RANGE_PATTERN: self.pattern_color[row]
+            elif kind == HD_RANGE_EFFECT: self.effect_color[row]
+            elif kind == HD_RANGE_DIM: self.dim_color[row]
+            elif kind == HD_RANGE_AUX: self.aux_color[row]
+            elif kind == HD_RANGE_BLOCK: self.block_color[row]
+            elif kind == 20: self.bv_color[row]
+            else: 0
+        if mark == self.epoch: return 1
+        if mark == -self.epoch: return 2
+        0
+
+    me set_color(kind: i64, row: i64, value: i64):
+        val mark = if value == 1: self.epoch else: -self.epoch
+        if kind == HD_RANGE_EXPR: self.expr_color[row] = mark
+        elif kind == HD_RANGE_STMT: self.stmt_color[row] = mark
+        elif kind == HD_RANGE_TYPE: self.type_color[row] = mark
+        elif kind == HD_RANGE_PATTERN: self.pattern_color[row] = mark
+        elif kind == HD_RANGE_EFFECT: self.effect_color[row] = mark
+        elif kind == HD_RANGE_DIM: self.dim_color[row] = mark
+        elif kind == HD_RANGE_AUX: self.aux_color[row] = mark
+        elif kind == HD_RANGE_BLOCK: self.block_color[row] = mark
+        elif kind == 20: self.bv_color[row] = mark
+
+    me push(kind: i64, row: i64):
+        if row < 0 or row >= self.count_for(kind): self.failed = true; return
+        if kind == HD_RANGE_EXPR and row + 1 > self.reachable_expr_row_limit:
+            self.reachable_expr_row_limit = row + 1
+        self.kinds.push(kind); self.rows.push(row); self.exits.push(false)
+
+    me push_optional(kind: i64, row: i64):
+        if row >= 0: self.push(kind, row)
+
+    me push_range(r: MirDestinationFunctionReceipt, handle: i64, expected_kind: i64):
+        if (handle < 0 or not hdr_range_published(r.slot, r.generation, handle) or
+                hdr_range_kind(r.slot, r.generation, handle) != expected_kind):
+            self.failed = true; return
+        val subtype = hdr_range_subtype(r.slot, r.generation, handle)
+        val count = hdr_range_length(r.slot, r.generation, handle)
+        if count < 0: self.failed = true; return
+        var i = 0
+        while i < count:
+            self.push(expected_kind, hdr_range_value(r.slot, r.generation, handle, subtype, i))
+            i = i + 1
+
+    me expand_type(r: MirDestinationFunctionReceipt, row: i64):
+        val shape = hdr_type_shape(r.slot, r.generation, row)
+        if not mir_destination_type_shape_supported(shape): self.failed = true; return
+        if shape == HD_TYPE_INT:
+            val bits = hdr_type_i64(r.slot, r.generation, row, 0)
+            if bits <= 0 or bits > 64: self.failed = true; return
+        if shape == HD_TYPE_FLOAT:
+            val bits = hdr_type_i64(r.slot, r.generation, row, 0)
+            if bits != 32 and bits != 64: self.failed = true; return
+        if shape == HD_TYPE_NAMED:
+            if hdr_range_length(r.slot, r.generation,
+                    hdr_type_range(r.slot, r.generation, row, false)) != 0:
+                self.failed = true; return
+            val symbol = hdr_type_i64(r.slot, r.generation, row, 0)
+            val module_row = hdr_type_i64(r.slot, r.generation, row, 1)
+            val symbol_row = hdr_destination_symbol_lookup_in_module(r.slot,
+                r.generation, module_row, symbol)
+            val symbol_kind = hdr_destination_symbol_kind(r.slot,
+                r.generation, symbol_row)
+            if (symbol < 0 or module_row < 0 or symbol_row < 0 or
+                    (symbol_kind != HD_SYMBOL_KIND_CLASS and
+                     symbol_kind != HD_SYMBOL_KIND_STRUCT and
+                     symbol_kind != HD_SYMBOL_KIND_ENUM)):
+                self.failed = true; return
+        if shape == HD_TYPE_ARRAY:
+            if (not hdr_type_bool(r.slot, r.generation, row, 0) or
+                    hdr_type_i64(r.slot, r.generation, row, 1) < 0):
+                self.failed = true; return
+        if shape == HD_TYPE_FUNCTION and hdr_range_length(r.slot, r.generation,
+                hdr_type_range(r.slot, r.generation, row, true)) != 0:
+            self.failed = true; return
+        if shape == HD_TYPE_QUALIFIED_DYN_TRAIT:
+            val defining_module = hdr_type_qualified_dyn_trait_module(r.slot, r.generation, row)
+            if defining_module < 0 or hdr_module_identity(r.slot, r.generation, defining_module) < 0:
+                self.failed = true; return
+        if (shape == HD_TYPE_ARRAY or shape == HD_TYPE_SLICE or shape == HD_TYPE_REF or
+                shape == HD_TYPE_PTR or shape == HD_TYPE_OPTIONAL or shape == HD_TYPE_PROJECTION or
+                shape == HD_TYPE_ISOLATED or shape == HD_TYPE_WEAK or shape == HD_TYPE_ATOMIC):
+            self.push(HD_RANGE_TYPE, hdr_type_i64(r.slot, r.generation, row, 0))
+        elif shape == HD_TYPE_DICT or shape == HD_TYPE_RESULT:
+            self.push(HD_RANGE_TYPE, hdr_type_i64(r.slot, r.generation, row, 0)); self.push(HD_RANGE_TYPE, hdr_type_i64(r.slot, r.generation, row, 1))
+        elif shape == HD_TYPE_TUPLE or shape == HD_TYPE_UNION or shape == HD_TYPE_NAMED:
+            self.push_range(r, hdr_type_range(r.slot, r.generation, row, false), HD_RANGE_TYPE)
+        elif shape == HD_TYPE_FUNCTION:
+            self.push(HD_RANGE_TYPE, hdr_type_i64(r.slot, r.generation, row, 0))
+            self.push_range(r, hdr_type_range(r.slot, r.generation, row, false), HD_RANGE_TYPE)
+            self.push_range(r, hdr_type_range(r.slot, r.generation, row, true), HD_RANGE_EFFECT)
+        elif shape == HD_TYPE_TENSOR:
+            self.push(HD_RANGE_TYPE, hdr_type_i64(r.slot, r.generation, row, 0))
+            self.push_range(r, hdr_type_range(r.slot, r.generation, row, false), HD_RANGE_DIM)
+        elif shape == HD_TYPE_LAYER:
+            self.push_range(r, hdr_type_range(r.slot, r.generation, row, false), HD_RANGE_DIM)
+            self.push_range(r, hdr_type_range(r.slot, r.generation, row, true), HD_RANGE_DIM)
+
+    me expand_pattern(r: MirDestinationFunctionReceipt, row: i64):
+        val shape = hdr_pattern_shape(r.slot, r.generation, row)
+        if not mir_destination_pattern_shape_supported(shape): self.failed = true; return
+        # Destination MIR has no representation for an array-rest binding yet.
+        # Reject it before any function or synthesized helper is published.
+        if shape == HD_PATTERN_ARRAY and hdr_pattern_bool(r.slot, r.generation, row, 0):
+            self.failed = true; return
+        self.push_optional(HD_RANGE_TYPE, hdr_pattern_type(r.slot, r.generation, row))
+        if shape == HD_PATTERN_LITERAL:
+            self.push(HD_RANGE_EXPR, hdr_pattern_i64(r.slot, r.generation, row, 0))
+        elif shape == HD_PATTERN_TUPLE or shape == HD_PATTERN_ARRAY or shape == HD_PATTERN_OR:
+            self.push_range(r, hdr_pattern_range(r.slot, r.generation, row), HD_RANGE_PATTERN)
+        elif shape == HD_PATTERN_STRUCT:
+            self.push(HD_RANGE_TYPE, hdr_pattern_i64(r.slot, r.generation, row, 0)); self.push_range(r, hdr_pattern_range(r.slot, r.generation, row), HD_RANGE_AUX)
+        elif shape == HD_PATTERN_ENUM:
+            self.push(HD_RANGE_TYPE, hdr_pattern_i64(r.slot, r.generation, row, 0)); self.push_optional(HD_RANGE_AUX, hdr_pattern_i64(r.slot, r.generation, row, 1))
+        elif shape == HD_PATTERN_RANGE:
+            if hdr_pattern_endpoint_present(r.slot, r.generation, row, false): self.push(HD_RANGE_EXPR, hdr_pattern_i64(r.slot, r.generation, row, 0))
+            if hdr_pattern_endpoint_present(r.slot, r.generation, row, true): self.push(HD_RANGE_EXPR, hdr_pattern_i64(r.slot, r.generation, row, 1))
+        elif shape == HD_PATTERN_AS:
+            self.push(HD_RANGE_PATTERN, hdr_pattern_i64(r.slot, r.generation, row, 0))
+
+    me expand_aux(r: MirDestinationFunctionReceipt, row: i64):
+        val shape = hdr_aux_shape(r.slot, r.generation, row)
+        if not mir_destination_aux_shape_supported(shape): self.failed = true; return
+        if shape == HD_AUX_METHOD_RESOLUTION and hdr_aux_i64(r.slot, r.generation, row, 0) >= HD_RESOLUTION_QUALIFIED_INSTANCE:
+            val defining_module = hdr_method_resolution_defining_module(r.slot, r.generation, row)
+            if defining_module < 0 or hdr_module_identity(r.slot, r.generation, defining_module) < 0:
+                self.failed = true; return
+        if shape == HD_AUX_INTERPOLATION or shape == HD_AUX_CALL_ARG or shape == HD_AUX_NAMED_EXPR:
+            self.push(HD_RANGE_EXPR, hdr_aux_i64(r.slot, r.generation, row, 0))
+        elif shape == HD_AUX_DICT_ENTRY:
+            self.push(HD_RANGE_EXPR, hdr_aux_i64(r.slot, r.generation, row, 0)); self.push(HD_RANGE_EXPR, hdr_aux_i64(r.slot, r.generation, row, 1))
+        elif shape == HD_AUX_IF_ARM:
+            self.push(HD_RANGE_EXPR, hdr_aux_i64(r.slot, r.generation, row, 0)); self.push(HD_RANGE_BLOCK, hdr_aux_i64(r.slot, r.generation, row, 1))
+        elif shape == HD_AUX_MATCH_ARM:
+            self.push(HD_RANGE_PATTERN, hdr_aux_i64(r.slot, r.generation, row, 0)); self.push_optional(HD_RANGE_EXPR, hdr_aux_i64(r.slot, r.generation, row, 1)); self.push(HD_RANGE_BLOCK, hdr_aux_i64(r.slot, r.generation, row, 2))
+        elif shape == HD_AUX_CATCH:
+            val pattern = hdr_aux_i64(r.slot, r.generation, row, 0)
+            if pattern >= 0:
+                val pattern_shape = hdr_pattern_shape(r.slot, r.generation, pattern)
+                if pattern_shape != HD_PATTERN_WILDCARD and pattern_shape != HD_PATTERN_BINDING:
+                    self.failed = true; return
+            self.push_optional(HD_RANGE_PATTERN, pattern); self.push_optional(HD_RANGE_TYPE, hdr_aux_i64(r.slot, r.generation, row, 1)); self.push(HD_RANGE_BLOCK, hdr_aux_i64(r.slot, r.generation, row, 2))
+        elif shape == HD_AUX_WITH_ITEM:
+            self.push(HD_RANGE_EXPR, hdr_aux_i64(r.slot, r.generation, row, 0)); self.push_optional(HD_RANGE_PATTERN, hdr_aux_i64(r.slot, r.generation, row, 1))
+        elif shape == HD_AUX_COMP_FOR:
+            self.push(HD_RANGE_EXPR, hdr_aux_i64(r.slot, r.generation, row, 1))
+        elif shape == HD_AUX_COMP_IF:
+            self.push(HD_RANGE_EXPR, hdr_aux_i64(r.slot, r.generation, row, 0))
+        elif shape == HD_AUX_PARAM:
+            self.push(HD_RANGE_TYPE, hdr_aux_i64(r.slot, r.generation, row, 1)); self.push_optional(HD_RANGE_EXPR, hdr_aux_i64(r.slot, r.generation, row, 2))
+        elif shape == HD_AUX_TYPE_PARAM:
+            self.push_range(r, hdr_aux_range(r.slot, r.generation, row), HD_RANGE_TYPE); self.push_optional(HD_RANGE_TYPE, hdr_aux_i64(r.slot, r.generation, row, 1))
+        elif shape == HD_AUX_NAMED_PATTERN:
+            self.push(HD_RANGE_PATTERN, hdr_aux_i64(r.slot, r.generation, row, 0))
+        elif shape == HD_AUX_ENUM_TUPLE:
+            self.push_range(r, hdr_aux_range(r.slot, r.generation, row), HD_RANGE_EXPR)
+        elif shape == HD_AUX_ENUM_STRUCT:
+            self.push_range(r, hdr_aux_range(r.slot, r.generation, row), HD_RANGE_AUX)
+        elif shape == HD_AUX_PATTERN_TUPLE:
+            self.push_range(r, hdr_aux_range(r.slot, r.generation, row), HD_RANGE_PATTERN)
+        elif shape == HD_AUX_PATTERN_STRUCT:
+            self.push_range(r, hdr_aux_range(r.slot, r.generation, row), HD_RANGE_AUX)
+        elif shape == HD_AUX_CUSTOM_VALUE:
+            val children = hdr_aux_range(r.slot, r.generation, row)
+            if children >= 0: self.push_range(r, children, HD_RANGE_AUX)
+        elif shape == HD_AUX_ASM_CONSTRAINT:
+            self.push(HD_RANGE_EXPR, hdr_aux_i64(r.slot, r.generation, row, 2)); self.push_optional(HD_RANGE_EXPR, hdr_aux_i64(r.slot, r.generation, row, 3))
+        elif shape == HD_AUX_ASM_ARM:
+            self.push_optional(HD_RANGE_AUX, hdr_aux_i64(r.slot, r.generation, row, 0)); self.push_optional(HD_RANGE_AUX, hdr_aux_i64(r.slot, r.generation, row, 1))
+        elif shape == HD_AUX_CONTRACT_CLAUSE:
+            self.push(HD_RANGE_EXPR, hdr_aux_i64(r.slot, r.generation, row, 1))
+        elif shape == HD_AUX_CONTRACT or shape == HD_AUX_DRIVER_MANIFEST:
+            self.push_range(r, hdr_aux_range(r.slot, r.generation, row), HD_RANGE_AUX)
+        elif shape == HD_AUX_MODULE_IMPORT or shape == HD_AUX_MODULE_EXPORT:
+            self.push_optional(HD_RANGE_AUX, hdr_aux_i64(r.slot, r.generation, row, 4))
+        elif shape == HD_AUX_VHDL_GENERIC:
+            self.push(HD_RANGE_AUX, hdr_aux_i64(r.slot, r.generation, row, 0))
+        elif shape == HD_AUX_VHDL_CLOCKED:
+            self.push_range(r, hdr_aux_i64(r.slot, r.generation, row, 3), HD_RANGE_AUX); self.push(HD_RANGE_AUX, hdr_aux_i64(r.slot, r.generation, row, 5))
+        elif shape == HD_AUX_VHDL_METADATA:
+            self.push_range(r, hdr_aux_i64(r.slot, r.generation, row, 0), HD_RANGE_AUX); self.push_optional(HD_RANGE_AUX, hdr_aux_i64(r.slot, r.generation, row, 2)); self.push_range(r, hdr_aux_i64(r.slot, r.generation, row, 3), HD_RANGE_AUX)
+        elif shape == HD_AUX_ASM:
+            self.push_range(r, hdr_aux_i64(r.slot, r.generation, row, 0), HD_RANGE_AUX); self.push_range(r, hdr_aux_i64(r.slot, r.generation, row, 2), HD_RANGE_AUX); self.push_range(r, hdr_aux_i64(r.slot, r.generation, row, 4), HD_RANGE_AUX); self.push_range(r, hdr_aux_range(r.slot, r.generation, row), HD_RANGE_AUX)
+        elif shape == HD_AUX_ASM_SPEC:
+            self.push_range(r, hdr_aux_i64(r.slot, r.generation, row, 0), HD_RANGE_AUX); self.push_optional(HD_RANGE_AUX, hdr_aux_i64(r.slot, r.generation, row, 2)); self.push_optional(HD_RANGE_AUX, hdr_aux_i64(r.slot, r.generation, row, 3)); self.push_optional(HD_RANGE_AUX, hdr_aux_i64(r.slot, r.generation, row, 4)); self.push_range(r, hdr_aux_range(r.slot, r.generation, row), HD_RANGE_AUX)
+
+    me expand_stmt(r: MirDestinationFunctionReceipt, row: i64):
+        val shape = hdr_stmt_shape(r.slot, r.generation, row)
+        if not mir_destination_stmt_shape_supported(shape): self.failed = true; return
+        if shape == HD_STMT_EXPR:
+            self.push(HD_RANGE_EXPR, hdr_stmt_i64(r.slot, r.generation, row, 0))
+        elif shape == HD_STMT_LET or shape == HD_STMT_SHARED_VAL or shape == HD_STMT_SHARED_VAR:
+            self.push_optional(HD_RANGE_TYPE, hdr_stmt_i64(r.slot, r.generation, row, 1)); self.push_optional(HD_RANGE_EXPR, hdr_stmt_i64(r.slot, r.generation, row, 2))
+        elif shape == HD_STMT_ASSIGN:
+            self.push(HD_RANGE_EXPR, hdr_stmt_i64(r.slot, r.generation, row, 0)); self.push(HD_RANGE_EXPR, hdr_stmt_i64(r.slot, r.generation, row, 2))
+        elif shape == HD_STMT_BLOCK:
+            self.push(HD_RANGE_BLOCK, hdr_stmt_i64(r.slot, r.generation, row, 0))
+        elif shape == HD_STMT_ASM_ASSERT:
+            self.push(HD_RANGE_AUX, hdr_stmt_i64(r.slot, r.generation, row, 0))
+        elif shape == HD_STMT_GPU_LAUNCH:
+            self.push_range(r, hdr_stmt_i64(r.slot, r.generation, row, 0), HD_RANGE_EXPR); self.push_range(r, hdr_stmt_i64(r.slot, r.generation, row, 2), HD_RANGE_EXPR); self.push(HD_RANGE_BLOCK, hdr_stmt_i64(r.slot, r.generation, row, 4))
+
+    me expand_expr(r: MirDestinationFunctionReceipt, row: i64):
+        val shape = hdr_expr_shape(r.slot, r.generation, row)
+        if not mir_destination_expr_shape_supported(shape): self.failed = true; return
+        if shape == HD_EXPR_QUALIFIED_NAMED_VAR:
+            val defining_module = hdr_expr_i64(r.slot, r.generation, row, 1)
+            if defining_module < 0 or hdr_module_identity(r.slot, r.generation, defining_module) < 0:
+                self.failed = true; return
+        if shape == HD_EXPR_RESOLVED_FIELD:
+            val defining_module = hdr_expr_i64(r.slot, r.generation, row, 2)
+            if defining_module < 0 or hdr_module_identity(r.slot, r.generation, defining_module) < 0:
+                self.failed = true; return
+        self.push_optional(HD_RANGE_TYPE, hdr_expr_type(r.slot, r.generation, row))
+        if shape == HD_EXPR_STRING:
+            if hdr_expr_bool(r.slot, r.generation, row, 0): self.push_range(r, hdr_expr_range(r.slot, r.generation, row, false), HD_RANGE_AUX)
+        elif shape == HD_EXPR_FIELD or shape == HD_EXPR_TUPLE_INDEX or shape == HD_EXPR_OPTIONAL_CHAIN or shape == HD_EXPR_EXISTS or shape == HD_EXPR_UNWRAP or shape == HD_EXPR_THROW or shape == HD_EXPR_TRY or shape == HD_EXPR_AWAIT or shape == HD_EXPR_SPAWN or shape == HD_EXPR_TYPE_TEST:
+            self.push(HD_RANGE_EXPR, hdr_expr_i64(r.slot, r.generation, row, 0))
+        elif shape == HD_EXPR_CAST or shape == HD_EXPR_AS:
+            self.push(HD_RANGE_EXPR, hdr_expr_i64(r.slot, r.generation, row, 0))
+            self.push(HD_RANGE_TYPE, hdr_expr_i64(r.slot, r.generation, row, 1))
+        elif shape == HD_EXPR_INDEX or shape == HD_EXPR_NULL_COALESCE or shape == HD_EXPR_ARRAY_REPEAT or shape == HD_EXPR_DICT_COMPREHENSION:
+            self.push(HD_RANGE_EXPR, hdr_expr_i64(r.slot, r.generation, row, 0)); self.push(HD_RANGE_EXPR, hdr_expr_i64(r.slot, r.generation, row, 1)); self.push_optional(HD_RANGE_TYPE, hdr_expr_i64(r.slot, r.generation, row, 2))
+        elif shape == HD_EXPR_RESOLVED_FIELD:
+            self.push(HD_RANGE_EXPR, hdr_expr_i64(r.slot, r.generation, row, 0))
+        elif shape == HD_EXPR_UNARY:
+            self.push(HD_RANGE_EXPR, hdr_expr_i64(r.slot, r.generation, row, 1))
+        elif shape == HD_EXPR_BINARY:
+            self.push(HD_RANGE_EXPR, hdr_expr_i64(r.slot, r.generation, row, 1)); self.push(HD_RANGE_EXPR, hdr_expr_i64(r.slot, r.generation, row, 2))
+        elif shape == HD_EXPR_ARRAY or shape == HD_EXPR_TUPLE or shape == HD_EXPR_SET:
+            self.push_range(r, hdr_expr_range(r.slot, r.generation, row, false), HD_RANGE_EXPR); self.push_optional(HD_RANGE_TYPE, hdr_expr_i64(r.slot, r.generation, row, 0))
+        elif shape == HD_EXPR_ARRAY_SUFFIX:
+            self.push(HD_RANGE_AUX, hdr_expr_i64(r.slot, r.generation, row, 0)); self.push_range(r, hdr_expr_range(r.slot, r.generation, row, false), HD_RANGE_EXPR)
+        elif shape == HD_EXPR_GPU_INTRINSIC:
+            val gpu_kind = hdr_expr_i64(r.slot, r.generation, row, 0)
+            val gpu_args = hdr_expr_range(r.slot, r.generation, row, false)
+            if gpu_kind < 0 or gpu_kind > 7:
+                self.failed = true; return
+            if gpu_kind == 7 and hdr_range_length(r.slot, r.generation,
+                    gpu_args) != 3:
+                self.failed = true; return
+            self.push_range(r, gpu_args, HD_RANGE_EXPR)
+        elif shape == HD_EXPR_DICT or shape == HD_EXPR_STRUCT:
+            self.push_range(r, hdr_expr_range(r.slot, r.generation, row, false), HD_RANGE_AUX); self.push_optional(HD_RANGE_TYPE, hdr_expr_i64(r.slot, r.generation, row, 0)); self.push_optional(HD_RANGE_TYPE, hdr_expr_i64(r.slot, r.generation, row, 1))
+        elif shape == HD_EXPR_CALL:
+            self.push(HD_RANGE_EXPR, hdr_expr_i64(r.slot, r.generation, row, 0)); self.push_range(r, hdr_expr_range(r.slot, r.generation, row, false), HD_RANGE_AUX); self.push_range(r, hdr_expr_range(r.slot, r.generation, row, true), HD_RANGE_TYPE)
+        elif shape == HD_EXPR_METHOD_CALL:
+            self.push(HD_RANGE_EXPR, hdr_expr_i64(r.slot, r.generation, row, 0)); self.push(HD_RANGE_AUX, hdr_expr_i64(r.slot, r.generation, row, 1)); self.push_range(r, hdr_expr_range(r.slot, r.generation, row, false), HD_RANGE_AUX)
+        elif shape == HD_EXPR_STATIC_CALL:
+            self.push(HD_RANGE_TYPE, hdr_expr_i64(r.slot, r.generation, row, 0)); self.push(HD_RANGE_AUX, hdr_expr_i64(r.slot, r.generation, row, 1)); self.push_range(r, hdr_expr_range(r.slot, r.generation, row, false), HD_RANGE_AUX)
+        elif shape == HD_EXPR_IF:
+            self.push(HD_RANGE_EXPR, hdr_expr_i64(r.slot, r.generation, row, 0)); self.push(HD_RANGE_BLOCK, hdr_expr_i64(r.slot, r.generation, row, 1)); self.push_optional(HD_RANGE_BLOCK, hdr_expr_i64(r.slot, r.generation, row, 2))
+        elif shape == HD_EXPR_IF_CHAIN:
+            self.push_optional(HD_RANGE_BLOCK, hdr_expr_i64(r.slot, r.generation, row, 0)); self.push_range(r, hdr_expr_range(r.slot, r.generation, row, false), HD_RANGE_AUX)
+        elif shape == HD_EXPR_MATCH:
+            self.push(HD_RANGE_EXPR, hdr_expr_i64(r.slot, r.generation, row, 0)); self.push_range(r, hdr_expr_range(r.slot, r.generation, row, false), HD_RANGE_AUX)
+        elif shape == HD_EXPR_WITH:
+            self.push(HD_RANGE_BLOCK, hdr_expr_i64(r.slot, r.generation, row, 0)); self.push_range(r, hdr_expr_range(r.slot, r.generation, row, false), HD_RANGE_AUX)
+        elif shape == HD_EXPR_COMPREHENSION:
+            self.push(HD_RANGE_EXPR, hdr_expr_i64(r.slot, r.generation, row, 1)); self.push_range(r, hdr_expr_range(r.slot, r.generation, row, false), HD_RANGE_AUX)
+        elif shape == HD_EXPR_INLINE_ASM_MATCH:
+            self.push_range(r, hdr_expr_range(r.slot, r.generation, row, false), HD_RANGE_AUX)
+        elif shape == HD_EXPR_LOOP or shape == HD_EXPR_BLOCK or shape == HD_EXPR_LOSS or shape == HD_EXPR_NOGRAD or shape == HD_EXPR_UNSAFE:
+            self.push(HD_RANGE_BLOCK, hdr_expr_i64(r.slot, r.generation, row, 0))
+        elif shape == HD_EXPR_WHILE:
+            self.push(HD_RANGE_EXPR, hdr_expr_i64(r.slot, r.generation, row, 0)); self.push(HD_RANGE_BLOCK, hdr_expr_i64(r.slot, r.generation, row, 1))
+        elif shape == HD_EXPR_FOR:
+            val iterable = hdr_expr_i64(r.slot, r.generation, row, 1)
+            if hdr_expr_shape(r.slot, r.generation, iterable) == HD_EXPR_RANGE:
+                # A Range has exact flat semantics only as the scalar iterator
+                # descriptor consumed by `lower_destination_for`; it is not a
+                # first-class MIR value. Validate its operands in that context
+                # without advertising standalone Range expression support.
+                self.push_optional(HD_RANGE_EXPR, hdr_expr_i64(r.slot,
+                    r.generation, iterable, 0))
+                self.push_optional(HD_RANGE_EXPR, hdr_expr_i64(r.slot,
+                    r.generation, iterable, 1))
+                self.push_optional(HD_RANGE_EXPR, hdr_expr_i64(r.slot,
+                    r.generation, iterable, 2))
+            else:
+                self.push(HD_RANGE_EXPR, iterable)
+            self.push(HD_RANGE_BLOCK, hdr_expr_i64(r.slot, r.generation, row, 2))
+        elif shape == HD_EXPR_LAMBDA:
+            self.push(HD_RANGE_EXPR, hdr_expr_i64(r.slot, r.generation, row, 0)); self.push_range(r, hdr_expr_range(r.slot, r.generation, row, false), HD_RANGE_AUX); self.push_range(r, hdr_expr_range(r.slot, r.generation, row, true), HD_RANGE_AUX)
+        elif shape == HD_EXPR_HOST_GPU:
+            self.push(HD_RANGE_EXPR, hdr_expr_i64(r.slot, r.generation, row, 2)); self.push(HD_RANGE_BLOCK, hdr_expr_i64(r.slot, r.generation, row, 3))
+        elif shape == HD_EXPR_RETURN or shape == HD_EXPR_BREAK or shape == HD_EXPR_YIELD:
+            self.push_optional(HD_RANGE_EXPR, hdr_expr_i64(r.slot, r.generation, row, 0))
+        elif shape == HD_EXPR_ENUM:
+            self.push(HD_RANGE_TYPE, hdr_expr_i64(r.slot, r.generation, row, 0)); self.push_optional(HD_RANGE_AUX, hdr_expr_i64(r.slot, r.generation, row, 1))
+        elif shape == HD_EXPR_RANGE:
+            self.push_optional(HD_RANGE_EXPR, hdr_expr_i64(r.slot, r.generation, row, 0)); self.push_optional(HD_RANGE_EXPR, hdr_expr_i64(r.slot, r.generation, row, 1)); self.push_optional(HD_RANGE_EXPR, hdr_expr_i64(r.slot, r.generation, row, 2))
+        elif shape == HD_EXPR_CUSTOM_BLOCK:
+            self.push(20, hdr_expr_i64(r.slot, r.generation, row, 0))
+        elif shape == HD_EXPR_INLINE_ASM:
+            self.push(HD_RANGE_AUX, hdr_expr_i64(r.slot, r.generation, row, 0))
+        elif shape == HD_EXPR_TRY_CATCH:
+            self.push(HD_RANGE_BLOCK, hdr_expr_i64(r.slot, r.generation, row, 0)); self.push_range(r, hdr_expr_range(r.slot, r.generation, row, false), HD_RANGE_AUX); self.push_optional(HD_RANGE_BLOCK, hdr_expr_i64(r.slot, r.generation, row, 1))
+        elif shape == HD_EXPR_KERNEL_LAUNCH:
+            self.push(HD_RANGE_EXPR, hdr_expr_i64(r.slot, r.generation, row, 0)); self.push(HD_RANGE_EXPR, hdr_expr_i64(r.slot, r.generation, row, 1)); self.push(HD_RANGE_EXPR, hdr_expr_i64(r.slot, r.generation, row, 2)); self.push_range(r, hdr_expr_range(r.slot, r.generation, row, false), HD_RANGE_AUX)
+
+    me expand_block(r: MirDestinationFunctionReceipt, row: i64):
+        if not hdr_block_ready(r.slot, r.generation, row): self.failed = true; return
+        self.push_range(r, hdr_block_stmt_range(r.slot, r.generation, row), HD_RANGE_STMT)
+        self.push_optional(HD_RANGE_EXPR, hdr_block_value(r.slot, r.generation, row))
+        self.push_range(r, hdr_block_cap_range(r.slot, r.generation, row), HD_RANGE_AUX)
+
+    me expand_bv(r: MirDestinationFunctionReceipt, row: i64):
+        val shape = hdr_bv_shape(r.slot, r.generation, row)
+        if not mir_destination_block_value_shape_supported(shape):
+            self.failed = true; return
+        if shape == HD_BV_EXPR:
+            self.push(HD_RANGE_EXPR, hdr_bv_i64(r.slot, r.generation, row, 0))
+        elif shape == HD_BV_LOSS or shape == HD_BV_NOGRAD:
+            self.push(HD_RANGE_BLOCK, hdr_bv_i64(r.slot, r.generation, row, 0))
+        elif shape == HD_BV_JSON_FIELD:
+            self.push(20, hdr_bv_i64(r.slot, r.generation, row, 0))
+        elif shape == HD_BV_CUSTOM:
+            self.push(20, hdr_bv_i64(r.slot, r.generation, row, 1))
+        elif shape == HD_BV_SHELL_COMMAND:
+            if hdr_bv_bool(r.slot, r.generation, row, 0): self.push(20, hdr_bv_i64(r.slot, r.generation, row, 0))
+        elif shape == HD_BV_GRAPH_NODE:
+            if hdr_bv_bool(r.slot, r.generation, row, 1): self.push(20, hdr_bv_i64(r.slot, r.generation, row, 0))
+        elif shape == HD_BV_GRAPH_EDGE:
+            if hdr_bv_bool(r.slot, r.generation, row, 0): self.push(20, hdr_bv_i64(r.slot, r.generation, row, 0))
+            if hdr_bv_bool(r.slot, r.generation, row, 1): self.push(20, hdr_bv_i64(r.slot, r.generation, row, 1))
+        val first = hdr_bv_range(r.slot, r.generation, row, false)
+        val first_len = hdr_bv_range_len(r.slot, r.generation, row, false)
+        var offset = 0
+        while offset < first_len: self.push(20, first + offset); offset = offset + 1
+        val second = hdr_bv_range(r.slot, r.generation, row, true)
+        val second_len = hdr_bv_range_len(r.slot, r.generation, row, true)
+        offset = 0
+        while offset < second_len: self.push(20, second + offset); offset = offset + 1
+
+    me expand(r: MirDestinationFunctionReceipt, kind: i64, row: i64):
+        if kind == HD_RANGE_EXPR:
+            self.expand_expr(r, row)
+        elif kind == HD_RANGE_STMT:
+            self.expand_stmt(r, row)
+        elif kind == HD_RANGE_TYPE:
+            self.expand_type(r, row)
+        elif kind == HD_RANGE_PATTERN:
+            self.expand_pattern(r, row)
+        elif kind == HD_RANGE_EFFECT:
+            if not mir_destination_effect_shape_supported(hdr_effect_shape(r.slot, r.generation, row)): self.failed = true
+            self.push_optional(HD_RANGE_TYPE, hdr_effect_type(r.slot, r.generation, row))
+        elif kind == HD_RANGE_DIM:
+            if not mir_destination_dim_shape_supported(hdr_dim_shape(r.slot, r.generation, row)): self.failed = true
+            val dim_shape = hdr_dim_shape(r.slot, r.generation, row)
+            if dim_shape == HD_DIM_ADD or dim_shape == HD_DIM_MUL or dim_shape == HD_DIM_DIV:
+                self.push(HD_RANGE_DIM, hdr_dim_i64(r.slot, r.generation, row, 0)); self.push(HD_RANGE_DIM, hdr_dim_i64(r.slot, r.generation, row, 1))
+        elif kind == HD_RANGE_AUX:
+            self.expand_aux(r, row)
+        elif kind == HD_RANGE_BLOCK:
+            self.expand_block(r, row)
+        elif kind == 20:
+            self.expand_bv(r, row)
+        else:
+            self.failed = true
+
+    fn expr_is_transitively_pure(row: i64) -> bool:
+        row >= 0 and row < self.active_expr_count and self.expr_purity[row] == self.epoch
+
+    me finish_expr_purity(r: MirDestinationFunctionReceipt, row: i64):
+        val shape = hdr_expr_shape(r.slot, r.generation, row)
+        var pure = (shape == HD_EXPR_INT or shape == HD_EXPR_FLOAT or
+            shape == HD_EXPR_BOOL or shape == HD_EXPR_CHAR or
+            shape == HD_EXPR_UNIT or shape == HD_EXPR_NIL)
+        if shape == HD_EXPR_UNARY:
+            val op = hdr_expr_i64(r.slot, r.generation, row, 0)
+            pure = (op == 0 or op == 1 or op == 2) and
+                self.expr_is_transitively_pure(hdr_expr_i64(r.slot, r.generation, row, 1))
+        elif shape == HD_EXPR_BINARY:
+            val op = hdr_expr_i64(r.slot, r.generation, row, 0)
+            pure = op >= 0 and op <= 19 and op != 6 and op != 13 and op != 14 and
+                self.expr_is_transitively_pure(hdr_expr_i64(r.slot, r.generation, row, 1)) and
+                self.expr_is_transitively_pure(hdr_expr_i64(r.slot, r.generation, row, 2))
+        elif shape == HD_EXPR_CAST:
+            val target_row = hdr_expr_i64(r.slot, r.generation, row, 1)
+            val target_shape = hdr_type_shape(r.slot, r.generation, target_row)
+            pure = (target_shape == HD_TYPE_INT or target_shape == HD_TYPE_FLOAT or
+                target_shape == HD_TYPE_BOOL or target_shape == HD_TYPE_CHAR) and
+                self.expr_is_transitively_pure(hdr_expr_i64(r.slot, r.generation, row, 0))
+        self.expr_purity[row] = if pure: self.epoch else: -self.epoch
+
+    me validate_function_graph(r: MirDestinationFunctionReceipt) -> bool:
+        if not mir_destination_receipt_still_active(r): return false
+        if hdr_function_module(r.slot, r.generation, r.function_row) != r.module_index: return false
+        if hdr_module_identity(r.slot, r.generation, r.module_index) < 0: return false
+        self.reset(r)
+        self.push(HD_RANGE_BLOCK, r.root_block)
+        self.push(HD_RANGE_TYPE, hdr_function_return_type(r.slot, r.generation, r.function_row))
+        self.push_range(r, hdr_function_type_params(r.slot, r.generation, r.function_row), HD_RANGE_AUX)
+        self.push_range(r, hdr_function_params(r.slot, r.generation, r.function_row), HD_RANGE_AUX)
+        self.push_range(r, hdr_function_effects(r.slot, r.generation, r.function_row), HD_RANGE_EFFECT)
+        self.push_range(r, hdr_function_metadata(r.slot, r.generation, r.function_row), HD_RANGE_AUX)
+        while self.kinds.len() > 0 and not self.failed:
+            val last = self.kinds.len() - 1
+            val kind = self.kinds[last]; val row = self.rows[last]; val exit = self.exits[last]
+            self.kinds.pop(); self.rows.pop(); self.exits.pop()
+            val color = self.color(kind, row)
+            if color < 0:
+                self.failed = true
+            elif exit:
+                if kind == HD_RANGE_EXPR: self.finish_expr_purity(r, row)
+                self.set_color(kind, row, 2)
+            elif color == 1:
+                # Destination HIR is an ownership tree/DAG. Back-edges would
+                # make recursive lowering non-terminating and are never legal.
+                self.failed = true
+            elif color == 0:
+                self.set_color(kind, row, 1)
+                self.kinds.push(kind); self.rows.push(row); self.exits.push(true)
+                self.expand(r, kind, row)
+        not self.failed and mir_destination_receipt_still_active(r)
+
+export HirDestinationPreflight

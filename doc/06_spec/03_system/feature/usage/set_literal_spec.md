@@ -2,6 +2,29 @@
 
 > Tests the `s{...}` set literal syntax for creating sets with automatic duplicate removal. Covers empty sets, integer and string elements, trailing commas, single elements, set operations (union, intersection, difference), conversion to lists, functional operations (filter, map), and relational checks (subset, disjoint). Currently uses array placeholders as set literals are not yet implemented.
 
+<!-- sdn-diagram:id=set_literal_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=set_literal_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+set_literal_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=set_literal_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 13 | 13 | 0 | 0 |
@@ -21,7 +44,7 @@ Tests the `s{...}` set literal syntax for creating sets with automatic duplicate
 | Category | Syntax |
 | Status | In Progress |
 | Source | `test/03_system/feature/usage/set_literal_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -35,8 +58,6 @@ Currently uses array placeholders as set literals are not yet implemented.
 ## Syntax
 
 ```simple
-use std.spec.step
-
 val nums = s{1, 2, 3}
 val union_set = a.union(b)
 val evens = nums.filter(_1 % 2 == 0)
@@ -51,22 +72,16 @@ Test set literal syntax: s{1, 2, 3}
 
 #### creates empty set
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- creates empty set
+1. check empty len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates empty set")
 # val empty = s{}  # TODO: Set literal syntax not yet implemented
 val empty = []  # Placeholder - use empty array for now
 check empty.len() == 0
@@ -76,18 +91,19 @@ check empty.len() == 0
 
 #### creates set from integer elements
 
-- creates set from integer elements
+1. check nums len
+2. check nums contains
+3. check nums contains
+4. check nums contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates set from integer elements")
 # val nums = s{1, 2, 3}  # TODO: Set literal syntax not yet implemented
 val nums = [1, 2, 3]  # Placeholder - use array for now
 check nums.len() == 3
@@ -100,18 +116,19 @@ check nums.contains(3)
 
 #### removes duplicates automatically
 
-- removes duplicates automatically
+1. check nums len
+2. check nums contains
+3. check nums contains
+4. check nums contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("removes duplicates automatically")
 # val nums = s{1, 2, 2, 3, 3, 3}  # TODO: Set literal syntax not yet implemented
 val nums = [1, 2, 3]  # Placeholder - use array for now
 check nums.len() == 3
@@ -124,18 +141,18 @@ check nums.contains(3)
 
 #### creates set from string elements
 
-- creates set from string elements
+1. check words len
+2. check words contains
+3. check words contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates set from string elements")
 # val words = s{"hello", "world", "hello"}  # TODO: Set literal syntax not yet implemented
 val words = ["hello", "world"]  # Placeholder - use array for now
 check words.len() == 2
@@ -147,18 +164,16 @@ check words.contains("world")
 
 #### handles trailing comma
 
-- handles trailing comma
+1. check nums len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles trailing comma")
 # val nums = s{1, 2, 3,}  # TODO: Set literal syntax not yet implemented
 val nums = [1, 2, 3]  # Placeholder - use array for now
 check nums.len() == 3
@@ -168,18 +183,17 @@ check nums.len() == 3
 
 #### supports single element
 
-- supports single element
+1. check single len
+2. check single contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("supports single element")
 # val single = s{42}  # TODO: Set literal syntax not yet implemented
 val single = [42]  # Placeholder - use array for now
 check single.len() == 1
@@ -190,18 +204,18 @@ check single.contains(42)
 
 #### computes union via concatenation
 
-- computes union via concatenation
+1. check union  len
+2. check union  contains
+3. check union  contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes union via concatenation")
 # TODO: s{} union operator not yet implemented — using array concat
 val a = [1, 2, 3]
 val b = [2, 3, 4]
@@ -215,18 +229,18 @@ check union_.contains(4)
 
 #### computes intersection via filter
 
-- computes intersection via filter
+1. check common len
+2. check common contains
+3. check common contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes intersection via filter")
 # TODO: s{} intersect operator not yet implemented — using filter
 val a = [1, 2, 3]
 val b = [2, 3, 4]
@@ -240,18 +254,17 @@ check common.contains(3)
 
 #### computes difference via filter
 
-- computes difference via filter
+1. check diff len
+2. check diff contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes difference via filter")
 # TODO: s{} diff operator not yet implemented — using filter
 val a = [1, 2, 3]
 val b = [2, 3, 4]
@@ -264,18 +277,18 @@ check diff.contains(1)
 
 #### supports filter
 
-- supports filter
+1. check evens len
+2. check evens contains
+3. check evens contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("supports filter")
 # val nums = s{1, 2, 3, 4, 5}  # TODO: Set literal syntax not yet implemented
 val nums = [1, 2, 3, 4, 5]  # Placeholder - use array for now
 val evens = nums.filter(_ % 2 == 0)
@@ -288,18 +301,19 @@ check evens.contains(4)
 
 #### supports map
 
-- supports map
+1. check doubled len
+2. check doubled contains
+3. check doubled contains
+4. check doubled contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("supports map")
 # val nums = s{1, 2, 3}  # TODO: Set literal syntax not yet implemented
 val nums = [1, 2, 3]  # Placeholder - use array for now
 val doubled = nums.map(_ * 2)
@@ -313,18 +327,17 @@ check doubled.contains(6)
 
 #### checks subset via all-contained
 
-- checks subset via all-contained
+1. check small in large count == small len
+2. check large in small count != large len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("checks subset via all-contained")
 # TODO: s{} is_subset operator not yet implemented — using manual check
 val small = [1, 2]
 val large = [1, 2, 3, 4]
@@ -346,18 +359,13 @@ check large_in_small_count != large.len()
 
 #### checks disjoint via no overlap
 
-- checks disjoint via no overlap
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("checks disjoint via no overlap")
 # TODO: s{} is_disjoint operator not yet implemented — using manual check
 val a = [1, 2, 3]
 val b = [4, 5, 6]
@@ -388,51 +396,3 @@ check ac_overlap > 0
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `a9be7538a3992c3b70d2353350aa9a0707bb40be5351ddf2509ba846619b3082`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `a9be7538a3992c3b70d2353350aa9a0707bb40be5351ddf2509ba846619b3082`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `a9be7538a3992c3b70d2353350aa9a0707bb40be5351ddf2509ba846619b3082`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/set_literal_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/set_literal_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/set_literal_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/set_literal_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/set_literal_spec.spl:41:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates empty set' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/set_literal_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates set from integer elements' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/set_literal_spec.spl:58:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'removes duplicates automatically' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

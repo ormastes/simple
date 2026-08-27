@@ -1,8 +1,19 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 # @cover src/lib/nogc_sync_mut/mission_critical/domain_arena_v1.spl 80%
 # @tag: unit, mission_critical, memory, arena
 
+use std.spec.step
+
 use std.spec.*
 use nogc_sync_mut.mission_critical.domain_arena_v1.*
+
 
 fn relaxed_test_profile_v1(quota: u64) -> RelaxedAllocationProfileV1:
     RelaxedAllocationProfileV1(
@@ -15,8 +26,11 @@ fn relaxed_test_profile_v1(quota: u64) -> RelaxedAllocationProfileV1:
     )
 
 describe "sealed relaxed-allocation domain arena v1":
+    # @manual scenario evidence
 
     it "uses a canonical SHA-256 identity for the sealed profile":
+        # @req REQ-SSPEC-LIB
+        step("uses a canonical SHA-256 identity for the sealed profile")
         val profile = relaxed_test_profile_v1(64u64)
         val fingerprint = relaxed_allocation_profile_fingerprint_v1(profile)
         expect(fingerprint.len()).to_equal(64)
@@ -33,6 +47,8 @@ describe "sealed relaxed-allocation domain arena v1":
         expect(relaxed_allocation_profile_hash_v1(field_profile) == fingerprint).to_equal(false)
 
     it "enumerates the complete named failure-point registry":
+        # @req REQ-SSPEC-LIB
+        step("enumerates the complete named failure-point registry")
         expect(arena_failure_point_count_v1()).to_equal(2u16)
         expect(arena_failure_point_at_v1(0u16)).to_equal(ARENA_FAULT_BEFORE_CURSOR_ADVANCE)
         expect(arena_failure_point_at_v1(1u16)).to_equal(ARENA_FAULT_BEFORE_PUBLICATION)
@@ -42,6 +58,8 @@ describe "sealed relaxed-allocation domain arena v1":
         expect(arena_failure_point_registered_v1(99u16)).to_equal(false)
 
     it "binds every profile and committed-snapshot field into its hash":
+        # @req REQ-SSPEC-LIB
+        step("binds every profile and committed-snapshot field into its hash")
         val base_profile = relaxed_test_profile_v1(64u64)
         val base_hash = relaxed_allocation_profile_hash_v1(base_profile)
         var changed = base_profile
@@ -96,6 +114,8 @@ describe "sealed relaxed-allocation domain arena v1":
         expect(domain_arena_committed_state_hash_v1(arena) == committed_hash).to_equal(false)
 
     it "ignores compatibility mirror tampering in operational paths":
+        # @req REQ-SSPEC-LIB
+        step("ignores compatibility mirror tampering in operational paths")
         val arena = DomainArenaV1.from_sealed_profile(78u64, relaxed_test_profile_v1(64u64))
         val first = arena.checkpoint()
         arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL)
@@ -111,6 +131,8 @@ describe "sealed relaxed-allocation domain arena v1":
         expect(arena.generation).to_equal(1u64)
 
     it "accepts exact quota and rejects plus one without cursor mutation":
+        # @req REQ-SSPEC-LIB
+        step("accepts exact quota and rejects plus one without cursor mutation")
         val arena = DomainArenaV1.from_sealed_profile(11u64, relaxed_test_profile_v1(64u64))
         val checkpoint = arena.checkpoint()
         var exact = false
@@ -130,7 +152,68 @@ describe "sealed relaxed-allocation domain arena v1":
         expect(arena.cursor_bytes).to_equal(0u64)
         expect(arena.allocation_count).to_equal(0u32)
 
+    it "isolates fixed bytes, rolls back staged bytes, and publishes committed bytes":
+        val arena = DomainArenaV1.from_sealed_profile(111u64, relaxed_test_profile_v1(16u64))
+        val first = arena.checkpoint()
+        var first_ref = DomainArenaRefV1(
+            arena_id: 0u64, domain_id: 0u32, generation: 0u64,
+            offset_bytes: 0u64, size_bytes: 0u64
+        )
+        match arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL):
+            DomainArenaAllocationV1.Allocated(reference): first_ref = reference
+            DomainArenaAllocationV1.Exhausted(receipt): expect(false).to_equal(true)
+        expect(arena.write_byte(first_ref, 0u64, 1u8)).to_equal(true)
+        expect(arena.write_byte(first_ref, 7u64, 8u8)).to_equal(true)
+        # Unpublished bytes are not readable, even through the valid staging ref.
+        expect(arena.read_byte(first_ref, 0u64)).to_be_nil()
+        expect(arena.commit(first)).to_equal(true)
+        if val first_readback = arena.read_byte(first_ref, 0u64):
+            expect(first_readback).to_equal(1u8)
+        else:
+            expect(false).to_equal(true)
+        val committed_hash = domain_arena_committed_bytes_hash_v1(arena)
+
+        val second = arena.checkpoint()
+        var second_ref = DomainArenaRefV1(
+            arena_id: 0u64, domain_id: 0u32, generation: 0u64,
+            offset_bytes: 0u64, size_bytes: 0u64
+        )
+        match arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL):
+            DomainArenaAllocationV1.Allocated(reference): second_ref = reference
+            DomainArenaAllocationV1.Exhausted(receipt): expect(false).to_equal(true)
+        expect(arena.write_byte(second_ref, 0u64, 9u8)).to_equal(true)
+        expect(arena.read_byte(second_ref, 0u64)).to_be_nil()
+        expect(arena.rollback(second)).to_equal(true)
+        expect(domain_arena_committed_bytes_hash_v1(arena)).to_equal(committed_hash)
+        expect(arena.validates(first_ref)).to_equal(true)
+        expect(arena.validates(second_ref)).to_equal(false)
+
+    it "rejects forged subspans, wrong domain/generation, and capacity drift":
+        val arena = DomainArenaV1.from_sealed_profile(112u64, relaxed_test_profile_v1(16u64))
+        val checkpoint = arena.checkpoint()
+        var reference = DomainArenaRefV1(
+            arena_id: 0u64, domain_id: 0u32, generation: 0u64,
+            offset_bytes: 0u64, size_bytes: 0u64
+        )
+        match arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL):
+            DomainArenaAllocationV1.Allocated(allocated): reference = allocated
+            DomainArenaAllocationV1.Exhausted(receipt): expect(false).to_equal(true)
+        val forged_subspan = DomainArenaRefV1(
+            arena_id: reference.arena_id, domain_id: reference.domain_id,
+            generation: reference.generation, offset_bytes: 1u64, size_bytes: 7u64
+        )
+        expect(arena.write_byte(forged_subspan, 0u64, 1u8)).to_equal(false)
+        val wrong_domain = DomainArenaRefV1(
+            arena_id: reference.arena_id, domain_id: 99u32,
+            generation: reference.generation, offset_bytes: reference.offset_bytes,
+            size_bytes: reference.size_bytes
+        )
+        expect(arena.write_byte(wrong_domain, 0u64, 1u8)).to_equal(false)
+        expect(arena.rollback(checkpoint)).to_equal(true)
+
     it "rejects strict and forbidden contexts before mutation":
+        # @req REQ-SSPEC-LIB
+        step("rejects strict and forbidden contexts before mutation")
         var unsealed = relaxed_test_profile_v1(64u64)
         unsealed.sealed = false
         val strict_arena = DomainArenaV1.from_sealed_profile(12u64, unsealed)
@@ -152,6 +235,8 @@ describe "sealed relaxed-allocation domain arena v1":
         expect(forbidden_arena.cursor_bytes).to_equal(0u64)
 
     it "commits a transaction and invalidates rolled-back references":
+        # @req REQ-SSPEC-LIB
+        step("commits a transaction and invalidates rolled-back references")
         val arena = DomainArenaV1.from_sealed_profile(14u64, relaxed_test_profile_v1(64u64))
         val checkpoint = arena.checkpoint()
         var allocated_ref = DomainArenaRefV1(
@@ -174,6 +259,8 @@ describe "sealed relaxed-allocation domain arena v1":
         expect(arena.publication_epoch).to_equal(1u64)
 
     it "preserves the committed generation when a later staging generation rolls back":
+        # @req REQ-SSPEC-LIB
+        step("preserves the committed generation when a later staging generation rolls back")
         val arena = DomainArenaV1.from_sealed_profile(17u64, relaxed_test_profile_v1(64u64))
         val first_checkpoint = arena.checkpoint()
         var first_ref = DomainArenaRefV1(
@@ -203,6 +290,8 @@ describe "sealed relaxed-allocation domain arena v1":
         expect(arena.validates(second_ref)).to_equal(false)
 
     it "rejects forged checkpoints and keeps the original rollback point":
+        # @req REQ-SSPEC-LIB
+        step("rejects forged checkpoints and keeps the original rollback point")
         val arena = DomainArenaV1.from_sealed_profile(15u64, relaxed_test_profile_v1(64u64))
         val original = arena.checkpoint()
         arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL)
@@ -218,6 +307,8 @@ describe "sealed relaxed-allocation domain arena v1":
         expect(arena.cursor_bytes).to_equal(0u64)
 
     it "rejects malformed relaxed profiles before cursor mutation":
+        # @req REQ-SSPEC-LIB
+        step("rejects malformed relaxed profiles before cursor mutation")
         var invalid = relaxed_test_profile_v1(64u64)
         invalid.strict_default = false
         val arena = DomainArenaV1.from_sealed_profile(16u64, invalid)
@@ -228,6 +319,18 @@ describe "sealed relaxed-allocation domain arena v1":
             DomainArenaAllocationV1.Allocated(reference):
                 expect(false).to_equal(true)
         expect(arena.cursor_bytes).to_equal(0u64)
+
+        # This must fail admission before either V1 backing bank is built.
+        val oversize_arena = DomainArenaV1.from_sealed_profile(
+            17u64, relaxed_test_profile_v1(DOMAIN_ARENA_V1_MAX_QUOTA_BYTES + 1u64)
+        )
+        oversize_arena.checkpoint()
+        match oversize_arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL):
+            DomainArenaAllocationV1.Exhausted(receipt):
+                expect(receipt.reason).to_equal(ARENA_EXHAUSTION_INVALID_REQUEST)
+            DomainArenaAllocationV1.Allocated(reference):
+                expect(false).to_equal(true)
+        expect(oversize_arena.cursor_bytes).to_equal(0u64)
 
         var bad_alignment = relaxed_test_profile_v1(64u64)
         bad_alignment.alignment = 3u32
@@ -248,6 +351,8 @@ describe "sealed relaxed-allocation domain arena v1":
                 expect(false).to_equal(true)
 
     it "rejects profile mutation after sealing and forged zero-size references":
+        # @req REQ-SSPEC-LIB
+        step("rejects profile mutation after sealing and forged zero-size references")
         val arena = DomainArenaV1.from_sealed_profile(20u64, relaxed_test_profile_v1(64u64))
         val checkpoint = arena.checkpoint()
         arena.profile.quota_bytes = 128u64
@@ -266,6 +371,8 @@ describe "sealed relaxed-allocation domain arena v1":
         expect(arena.validates(forged)).to_equal(false)
 
     it "injects every registered arena failure boundary without cross-domain mutation":
+        # @req REQ-SSPEC-LIB
+        step("injects every registered arena failure boundary without cross-domain mutation")
         val protected_arena = DomainArenaV1.from_sealed_profile(
             21u64, relaxed_test_profile_v1(64u64)
         )

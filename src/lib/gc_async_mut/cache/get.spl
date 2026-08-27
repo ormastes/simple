@@ -16,15 +16,13 @@
 fn cache_lru_get(cache, key: text):
     """Get value from LRU cache. Returns nil if not found.
     Updates access order on hit."""
-    if not cache.has('keys') or not cache.has('values'):
-        return nil
     val keys = cache['keys']
     val values = cache['values']
     val index = _find_key_index_in(cache, key)
 
-    if index >= 0 and index < values.len():
+    if index >= 0:
         # Hit: move to end (most recently used)
-        _increment_counter(cache, 'hits')
+        cache['hits'] = cache['hits'] + 1
         val value = values[index]
 
         # Remove from current position
@@ -46,7 +44,7 @@ fn cache_lru_get(cache, key: text):
         return value
     else:
         # Miss
-        _increment_counter(cache, 'misses')
+        cache['misses'] = cache['misses'] + 1
         return nil
 
 # ============================================================================
@@ -56,16 +54,15 @@ fn cache_lru_get(cache, key: text):
 fn cache_fifo_get(cache, key: text):
     """Get value from FIFO cache. Returns nil if not found.
     Does NOT update order on access (unlike LRU)."""
-    if not cache.has('values'):
-        return nil
+    val keys = cache['keys']
     val values = cache['values']
     val index = _find_key_index_in(cache, key)
 
-    if index >= 0 and index < values.len():
-        _increment_counter(cache, 'hits')
+    if index >= 0:
+        cache['hits'] = cache['hits'] + 1
         return values[index]
     else:
-        _increment_counter(cache, 'misses')
+        cache['misses'] = cache['misses'] + 1
         return nil
 
 # ============================================================================
@@ -75,14 +72,13 @@ fn cache_fifo_get(cache, key: text):
 fn cache_lfu_get(cache, key: text):
     """Get value from LFU cache. Returns nil if not found.
     Increments frequency counter on hit."""
-    if not cache.has('values') or not cache.has('frequencies'):
-        return nil
+    val keys = cache['keys']
     val values = cache['values']
     val frequencies = cache['frequencies']
     val index = _find_key_index_in(cache, key)
 
-    if index >= 0 and index < values.len() and index < frequencies.len():
-        _increment_counter(cache, 'hits')
+    if index >= 0:
+        cache['hits'] = cache['hits'] + 1
 
         # Increment frequency
         var new_frequencies = frequencies
@@ -91,7 +87,7 @@ fn cache_lfu_get(cache, key: text):
 
         return values[index]
     else:
-        _increment_counter(cache, 'misses')
+        cache['misses'] = cache['misses'] + 1
         return nil
 
 # ============================================================================
@@ -100,20 +96,18 @@ fn cache_lfu_get(cache, key: text):
 
 fn cache_ttl_get(cache, key: text):
     """Get value from TTL cache. Returns nil if not found or expired."""
-    if not cache.has('keys') or not cache.has('values') or not cache.has('expiry_times'):
-        return nil
     val keys = cache['keys']
     val values = cache['values']
     val expiry_times = cache['expiry_times']
     val index = _find_key_index_in(cache, key)
 
-    if index >= 0 and index < values.len() and index < expiry_times.len():
+    if index >= 0:
         val now = _get_timestamp()
         val expiry = expiry_times[index]
 
         if now < expiry:
             # Not expired - hit
-            _increment_counter(cache, 'hits')
+            cache['hits'] = cache['hits'] + 1
             return values[index]
         else:
             # Expired - remove entry and count as miss
@@ -122,10 +116,10 @@ fn cache_ttl_get(cache, key: text):
             cache['expiry_times'] = _remove_at_index(expiry_times, index)
             # Rebuild key_index after removal
             _rebuild_key_index(cache)
-            _increment_counter(cache, 'misses')
+            cache['misses'] = cache['misses'] + 1
             return nil
     else:
-        _increment_counter(cache, 'misses')
+        cache['misses'] = cache['misses'] + 1
         return nil
 
 # ============================================================================
@@ -134,7 +128,7 @@ fn cache_ttl_get(cache, key: text):
 
 fn cache_get(cache, key: text):
     """Generic cache get operation. Works with any cache type."""
-    val cache_type = if cache.has('type'): cache['type'] else: ''
+    val cache_type = cache['type']
     if cache_type == 'lru':
         cache_lru_get(cache, key)
     elif cache_type == 'fifo':
@@ -152,8 +146,6 @@ fn cache_get(cache, key: text):
 
 fn _find_key_index_in(cache, key: text) -> i64:
     """Find index of key using the key_index dict. Returns -1 if not found."""
-    if not cache.has('key_index'):
-        return -1
     val ki = cache['key_index']
     if ki.has(key):
         return ki[key]
@@ -172,9 +164,6 @@ fn _remove_at_index(arr, index: i64):
 fn _rebuild_key_index(cache):
     """Rebuild the key_index dict from the keys array."""
     var ki = {}
-    if not cache.has('keys'):
-        cache['key_index'] = ki
-        return
     val keys = cache['keys']
     var i = 0
     while i < keys.len():

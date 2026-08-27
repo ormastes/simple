@@ -15,7 +15,6 @@ use .assistant.session_views.{
 }
 
 use std.io_runtime.{dir_create_all, list_dir, file_exists, time_now_unix_micros}
-use std.common.encoding.utf8.{text_truncate_bytes}
 
 val ASSIST_ROOT = ".build/llm_dashboard/assistant"
 val ASSIST_SESSIONS = ASSIST_ROOT + "/sessions"
@@ -49,14 +48,14 @@ fn _assistant_default_name(session_id: text, prompt: text) -> text:
     if prompt != "":
         val preview = prompt
         if preview.len() > 48:
-            return "Assistant " + text_truncate_bytes(preview, 48)
+            return "Assistant " + preview.slice(0, 48)
         return "Assistant " + preview
     "Assistant " + session_id
 
 fn _assistant_default_summary(name: text, prompt: text) -> text:
     if prompt != "":
         if prompt.len() > 160:
-            return text_truncate_bytes(prompt, 160)
+            return prompt.slice(0, 160)
         return prompt
     name
 
@@ -117,7 +116,7 @@ fn _assistant_update_session_state(session_id: text, new_state: text, last_signa
     )
     _assistant_load_session(session_id)
 
-fn _lazy_assistant_append_jsonl(path: text, line: text):
+fn _assistant_append_jsonl(path: text, line: text):
     var content = file_read(path)
     if content != "" and not content.ends_with("\n"):
         content = content + "\n"
@@ -156,8 +155,8 @@ fn _assistant_event_object(session_id: text, timestamp: i64, kind: text, message
 fn _assistant_record_event(session_id: text, kind: text, message: text, signal: text):
     val ts = _assistant_now_ms()
     val line = _assistant_event_object(session_id, ts, kind, message, signal)
-    _lazy_assistant_append_jsonl(_assistant_timeline_path(session_id), line)
-    _lazy_assistant_append_jsonl(_assistant_notifications_path(session_id), line)
+    _assistant_append_jsonl(_assistant_timeline_path(session_id), line)
+    _assistant_append_jsonl(_assistant_notifications_path(session_id), line)
 
 fn _assistant_session_detail_object(session_json: text) -> text:
     val session_id = extract_field(session_json, "id")
@@ -541,10 +540,7 @@ fn handle_assistant_spawn_task(id: text, body: text) -> text:
     )
     val appended = assistant_store_append_event_record(ASSIST_ROOT, event_obj)
     if appended == nil:
-        # `signal` was an undefined name in THIS handler (only the record
-        # FIELD is named signal) — interp never executed this error branch so
-        # it survived; native HIR lowering correctly rejected it.
-        return make_tool_error(id, -32603, "Failed to append signal event: " + event_obj.signal)
+        return make_tool_error(id, -32603, "Failed to append signal event: " + signal)
     if parent_session_id != "":
         val child_task_obj = AssistantChildTaskRecord(
             task_id: "",

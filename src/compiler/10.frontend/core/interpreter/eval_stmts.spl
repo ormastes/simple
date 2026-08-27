@@ -15,7 +15,6 @@
 
 use compiler.core.types.{type_tag_name}
 use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
-use compiler.core.ast.{stmt_is_if_val_decl}
 
 # Import from split declarations module
 use compiler.core.interpreter.eval_decls.{eval_decl, eval_module, eval_init}
@@ -31,7 +30,7 @@ fn eval_stmt(sid: i64) -> i64:
     if eval_breaking: return val_make_nil()
     if eval_continuing: return val_make_nil()
 
-    val tag = stmt_get(sid).tag
+    val tag = stmt_get_tag(sid)
 
     # Range-partitioned dispatch: reduces average comparisons from ~12 to ~4.
     # Hot path (tags 1-5): EXPR, VAL_DECL, VAR_DECL, ASSIGN, RETURN
@@ -62,29 +61,14 @@ fn eval_stmt(sid: i64) -> i64:
         if tag == STMT_COMPOUND_ASSIGN: return eval_stmt_compound_assign(sid)
 
     # Rare (tags 14+): DEFER, ERRDEFER, LABELED_LOOP, STATIC_FOR, COMPTIME, RECEIVE, BIND, LAZY_VAL
+    if tag == STMT_IF_CHAIN: return eval_stmt_if_chain(sid)
     if tag == STMT_DEFER:
         val defer_eid = stmt_get(sid).expr_idx
-        # Block-form `defer:` (bug #172) is parsed (stmt_defer_block_stmt sets
-        # EXPR to the -1 "no expr" sentinel and stores the body statements
-        # instead), but this tree-walking interpreter's replay queue
-        # (eval_defer_eids/eval_defer_depths in eval.spl) only stores a single
-        # expr id per registration and has no slot for a multi-statement
-        # body. Silently pushing -1 would let eval_expr(-1) run later with an
-        # invalid id (or collide with the queue's own -1 "already executed"
-        # tombstone) -- a silent-wrong-answer risk. Refuse loudly instead;
-        # the native-build path (_FlatAstBridge/convert_nodes.spl) is the
-        # supported route for block-form defer.
-        if defer_eid == -1:
-            eval_set_error("block-form 'defer:' is not supported by the interpreter (bin/simple run) -- use native-build, or the single-line 'defer expr' form")
-            return val_make_nil()
         eval_defer_eids.push(defer_eid)
         eval_defer_depths.push(eval_defer_depth)
         return val_make_nil()
     if tag == STMT_ERRDEFER:
         val errdefer_eid = stmt_get(sid).expr_idx
-        if errdefer_eid == -1:
-            eval_set_error("block-form 'errdefer:' is not supported by the interpreter (bin/simple run) -- use the single-line 'errdefer expr' form")
-            return val_make_nil()
         eval_errdefer_eids.push(errdefer_eid)
         eval_errdefer_depths.push(eval_defer_depth)
         return val_make_nil()
@@ -116,7 +100,7 @@ fn eval_stmt(sid: i64) -> i64:
         val bind_rhs_idx = s_node_bind.expr_idx
         val bind_rhs_val = eval_expr(bind_rhs_idx)
         if eval_had_error: return -1
-        val bind_is_nil = val_get_kind(bind_rhs_val) == 0
+        val bind_is_nil = val_kind(bind_rhs_val) == 0
         if bind_is_nil:
             return bind_rhs_val
         env_define(bind_name, bind_rhs_val)
@@ -310,9 +294,6 @@ fn eval_stmt_assign(sid: i64) -> i64:
                         elements[idx] = new_val
                         val_arrays[base_val2] = elements
                         return new_val
-        if val_is_struct(base_val2) and val_get_struct_name(base_val2) == "__dict":
-            val_struct_upsert_field(base_val2, val_to_text(idx_val), new_val)
-            return new_val
         eval_set_error("invalid index assignment")
         return -1
 
@@ -379,7 +360,8 @@ fn eval_stmt_if(sid: i64) -> i64:
     val then_stmts = elif_get_body(elif_idx)
     val else_stmts = elif_get_else(elif_idx)
 
-    val cond_val = eval_control_condition(cond_eid, coverage_span_decision_id(stmt_get(sid).span_id))
+    val cond_span_id = expr_get(cond_eid).span_id
+    val cond_val = eval_control_condition(cond_eid, coverage_span_decision_id(cond_span_id))
     if eval_had_error: return -1
 
     val taken = val_is_truthy(cond_val)
@@ -407,6 +389,93 @@ fn eval_stmt_if(sid: i64) -> i64:
         env_pop_scope()
         return last_val2
     val_make_nil()
+
+fn eval_stmt_if_chain_body(arm_id: i64) -> i64:
+    var last_value = val_make_nil()
+    var body_offset: i64 = 0
+    val body_count = flat_if_arm_body_count_get(arm_id)
+    while body_offset < body_count:
+        if eval_had_error: break
+        if eval_returning: break
+        if eval_breaking: break
+        if eval_continuing: break
+        last_value = eval_stmt(flat_if_arm_body_at(arm_id, body_offset))
+        body_offset = body_offset + 1
+    last_value
+
+fn eval_stmt_if_chain(sid: i64) -> i64:
+    val chain_id = stmt_get_type(sid)
+    var arm_id = flat_if_chain_first_arm_get(chain_id)
+    var remaining = flat_if_chain_arm_count_get(chain_id)
+
+    while arm_id >= 0 and remaining > 0:
+        val arm_kind = flat_if_arm_kind_get(arm_id)
+        val arm_head = flat_if_arm_head_get(arm_id)
+        val arm_span = flat_if_arm_span_get(arm_id)
+        var taken = false
+
+        if arm_kind == ARM_CONDITION:
+            val condition_value = eval_control_condition(
+                arm_head, coverage_span_decision_id(arm_span))
+            if eval_had_error: return -1
+            taken = val_is_truthy(condition_value)
+            record_if_chain_decision(arm_span, taken)
+            if taken:
+                env_push_scope()
+                val branch_value = eval_stmt_if_chain_body(arm_id)
+                env_pop_scope()
+                return branch_value
+        elif arm_kind == ARM_VALUE_BIND:
+            val init_value = eval_expr(flat_if_arm_init_get(arm_id))
+            if eval_had_error: return -1
+            val bound_value = val_copy_if_value_struct(
+                eval_option_binding_value(init_value))
+            taken = val_exists(bound_value)
+            record_control_condition(
+                coverage_span_decision_id(arm_span), arm_head, taken)
+            record_if_chain_decision(arm_span, taken)
+            if taken:
+                env_push_scope()
+                env_define(expr_get_str(arm_head), bound_value)
+                val branch_value = eval_stmt_if_chain_body(arm_id)
+                env_pop_scope()
+                return branch_value
+        elif arm_kind == ARM_PATTERN_BIND:
+            val init_value = eval_expr(flat_if_arm_init_get(arm_id))
+            if eval_had_error: return -1
+            env_push_scope()
+            taken = match_pattern(init_value, arm_head)
+            if eval_had_error:
+                env_pop_scope()
+                return -1
+            record_control_condition(
+                coverage_span_decision_id(arm_span), arm_head, taken)
+            record_if_chain_decision(arm_span, taken)
+            if taken:
+                val branch_value = eval_stmt_if_chain_body(arm_id)
+                env_pop_scope()
+                return branch_value
+            env_pop_scope()
+        else:
+            eval_set_error("unsupported if-chain arm kind: " + "{arm_kind}")
+            return -1
+
+        arm_id = flat_if_arm_next_get(arm_id)
+        remaining = remaining - 1
+
+    env_push_scope()
+    var else_value = val_make_nil()
+    var else_offset: i64 = 0
+    val else_count = flat_if_chain_else_stmt_count_get(chain_id)
+    while else_offset < else_count:
+        if eval_had_error: break
+        if eval_returning: break
+        if eval_breaking: break
+        if eval_continuing: break
+        else_value = eval_stmt(flat_if_chain_else_stmt_at(chain_id, else_offset))
+        else_offset = else_offset + 1
+    env_pop_scope()
+    else_value
 
 fn eval_stmt_for(sid: i64) -> i64:
     val s_node = stmt_get(sid)
@@ -466,9 +535,8 @@ fn eval_stmt_for(sid: i64) -> i64:
     val iterable = eval_expr(iterable_eid)
     if eval_had_error: return -1
 
-    val iterable_array = val_iterable_array(iterable)
-    if iterable_array >= 0:
-        val elements = val_get_array(iterable_array)
+    if val_is_array(iterable):
+        val elements = val_get_array(iterable)
         var last_val2 = val_make_nil()
         for elem_vid in elements:
             if eval_had_error: break
@@ -496,26 +564,16 @@ fn eval_stmt_for(sid: i64) -> i64:
 
     if val_is_text(iterable):
         val str_val = val_get_text(iterable)
-        # One loop element is one UTF-8 codepoint, not one byte. `len()` is the
-        # BYTE length and `substring(i, i + 1)` is a byte slice, so the old
-        # index-stepped form over-ran non-ASCII input ("café," ran 6 times, not
-        # 5) and bound split-codepoint fragments. `chars()` is the canonical
-        # Unicode splitter and matches the MIR lowering in
-        # src/compiler/50.mir/mir_lowering_stmts.spl (rt_string_chars).
-        # Bound to a val so the `for x in s.chars()` -> `for x in s` desugar
-        # (Pattern F in 10.frontend/desugar/collection_desugar.spl) cannot
-        # rewrite this back into the byte-indexed shape.
-        val str_chars = str_val.chars()
         var last_val3 = val_make_nil()
         var char_idx = 0
-        for _iter in 0..str_chars.len():
-            if char_idx >= str_chars.len(): break
+        for _iter in 0..str_val.len():
+            if char_idx >= str_val.len(): break
             if eval_had_error: break
             if eval_returning: break
             if eval_breaking: break
             eval_continuing = false
             eval_continue_label = ""
-            val ch = str_chars[char_idx]
+            val ch = str_val.substring(char_idx, char_idx + 1)
             env_push_scope()
             env_define(iter_name, val_make_text(ch))
             for sid2 in body_stmts:
@@ -549,9 +607,8 @@ fn eval_stmt_static_for(sid: i64) -> i64:
     val sf_iterable = eval_expr(sf_iterable_eid)
     if eval_had_error: return -1
 
-    val sf_iterable_array = val_iterable_array(sf_iterable)
-    if sf_iterable_array >= 0:
-        val sf_elements = val_get_array(sf_iterable_array)
+    if val_is_array(sf_iterable):
+        val sf_elements = val_get_array(sf_iterable)
         var sf_last_val = val_make_nil()
         for sf_elem_vid in sf_elements:
             if eval_had_error: break
@@ -601,21 +658,20 @@ fn eval_stmt_while(sid: i64) -> i64:
         if eval_had_error: break
         if eval_returning: break
         if eval_breaking: break
-        val cond_val = eval_control_condition(cond_eid, coverage_span_decision_id(stmt_get(sid).span_id))
+        val cond_span_id = expr_get(cond_eid).span_id
+        val cond_val = eval_control_condition(cond_eid, coverage_span_decision_id(cond_span_id))
         if eval_had_error: break
         val taken = val_is_truthy(cond_val)
         record_stmt_control_decision(sid, taken)
         if taken == false: break
         eval_continuing = false
         eval_continue_label = ""
-        env_push_scope()
         for sid2 in body_stmts:
             if eval_had_error: break
             if eval_returning: break
             if eval_breaking: break
             if eval_continuing: break
             last_val = eval_stmt(sid2)
-        env_pop_scope()
         iterations = iterations + 1
 
     if iterations >= 1000000:
@@ -685,20 +741,9 @@ fn eval_stmt_match(sid: i64) -> i64:
             return last_val
         env_pop_scope()
 
-    # No arm matched. The statement form previously fell out here with NO
-    # diagnostic at all, making a non-firing match an invisible no-op — the
-    # exact shape of the layout-frontier defect this diagnostic exists for.
-    report_match_fallthrough(
-        inferred_type2,
-        val_enum_variant_name(scrutinee),
-        val_kind_name(val_get_kind(scrutinee)),
-        arm_ids
-    )
-    if match_fallthrough_get_abort():
-        eval_set_error(eval_warnings[eval_warnings.len() - 1])
-        return -1
     val_make_nil()
 
 fn eval_stmt_block(sid: i64) -> i64:
     val body_stmts = stmt_get(sid).body
     eval_block(body_stmts, -1)
+

@@ -28,7 +28,7 @@
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -70,7 +70,7 @@ check(results[0].get("name")? == "user_2")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -118,7 +118,7 @@ check(results_lt.len() == 3)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -166,7 +166,7 @@ check(first_path.contains("src"))
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -204,7 +204,7 @@ check(results[0].get("status")? != "Pending")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -259,7 +259,7 @@ check(results.len() >= 2)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -301,7 +301,7 @@ check(results.len() == 3)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -339,7 +339,7 @@ check(suffix_results.len() == 2)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -381,7 +381,7 @@ check(results.len() == 3)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -417,7 +417,7 @@ check(results[2].get("score")? == "30")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -453,7 +453,7 @@ check(results[2].get("score")? == "10")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -487,7 +487,7 @@ check(results[1].get("id")? == "1")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -528,7 +528,7 @@ check(results[1].get("id")? == "3")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

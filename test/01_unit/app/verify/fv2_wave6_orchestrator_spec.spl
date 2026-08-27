@@ -1,0 +1,263 @@
+use std.spec
+use std.common.crypto.sha256.{sha256_text}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.verification_effects.{VerificationEffectV1}
+use compiler.mir.verification_ir.{SemanticClass, SemanticCoverageV1,
+    VerificationIrType, VerificationIrProvenance, VerificationIrFunction,
+    VerificationIrModuleV1, ResolvedVerificationIrModuleV2,
+    semantic_coverage_hash_v2}
+use compiler.common.assurance.formal_delivery_gates.{FormalDeliveryGateV1,
+    FormalDeliveryGateStatusV1, FormalDeliveryGateEvidenceV1,
+    FormalDeliveryReceiptFileV1, formal_delivery_manifest_hash_v1}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.replay_receipt.{ReplayCheckerClassV1,
+    ReplayOutcomeV1, ReplayCheckerReceiptV1, IndependentReplayClosureV1,
+    close_independent_replay_v1}
+use compiler.common.assurance.dynamic_composition.{
+    SignatureVerificationReceiptV1}
+use compiler.common.assurance.verified_release_gate.{VerifiedReleaseEvidenceV1,
+    ReleaseEvidenceOutcomeV1, ApprovedReleaseSignerV1,
+    ReleaseSignatureVerificationV1, release_evidence_hash_v1}
+use compiler.tools.verify.formal_gate_collectors.{ExactCoreCheckKindV1,
+    ExecutedCheckOutcomeV1, ExecutedExactCoreCheckV1,
+    FormalGateCollectionV1}
+use app.verify.fv2_wave6_orchestrator.{fv2_wave6_collection_error_v1,
+    finalize_fv2_wave6_orchestration_v1, collect_fv2_wave6_exact_core_v2}
+
+fn wave6_exact_vir() -> VerificationIrModuleV1:
+    val type_ = VerificationIrType("i32", "bitvec:32:signed",
+        SemanticClass.Exact, "", "")
+    val provenance = VerificationIrProvenance(sha256_text("source"),
+        sha256_text("expanded"), sha256_text("woven"), sha256_text("mir"),
+        sha256_text("contract"), sha256_text("policy"))
+    val function_draft = VerificationIrFunction("VerificationIR-v1",
+        SymbolId(id: 7), "increment", [type_], type_,
+        [VerificationEffectV1.Pure], [], provenance, "", "")
+    val function = VerificationIrFunction(function_draft.schema,
+        function_draft.symbol, function_draft.name, function_draft.parameters,
+        function_draft.return_type, function_draft.effects,
+        function_draft.called_symbols, function_draft.provenance,
+        function_draft.expected_semantic_hash(), "")
+    val module_draft = VerificationIrModuleV1("VerificationIRModule-v1",
+        "wave6_exact", sha256_text("effects"), [function], "", "")
+    VerificationIrModuleV1(module_draft.schema, module_draft.module_name,
+        module_draft.effect_closure_hash, module_draft.functions,
+        module_draft.expected_semantic_hash(), "")
+
+fn wave6_resolved_vir(
+    coverage: [SemanticCoverageV1]
+) -> ResolvedVerificationIrModuleV2:
+    val vir = wave6_exact_vir()
+    val calls_hash = sha256_text("resolved-calls")
+    val coverage_hash = semantic_coverage_hash_v2(coverage)
+    val semantic_hash = sha256_text(
+        "ResolvedVerificationIRModule-v2|vir=" + vir.semantic_hash +
+        "|calls=" + calls_hash + "|coverage=" + coverage_hash)
+    ResolvedVerificationIrModuleV2(vir, calls_hash, coverage, coverage_hash,
+        semantic_hash, "")
+
+fn wave6_exact_checks(vir_hash: text) -> [ExecutedExactCoreCheckV1]:
+    val kinds = [ExactCoreCheckKindV1.TypedLeanLowering,
+        ExactCoreCheckKindV1.UnsupportedNegative,
+        ExactCoreCheckKindV1.GeneratedFallbackScan,
+        ExactCoreCheckKindV1.FixedWidthIntegerEdges,
+        ExactCoreCheckKindV1.ResultOutcomeSeparation]
+    var checks: [ExecutedExactCoreCheckV1] = []
+    for kind in kinds:
+        checks.push(ExecutedExactCoreCheckV1("ExecutedExactCoreCheck-v1", kind,
+            vir_hash, sha256_text("tool-" + kind.name()),
+            sha256_text("policy-" + kind.name()), "PASS " + kind.name(),
+            ExecutedCheckOutcomeV1.Passed, ""))
+    checks
+
+fn passing_collection(
+    gate: FormalDeliveryGateV1,
+    content: text
+) -> FormalGateCollectionV1:
+    val receipt_hash = sha256_text(content)
+    FormalGateCollectionV1(FormalDeliveryGateEvidenceV1(gate,
+        FormalDeliveryGateStatusV1.Passed, [receipt_hash],
+        sha256_text("gate-evidence|" + content), ""),
+        [FormalDeliveryReceiptFileV1(receipt_hash, content)])
+
+fn ordered_non_wave4_collections() -> [FormalGateCollectionV1]:
+    [passing_collection(FormalDeliveryGateV1.VerificationTruthfulness, "g0"),
+        passing_collection(FormalDeliveryGateV1.ExactCoreSemantics, "g1"),
+        passing_collection(FormalDeliveryGateV1.VirCompilerRelation, "g2"),
+        passing_collection(FormalDeliveryGateV1.AopMacroClosure, "g3"),
+        passing_collection(FormalDeliveryGateV1.GeneratedRv32iEndToEnd, "g5"),
+        passing_collection(FormalDeliveryGateV1.Rv64PrivilegeMmuLinux, "g6"),
+        passing_collection(FormalDeliveryGateV1.VerifiedRelease, "g7")]
+
+fn accepted_replay() -> IndependentReplayClosureV1:
+    val artifact = sha256_text("fv2-wave6-artifact")
+    val fresh = ReplayCheckerReceiptV1("ReplayCheckerReceipt-v1",
+        ReplayCheckerClassV1.FreshLeanKernel, "leanchecker", "4.33.0",
+        sha256_text("leanchecker-binary"), "Fv2", "Fv2.root", artifact,
+        sha256_text("fresh-policy"), sha256_text("fresh-output"),
+        ReplayOutcomeV1.Accepted, "")
+    val independent = ReplayCheckerReceiptV1("ReplayCheckerReceipt-v1",
+        ReplayCheckerClassV1.IndependentKernel, "nanoda", "0.2.1",
+        sha256_text("nanoda-binary"), "Fv2", "Fv2.root", artifact,
+        sha256_text("independent-policy"), sha256_text("independent-output"),
+        ReplayOutcomeV1.Accepted, "")
+    close_independent_replay_v1(fresh, independent)
+
+fn release_evidence(replay_hash: text) -> VerifiedReleaseEvidenceV1:
+    val artifact = sha256_text("release-artifact")
+    VerifiedReleaseEvidenceV1("verified", FormalStatus.ArtifactVerified,
+        [FormalStatus.ArtifactVerified], artifact, artifact,
+        [sha256_text("proof")], [sha256_text("compiler")],
+        sha256_text("trust"), "", replay_hash, sha256_text("mutation"),
+        sha256_text("non-vacuity"),
+        [ReleaseEvidenceOutcomeV1.ProvedWithCertificate], 0, 0, 0, 0, "")
+
+fn collection_gates(
+    collections: [FormalGateCollectionV1]
+) -> [FormalDeliveryGateEvidenceV1]:
+    var gates: [FormalDeliveryGateEvidenceV1] = []
+    for collection in collections: gates.push(collection.gate_evidence)
+    gates
+
+fn accepted_signature(
+    evidence: VerifiedReleaseEvidenceV1,
+    collections: [FormalGateCollectionV1],
+    verified: bool
+) -> ReleaseSignatureVerificationV1:
+    var sealed = evidence
+    sealed.delivery_gate_manifest_hash = formal_delivery_manifest_hash_v1(
+        collection_gates(collections))
+    val payload = release_evidence_hash_v1(sealed)
+    ReleaseSignatureVerificationV1("release-key", sha256_text("public-key"),
+        SignatureVerificationReceiptV1(payload, "release-key",
+            "pure-ed25519-test-v1", sha256_text("signature-evidence"),
+            verified))
+
+describe "FV2 Wave 6 non-Wave-4 production orchestration":
+    it "keeps the frozen V1 finalizer closed after adding V2 orchestration":
+        val replay = accepted_replay()
+        val evidence = release_evidence(replay.hash())
+        val collections = ordered_non_wave4_collections()
+        val result = finalize_fv2_wave6_orchestration_v1(replay, collections,
+            evidence, "release-key", accepted_signature(evidence, collections,
+                true), [ApprovedReleaseSignerV1("release-key",
+                sha256_text("public-key"))])
+        expect(result.accepted_non_wave4).to_be(false)
+        expect(result.diagnostic).to_contain("EXECUTION-AUTHORITY")
+        expect(result.signed_bundle).to_be_nil()
+
+    it "binds resolved V2 coverage before execution authority":
+        val exact = SemanticCoverageV1("MirTypeKind.I32", SemanticClass.Exact,
+            "compiler.mir.verification_semantic_coverage",
+            "verification_ir_spec")
+        val resolved = wave6_resolved_vir([exact])
+        val result = collect_fv2_wave6_exact_core_v2(resolved,
+            wave6_exact_checks(resolved.semantic_hash))
+        expect(result.gate_evidence.diagnostic).to_contain(
+            "EXACT-EXECUTION-AUTHORITY")
+
+    it "rejects tampered V2 coverage at the Wave 6 boundary":
+        val exact = SemanticCoverageV1("MirTypeKind.I32", SemanticClass.Exact,
+            "compiler.mir.verification_semantic_coverage",
+            "verification_ir_spec")
+        var resolved = wave6_resolved_vir([exact])
+        resolved.semantic_coverage_hash = sha256_text("forged-coverage")
+        val result = collect_fv2_wave6_exact_core_v2(resolved,
+            wave6_exact_checks(resolved.semantic_hash))
+        expect(result.gate_evidence.diagnostic).to_contain(
+            "EXACT-COVERAGE-BINDING")
+
+    it "rejects unsupported reachable constructs at the Wave 6 boundary":
+        val unsupported = SemanticCoverageV1("MirInstKind.Nop",
+            SemanticClass.Unsupported,
+            "compiler.mir.verification_semantic_coverage",
+            "verification_ir_spec")
+        val resolved = wave6_resolved_vir([unsupported])
+        val result = collect_fv2_wave6_exact_core_v2(resolved,
+            wave6_exact_checks(resolved.semantic_hash))
+        expect(result.gate_evidence.diagnostic).to_contain(
+            "EXACT-COVERAGE-CLASS")
+
+    it "rejects release evidence bound to another replay pair":
+        val replay = accepted_replay()
+        val evidence = release_evidence(sha256_text("other-replay"))
+        val collections = ordered_non_wave4_collections()
+        val result = finalize_fv2_wave6_orchestration_v1(replay, collections,
+            evidence, "release-key", accepted_signature(evidence, collections,
+                true), [ApprovedReleaseSignerV1("release-key",
+                sha256_text("public-key"))])
+        expect(result.accepted_non_wave4).to_be(false)
+        expect(result.diagnostic).to_contain("REPLAY-RELEASE")
+
+    it "accepts only the frozen gate 0-3 and 5-7 sequence":
+        expect(fv2_wave6_collection_error_v1(
+            ordered_non_wave4_collections())).to_equal("")
+
+    it "fails closed when a required collector is absent":
+        var collections = ordered_non_wave4_collections()
+        collections.pop()
+        expect(fv2_wave6_collection_error_v1(collections)).to_contain(
+            "FV2-E-WAVE6-GATE-COUNT")
+
+    it "does not silently count excluded Wave 4 as Wave 5":
+        var collections = ordered_non_wave4_collections()
+        collections[4] = passing_collection(
+            FormalDeliveryGateV1.SimpleOsVerticalSlice, "excluded-g4")
+        expect(fv2_wave6_collection_error_v1(collections)).to_contain(
+            "FV2-E-WAVE6-GATE-ORDER")
+
+    it "rejects stale retained receipt bytes":
+        var collections = ordered_non_wave4_collections()
+        val valid_hash = sha256_text("original")
+        collections[2] = FormalGateCollectionV1(
+            FormalDeliveryGateEvidenceV1(
+                FormalDeliveryGateV1.VirCompilerRelation,
+                FormalDeliveryGateStatusV1.Passed, [valid_hash],
+                sha256_text("evidence"), ""),
+            [FormalDeliveryReceiptFileV1(valid_hash, "modified")])
+        expect(fv2_wave6_collection_error_v1(collections)).to_contain(
+            "FV2-E-WAVE6-GATE-STALE")
+
+    it "rejects duplicate receipt multiplicity hidden by set membership":
+        var collections = ordered_non_wave4_collections()
+        val first = sha256_text("first")
+        val second = sha256_text("second")
+        collections[2] = FormalGateCollectionV1(
+            FormalDeliveryGateEvidenceV1(
+                FormalDeliveryGateV1.VirCompilerRelation,
+                FormalDeliveryGateStatusV1.Passed, [first, second],
+                sha256_text("evidence"), ""),
+            [FormalDeliveryReceiptFileV1(first, "first"),
+                FormalDeliveryReceiptFileV1(first, "first")])
+        expect(fv2_wave6_collection_error_v1(collections)).to_contain(
+            "bijection")
+
+    it "rejects missing retained receipt material":
+        var collections = ordered_non_wave4_collections()
+        val gate = collections[5].gate_evidence
+        collections[5] = FormalGateCollectionV1(gate, [])
+        val replay = accepted_replay()
+        val evidence = release_evidence(replay.hash())
+        val result = finalize_fv2_wave6_orchestration_v1(replay, collections,
+            evidence, "release-key", accepted_signature(evidence, collections,
+                true), [ApprovedReleaseSignerV1("release-key",
+                sha256_text("public-key"))])
+        expect(result.accepted_non_wave4).to_be(false)
+        expect(result.diagnostic).to_contain("GATE-MATERIAL")
+
+    it "does not promote caller-constructed signature verification records":
+        val replay = accepted_replay()
+        val evidence = release_evidence(replay.hash())
+        val collections = ordered_non_wave4_collections()
+        val unapproved = finalize_fv2_wave6_orchestration_v1(replay,
+            collections, evidence, "release-key",
+            accepted_signature(evidence, collections, true),
+            [ApprovedReleaseSignerV1("other-key", sha256_text("public-key"))])
+        expect(unapproved.accepted_non_wave4).to_be(false)
+        expect(unapproved.diagnostic).to_contain("EXECUTION-AUTHORITY")
+        val failed = finalize_fv2_wave6_orchestration_v1(replay, collections,
+            evidence, "release-key", accepted_signature(evidence, collections,
+                false), [ApprovedReleaseSignerV1("release-key",
+                sha256_text("public-key"))])
+        expect(failed.accepted_non_wave4).to_be(false)
+        expect(failed.diagnostic).to_contain("EXECUTION-AUTHORITY")

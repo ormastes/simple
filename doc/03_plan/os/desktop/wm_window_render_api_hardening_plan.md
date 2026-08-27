@@ -1,9 +1,6 @@
 # WM Window-Render API Hardening — Phase 2 Plan
 
-**Status:** DRAFT (2026-07-07) · updated 2026-07-14 — see [§D.1](#d1--2026-07-14-status-update-full-desktop-native-build-lane):
-full-desktop `gui_entry_desktop` native build perf SOLVED (~87 s) and the hardened lane BOOTS
-+ `first-frame-rendered`; real screendump now gated only on a rust-seed cross-module
-field-index-misresolution fix (in flight). · **Owner:** OS/desktop + UI/rendering · **Scope:** the
+**Status:** DRAFT (2026-07-07) · **Owner:** OS/desktop + UI/rendering · **Scope:** the
 next hardening wave on top of the landed window-render executor.
 
 **Reads-with:**
@@ -368,90 +365,6 @@ the blocker on SimpleOS visual proof for A/B, and (b) hand the fix directions to
 stays on the current worked-around chrome/text evidence. Do NOT convert the bug record to a NOTE
 and do NOT remove the workaround comment in `gui_entry_engine2d.spl` until the fix lands.
 
-### D.1 — 2026-07-14 status update (full-desktop native-build lane)
-
-The visual-proof target moved from the single-window `gui_entry_engine2d.spl` (item D above)
-to the **full desktop** `gui_entry_desktop.spl` (created 2026-07-11: launcher + 15 apps +
-taskbar + `SharedWmScene`/`TaskbarModel`/`FramebufferDriver` graph, native 3840×2160). Status:
-
-**Solved — build perf (was mis-blamed on "lexer O(n²)").** The multi-hour SimpleOS GUI kernel
-build was the gate selecting the **aarch64 self-hosted compiler run under qemu-user emulation**
-(`bin/release/*/simple` glob picks aarch64 alphabetically) — ~1500× slower (>100s / 200 lines).
-Building with the **native x86 compiler** (`bin/release/x86_64-unknown-linux-gnu/simple`, rust
-seed) + gate env (`SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=$PWD/src SIMPLE_ALLOW_FREESTANDING_STUBS=1`,
-llvm-objcopy on PATH) builds the whole kernel in **~87 s**. Native lint is O(n) (8000 lines /
-0.077 s) — there is no lexer quadratic in the deployed compiler. Full recipe: session scratchpad
-`screendump_repro.md`.
-
-**Proven — the hardened lane boots.** The 87 s native kernel boots under QEMU (q35/max/2G,
-`-vga std -global VGA.vgamem_mb=64`, nvme FAT32 font disk) to: `engine2d-ready
-backend=baremetal-framebuffer → compositor ready → shell initialized → 15 apps → [wm-frame]
-executor → first-frame-rendered`. So the phase-1/phase-2 hardened Engine2D/compositor/shell
-lane executes on real SimpleOS.
-
-**Remaining blocker (NEW, deeper than item D's primitive-global shift) — rust-seed cross-module
-FIELD-INDEX misresolution.** Screendump is black + `cr2=0x0` nil-receiver panic cascade
-("field access on nil receiver"). Root cause (team-confirmed):
-`src/compiler_rust/compiler/src/hir/lower/type_resolver.rs:155` registers imported struct fields
-as `TypeId::ANY`, so nested field chains yield ANY receivers; for an ANY receiver the field
-INDEX is resolved by a receiver-BLIND "struct with the MOST fields declaring this name wins"
-scan (`type_resolver.rs:548-564`/`:599-625`; `expr/access.rs:337-346` keeps the wrong index,
-only degrading the TYPE to ANY). With 57 structs declaring `background`, 801 `width` at
-differing indices, the scan picks the wrong struct → one-slot shift → nil → panic. First victim:
-`scene.background` (SharedWmScene field after the `windows:[]` array) in `_wm_draw_ir_desktop_batch`.
-CONFIRMED source-UNworkaroundable at the field level: reordering fields only MOVES the victim
-(background→windows). Full-graph-only (isolated 2-module repro reads correctly). The `.spl`
-`resolve_field_index` is DEAD CODE here (MIR consumes a pre-resolved HIR `field_index`) — the fix
-is RUST-seed only. This is NOT a regression: the Jul-6 1024×768 proof (`wm_shared_evidence/
-fullscreen.ppm`) was the smaller `gui_entry_engine2d.spl`, whose closure lacked the collisions.
-Bug record: `doc/08_tracking/bug/simpleos_native_build_framebufferdriver_crossmodule_field_offset_shift_2026-07-14.md`.
-
-**Fix (in flight).** Make ambiguous-field resolution use the receiver's REAL struct
-(`access.rs try_resolve_receiver_struct_name_from_expr` → `try_resolve_global_field_index_by_name`)
-instead of most-fields-wins, and extend the `AmbiguousFieldNames` computation (over
-`imports.struct_defs` today) to also flag index-disagreements in local `module.types`. Requires a
-cargo seed rebuild (~2–6 min incremental, no parallel cargo) + the 3-stage byte-identical bootstrap
-gate + this PPM gate — all runnable on this Linux host (the prior attempt was blocked on a
-broken-native-build Mac). Fallback stopgap: extend the existing `fb_w/fb_h` scalar-threading /
-nil-guard workaround to the `SharedWmScene`/`TaskbarModel` fields the composition reads, for a
-non-black PPM before the compiler fix lands.
-
-**Render-lane confirmation (same day):** guarding the composition's `scene.background` derefs +
-bypassing the internally-faulting font-metrics call makes the composition BUILD FULLY and reach
-`first-frame-rendered`; the paint step then returns `rendered=0` because the Engine2D CPU
-rasterizer reads shifted `FramebufferDriver.width/height` at creation
-(`src/lib/gc_async_mut/gpu/engine2d/backend_baremetal.spl:59-60`). So the ENTIRE render chain is
-the SAME field-shift root cause — the ready compiler patch fixes composition + Engine2D dims in
-one shot; the `fb_w/fb_h` workaround on main only covered host-gpu present dims. The remaining
-independent blocker is a separate HEAD-seed NVMe-init regression that must be fixed to build a
-HEAD-seed kernel that boots to the render stage (to verify the field fix). Render-lane bisect:
-`scratchpad/render_findings.md`; patches: `scratchpad/screendump_handoff/`.
-
-**Acceptance (D.1).** `check-simpleos-wm-fullscreen-evidence.shs` captures a non-black
-(>1%) 3840×2160 PPM of `gui_entry_desktop`, AND the seed still passes the 3-stage bootstrap gate.
-
-**Owner.** Rust-seed HIR-lowering maintainer (same as item D's linker/lowering owner). This UI
-wave supplies the fast native-build repro loop + the confirmed root cause; it does not own the seed fix.
-
-### D.2 — 2026-07-16 status (full landed fix chain)
-
-**Landed today — interconnected struct-lowering + Result routing corrections:**
-- `7a4cb1ab3d3` + `81fe38e6dd6`: seed spl_arg providers (plain cargo builds fixed)
-- `86e56ca7867`: qualified Result.Ok/Err routing (NVMe init_from_grant root)
-- `610b4572a32`: bootstrap rewrite was deleting Try operators (BinaryWriter.len root)
-- `77c519cdab43`: trait-impl virtualization scoped to local impls (fb-init regression)
-- `73b6b02eca2`: BGA enable-bit fix, rt_file_read_bytes weak + VFS export, font soft-fail, frame-degraded policy
-- `4c1a5365c61`: unconditional rasterizer clipping, per-command preflight, strong dl stubs, Engine2D nil pinning
-- `6b59a8c4bf7`: struct-init declared-order lowering (Symptom A root fix)
-- `8932fcb3a14`: vtable NAME-keyed (Symptom B root fix; all 13 RenderBackend vtables)
-
-**Boot depth:** compositor ready → shell initialized → launcher apps=15 → [wm-frame] executor → first-frame-rendered
-
-**Screendump state:** 3840×2160 honest dims (QMP `-vga std`, real OVMF + nvme FAT32), still **BLACK** (0.00%);
-confirmed as downstream of cross-module field-index shift (access.rs patch ready but uncommitted)
-
-**Open blocker:** compose retry-recovery leak — alloc sz 8MB per `create_offscreen` → ~5 faults exhausts heap → boot halts.
-
 ---
 
 ## E — fb-lane trait unification remainder (CompositorBackend vs RenderBackend)
@@ -519,23 +432,3 @@ every backend; default to option 1 and only escalate on a proven need. Rollback 
 Recommended order: A → C (independent) → E(option 1) → B (after region-dirty) ; D runs in
 parallel on the seed owner's track and gates only the SimpleOS visual-proof column, not host-lane
 delivery of A/B/C.
-
-## 2026-07-19 — MILESTONE: glass desktop renders 99.83% under real firmware WITH NVMe (board-runnable)
-
-The x86_64 glass desktop (`gui_entry_desktop.spl`) now renders a full non-black frame under BOTH
-QEMU `-kernel` AND OVMF pflash real firmware with an NVMe device attached:
-`COVERAGE 3840x2160 nonblack=8280330/8294400 (99.83%) colors=13`, reaching `first-frame-rendered`
-+ `desktop-ready` + `production-readiness wm=live renderer=engine2d`, faults=2 (benign, no cascade).
-
-Fix chain that closed it (all landed on origin):
-- First-frame heap exhaustion FIXED (software_backend offscreen opacity-consume wiring, 77acb3e4b8b) —
-  also lifted coverage 12.64% → 99.83% (the leaky offscreen path was truncating the blit).
-- NVMe BAR-high map in the desktop entry (ceb43107412) — `vmm_map_nvme_bar_high()` after vmm_activate();
-  the C `_nvme_init_controller` now succeeds under OVMF (admin queues configured, NS1 detected) instead
-  of page-faulting on the unmapped higher-half BAR VA.
-- OVMF GRUB video fix (136ea66f518) — embed efi_gop/all_video etc. so GRUB stops #UD-crashing at
-  video-mode setup before the kernel runs (this was the real OVMF blocker, not machine load).
-
-Bug docs RESOLVED: `desktop_kernel_ovmf_render_pagefault_vs_kernel_clean_2026-07-18.md`. Remaining:
-real glyph TEXT (font still bitmap-fallback, 13 colors) and physical-board hardware evidence
-(hardware-gated). Board-runnability of the render WITH NVMe under real firmware is CONFIRMED.

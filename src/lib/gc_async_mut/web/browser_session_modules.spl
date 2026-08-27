@@ -1,7 +1,7 @@
 # Browser session — JS module transform functions (core).
 #
 # Free functions for:
-# - extract_script_blocks: compatibility view over the ordered resource plan
+# - extract_script_blocks: parse <script> tags from HTML into BrowserScriptBlock list
 # - extract_module_dependency_urls: find import/export-from URLs in module source
 # - transform_module_source: convert ESM to browser-session runtime object form
 # - transform_import_statement / transform_export_statement
@@ -12,12 +12,7 @@
 use std.js.types.pair.{Pair}
 use std.gc_async_mut.web.browser_session.{BrowserScriptBlock}
 use std.gc_async_mut.web.browser_session_url.{find_text, resolve_relative_url}
-use std.gc_async_mut.web.browser_session_html.{
-    browser_document_resource_plan
-}
-use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
-    BROWSER_MAX_DOCUMENT_SUBRESOURCES
-}
+use std.gc_async_mut.web.browser_session_html.{extract_attr_value, has_tag_attr}
 use std.gc_async_mut.web.browser_session_modules_helpers.{
     split_module_statements, module_statement_source, module_import_clause,
     split_import_bindings, split_text, normalize_module_binding_name,
@@ -28,13 +23,47 @@ use std.gc_async_mut.web.browser_session_modules_helpers.{
 }
 
 fn extract_script_blocks(html: text) -> [BrowserScriptBlock]:
-    browser_document_resource_plan(html, "", "").script_blocks
+    var blocks: [BrowserScriptBlock] = []
+    var pos = 0
+    val html_len = html.len()
+    val debug_runtime_ready = html.contains("Runtime Ready")
+    if debug_runtime_ready:
+        print "[BRS] extract scripts start"
+    while pos < html_len:
+        if debug_runtime_ready:
+            print "[BRS] extract scripts loop pos={pos}"
+        val start = find_text(html, "<script", pos)
+        if debug_runtime_ready:
+            print "[BRS] extract scripts start_idx={start}"
+        if start < 0:
+            return blocks
+        val tag_end = find_text(html, ">", start)
+        if debug_runtime_ready:
+            print "[BRS] extract scripts tag_end={tag_end}"
+        if tag_end < 0:
+            return blocks
+        val tag_content = html[start:tag_end + 1]
+        val close = find_text(html, "</script>", tag_end + 1)
+        if debug_runtime_ready:
+            print "[BRS] extract scripts close={close}"
+        val src_value = extract_attr_value(tag_content, "src")
+        val script_type = extract_attr_value(tag_content, "type").lower()
+        val is_async = has_tag_attr(tag_content, "async")
+        val is_defer = has_tag_attr(tag_content, "defer")
+        if src_value != "":
+            blocks.push(BrowserScriptBlock.with_attrs("external", "", src_value, script_type, is_async, is_defer))
+        else if close >= 0:
+            val content = html[tag_end + 1:close]
+            if content.trim().len() > 0:
+                blocks.push(BrowserScriptBlock.with_attrs("inline", content, "", script_type, is_async, is_defer))
+        if close < 0:
+            return blocks
+        pos = close + 9
+    blocks
 
 fn extract_module_dependency_urls(module_url: text, source: text) -> [text]:
     var out: [text] = []
     for stmt in split_module_statements(source):
-        if out.len() >= BROWSER_MAX_DOCUMENT_SUBRESOURCES:
-            return out
         val trimmed = stmt.trim()
         if trimmed.starts_with("import "):
             val dep = module_statement_source(trimmed)
@@ -76,16 +105,6 @@ fn transform_import_statement(module_url: text, stmt: text) -> text:
     val named_open = find_text(stmt, "{", 0)
     val named_close = find_text(stmt, "}", named_open + 1)
     if named_open >= 0 and named_close > named_open and (from_idx_for_named < 0 or named_close < from_idx_for_named):
-        # A leading default import may precede the named group:
-        # `import Foo, { a, b } from '...'`. Emit the default binding first.
-        val clause_brace = find_text(clause, "{", 0)
-        if clause_brace > 0:
-            var default_part = clause.slice(0, clause_brace).trim()
-            if default_part.ends_with(","):
-                default_part = default_part.slice(0, default_part.len() - 1).trim()
-            val default_name = normalize_module_binding_name(default_part)
-            if default_name != "":
-                out = out + "var {default_name} = {module_prop_access(resolved_ref, \"default\")};\n"
         val inner = stmt.slice(named_open + 1, named_close)
         for named in split_text(inner, ","):
             val named_trimmed = named.trim()
@@ -135,17 +154,15 @@ fn transform_export_statement(module_url: text, stmt: text, module_cache: [Pair<
     if trimmed.starts_with("export default function "):
         val decl = trimmed.slice(15, trimmed.len()).trim()
         val name = normalize_module_binding_name(declared_function_name(decl))
-        val fn_expr = function_decl_to_expr(decl)
         if name == "":
-            return "__simple_module.default = " + fn_expr + ";\n"
-        return "var " + name + " = " + fn_expr + ";\n__simple_module.default = " + name + ";\n"
+            return "function __simple_default_export" + decl.slice(8, decl.len()) + "\n__simple_module.default = __simple_default_export;\n"
+        return decl + "\n__simple_module.default = " + name + ";\n"
     if trimmed.starts_with("export default class "):
         val decl = trimmed.slice(15, trimmed.len()).trim()
         val name = normalize_module_binding_name(declared_class_name(decl))
-        val class_expr = class_decl_to_function_expr(decl)
         if name == "":
-            return "__simple_module.default = " + class_expr + ";\n"
-        return "var " + name + " = " + class_expr + ";\n__simple_module.default = " + name + ";\n"
+            return "class __simple_default_export" + decl.slice(5, decl.len()) + "\n__simple_module.default = __simple_default_export;\n"
+        return decl + "\n__simple_module.default = " + name + ";\n"
     if trimmed.starts_with("export default "):
         val expr = trimmed.slice(15, trimmed.len()).trim()
         return "__simple_module.default = {expr};\n"
@@ -155,16 +172,14 @@ fn transform_export_statement(module_url: text, stmt: text, module_cache: [Pair<
         if name == "":
             return decl + "\n"
         val export_ref = module_prop_access("__simple_module", name)
-        val fn_expr = function_decl_to_expr(decl)
-        return "var {name} = {fn_expr};\n{export_ref} = {name};\n"
+        return decl + "\n{export_ref} = {name};\n"
     if trimmed.starts_with("export class "):
         val decl = trimmed.slice(7, trimmed.len()).trim()
         val name = normalize_module_binding_name(declared_class_name(decl))
         if name == "":
             return decl + "\n"
         val export_ref = module_prop_access("__simple_module", name)
-        val class_expr = class_decl_to_function_expr(decl)
-        return "var {name} = {class_expr};\n{export_ref} = {name};\n"
+        return decl + "\n{export_ref} = {name};\n"
     if trimmed.starts_with("export const ") or trimmed.starts_with("export let ") or trimmed.starts_with("export var "):
         val decl = trimmed.slice(7, trimmed.len()).trim()
         val kind = module_variable_decl_kind(decl)
@@ -234,11 +249,7 @@ fn transform_export_statement(module_url: text, stmt: text, module_cache: [Pair<
             for exported in module_exported_names(dep_source, false):
                 val export_ref = module_prop_access("__simple_module", exported)
                 val source_ref = module_prop_access(resolved_ref, exported)
-                # Local (already-assigned) exports take precedence over star
-                # re-exports. The JS subset drops mutations made inside an `if`
-                # body, so use a logical-or assignment instead of an `if` guard:
-                # keep the existing value when present, else pull from the dep.
-                out = out + export_ref + " = " + export_ref + " || " + source_ref + ";\n"
+                out = out + "if (" + export_ref + " == undefined) " + export_ref + " = " + source_ref + ";\n"
         return out
     if trimmed.starts_with("export {"):
         val open = find_text(trimmed, "{", 0)
@@ -338,39 +349,6 @@ fn is_module_symbol_char(ch: text) -> bool:
 fn transform_simple_class_export(decl: text, class_name: text) -> text:
     val body = extract_constructor_body(decl)
     "function {class_name}() { {body} }\n"
-
-# Rewrite a `function name(args) { body }` declaration into an anonymous
-# function expression `function(args) { body }`. The browser-session JS subset
-# cannot reference a hoisted function declaration by bare name as a value (e.g.
-# `module.default = name`), but a function expression bound to a `var` works, so
-# module exports route every function/class through expression form.
-fn function_decl_to_expr(decl: text) -> text:
-    val open = find_text(decl, "(", 0)
-    if open < 0:
-        return decl
-    "function" + decl.slice(open, decl.len())
-
-# Constructor parameter list for a `class X { constructor(params) { body } }`.
-fn class_constructor_params(decl: text) -> text:
-    val ctor = find_text(decl, "constructor", 0)
-    if ctor < 0:
-        return ""
-    val open = find_text(decl, "(", ctor)
-    if open < 0:
-        return ""
-    val close = find_text(decl, ")", open + 1)
-    if close <= open:
-        return ""
-    decl.slice(open + 1, close)
-
-# Rewrite a `class X { constructor(params) { body } }` declaration into a
-# constructor function expression `function(params) { body }`. Methods beyond
-# the constructor are not represented; module class exports in the supported
-# subset are constructor-only.
-fn class_decl_to_function_expr(decl: text) -> text:
-    val params = class_constructor_params(decl)
-    val body = extract_constructor_body(decl)
-    "function(" + params + ") \{ " + body + " \}"
 
 fn extract_constructor_body(decl: text) -> text:
     val ctor = find_text(decl, "constructor", 0)

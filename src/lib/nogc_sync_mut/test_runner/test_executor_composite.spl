@@ -4,13 +4,12 @@
 #
 # Split from test_runner_execute.spl for maintainability.
 
-use std.test_runner.test_runner_types.{TestFileResult, TestOptions, TEST_OUTPUT_CAPTURE_BYTES}
+use std.test_runner.test_runner_types.{TestFileResult, TestOptions}
 use std.test_runner.test_executor_parsing.{find_simple_binary, build_child_args, make_result_from_output, parse_test_output}
 use std.test_runner.test_runner_metrics.{test_execution_cohort_id}
 use std.io.{file_exists, file_read}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
-use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, ExecutionScopeResult, standard_resource_budget, execution_resource_scope_with_budget, run_in_execution_resource_scope}
-use std.common.perf.execution_metrics.{ResourceBudget, decision_status_name}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 use std.io_runtime.{shell}
 use std.nogc_sync_mut.jit.jit_types.{JitBinary}
 use std.nogc_sync_mut.jit.jit_util.{hex_i64}
@@ -30,28 +29,6 @@ use std.sffi.io.{file_read_bytes}
 # =========================================================================
 # Composite Platform Execution
 # =========================================================================
-
-fn run_composite_scoped(resource_class: ExecutionResourceClass, cmd: text, args: [text], timeout_ms: i64) -> ExecutionScopeResult:
-    val defaults = standard_resource_budget(resource_class)
-    val budget = ResourceBudget(
-        max_wall_ms: timeout_ms, max_cpu_ms: defaults.max_cpu_ms,
-        max_tree_charge_bytes: defaults.max_tree_charge_bytes,
-        max_direct_child_rss_bytes: defaults.max_direct_child_rss_bytes,
-        max_io_read_bytes: defaults.max_io_read_bytes,
-        max_io_write_bytes: defaults.max_io_write_bytes,
-        max_pids: defaults.max_pids, max_fds: defaults.max_fds)
-    run_in_execution_resource_scope(
-        execution_resource_scope_with_budget(resource_class, budget, TEST_OUTPUT_CAPTURE_BYTES),
-        cmd, args)
-
-fn attach_composite_scope(result: TestFileResult, scoped: ExecutionScopeResult, resource_class: text, duration_ms: i64, file_path: text, options: TestOptions) -> TestFileResult:
-    result.execution_ms = duration_ms
-    result.resource_usage = scoped.process.usage
-    result.resource_class = resource_class
-    result.cohort_id = test_execution_cohort_id(file_path, options)
-    result.budget_status = decision_status_name(scoped.budget_decision.status)
-    result.anomaly_status = "provisional"
-    result
 
 fn run_test_file_composite(file_path: text, options: TestOptions, spec: text) -> TestFileResult:
     """Execute test in composite platform mode."""
@@ -88,19 +65,19 @@ fn run_test_file_composite(file_path: text, options: TestOptions, spec: text) ->
 
 fn extract_base_runtime(spec: text) -> text:
     """Extract base runtime from composite spec (e.g. 'interpreter' from 'interpreter(baremetal(riscv32))')."""
-    val paren = spec.index_of("(")
+    val paren = spec.index_of("(") ?? -1
     if paren > 0:
         return spec[0:paren].trim()
     spec.trim()
 
 fn extract_platform_layer(spec: text) -> text:
     """Extract platform layer from composite spec (e.g. 'baremetal' from 'interpreter(baremetal(riscv32))')."""
-    val paren = spec.index_of("(")
+    val paren = spec.index_of("(") ?? -1
     if paren < 0: return ""
     val after = spec[paren + 1:]
-    val paren2 = after.index_of("(")
+    val paren2 = after.index_of("(") ?? -1
     if paren2 > 0: return after[0:paren2].trim()
-    val close = after.index_of(")")
+    val close = after.index_of(")") ?? -1
     if close > 0: return after[0:close].trim()
     ""
 
@@ -208,7 +185,7 @@ fn run_test_file_baremetal(file_path: text, options: TestOptions, base: text, ar
     - .elf files: run directly on QEMU with semihosting
     """
     # All .spl test files run via the host interpreter.
-    # Tests that need QEMU invoke it themselves through bounded capture.
+    # Tests that need QEMU invoke it themselves (via rt_process_run_timeout).
     # Pure-logic tests just check constants and run without QEMU.
     if file_path.ends_with(".spl"):
         return run_test_file_baremetal_via_interpreter(file_path: file_path, options, arch: arch)
@@ -230,12 +207,12 @@ fn run_test_file_baremetal_via_interpreter(file_path: text, options: TestOptions
     val setup_ms = (setup_end - setup_start) / 1000
 
     val test_start = time_now_unix_micros()
-    val scoped = run_composite_scoped(ExecutionResourceClass.System, binary, child_args, timeout_ms)
+    val (stdout, stderr, exit_code) = process_run_bounded(binary, child_args, timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
     val test_end = time_now_unix_micros()
     val duration_ms = (test_end - test_start) / 1000
-    var result = make_result_from_output(file_path, scoped.process.stdout, scoped.process.stderr, scoped.process.usage.exit_code, duration_ms, options.timeout)
+    var result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
     result.setup_ms = setup_ms
-    attach_composite_scope(result, scoped, "system", duration_ms, file_path, options)
+    result
 
 fn find_baremetal_elf(spec_file: text, arch: text) -> text:
     """Find prebuilt ELF for a baremetal spec file."""
@@ -286,18 +263,18 @@ fn run_test_file_baremetal_ghdl(file_path: text, options: TestOptions, elf_path:
 
     val timeout_ms = timeout_secs * 1000
     val test_start = time_now_unix_micros()
-    val scoped = run_composite_scoped(
-        ExecutionResourceClass.System,
+    val (stdout, stderr, exit_code) = process_run_bounded(
         "bash",
         ["src/lib/nogc_async_mut_noalloc/baremetal/ghdl_runner.shs", elf_path, "--timeout={timeout_secs}"],
-        timeout_ms
+        timeout_ms,
+        TEST_OUTPUT_CAPTURE_BYTES
     )
     val test_end = time_now_unix_micros()
     val duration_ms = (test_end - test_start) / 1000
 
-    var result = make_result_from_output(file_path, scoped.process.stdout, scoped.process.stderr, scoped.process.usage.exit_code, duration_ms, timeout_secs)
+    var result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, timeout_secs)
     result.setup_ms = setup_ms
-    attach_composite_scope(result, scoped, "system", duration_ms, file_path, options)
+    result
 
 fn run_test_file_baremetal_qemu(file_path: text, options: TestOptions, arch: text, elf_path: text) -> TestFileResult:
     """Execute a prebuilt ELF on QEMU with semihosting and parse results."""
@@ -325,14 +302,14 @@ fn run_test_file_baremetal_qemu(file_path: text, options: TestOptions, arch: tex
 
     val timeout_ms = options.timeout * 1000
     val test_start = time_now_unix_micros()
-    val scoped = run_composite_scoped(ExecutionResourceClass.Qemu, qemu_bin, qemu_args, timeout_ms)
+    val (stdout, stderr, exit_code) = process_run_bounded(qemu_bin, qemu_args, timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
     val test_end = time_now_unix_micros()
     val duration_ms = (test_end - test_start) / 1000
 
     # Parse SPipe-format output from QEMU semihosting
-    var result = make_result_from_output(file_path, scoped.process.stdout, scoped.process.stderr, scoped.process.usage.exit_code, duration_ms, options.timeout)
+    var result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
     result.setup_ms = setup_ms
-    attach_composite_scope(result, scoped, "qemu", duration_ms, file_path, options)
+    result
 
 # =========================================================================
 # GPU lane dispatch — wires remote(cuda(...))/remote(vulkan(...)) to the
@@ -523,23 +500,39 @@ fn run_test_file_jit(file_path: text, options: TestOptions, arch: text, target: 
 
 fn run_test_file_jit_stm32h7(file_path: text, source: text, options: TestOptions) -> TestFileResult:
     val setup_start = time_now_unix_micros()
-    val openocd_pid = match stm32h7_connect():
-        case Ok(pid): pid
-        case Err(reason):
-            val end = time_now_unix_micros()
-            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                duration_ms: 0, setup_ms: (end - setup_start) / 1000,
-                error: "JIT target connect failed: {reason}", timed_out: false, cached: false)
+    val connect_result = stm32h7_connect()
+    if connect_result.is_err():
+        val end = time_now_unix_micros()
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: (end - setup_start) / 1000,
+            error: "JIT target connect failed: {connect_result.err().unwrap()}", timed_out: false, cached: false)
+
+    var openocd_pid: i64 = 0
+    match connect_result:
+        case Ok(v):
+            openocd_pid = v
+        case Err(_):
+            openocd_pid = 0
 
     val limits = MemoryMap.stm32h7()
-    val compiled_bytes = match compile_remote_binary(source, Architecture.Arm32, limits.code_start):
-        case Ok(bytes): bytes
-        case Err(reason):
+    val compile_result = compile_remote_binary(source, Architecture.Arm32, limits.code_start)
+    if compile_result.is_err():
+        stm32h7_disconnect(openocd_pid)
+        val end = time_now_unix_micros()
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: (end - setup_start) / 1000,
+            error: "JIT compile failed: {compile_result.err().unwrap()}", timed_out: false, cached: false)
+
+    var compiled_bytes: [i32] = []
+    match compile_result:
+        case Ok(v):
+            compiled_bytes = v
+        case Err(msg):
             stm32h7_disconnect(openocd_pid)
             val end = time_now_unix_micros()
             return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
                 duration_ms: 0, setup_ms: (end - setup_start) / 1000,
-                error: "JIT compile failed: {reason}", timed_out: false, cached: false)
+                error: "JIT compile failed: {msg}", timed_out: false, cached: false)
     val bytes = append_halt_trampoline_arm32(compiled_bytes)
     val binary = JitBinary(
         name: file_path,
@@ -548,22 +541,21 @@ fn run_test_file_jit_stm32h7(file_path: text, source: text, options: TestOptions
         stack_bytes: 0,
         arch: Architecture.Arm32
     )
-    var layout = match plan_binary_layout_arm32(binary, limits):
-        case Ok(planned): planned
-        case Err(reason):
-            stm32h7_disconnect(openocd_pid)
-            val end = time_now_unix_micros()
-            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                duration_ms: 0, setup_ms: (end - setup_start) / 1000,
-                error: "JIT layout failed: {reason}", timed_out: false, cached: false)
-    match stm32h7_write_code(layout.code_base, bytes):
-        case Ok(_): pass
-        case Err(reason):
-            stm32h7_disconnect(openocd_pid)
-            val end = time_now_unix_micros()
-            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                duration_ms: 0, setup_ms: (end - setup_start) / 1000,
-                error: "JIT upload failed: {reason}", timed_out: false, cached: false)
+    val layout_result = plan_binary_layout_arm32(binary, limits)
+    if layout_result.is_err():
+        stm32h7_disconnect(openocd_pid)
+        val end = time_now_unix_micros()
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: (end - setup_start) / 1000,
+            error: "JIT layout failed: {layout_result.err().unwrap()}", timed_out: false, cached: false)
+    var layout = layout_result.ok.unwrap()
+    val write_result = stm32h7_write_code(layout.code_base, bytes)
+    if write_result.is_err():
+        stm32h7_disconnect(openocd_pid)
+        val end = time_now_unix_micros()
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: (end - setup_start) / 1000,
+            error: "JIT upload failed: {write_result.err().unwrap()}", timed_out: false, cached: false)
 
     val readback_result = stm32h7_read_code(layout.code_base, bytes.len())
     match readback_result:
@@ -584,45 +576,41 @@ fn run_test_file_jit_stm32h7(file_path: text, source: text, options: TestOptions
                     duration_ms: 0, setup_ms: (end - setup_start) / 1000,
                     error: "SRAM readback mismatch", timed_out: false, cached: false)
 
-    match stm32h7_write_register(13, layout.stack_top):
-        case Ok(_): pass
-        case Err(reason):
-            stm32h7_disconnect(openocd_pid)
-            val end = time_now_unix_micros()
-            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                duration_ms: 0, setup_ms: (end - setup_start) / 1000,
-                error: "JIT set SP failed: {reason}", timed_out: false, cached: false)
+    val sp_result = stm32h7_write_register(13, layout.stack_top)
+    if sp_result.is_err():
+        stm32h7_disconnect(openocd_pid)
+        val end = time_now_unix_micros()
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: (end - setup_start) / 1000,
+            error: "JIT set SP failed: {sp_result.err().unwrap()}", timed_out: false, cached: false)
 
-    match stm32h7_write_register(14, jit_return_pc_arm32(layout)):
-        case Ok(_): pass
-        case Err(reason):
-            stm32h7_disconnect(openocd_pid)
-            val end = time_now_unix_micros()
-            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                duration_ms: 0, setup_ms: (end - setup_start) / 1000,
-                error: "JIT set LR failed: {reason}", timed_out: false, cached: false)
+    val lr_result = stm32h7_write_register(14, jit_return_pc_arm32(layout))
+    if lr_result.is_err():
+        stm32h7_disconnect(openocd_pid)
+        val end = time_now_unix_micros()
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: (end - setup_start) / 1000,
+            error: "JIT set LR failed: {lr_result.err().unwrap()}", timed_out: false, cached: false)
 
-    match stm32h7_write_register(15, jit_entry_pc_arm32(layout)):
-        case Ok(_): pass
-        case Err(reason):
-            stm32h7_disconnect(openocd_pid)
-            val end = time_now_unix_micros()
-            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                duration_ms: 0, setup_ms: (end - setup_start) / 1000,
-                error: "JIT set PC failed: {reason}", timed_out: false, cached: false)
+    val pc_result = stm32h7_write_register(15, jit_entry_pc_arm32(layout))
+    if pc_result.is_err():
+        stm32h7_disconnect(openocd_pid)
+        val end = time_now_unix_micros()
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: (end - setup_start) / 1000,
+            error: "JIT set PC failed: {pc_result.err().unwrap()}", timed_out: false, cached: false)
 
     val setup_end = time_now_unix_micros()
     val setup_ms = (setup_end - setup_start) / 1000
 
     val exec_start = time_now_unix_micros()
-    match stm32h7_resume():
-        case Ok(_): pass
-        case Err(reason):
-            stm32h7_disconnect(openocd_pid)
-            val end = time_now_unix_micros()
-            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                duration_ms: 0, setup_ms: setup_ms,
-                error: "JIT resume failed: {reason}", timed_out: false, cached: false)
+    val resume_result = stm32h7_resume()
+    if resume_result.is_err():
+        stm32h7_disconnect(openocd_pid)
+        val end = time_now_unix_micros()
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: setup_ms,
+            error: "JIT resume failed: {resume_result.err().unwrap()}", timed_out: false, cached: false)
 
     shell("sleep 0.5")
     val r0_result = stm32h7_read_register(0)
@@ -630,19 +618,29 @@ fn run_test_file_jit_stm32h7(file_path: text, source: text, options: TestOptions
     val exec_end = time_now_unix_micros()
     stm32h7_disconnect(openocd_pid)
 
-    val r0 = match r0_result:
-        case Ok(v): v
-        case Err(reason):
-            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                duration_ms: (exec_end - exec_start) / 1000, setup_ms: setup_ms,
-                error: "JIT read R0 failed: {reason}", timed_out: false, cached: false)
+    if r0_result.is_err():
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: (exec_end - exec_start) / 1000, setup_ms: setup_ms,
+            error: "JIT read R0 failed: {r0_result.err().unwrap()}", timed_out: false, cached: false)
 
-    val pc_after = match pc_after_result:
-        case Ok(v): v
-        case Err(reason):
-            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                duration_ms: (exec_end - exec_start) / 1000, setup_ms: setup_ms,
-                error: "JIT read PC failed: {reason}", timed_out: false, cached: false)
+    if pc_after_result.is_err():
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: (exec_end - exec_start) / 1000, setup_ms: setup_ms,
+            error: "JIT read PC failed: {pc_after_result.err().unwrap()}", timed_out: false, cached: false)
+
+    var r0 = 0
+    match r0_result:
+        case Ok(v):
+            r0 = v
+        case Err(_):
+            r0 = 0
+
+    var pc_after = 0
+    match pc_after_result:
+        case Ok(v):
+            pc_after = v
+        case Err(_):
+            pc_after = 0
     val expected_halt_pc = layout.halt_addr
     val expected_pc = layout.halt_addr + 2
     val pc_ok = pc_after == expected_halt_pc or pc_after == expected_pc

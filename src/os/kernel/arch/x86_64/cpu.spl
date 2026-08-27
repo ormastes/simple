@@ -9,66 +9,56 @@
 # MMIO instead of port I/O).
 
 use os.kernel.interrupts.apic.{apic_send_init, apic_send_sipi, apic_get_id}
-use os.kernel.arch.x86.port_io_owner.{
-    x86_port_inb, x86_port_outb, x86_port_inw, x86_port_outw,
-    x86_port_inl, x86_port_outl, x86_port_io_wait,
-}
 use os.kernel.smp.percpu.{percpu_apic_id, percpu_is_online}
 use os.kernel.smp.smp.{smp_mark_ap_startup_sent, smp_ap_startup_sent, smp_mark_ap_started_by_apic_id, smp_num_cpus}
-use os.kernel.smp.cpu_identity_runtime_surface_v1.{
-    cpu_identity_runtime_resolve_or_unresolved_v1,
-}
-use os.kernel.smp.cpu_topology_identity_owner_v1.{CpuHardwareIdentityKindV1}
 
 # ============================================================================
 # Port I/O
 # ============================================================================
 
+extern fn rt_port_inb(port: u16) -> u8
+extern fn rt_port_outb(port: u16, value: u8)
+extern fn rt_port_inw(port: u16) -> u16
+extern fn rt_port_outw(port: u16, value: u16)
+extern fn rt_port_inl(port: u16) -> u32
+extern fn rt_port_outl(port: u16, value: u32)
+extern fn rt_port_io_wait()
+
 fn port_inb(port: u16) -> u8:
     """Read byte from I/O port."""
-    x86_port_inb(port)
+    rt_port_inb(port)
 
 fn port_outb(port: u16, value: u8):
     """Write byte to I/O port."""
-    x86_port_outb(port, value)
+    rt_port_outb(port, value)
 
 fn port_outb_wait(port: u16, value: u8):
     """Write byte to I/O port with I/O wait."""
-    x86_port_outb(port, value)
-    x86_port_io_wait()
+    rt_port_outb(port, value)
+    rt_port_io_wait()
 
 fn port_inw(port: u16) -> u16:
     """Read word from I/O port."""
-    x86_port_inw(port)
+    rt_port_inw(port)
 
 fn port_outw(port: u16, value: u16):
     """Write word to I/O port."""
-    x86_port_outw(port, value)
+    rt_port_outw(port, value)
 
 fn port_inl(port: u16) -> u32:
     """Read dword from I/O port."""
-    x86_port_inl(port)
+    rt_port_inl(port)
 
 fn port_outl(port: u16, value: u32):
     """Write dword to I/O port."""
-    x86_port_outl(port, value)
+    rt_port_outl(port, value)
 
 # ============================================================================
 # Control Registers
 # ============================================================================
 
-extern fn rt_read_cr3() -> u64
-extern fn rt_write_cr3(value: u64)
 extern fn rt_read_cr2() -> u64
 extern fn rt_invlpg(addr: u64)
-
-fn read_cr3() -> u64:
-    """Read CR3 (page table base address)."""
-    rt_read_cr3()
-
-fn write_cr3(value: u64):
-    """Write CR3 (switch page tables, flush TLB)."""
-    rt_write_cr3(value)
 
 fn read_cr2() -> u64:
     """Read CR2 (faulting address after page fault)."""
@@ -84,7 +74,6 @@ fn invlpg(addr: u64):
 
 extern fn rt_read_msr(msr: u32) -> u64
 extern fn rt_write_msr(msr: u32, value: u64)
-extern fn rt_x86_install_syscall_entry_raw() -> u64
 
 fn read_msr(msr: u32) -> u64:
     """Read Model Specific Register."""
@@ -106,12 +95,6 @@ val MSR_KERNEL_GS_BASE: u32 = 0xC0000102
 
 # EFER bit 0 — System Call Extensions. Required to enable SYSCALL/SYSRET.
 val EFER_SCE: u64 = 0x1
-# EFER bit 11 — No-Execute Enable. Makes PTE bit 63 (NX) a valid no-execute bit
-# instead of a RESERVED bit. The ring-3 exec loader's W^X policy sets NX on
-# writable user pages (e.g. the user stack); without NXE the CPU raises a
-# reserved-bit page fault (errcode RSVD) on ANY access to them — which is exactly
-# why a ring-3 program faulted on its first stack read.
-val EFER_NXE: u64 = 0x800
 # RFLAGS mask: clear IF (bit 9) on SYSCALL entry so kernel runs with
 # interrupts disabled until it is ready to re-enable them.
 val SYSCALL_FMASK_IF: u64 = 0x200
@@ -177,6 +160,7 @@ use os.kernel.log.klog_api.{log_raw_println}
 # must be set to once the SYSCALL install is actually enabled.
 extern fn get_kernel_syscall_entry_addr() -> u64
 extern fn rt_x86_prepare_ap_startup(cpu_id: u32, sipi_vector: u32) -> i64
+extern fn rt_x86_ap_trampoline_phys() -> u64
 
 # Use u64 sentinel instead of bool — `bool = false` in the baremetal runtime
 # tags as 0x3 (NIL), which is non-zero, so the idempotency guard below would
@@ -201,16 +185,25 @@ fn install_syscall_entry():
       3. src/os/kernel/abi/syscall_shim.spl provides @export("C",...) strong
          overrides for 10+ common syscalls.
     """
+    if _syscall_entry_installed != 0:
+        return
     _syscall_entry_installed = 1
-    val entry = rt_x86_install_syscall_entry_raw()
+    # 1. Enable SYSCALL/SYSRET via EFER.SCE (bit 0).
+    val efer = read_msr(MSR_EFER)
+    write_msr(MSR_EFER, efer | EFER_SCE)
+    # 2. Program MSR_STAR for SYSCALL/SYSRET segment selectors.
+    # Kernel CS = 0x08 (bits 32-47); user CS 32-bit compat = 0x18 (bits 48-63).
+    # SYSCALL loads CS=0x08, SS=0x10; SYSRET64 loads CS=0x28 (user_cs+16), SS=0x20 (user_cs+8).
+    val user_cs_rpl3: u64 = 0x18 | 3
+    val star: u64 = (user_cs_rpl3 << 48) | (0x08 as u64 << 32)
+    write_msr(MSR_STAR, star)
+    # 3. LSTAR = 64-bit SYSCALL entry point.
+    val entry = get_kernel_syscall_entry_addr()
+    write_msr(MSR_LSTAR, entry)
+    # 4. SFMASK: clear IF (RFLAGS bit 9) on SYSCALL so kernel runs with
+    # interrupts disabled until it explicitly re-enables them.
+    write_msr(MSR_SFMASK, SYSCALL_FMASK_IF)
     log_raw_println("[syscall] MSRs programmed: LSTAR STAR SFMASK=0x200")
-    # Enable EFER.NXE so PTE bit 63 (NX) is a valid no-execute bit, not reserved.
-    # The exec loader marks writable user pages NX (W^X); without NXE any access
-    # to them faults reserved-bit. rt_x86_install_syscall_entry_raw sets EFER.SCE;
-    # OR in NXE here (pure-Simple, existing rt_read_msr/rt_write_msr externs).
-    val efer_val = read_msr(MSR_EFER)
-    write_msr(MSR_EFER, efer_val | EFER_NXE)
-    log_raw_println("[arch-init] EFER.NXE enabled")
 
 fn syscall_entry_installed() -> bool:
     """Test-visible accessor: did `install_syscall_entry` run?"""
@@ -233,28 +226,28 @@ extern fn rt_cli()
 extern fn rt_sti()
 extern fn rt_hlt()
 
-fn x86_cli():
+fn cli():
     """Disable interrupts."""
     rt_cli()
 
-fn x86_sti():
+fn sti():
     """Enable interrupts."""
     rt_sti()
 
-fn x86_hlt():
+fn hlt():
     """Halt until next interrupt."""
     rt_hlt()
 
 fn halt_loop():
     """Halt forever (used for unrecoverable errors)."""
-    x86_cli()
+    cli()
     while true:
-        x86_hlt()
+        hlt()
 
 fn reboot():
     """Request a platform reset using the x86 reset control register."""
     log_raw_println("[power] reboot requested")
-    x86_cli()
+    cli()
     port_outb(0xCF9 as u16, 0x02 as u8)
     port_outb(0xCF9 as u16, 0x06 as u8)
     halt_loop()
@@ -287,7 +280,7 @@ fn x86_ap_trampoline_vector() -> u32:
 
 fn x86_ap_trampoline_phys() -> u64:
     """Return the physical install address for the AP trampoline."""
-    0x8000u64
+    rt_x86_ap_trampoline_phys()
 
 fn x86_start_registered_aps() -> u32:
     """Send INIT/SIPI to all firmware-registered APs using the installed trampoline."""
@@ -367,11 +360,8 @@ struct X86Cpu:
 
 impl X86Cpu:
     fn cpu_id() -> u64:
-        """Resolve the current xAPIC identity through the boot-sealed map."""
-        cpu_identity_runtime_resolve_or_unresolved_v1(
-            CpuHardwareIdentityKindV1.X86Apic,
-            apic_get_id() as u64,
-        )
+        """Return current CPU ID. Single CPU for now."""
+        0
 
     fn cpu_address_width() -> u64:
         """Return virtual address width in bits."""
@@ -379,15 +369,15 @@ impl X86Cpu:
 
     fn cpu_enable_interrupts():
         """Enable interrupts (STI)."""
-        x86_sti()
+        sti()
 
     fn cpu_disable_interrupts():
         """Disable interrupts (CLI)."""
-        x86_cli()
+        cli()
 
     fn cpu_halt():
         """Halt until next interrupt (HLT)."""
-        x86_hlt()
+        hlt()
 
     fn cpu_halt_loop():
         """Disable interrupts and halt forever."""

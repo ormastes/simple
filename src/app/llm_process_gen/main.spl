@@ -4,8 +4,8 @@ use std.cli.cli_util (get_cli_args)
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use std.log.{error}
 use app.io.mod.{process_run}
-use std.nogc_sync_mut.io.file_ops.{file_read_text}
 
+extern fn rt_file_read_text(path: text) -> text
 use std.io_runtime.{file_write}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{file_delete}
@@ -208,7 +208,7 @@ fn parse_options(args: [text]) -> Options:
     opts
 
 fn manifest_path(root: text) -> text:
-    resolve_under_root(root, "doc/00_llm_process/llm_process_manifest.sdn")
+    path_join(root, "doc/00_llm_process/llm_process_manifest.sdn")
 
 fn check_all(root: text) -> ResultSummary:
     val manifest = read_manifest(root)
@@ -254,9 +254,9 @@ fn generate_all(root: text, dry_run: bool, force: bool) -> ResultSummary:
 
 fn read_manifest(root: text) -> text:
     val path = manifest_path(root)
-    if not file_exists(path):
+    if not rt_file_exists(path):
         return ""
-    file_read_text(path)
+    rt_file_read_text(path)
 
 fn validate_tables(manifest: text) -> [text]:
     val tables = ["skills", "commands", "subagents", "tools", "expert_routes", "generated_files"]
@@ -340,20 +340,20 @@ fn value_after(line: text, prefix: text) -> text:
 
 fn check_record(root: text, rec: GeneratedFile) -> [text]:
     var failures: [text] = []
-    val source = resolve_under_root(root, rec.source_path)
-    val target = resolve_under_root(root, rec.target_path)
+    val source = path_join(root, rec.source_path)
+    val target = path_join(root, rec.target_path)
     if rec.id == "":
         failures.push("generated_files record missing id")
-    if rec.source_path == "" or not file_exists(source):
+    if rec.source_path == "" or not rt_file_exists(source):
         failures.push("{rec.id}: missing source {rec.source_path}")
-    if rec.target_path == "" or not file_exists(target):
+    if rec.target_path == "" or not rt_file_exists(target):
         failures.push("{rec.id}: missing target {rec.target_path}")
         return failures
     if rec.mode == "skeleton":
         for f in check_links(root, target, parent_dir(source)):
             failures.push("{rec.id}: {f}")
         return failures
-    val target_text = file_read_text(target)
+    val target_text = rt_file_read_text(target)
     val first = first_line(target_text)
     if not first.contains("llm-process-gen: managed"):
         failures.push("{rec.id}: missing generated marker in {rec.target_path}")
@@ -371,12 +371,12 @@ fn check_record(root: text, rec: GeneratedFile) -> [text]:
 
 fn generate_record(root: text, rec: GeneratedFile, dry_run: bool, force: bool) -> [text]:
     var failures: [text] = []
-    val source = resolve_under_root(root, rec.source_path)
-    val target = resolve_under_root(root, rec.target_path)
+    val source = path_join(root, rec.source_path)
+    val target = path_join(root, rec.target_path)
     if rec.source_path == "" or not file_exists(source):
         failures.push("{rec.id}: missing source {rec.source_path}")
         return failures
-    if rec.mode == "skeleton" and file_exists(target):
+    if rec.mode == "skeleton" and rt_file_exists(target):
         return failures
     val body = render_content(root, rec)
     if rec.mode == "skeleton":
@@ -384,12 +384,12 @@ fn generate_record(root: text, rec: GeneratedFile, dry_run: bool, force: bool) -
             print "would create skeleton {rec.target_path}"
             return failures
         ensure_parent(target)
-        if not file_write(target, body):
+        if not rt_file_write_text(target, body):
             failures.push("{rec.id}: failed to write {rec.target_path}")
         return failures
     val output = marker_for(rec, hash_file(source), hash_text(root, body)) + "\n" + body
     if file_exists(target):
-        val existing = file_read_text(target)
+        val existing = rt_file_read_text(target)
         val first = first_line(existing)
         if first.contains("llm-process-gen: managed"):
             if marker_field(first, "content_sha256") != hash_text(root, strip_marker(existing)) and not force:
@@ -399,21 +399,21 @@ fn generate_record(root: text, rec: GeneratedFile, dry_run: bool, force: bool) -
             failures.push("{rec.id}: refusing unmarked target {rec.target_path}; rerun with --force")
             return failures
     if dry_run:
-        if file_exists(target) and existing == output:
+        if rt_file_exists(target) and existing == output:
             print "unchanged {rec.target_path}"
-        elif file_exists(target):
+        elif rt_file_exists(target):
             print "would update {rec.target_path}"
         else:
             print "would create {rec.target_path}"
         return failures
     ensure_parent(target)
-    if not file_write(target, output):
+    if not rt_file_write_text(target, output):
         failures.push("{rec.id}: failed to write {rec.target_path}")
     failures
 
 fn render_content(root: text, rec: GeneratedFile) -> text:
     val source = resolve_under_root(root, rec.source_path)
-    val raw = file_read_text(source)
+    val raw = rt_file_read_text(source)
     if rec.mode == "gemini_toml_skill":
         return render_gemini_skill(rec.source_path, raw)
     if rec.mode == "tools_sdn":
@@ -443,7 +443,7 @@ fn render_tools(rec: GeneratedFile) -> text:
     "skill_tools |skill, stage|\n    " + skill + ", " + rec.stage + "\n\n" +
         "tools |id, type, name, purpose|\n" +
         "    simple_cli, cli, \"bin/simple\", \"Build, run, test, lint, and inspect Simple code\"\n" +
-        "    duplicate_check, cli, \"bin/simple duplicate-check <path>\", \"Check semantic documentation duplication\"\n" +
+        "    duplicate_check, cli, \"bin/simple duplicate-check\", \"Check semantic documentation duplication\"\n" +
         "    git, cli, \"git\", \"Inspect local changes without reverting user work\"\n"
 
 fn render_pipe_tools(rec: GeneratedFile, skill: text) -> text:
@@ -476,7 +476,7 @@ fn render_pipe_tools(rec: GeneratedFile, skill: text) -> text:
     "skill_tools |skill, stage|\n    " + skill + ", " + rec.stage + "\n\n" +
         "tools |id, type, name, purpose|\n" +
         "    simple_cli, cli, \"bin/simple\", \"Build, run, test, lint, and inspect Simple code\"\n" +
-        "    duplicate_check, cli, \"bin/simple duplicate-check <path>\", \"Check semantic documentation duplication\"\n" +
+        "    duplicate_check, cli, \"bin/simple duplicate-check\", \"Check semantic documentation duplication\"\n" +
         "    git, cli, \"git\", \"Inspect local changes without reverting user work\"\n"
 
 fn render_pipe_impl_tools(rec: GeneratedFile, skill: text) -> text:
@@ -486,7 +486,7 @@ fn render_pipe_impl_tools(rec: GeneratedFile, skill: text) -> text:
             "    simple_mcp, mcp, \"Simple MCP\", \"Query workspace structure, symbols, and module context\"\n" +
             "    simple_lsp_mcp, mcp, \"Simple LSP MCP\", \"Resolve definitions, references, hover, and call sites\"\n" +
             "    simple_cli, cli, \"bin/simple\", \"Run lint, tests, and coupling-related queries\"\n" +
-            "    duplicate_check, cli, \"bin/simple duplicate-check <impl-dir>\", \"Run semantic duplication scans during refactors\"\n" +
+            "    duplicate_check, cli, \"bin/simple duplicate-check\", \"Run semantic duplication scans during refactors\"\n" +
             "    git, cli, \"git\", \"Inspect diffs and history during refactors\"\n"
     if rec.target_path.contains("/skills/pipe/impl/spipe_loop/"):
         return "skill_tools |skill, stage|\n    " + skill + ", " + rec.stage + "\n\n" +
@@ -521,7 +521,7 @@ fn render_pipe_impl_tools(rec: GeneratedFile, skill: text) -> text:
         "    simple_mcp, mcp, \"Simple MCP\", \"Query workspace structure, symbols, and project context\"\n" +
         "    simple_lsp_mcp, mcp, \"Simple LSP MCP\", \"Resolve definitions, references, hover, and completions\"\n" +
         "    simple_cli, cli, \"bin/simple\", \"Run build, query, lint, test, and verification commands\"\n" +
-        "    duplicate_check, cli, \"bin/simple duplicate-check <impl-dir>\", \"Run semantic duplication scans during impl/refactor phases\"\n" +
+        "    duplicate_check, cli, \"bin/simple duplicate-check\", \"Run semantic duplication scans during impl/refactor phases\"\n" +
         "    playwright, cli, \"Playwright CLI\", \"Gather external domain research when prerequisites are missing\"\n" +
         "    git, cli, \"git\", \"Inspect local changes and history without reverting user work\"\n"
 
@@ -535,7 +535,7 @@ fn render_claude_lib_tools(rec: GeneratedFile) -> text:
 
 fn skill_name_from_target(path: text) -> text:
     val parent = parent_dir(path)
-    val slash = parent.last_index_of("/")
+    val slash = parent.last_index_of("/") ?? -1
     if slash >= 0:
         return parent.slice(slash + 1, parent.len())
     parent
@@ -558,7 +558,7 @@ fn render_gemini_skill(source_path: text, raw: text) -> text:
 
 fn source_name(path: text) -> text:
     var name = path
-    val slash = name.last_index_of("/")
+    val slash = name.last_index_of("/") ?? -1
     if slash >= 0:
         name = name.slice(slash + 1, name.len())
     if name.ends_with(".toml"):
@@ -574,12 +574,12 @@ fn toml_string(raw: text, key: text) -> text:
     ""
 
 fn toml_prompt(raw: text) -> text:
-    val start = raw.index_of("prompt = \"\"\"")
+    val start = raw.index_of("prompt = \"\"\"") ?? -1
     if start < 0:
         return ""
     val body_start = start + "prompt = \"\"\"".len()
     val tail = raw.slice(body_start, raw.len())
-    val end = tail.index_of("\"\"\"")
+    val end = tail.index_of("\"\"\"") ?? -1
     if end < 0:
         return tail.trim()
     tail.slice(0, end).trim()
@@ -590,7 +590,7 @@ fn marker_for(rec: GeneratedFile, source_hash: text, content_hash: text) -> text
     "# llm-process-gen: managed source={rec.id} source_sha256={source_hash} content_sha256={content_hash}"
 
 fn first_line(content: text) -> text:
-    val idx = content.index_of("\n")
+    val idx = content.index_of("\n") ?? -1
     if idx >= 0:
         return content.slice(0, idx)
     content
@@ -599,14 +599,14 @@ fn strip_marker(content: text) -> text:
     val first = first_line(content)
     if not first.contains("llm-process-gen: managed"):
         return content
-    val idx = content.index_of("\n")
+    val idx = content.index_of("\n") ?? -1
     if idx >= 0:
         return content.slice(idx + 1, content.len())
     ""
 
 fn marker_field(line: text, field: text) -> text:
     val needle = field + "="
-    val idx = line.index_of(needle)
+    val idx = line.index_of(needle) ?? -1
     if idx < 0:
         return ""
     var end = idx + needle.len()
@@ -622,27 +622,27 @@ fn check_links(root: text, path: text, fallback_base: text) -> [text]:
     if not path.ends_with(".md"):
         return failures
     val base = parent_dir(path)
-    for line in file_read_text(path).split("\n"):
+    for line in rt_file_read_text(path).split("\n"):
         var rest = line
         var guard = 0
         while guard < 20:
-            val open = rest.index_of("](")
+            val open = rest.index_of("](") ?? -1
             if open < 0:
                 break
             val after = rest.slice(open + 2, rest.len())
-            val close = after.index_of(")")
+            val close = after.index_of(")") ?? -1
             if close < 0:
                 break
             var link = after.slice(0, close)
             if link.contains("#"):
-                val hash_idx = link.index_of("#")
+                val hash_idx = link.index_of("#") ?? -1
                 link = link.slice(0, hash_idx)
             if should_check_link(link):
-                var exists = file_exists(normalize_relative(base, link))
+                var exists = rt_file_exists(normalize_relative(base, link))
                 if not exists and fallback_base != "":
-                    exists = file_exists(normalize_relative(fallback_base, link))
+                    exists = rt_file_exists(normalize_relative(fallback_base, link))
                 if not exists:
-                    exists = file_exists(normalize_relative(root, link))
+                    exists = rt_file_exists(normalize_relative(root, link))
                 if not exists:
                     failures.push("broken local link {link} in {path}")
             rest = after.slice(close + 1, after.len())
@@ -653,17 +653,17 @@ fn should_check_link(link: text) -> bool:
     link != "" and not link.starts_with("#") and not link.starts_with("http:") and not link.starts_with("https:") and not link.starts_with("mailto:")
 
 fn hash_file(path: text) -> text:
-    val (out, err, code) = process_run("sha256sum", [path])
+    val (out, err, code) = rt_process_run("sha256sum", [path])
     if code != 0:
         return ""
     first_word(out)
 
 fn hash_text(root: text, content: text) -> text:
-    val tmp = resolve_under_root(root, ".llm-process-gen.tmp.{getpid()}")
+    val tmp = path_join(root, ".llm-process-gen.tmp.{getpid()}")
     if not file_write(tmp, content):
         return ""
     val digest = hash_file(tmp)
-    file_delete(tmp)
+    rt_file_delete(tmp)
     digest
 
 fn first_word(s: text) -> text:
@@ -675,7 +675,7 @@ fn first_word(s: text) -> text:
         i = i + 1
     s
 
-fn resolve_under_root(root: text, rel: text) -> text:
+fn path_join(root: text, rel: text) -> text:
     if rel.starts_with("/"):
         return rel
     if root == "" or root == ".":
@@ -707,7 +707,7 @@ fn normalize_relative(base: text, link: text) -> text:
 fn ensure_parent(path: text):
     val parent = parent_dir(path)
     if parent != ".":
-        process_run("mkdir", ["-p", parent])
+        rt_process_run("mkdir", ["-p", parent])
 
 fn emit_result(r: ResultSummary, json: bool, label: text):
     if json:

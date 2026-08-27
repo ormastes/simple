@@ -4,15 +4,9 @@
 # Supports: .sdn files, env vars, CLI args, profile selection.
 
 # env_get inlined here to avoid L0→L7 layer violation (was: use compiler.backend.sffi)
-use std.common.mcdc.model.{McdcMode, mcdc_mode_from_text}
-use std.common.convert.{try_parse_int}
-@unsafe(reason: "raw nullable compiler environment lookup", capabilities: [ffi])
-extern fn rt_env_get(key: text) -> text?
-
-@always_inline
-fn env_get(key: text) -> text?:
-    unsafe(capabilities: [ffi]):
-        rt_env_get(key)
+extern fn rt_env_get(key: text) -> text
+fn env_get(key: text) -> text:
+    rt_env_get(key)
 
 # ============================================================================
 # Profile
@@ -41,6 +35,39 @@ impl CompilerProfile:
             case "sdn" | "data": CompilerProfile.Sdn
             case _: CompilerProfile.Dev
 
+enum McdcPolicy:
+    StaticOff
+    StaticOn
+    Dynamic
+    Invalid
+
+impl McdcPolicy:
+    fn to_text() -> text:
+        match self:
+            case StaticOff: "off"
+            case StaticOn: "static"
+            case Dynamic: "dynamic"
+            case Invalid: "invalid"
+
+    static fn from_text(value: text) -> McdcPolicy:
+        match value.lower():
+            case "" | "off" | "disabled" | "0": McdcPolicy.StaticOff
+            case "static" | "on" | "enabled" | "1": McdcPolicy.StaticOn
+            case "dynamic" | "dynload" | "aspect": McdcPolicy.Dynamic
+            case _: McdcPolicy.Invalid
+
+    fn emits_manifest() -> bool:
+        self == McdcPolicy.StaticOn or self == McdcPolicy.Dynamic
+
+    fn emits_direct_probes() -> bool:
+        self == McdcPolicy.StaticOn
+
+    fn emits_dynamic_patchpoints() -> bool:
+        self == McdcPolicy.Dynamic
+
+    fn links_static_payload() -> bool:
+        self == McdcPolicy.StaticOn
+
 # ============================================================================
 # Config (key-value bag)
 # ============================================================================
@@ -53,9 +80,7 @@ struct Config:
         Config(values: {})
 
     fn get(self, key: text) -> text?:
-        # contains_key + index read, never `.get()`: a native `Dict.get()` HIT
-        # does not round-trip. See doc/07_guide/language/dict_native_pitfalls.md
-        if self.values.contains_key(key): Some(self.values[key]) else: nil
+        self.values.get(key)
 
     me set(self, key: text, value: text):
         self.values[key] = value
@@ -79,11 +104,6 @@ struct CompilerConfig:
     use_rust_lexer: bool      # --fast-lex Rust lexer fallback
     deterministic: bool       # Deterministic mode (fixed seeds, sorted)
     coverage_enabled: bool
-    mcdc_mode: McdcMode
-    mcdc_owner_bytes: i64
-    mcdc_global_bytes: i64
-    mcdc_include: text
-    mcdc_exclude: text
 
 impl CompilerConfig:
     static fn default() -> CompilerConfig:
@@ -96,12 +116,7 @@ impl CompilerConfig:
             use_rust_interp: false,
             use_rust_lexer: false,
             deterministic: false,
-            coverage_enabled: false,
-            mcdc_mode: McdcMode.StaticOff,
-            mcdc_owner_bytes: 1048576,
-            mcdc_global_bytes: 67108864,
-            mcdc_include: "",
-            mcdc_exclude: ""
+            coverage_enabled: false
         )
 
     static fn from_env() -> CompilerConfig:
@@ -109,11 +124,11 @@ impl CompilerConfig:
         var config = CompilerConfig.default()
 
         val profile_env = env_get("SIMPLE_PROFILE")
-        if val profile_value = profile_env:
+        if val Some(profile_value) = profile_env:
             config.profile = CompilerProfile.from_text(profile_value)
 
         val log_env = env_get("SIMPLE_LOG")
-        if val log_value = log_env:
+        if val Some(log_value) = log_env:
             config.log_level = match log_value:
                 case "trace": 20
                 case "debug": 10
@@ -123,38 +138,20 @@ impl CompilerConfig:
                 case _: 0
 
         val det_env = env_get("SIMPLE_DETERMINISTIC")
-        if val det_value = det_env:
+        if val Some(det_value) = det_env:
             if det_value == "1":
                 config.deterministic = true
 
         val cov_env = env_get("SIMPLE_COVERAGE")
-        if val cov_value = cov_env:
+        if val Some(cov_value) = cov_env:
             if cov_value == "1":
                 config.coverage_enabled = true
+                config.mcdc_policy = McdcPolicy.StaticOn
 
         val mcdc_env = env_get("SIMPLE_MCDC_MODE")
         if val mcdc_value = mcdc_env:
-            if val parsed_mode = mcdc_mode_from_text(mcdc_value):
-                config.mcdc_mode = parsed_mode
-
-        val mcdc_owner_env = env_get("SIMPLE_MCDC_OWNER_BYTES")
-        if val owner_value = mcdc_owner_env:
-            if val parsed_owner = try_parse_int(owner_value):
-                if parsed_owner > 0:
-                    config.mcdc_owner_bytes = parsed_owner
-
-        val mcdc_global_env = env_get("SIMPLE_MCDC_GLOBAL_BYTES")
-        if val global_value = mcdc_global_env:
-            if val parsed_global = try_parse_int(global_value):
-                if parsed_global >= config.mcdc_owner_bytes:
-                    config.mcdc_global_bytes = parsed_global
-
-        if val include_value = env_get("SIMPLE_MCDC_INCLUDE"):
-            config.mcdc_include = include_value
-        if val exclude_value = env_get("SIMPLE_MCDC_EXCLUDE"):
-            config.mcdc_exclude = exclude_value
-        if val rt_hal_plan = env_get("SIMPLE_RT_HAL_PLAN"):
-            config.values["rt-hal-plan"] = rt_hal_plan
+            config.mcdc_policy = McdcPolicy.from_text(mcdc_value)
+            config.coverage_enabled = config.mcdc_policy.emits_manifest()
 
         config
 
@@ -168,18 +165,6 @@ impl CompilerConfig:
                     if i + 1 < args.len():
                         self.profile = CompilerProfile.from_text(args[i + 1])
                         i = i + 1
-                case "--mcdc-include":
-                    if i + 1 < args.len():
-                        self.mcdc_include = args[i + 1]
-                        i = i + 1
-                case "--mcdc-exclude":
-                    if i + 1 < args.len():
-                        self.mcdc_exclude = args[i + 1]
-                        i = i + 1
-                case "--rt-hal-plan":
-                    if i + 1 < args.len():
-                        self.values["rt-hal-plan"] = args[i + 1]
-                        i = i + 1
                 case "--use-rust-types":
                     self.use_rust_types = true
                 case "--fast-interp":
@@ -190,32 +175,12 @@ impl CompilerConfig:
                     self.deterministic = true
                 case "--coverage":
                     self.coverage_enabled = true
-                case "--mcdc":
-                    self.mcdc_mode = McdcMode.StaticOn
-                case "--mcdc-mode":
-                    if i + 1 < args.len():
-                        if val parsed_mode = mcdc_mode_from_text(args[i + 1]):
-                            self.mcdc_mode = parsed_mode
-                        i = i + 1
-                case "--no-mcdc":
-                    self.mcdc_mode = McdcMode.StaticOff
                 case _:
                     # Check for --key=value form
                     if arg.starts_with("--") and arg.contains("="):
                         val parts: [text] = arg[2:].split("=")
                         if parts.len() >= 2:
                             self.values[parts[0]] = parts[1]
-                            if parts[0] == "mcdc":
-                                if val parsed_mode = mcdc_mode_from_text(parts[1]):
-                                    self.mcdc_mode = parsed_mode
-                            elif parts[0] == "mcdc-owner-bytes":
-                                if val parsed_owner = try_parse_int(parts[1]):
-                                    if parsed_owner > 0:
-                                        self.mcdc_owner_bytes = parsed_owner
-                            elif parts[0] == "mcdc-global-bytes":
-                                if val parsed_global = try_parse_int(parts[1]):
-                                    if parsed_global >= self.mcdc_owner_bytes:
-                                        self.mcdc_global_bytes = parsed_global
             i = i + 1
 
     me apply_sdn(content: text):
@@ -236,9 +201,7 @@ impl CompilerConfig:
         Logger(level: self.log_level)
 
     fn get(key: text) -> text?:
-        # contains_key + index read, never `.get()`.
-        # See doc/07_guide/language/dict_native_pitfalls.md
-        if self.values.contains_key(key): Some(self.values[key]) else: nil
+        self.values.get(key)
 
 class Logger:
     """Simple logger.
@@ -259,15 +222,16 @@ class Logger:
     static fn from_env() -> Logger:
         """Create logger with level from SIMPLE_LOG env var."""
         val env_val = env_get("SIMPLE_LOG")
-        var level = 0
-        if val log_value = env_val:
-            level = match log_value:
+        val level = if val Some(log_value) = env_val:
+            match log_value:
                 case "trace": 20
                 case "debug": 10
                 case "info": 4
                 case "warn": 2
                 case "error": 1
                 case _: 0
+        else:
+            0
         Logger(level: level)
 
     fn log(level: i64, prefix: text, message: text):

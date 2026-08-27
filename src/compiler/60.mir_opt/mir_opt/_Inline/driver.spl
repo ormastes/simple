@@ -1,7 +1,7 @@
 # Function inlining pass, module inliner, and public wrappers
 
 use compiler.mir.mir_data.*
-use compiler.mir.mir_data.*
+use compiler.mir.mir.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
 use compiler.mir_opt.mod.{MirPass}
 use compiler.mir_opt.mir_opt._Inline.policy.*
@@ -254,7 +254,7 @@ impl ModuleInliner:
         3. For each function in the module, inline eligible callees
         4. Return optimized module
         """
-        if module.functions.keys().len() < 2:
+        if module.functions.len() < 2:
             return module
 
         val cost_analyzer = InlineCostAnalyzer.new(self.threshold)
@@ -263,7 +263,8 @@ impl ModuleInliner:
         # Build both ID-based and name-based candidate tables for lookup
         var inline_candidates: Dict<i64, MirFunction> = {}
         var inline_candidates_by_name: Dict<text, MirFunction> = {}
-        for func in module.functions.values():
+        for func_symbol in module.functions.keys():
+            val func = module.functions[func_symbol]
             val is_recursive = cost_analyzer.is_recursive(func)
 
             val has_inline_marker = cost_analyzer._has_always_inline_marker(func)
@@ -271,12 +272,13 @@ impl ModuleInliner:
                 inline_candidates[inline_symbol_id_value(func.symbol)] = func
                 inline_candidates_by_name[func.name] = func
 
-        if inline_candidates.keys().len() == 0:
+        if inline_candidates.len() == 0:
             return module
 
         # Phase 2: For each function in the module, inline eligible callees
         var optimized_functions = module.functions
-        for func in module.functions.values():
+        for func_symbol in module.functions.keys():
+            val func = module.functions[func_symbol]
             var optimized_blocks: [MirBlock] = []
             var modified = false
             var generated_locals: [MirLocal] = []
@@ -310,27 +312,11 @@ impl ModuleInliner:
                 var new_locals = func.locals
                 for local in generated_locals:
                     new_locals = new_locals.push(local)
-                # NOTE: build via struct-copy + field mutation, NOT
-                # `MirFunction(..func, locals: ..., blocks: ...)`. Pinned via
-                # print-instrumentation bisection: that spread-update
-                # constructor call (overriding 2 of MirFunction's 24 fields)
-                # is the exact statement that raises "semantic: type
-                # mismatch: cannot convert object to int" inside
-                # `aot:optimize_mir` for ANY module under `--emit-object`
-                # (repro: 2-fn `f`/`main`) — a bootstrap seed interpreter
-                # landmine in struct-spread-copy for this field/struct
-                # combination. Rewriting as `var updated_func = func` +
-                # explicit `.locals =`/`.blocks =` assignment (same idiom
-                # already used for `caller_with_generated_locals` a few
-                # lines above) avoids the buggy interpreter path entirely.
-                # See doc/08_tracking/bug/nvme_rv32_smp_flatten_seed_object_to_int_2026-07-19.md.
-                var updated_func = func
-                updated_func.locals = new_locals
-                updated_func.blocks = optimized_blocks
+                val updated_func = MirFunction(..func, locals: new_locals, blocks: optimized_blocks)
                 optimized_functions[updated_func.symbol] = updated_func
                 self.inlined_total = self.inlined_total + 1
 
-        MirModule(name: module.name, functions: optimized_functions, statics: module.statics, constants: module.constants, types: module.types)
+        MirModule(..module, functions: optimized_functions)
 
 # ============================================================================
 # Inline Result
@@ -367,40 +353,21 @@ impl ModuleInliner:
                 case Call(dest, callee_op, args):
                     # Try to resolve callee to a candidate function
                     # First try by symbol ID
-                    # NOTE: explicit match, not `if callee_id.?:` -- symbol
-                    # id 0 landmine (`.?` truthiness on a boxed `i64?`
-                    # collapses `Some(0)` to falsy in the bootstrap seed
-                    # interpreter, see var_reassign_ssa.spl's
-                    # ssa_alloca_apply_def_store). A miss here just falls
-                    # through to the name-based lookup below, but it is the
-                    # identical landmine so fixed for consistency.
-                    val callee_by_id = match self.extract_func_symbol_id(callee_op):
-                        case Some(found_callee_id):
-                            if candidates.has(found_callee_id):
-                                Some(candidates[found_callee_id])
-                            else:
-                                nil
-                        case nil:
-                            nil
+                    var resolved_callee: MirFunction? = nil
+                    val callee_id = self.extract_func_symbol_id(callee_op)
+                    if callee_id.? and candidates.has(callee_id.unwrap()):
+                        resolved_callee = Some(candidates[callee_id.unwrap()])
 
                     # Fall back to name-based lookup
-                    val resolved_callee = if callee_by_id.?:
-                        callee_by_id
-                    else:
+                    if not resolved_callee.?:
                         val callee_name = self.extract_func_name(callee_op)
-                        if val found_callee_name = callee_name:
-                            if candidates_by_name.has(found_callee_name):
-                                # Don't inline self
-                                if found_callee_name != caller.name:
-                                    Some(candidates_by_name[found_callee_name])
-                                else:
-                                    nil
-                            else:
-                                nil
-                        else:
-                            nil
+                        if callee_name.? and candidates_by_name.has(callee_name.unwrap()):
+                            # Don't inline self
+                            if callee_name.unwrap() != caller.name:
+                                resolved_callee = Some(candidates_by_name[callee_name.unwrap()])
 
-                    if val callee = resolved_callee:
+                    if resolved_callee.?:
+                        val callee = resolved_callee.unwrap()
                         # Perform inlining for single-block callees
                         var inliner = FunctionInliner.new(next_inline_local_id(caller, generated_locals))
                         val temp_block = MirBlock(
@@ -492,11 +459,11 @@ fn inline_symbol_id_value(symbol: SymbolId) -> i64:
 # Exports
 # ============================================================================
 
-fn inline_run_on_function(inline_pass: FunctionInlining, func: MirFunction) -> MirFunction:
+fn inline_run_on_function(func: MirFunction, inline_pass: FunctionInlining) -> MirFunction:
     """Free-function wrapper for inlining pass dispatch."""
     func
 
-fn inline_run_on_module(inline_pass: FunctionInlining, module: MirModule) -> MirModule:
+fn inline_run_on_module(module: MirModule, inline_pass: FunctionInlining) -> MirModule:
     """Free-function wrapper for module-level inlining pass dispatch."""
     var module_inliner = ModuleInliner.new(inline_pass.threshold, inline_pass.policy)
     module_inliner.inline_module(module)

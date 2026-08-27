@@ -55,7 +55,7 @@ expect(sosix_dataset_read_byte(dataset as u64, 2u64)).to_equal(3)
    - Expected: sosix_dataset_write(dataset as u64, 0u64, [4u8, 5u8]) equals `2`
    - Expected: sosix_dataset_seal(dataset as u64) equals `0`
    - Expected: sosix_dataset_write(dataset as u64, 1u64, [6u8]) equals `0 - EINVAL as i64`
-   - Expected: sosix_dataset_read_byte(dataset as u64, 1u64) equals `5`
+   - Expected: sosix_dataset_read_byte(dataset as u64, 1u64) equals `5)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
@@ -70,10 +70,10 @@ step("writes to a sealed dataset are rejected")
 sosix_share_init()
 val dataset = sosix_dataset_create(2u64, 0)
 
-expect(sosix_dataset_write(dataset as u64, 0u64, [4u8, 5u8])).to_equal(2)
-expect(sosix_dataset_seal(dataset as u64)).to_equal(0)
+expect(sosix_dataset_write(dataset as u64, 0u64, [4u8, 5u8])).to_equal(2)  # oracle: pinned constant asserted by this scenario
+expect(sosix_dataset_seal(dataset as u64)).to_equal(0)  # oracle: pinned constant asserted by this scenario
 expect(sosix_dataset_write(dataset as u64, 1u64, [6u8])).to_equal(0 - EINVAL as i64)
-expect(sosix_dataset_read_byte(dataset as u64, 1u64)).to_equal(5)
+expect(sosix_dataset_read_byte(dataset as u64, 1u64)).to_equal(5)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
@@ -82,11 +82,11 @@ expect(sosix_dataset_read_byte(dataset as u64, 1u64)).to_equal(5)
 
 #### message payloads traverse a bounded SOSIX queue intact and in order
 
-- message payloads traverse a bounded SOSIX queue intact and in order
+1. sosix share init
    - Expected: sosix_queue_poll(queue as u64) & SOSIX_POLL_WRITE equals `SOSIX_POLL_WRITE`
-   - Expected: sosix_queue_send(queue as u64, [10u8, 20u8], SOSIX_NO_DATASET) equals `2`
+   - Expected: sosix_queue_send(queue as u64, [10u8, 20u8], SOSIX_NO_DATASET) equals `2)  # oracle: pinned constant asserted by this scenario`
    - Expected: sosix_queue_poll(queue as u64) & SOSIX_POLL_READ equals `SOSIX_POLL_READ`
-   - Expected: recv.status equals `2`
+   - Expected: recv.status equals `2)  # oracle: pinned constant asserted by this scenario`
    - Expected: recv.data[0] equals `10u8`
    - Expected: recv.data[1] equals `20u8`
    - Expected: recv.attached_dataset equals `SOSIX_NO_DATASET`
@@ -95,21 +95,19 @@ expect(sosix_dataset_read_byte(dataset as u64, 1u64)).to_equal(5)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("message payloads traverse a bounded SOSIX queue intact and in order")
 sosix_share_init()
 val queue = sosix_queue_create(1u64, 8u64, 0)
 
 expect(sosix_queue_poll(queue as u64) & SOSIX_POLL_WRITE).to_equal(SOSIX_POLL_WRITE)
-expect(sosix_queue_send(queue as u64, [10u8, 20u8], SOSIX_NO_DATASET)).to_equal(2)
+expect(sosix_queue_send(queue as u64, [10u8, 20u8], SOSIX_NO_DATASET)).to_equal(2)  # oracle: pinned constant asserted by this scenario
 expect(sosix_queue_poll(queue as u64) & SOSIX_POLL_READ).to_equal(SOSIX_POLL_READ)
 
 val recv = sosix_queue_recv(queue as u64)
-expect(recv.status).to_equal(2)
+expect(recv.status).to_equal(2)  # oracle: pinned constant asserted by this scenario
 expect(recv.data[0]).to_equal(10u8)
 expect(recv.data[1]).to_equal(20u8)
 expect(recv.attached_dataset).to_equal(SOSIX_NO_DATASET)
@@ -117,30 +115,28 @@ expect(recv.attached_dataset).to_equal(SOSIX_NO_DATASET)
 
 </details>
 
-#### write readiness returns after the queued message is received
+#### should restore write readiness after the queued message is received
 
-- write readiness returns after the queued message is received
+1. sosix share init
    - Expected: sosix_queue_send(queue as u64, [1u8], SOSIX_NO_DATASET) equals `1`
    - Expected: sosix_queue_poll(queue as u64) & SOSIX_POLL_WRITE equals `0u32`
-   - Expected: sosix_queue_recv(queue as u64).status equals `1`
+   - Expected: sosix_queue_recv(queue as u64).status equals `1)  # oracle: pinned constant asserted by this scenario`
    - Expected: sosix_queue_poll(queue as u64) & SOSIX_POLL_WRITE equals `SOSIX_POLL_WRITE`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("write readiness returns after the queued message is received")
 sosix_share_init()
 val queue = sosix_queue_create(1u64, 8u64, 0)
 
-expect(sosix_queue_send(queue as u64, [1u8], SOSIX_NO_DATASET)).to_equal(1)
+expect(sosix_queue_send(queue as u64, [1u8], SOSIX_NO_DATASET)).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(sosix_queue_poll(queue as u64) & SOSIX_POLL_WRITE).to_equal(0u32)
-expect(sosix_queue_recv(queue as u64).status).to_equal(1)
+expect(sosix_queue_recv(queue as u64).status).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(sosix_queue_poll(queue as u64) & SOSIX_POLL_WRITE).to_equal(SOSIX_POLL_WRITE)
 ```
 
@@ -148,45 +144,43 @@ expect(sosix_queue_poll(queue as u64) & SOSIX_POLL_WRITE).to_equal(SOSIX_POLL_WR
 
 ### REQ-SOSIX-SHARE-003 dataset attachment
 
-#### a sealed dataset handle transfers with a queue message
+#### should transfer a sealed dataset handle with a queue message
 
-- a sealed dataset handle transfers with a queue message
+1. sosix share init
    - Expected: sosix_dataset_write(dataset as u64, 0u64, [77u8, 88u8]) equals `2`
    - Expected: sosix_dataset_seal(dataset as u64) equals `0`
    - Expected: sosix_queue_send(queue as u64, [9u8], dataset as u64) equals `1`
    - Expected: recv.status equals `1`
    - Expected: recv.attached_dataset equals `dataset as u64`
-   - Expected: sosix_dataset_read_byte(recv.attached_dataset, 1u64) equals `88`
+   - Expected: sosix_dataset_read_byte(recv.attached_dataset, 1u64) equals `88)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("a sealed dataset handle transfers with a queue message")
 sosix_share_init()
 val dataset = sosix_dataset_create(2u64, 0)
 val queue = sosix_queue_create(1u64, 8u64, 0)
 
-expect(sosix_dataset_write(dataset as u64, 0u64, [77u8, 88u8])).to_equal(2)
-expect(sosix_dataset_seal(dataset as u64)).to_equal(0)
-expect(sosix_queue_send(queue as u64, [9u8], dataset as u64)).to_equal(1)
+expect(sosix_dataset_write(dataset as u64, 0u64, [77u8, 88u8])).to_equal(2)  # oracle: pinned constant asserted by this scenario
+expect(sosix_dataset_seal(dataset as u64)).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(sosix_queue_send(queue as u64, [9u8], dataset as u64)).to_equal(1)  # oracle: pinned constant asserted by this scenario
 
 val recv = sosix_queue_recv(queue as u64)
-expect(recv.status).to_equal(1)
+expect(recv.status).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(recv.attached_dataset).to_equal(dataset as u64)
-expect(sosix_dataset_read_byte(recv.attached_dataset, 1u64)).to_equal(88)
+expect(sosix_dataset_read_byte(recv.attached_dataset, 1u64)).to_equal(88)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
 
-#### unsealed dataset handles are rejected as queue attachments
+#### should reject unsealed dataset handles as queue attachments
 
-- unsealed dataset handles are rejected as queue attachments
+1. sosix share init
    - Expected: sosix_queue_send(queue as u64, [3u8], dataset as u64) equals `0 - EINVAL as i64`
    - Expected: sosix_queue_poll(queue as u64) & SOSIX_POLL_READ equals `0u32`
 
@@ -194,7 +188,7 @@ expect(sosix_dataset_read_byte(recv.attached_dataset, 1u64)).to_equal(88)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple

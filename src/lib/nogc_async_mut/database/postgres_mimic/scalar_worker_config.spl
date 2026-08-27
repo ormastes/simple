@@ -1,0 +1,68 @@
+"""Reconstruct immutable pgwire worker configuration from scalar receipts.
+
+The parent publishes TLS policy and allow-list text once.  A socket worker gets
+only an i64 config token and copies bounded octets into local text before it
+starts parsing a connection.  No runtime text, struct, ``Any``, or callback
+crosses this boundary.
+"""
+
+use std.database.postgres_mimic.connection.{PgWireSslPolicy}
+use std.database.postgres_mimic.scalar_runtime_abi.{
+    rt_pg_wire_server_config_scalar_get,
+    rt_pg_wire_server_config_scalar_byte
+}
+
+extern fn rt_bytes_to_text(data: [u8]) -> text
+
+const PG_SCALAR_CONFIG_OWNER: i64 = 1
+const PG_SCALAR_CONFIG_FIELD_POLICY: i64 = 0
+const PG_SCALAR_CONFIG_FIELD_USER_LENGTH: i64 = 1
+const PG_SCALAR_CONFIG_FIELD_DATABASE_LENGTH: i64 = 2
+const PG_SCALAR_CONFIG_USER: i64 = 0
+const PG_SCALAR_CONFIG_DATABASE: i64 = 1
+const PG_SCALAR_CONFIG_MAX_TEXT: i64 = 256
+
+struct PgScalarWorkerConfig:
+    ssl_policy: PgWireSslPolicy
+    allowed_user: text
+    allowed_database: text
+
+fn pg_scalar_worker_ssl_policy(code: i64) -> PgWireSslPolicy?:
+    if code == 1: return Some(PgWireSslPolicy.Disabled)
+    if code == 2: return Some(PgWireSslPolicy.Optional)
+    if code == 3: return Some(PgWireSslPolicy.Required)
+    nil
+
+fn pg_scalar_worker_config_text(token: i64, which: i64, length: i64) -> text?:
+    if token <= 0 or (which != PG_SCALAR_CONFIG_USER and
+            which != PG_SCALAR_CONFIG_DATABASE) or length <= 0 or
+            length > PG_SCALAR_CONFIG_MAX_TEXT:
+        return nil
+    var bytes: [u8] = []
+    var index = 0
+    while index < length:
+        val octet = rt_pg_wire_server_config_scalar_byte(
+            PG_SCALAR_CONFIG_OWNER, token, which, index)
+        if octet < 0 or octet > 255: return nil
+        bytes.push(octet as u8)
+        index = index + 1
+    val value = rt_bytes_to_text(bytes)
+    if value == "": return nil
+    Some(value)
+
+fn pg_scalar_worker_config_from_token(token: i64) -> PgScalarWorkerConfig?:
+    if token <= 0: return nil
+    val policy = pg_scalar_worker_ssl_policy(
+        rt_pg_wire_server_config_scalar_get(PG_SCALAR_CONFIG_OWNER,
+            token, PG_SCALAR_CONFIG_FIELD_POLICY))?
+    val user = pg_scalar_worker_config_text(token, PG_SCALAR_CONFIG_USER,
+        rt_pg_wire_server_config_scalar_get(PG_SCALAR_CONFIG_OWNER,
+            token, PG_SCALAR_CONFIG_FIELD_USER_LENGTH))?
+    val database = pg_scalar_worker_config_text(token,
+        PG_SCALAR_CONFIG_DATABASE,
+        rt_pg_wire_server_config_scalar_get(PG_SCALAR_CONFIG_OWNER,
+            token, PG_SCALAR_CONFIG_FIELD_DATABASE_LENGTH))?
+    Some(PgScalarWorkerConfig(ssl_policy: policy, allowed_user: user,
+        allowed_database: database))
+
+export PgScalarWorkerConfig, pg_scalar_worker_config_from_token

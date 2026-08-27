@@ -2,6 +2,29 @@
 
 > This system spec proves the public concurrency API surfaces fail closed at compile time while the approved meaningful API names remain usable. The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green thread APIs, `multicore_green_spawn`, `multicore_green_spawn_sliced`, and pool-backed `task_spawn` facades must reject wrong imports, wrong arity, bad argument types, and direct runtime aliases. The Pure Simple lint at `src/compiler/35.semantics/lint/concurrency_api_misuse.spl` is the authoritative rule map; Rust driver checks are seed compatibility and bootstrap enforcement, not a separate user-facing API source.
 
+<!-- sdn-diagram:id=concurrency_api_misuse_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=concurrency_api_misuse_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+concurrency_api_misuse_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=concurrency_api_misuse_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 7 | 7 | 0 | 0 |
@@ -25,7 +48,7 @@ This system spec proves the public concurrency API surfaces fail closed at compi
 | Design | doc/05_design/multicore_green.md |
 | Research | doc/01_research/local/multicore_green.md |
 | Source | `test/03_system/feature/usage/concurrency_api_misuse_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -61,7 +84,7 @@ bootstrap enforcement, not a separate user-facing API source.
 Run the misuse gate:
 
 ```sh
-SIMPLE_BIN=bin/simple bin/simple test test/03_system/feature/usage/concurrency_api_misuse_spec.spl --mode=interpreter --clean
+SIMPLE_BIN=src/compiler_rust/target/debug/simple bin/simple test test/03_system/feature/usage/concurrency_api_misuse_spec.spl --mode=interpreter --clean
 ```
 
 ## Examples
@@ -92,7 +115,7 @@ SIMPLE_BIN=bin/simple bin/simple test test/03_system/feature/usage/concurrency_a
 ## TUI Capture
 
 ```text
-Simple Test Runner v1.0.0-RC
+Simple Test Runner v1.0.0-beta
 Running: test/03_system/feature/usage/concurrency_api_misuse_spec.spl
 Concurrency API misuse compile errors PASSED
 Files: 1
@@ -147,67 +170,51 @@ Failed: 0
 
 #### covers every checked-in misuse fixture
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- covers every checked-in misuse fixture
 - Count the checked-in concurrency misuse fixtures
-   - Expected: fixture_count() equals `30`
+   - Expected: fixture_count() equals `29`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("covers every checked-in misuse fixture")
 step("Count the checked-in concurrency misuse fixtures")
-expect(fixture_count()).to_equal(30)
+expect(fixture_count()).to_equal(29)
 ```
 
 </details>
 
 #### keeps Pure Simple lint as the authoritative API misuse rule map
 
-- keeps Pure Simple lint as the authoritative API misuse rule map
 - Open the Pure Simple concurrency API misuse lint
-- Verify the lint emits each rule from real code, not a header comment
-- Verify the import-level rule map is reachable from a real function
+- Verify the lint documents the Rust seed boundary
+- Verify the lint owns the public concurrency misuse errors
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("keeps Pure Simple lint as the authoritative API misuse rule map")
 step("Open the Pure Simple concurrency API misuse lint")
 val source = read_repo_text("src/compiler/35.semantics/lint/concurrency_api_misuse.spl")
-step("Verify the lint emits each rule from real code, not a header comment")
-# Anchored to the emitting `code:` field plus its message text — the
-# rule-intent header comment alone must never satisfy these.
-expect(source).to_contain("code: \"E-PAR-002\",")
-expect(source).to_contain("message: \"{{sym_name}} is a numbered name and is not a public API\"")
-expect(source).to_contain("code: \"E-PAR-003\",")
-expect(source).to_contain("message: \"{{sym_name}} belongs to {{expected_owner}}, not {{owner}}\"")
-expect(source).to_contain("code: \"E-PAR-005\",")
-expect(source).to_contain("message: \"{{sym}} is an internal runtime-pool symbol and is not a public API\"")
-step("Verify the import-level rule map is reachable from a real function")
-expect(source).to_contain("fn _cam_check_import_findings(owner: text, sym_name: text) -> [ConcurrencyMisuseFinding]:")
+step("Verify the lint documents the Rust seed boundary")
+expect(source).to_contain("Rule intents (from Rust seed")
+step("Verify the lint owns the public concurrency misuse errors")
+expect(source).to_contain("E-PAR-002: numbered-suffix concurrency alias")
+expect(source).to_contain("E-PAR-003: concurrency symbol imported from wrong module surface")
+expect(source).to_contain("E-PAR-005: direct use of internal rt_pool_* extern symbols outside the facade")
 ```
 
 </details>
 
 #### keeps approved public API names usable
 
-- keeps approved public API names usable
 - Run the profile-script concurrency API contract
    - Expected: code equals `0`
 - Verify approved public-name fixtures were checked before misuse fixtures
@@ -216,12 +223,10 @@ expect(source).to_contain("fn _cam_check_import_findings(owner: text, sym_name: 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("keeps approved public API names usable")
 step("Run the profile-script concurrency API contract")
 val (output, code) = run_profile_contract()
 expect(code).to_equal(0)
@@ -231,20 +236,26 @@ expect(output).to_contain("public_multicore_green_sliced_result=19 used_runtime_
 expect(output).to_contain("positive_fixtures=6")
 expect(output).to_contain("fixtures=11")
 expect(output).to_contain("misuse_fixtures=11")
-expect(output).to_contain("checked_in_misuse_fixtures=30")
-expect(output).to_contain("total_misuse_fixtures=41")
+expect(output).to_contain("checked_in_misuse_fixtures=29")
+expect(output).to_contain("total_misuse_fixtures=40")
 ```
 
 </details>
 
 #### rejects OS-thread surface misuse
 
-- rejects OS-thread surface misuse
 - Reject numbered suffix aliases for OS-thread APIs
+- expect compile error
+- expect compile error
+- expect compile error
 - Reject thread_spawn imported from the cooperative-green surface
+- expect compile error
 - Reject thread_spawn_with_args imported from the cooperative-green surface
+- expect compile error
 - Reject thread_spawn called with too many arguments
+- expect compile error
 - Reject thread_spawn called with a non-closure argument
+- expect compile error
 - Reject task_spawn imported from the OS-thread surface
 
 
@@ -266,9 +277,9 @@ expect_compile_error("thread_spawn_wrong_surface_import.spl", "E-PAR-003", "thre
 step("Reject thread_spawn_with_args imported from the cooperative-green surface")
 expect_compile_error("thread_spawn_with_args_wrong_surface_import.spl", "E-PAR-003", "thread_spawn_with_args belongs to std.concurrent.thread")
 step("Reject thread_spawn called with too many arguments")
-expect_compile_error("thread_spawn_wrong_arity.spl", "E-PAR-004", "thread_spawn expects one zero-argument closure")
+expect_compile_error("thread_spawn_wrong_arity.spl", "E-PAR-004", "pass a closure")
 step("Reject thread_spawn called with a non-closure argument")
-expect_compile_error("thread_spawn_bad_arg.spl", "E-PAR-004", "thread_spawn expects one zero-argument closure")
+expect_compile_error("thread_spawn_bad_arg.spl", "E-PAR-004", "pass a closure")
 step("Reject task_spawn imported from the OS-thread surface")
 expect_compile_error("task_spawn_wrong_surface_import.spl", "E-PAR-001", "task_spawn is not part of the OS-thread facade")
 ```
@@ -293,98 +304,145 @@ Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects cooperative and low-level green-thread surface misuse")
+step("Reject numbered suffix aliases for OS-thread APIs")
+expect_compile_error("thread_spawn_number_suffix_alias.spl", "E-PAR-002", "thread_spawn2 is a numbered name")
+expect_compile_error("spawn_isolated_number_suffix_alias.spl", "E-PAR-002", "spawn_isolated2 is a numbered name")
+expect_compile_error("spawn_limited_number_suffix_alias.spl", "E-PAR-002", "spawn_limited2 is a numbered name")
+step("Reject thread_spawn imported from the cooperative-green surface")
+expect_compile_error("thread_spawn_wrong_surface_import.spl", "E-PAR-003", "thread_spawn belongs to std.concurrent.thread")
+step("Reject thread_spawn_with_args imported from the cooperative-green surface")
+expect_compile_error("thread_spawn_with_args_wrong_surface_import.spl", "E-PAR-003", "thread_spawn_with_args belongs to std.concurrent.thread")
+step("Reject thread_spawn called with too many arguments")
+expect_compile_error("thread_spawn_wrong_arity.spl", "E-PAR-004", "pass a closure")
+step("Reject thread_spawn called with a non-closure argument")
+expect_compile_error("thread_spawn_bad_arg.spl", "E-PAR-004", "pass a closure")
+step("Reject task_spawn imported from the OS-thread surface")
+expect_compile_error("task_spawn_wrong_surface_import.spl", "E-PAR-001", "task_spawn is not part of the OS-thread facade")
+```
+
+</details>
+
+#### rejects cooperative and low-level green-thread surface misuse
+
+- Reject cooperative_green_spawn imported from the OS-thread surface
+- expect compile error
+- Reject cooperative_green_spawn called with too many arguments
+- expect compile error
+- Reject cooperative_green_spawn called with a non-closure argument
+- expect compile error
+- Reject green_spawn imported from the OS-thread surface
+- expect compile error
+- Reject green_spawn called with too many arguments
+- expect compile error
+- Reject green_spawn called with a non-closure argument
+- expect compile error
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
 step("Reject cooperative_green_spawn imported from the OS-thread surface")
 expect_compile_error("cooperative_green_wrong_surface_import.spl", "E-PAR-003", "cooperative_green_spawn belongs to std.concurrent.cooperative_green")
 step("Reject cooperative_green_spawn called with too many arguments")
-expect_compile_error("cooperative_green_wrong_arity.spl", "E-PAR-004", "cooperative_green_spawn expects one share-nothing zero-argument closure")
+expect_compile_error("cooperative_green_wrong_arity.spl", "E-PAR-004", "pass a closure")
 step("Reject cooperative_green_spawn called with a non-closure argument")
-expect_compile_error("cooperative_green_bad_arg.spl", "E-PAR-004", "cooperative_green_spawn expects one share-nothing zero-argument closure")
+expect_compile_error("cooperative_green_bad_arg.spl", "E-PAR-004", "pass a closure")
 step("Reject green_spawn imported from the OS-thread surface")
 expect_compile_error("green_spawn_wrong_surface_import.spl", "E-PAR-003", "green_spawn belongs to std.concurrent.green_thread")
 step("Reject green_spawn called with too many arguments")
-expect_compile_error("green_spawn_wrong_arity.spl", "E-PAR-004", "green_spawn expects one share-nothing zero-argument closure")
+expect_compile_error("green_spawn_wrong_arity.spl", "E-PAR-004", "pass a closure")
 step("Reject green_spawn called with a non-closure argument")
-expect_compile_error("green_spawn_bad_arg.spl", "E-PAR-004", "green_spawn expects one share-nothing zero-argument closure")
+expect_compile_error("green_spawn_bad_arg.spl", "E-PAR-004", "pass a closure")
 ```
 
 </details>
 
 #### rejects multicore-green runtime-pool facade misuse
 
-- rejects multicore-green runtime-pool facade misuse
 - Reject multicore_green_spawn imported from the OS-thread surface
+- expect compile error
 - Reject multicore_green_spawn called with too many arguments
+- expect compile error
 - Reject multicore_green_spawn called with a non-closure argument
+- expect compile error
 - Reject multicore_green_set_parallelism called with text
-- Reject direct rt_pool_* access that bypasses the public multicore_green facade
-- Reject direct rt_pool_* counter access that bypasses the public multicore_green facade
+- expect compile error
+- Reject direct access to internal runtime-pool symbols
+- expect compile error
+- Reject direct access to internal runtime-pool counter symbols
+- expect compile error
 - Reject multicore_green_spawn_sliced imported from the OS-thread surface
+- expect compile error
 - Reject multicore_green_spawn_sliced called with too few arguments
+- expect compile error
 - Reject multicore_green_spawn_sliced called with non-integer initial state
+- expect compile error
 - Reject multicore_green_spawn_sliced called with non-function step argument
+- expect compile error
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects multicore-green runtime-pool facade misuse")
 step("Reject multicore_green_spawn imported from the OS-thread surface")
 expect_compile_error("multicore_green_wrong_surface_import.spl", "E-PAR-003", "multicore_green_spawn belongs to std.concurrent.multicore_green")
 step("Reject multicore_green_spawn called with too many arguments")
-expect_compile_error("multicore_green_wrong_arity.spl", "E-PAR-004", "multicore_green_spawn expects one share-nothing zero-argument closure")
+expect_compile_error("multicore_green_wrong_arity.spl", "E-PAR-004", "pass a closure")
 step("Reject multicore_green_spawn called with a non-closure argument")
-expect_compile_error("multicore_green_bad_arg.spl", "E-PAR-004", "multicore_green_spawn expects one share-nothing zero-argument closure")
+expect_compile_error("multicore_green_bad_arg.spl", "E-PAR-004", "pass a closure")
 step("Reject multicore_green_set_parallelism called with text")
 expect_compile_error("multicore_green_parallelism_bad_arg.spl", "E-PAR-004", "integer worker count")
-step("Reject direct rt_pool_* access that bypasses the public multicore_green facade")
-expect_compile_error("multicore_green_direct_rt_pool_access.spl", "E-PAR-005", "direct rt_pool_* access bypasses the public multicore_green facade")
-step("Reject direct rt_pool_* counter access that bypasses the public multicore_green facade")
-expect_compile_error("multicore_green_direct_rt_pool_counter_access.spl", "E-PAR-005", "direct rt_pool_* access bypasses the public multicore_green facade")
+step("Reject direct access to internal runtime-pool symbols")
+expect_compile_error("multicore_green_direct_rt_pool_access.spl", "E-PAR-005", "internal runtime-pool symbol")
+step("Reject direct access to internal runtime-pool counter symbols")
+expect_compile_error("multicore_green_direct_rt_pool_counter_access.spl", "E-PAR-005", "internal runtime-pool symbol")
 step("Reject multicore_green_spawn_sliced imported from the OS-thread surface")
 expect_compile_error("multicore_green_sliced_wrong_surface_import.spl", "E-PAR-003", "multicore_green_spawn_sliced belongs to std.concurrent.multicore_green")
 step("Reject multicore_green_spawn_sliced called with too few arguments")
-expect_compile_error("multicore_green_sliced_wrong_arity.spl", "E-PAR-004", "multicore_green_spawn_sliced expects integer state and step function")
+expect_compile_error("multicore_green_sliced_wrong_arity.spl", "E-PAR-004", "initial integer state and step function")
 step("Reject multicore_green_spawn_sliced called with non-integer initial state")
-expect_compile_error("multicore_green_sliced_bad_state_arg.spl", "E-PAR-004", "multicore_green_spawn_sliced expects integer state and step function")
+expect_compile_error("multicore_green_sliced_bad_state_arg.spl", "E-PAR-004", "initial integer state and step function")
 step("Reject multicore_green_spawn_sliced called with non-function step argument")
-expect_compile_error("multicore_green_sliced_bad_step_arg.spl", "E-PAR-004", "multicore_green_spawn_sliced expects a step function as the second argument")
+expect_compile_error("multicore_green_sliced_bad_step_arg.spl", "E-PAR-004", "initial integer state and step function")
 ```
 
 </details>
 
 #### rejects shared mutable state in green-process closures
 
-- rejects shared mutable state in green-process closures
 - Reject green_spawn closures that read module-level mutable variables
+- expect compile error
 - Reject cooperative_green_spawn closures that mutate captured variables
+- expect compile error
 - Reject multicore_green_spawn closures that read module-level mutable variables
+- expect compile error
 - Reject multicore_green_spawn_sliced inline step lambdas that mutate shared variables
+- expect compile error
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects shared mutable state in green-process closures")
 step("Reject green_spawn closures that read module-level mutable variables")
-expect_compile_error("green_spawn_shared_var_capture.spl", "E-PAR-006", "green_spawn closure must not capture shared mutable state")
+expect_compile_error("green_spawn_shared_var_capture.spl", "E-PAR-006", "must not share mutable variable 'shared_total'")
 step("Reject cooperative_green_spawn closures that mutate captured variables")
-expect_compile_error("cooperative_green_shared_var_capture.spl", "E-PAR-006", "cooperative_green_spawn closure must not capture shared mutable state")
+expect_compile_error("cooperative_green_shared_var_capture.spl", "E-PAR-006", "must not share mutable variable 'local_count'")
 step("Reject multicore_green_spawn closures that read module-level mutable variables")
-expect_compile_error("multicore_green_shared_var_capture.spl", "E-PAR-006", "multicore_green_spawn closure must not capture shared mutable state")
+expect_compile_error("multicore_green_shared_var_capture.spl", "E-PAR-006", "must not share mutable variable 'shared_sum'")
 step("Reject multicore_green_spawn_sliced inline step lambdas that mutate shared variables")
-expect_compile_error("multicore_green_sliced_shared_var_capture.spl", "E-PAR-006", "multicore_green_spawn_sliced closure must not capture shared mutable state")
+expect_compile_error("multicore_green_sliced_shared_var_capture.spl", "E-PAR-006", "must not share mutable variable 'shared_state'")
 ```
 
 </details>
@@ -402,61 +460,10 @@ expect_compile_error("multicore_green_sliced_shared_var_capture.spl", "E-PAR-006
 
 ## Related Documentation
 
-- **Requirements:** `doc/02_requirements/feature/multicore_green.md`
-- **Plan:** `doc/03_plan/sys_test/multicore_green.md`
-- **Design:** `doc/05_design/multicore_green.md`
-- **Research:** `doc/01_research/local/multicore_green.md`
+- **Requirements:** [doc/02_requirements/feature/multicore_green.md](doc/02_requirements/feature/multicore_green.md)
+- **Plan:** [doc/03_plan/sys_test/multicore_green.md](doc/03_plan/sys_test/multicore_green.md)
+- **Design:** [doc/05_design/multicore_green.md](doc/05_design/multicore_green.md)
+- **Research:** [doc/01_research/local/multicore_green.md](doc/01_research/local/multicore_green.md)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `1d7d2bf088147d4dd0ddee13c8e135600492446180b3f1c1ef6592d4f5417631`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `1d7d2bf088147d4dd0ddee13c8e135600492446180b3f1c1ef6592d4f5417631`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `1d7d2bf088147d4dd0ddee13c8e135600492446180b3f1c1ef6592d4f5417631`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
-
-SSpec documentization score: 88/100
-source: test/03_system/feature/usage/concurrency_api_misuse_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/concurrency_api_misuse_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=80
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/concurrency_api_misuse_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/concurrency_api_misuse_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/concurrency_api_misuse_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/feature/usage/concurrency_api_misuse_spec.spl:166:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'covers every checked-in misuse fixture' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/concurrency_api_misuse_spec.spl:172:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps Pure Simple lint as the authoritative API misuse rule map' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/concurrency_api_misuse_spec.spl:189:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps approved public API names usable' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

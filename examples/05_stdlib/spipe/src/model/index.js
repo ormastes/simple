@@ -13,3 +13,4 @@ export * from "./trace.js";
 export * from "./classification.js";
 export * from "./graph_node.js";
 export * from "./migration.js";
+export * from "../view/uri.js";

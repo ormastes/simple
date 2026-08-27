@@ -3,13 +3,11 @@
 # Text-based detection for bare primitive types in public function signatures:
 #   L:primitive_api — Public API uses bare integer/float primitive types
 #
-# Covers `bool` as well (canonical table includes it since the 2026-07
-# mission-critical plan); it does not try to prove full AST-level correctness.
+# This intentionally does not cover `bool` because that has its own `bare_bool`
+# lint, and it does not try to prove full AST-level correctness.
 
-use std.tooling.easy_fix.types.{FixConfidence, Replacement, EasyFix}
 use std.tooling.easy_fix.*
 use compiler.semantics.lint.primitive_types.{bare_primitive_types}
-use compiler.tools.fix.rules.impl_.lint_allow.{lines_allow_rule, line_is_allowed}
 
 struct PrimitiveApiAuditEntry:
     file: text
@@ -20,16 +18,15 @@ struct PrimitiveApiAuditEntry:
     reason_code: text
     suggested_wrapper: text
 
-# Canonical table: compiler.semantics.lint.primitive_types (includes bool).
 fn primitive_api_types() -> [text]:
-    bare_primitive_types()
+    ["i64", "i32", "i16", "i8",
+     "u64", "u32", "u16", "u8",
+     "f64", "f32"]
 
 fn primitive_api_audit_types() -> [text]:
-    var out = bare_primitive_types()
-    out.push("text")
-    out.push("str")
-    out.push("String")
-    out
+    ["i64", "i32", "i16", "i8",
+     "u64", "u32", "u16", "u8",
+     "f64", "f32", "bool", "text", "str", "String"]
 
 fn primitive_api_audit_source(source: text, file: text) -> [PrimitiveApiAuditEntry]:
     var entries: [PrimitiveApiAuditEntry] = []
@@ -93,35 +90,17 @@ fn primitive_api_audit_report(source: text, file: text) -> text:
     out
 
 fn check_primitive_api(source: text, file: text) -> [EasyFix]:
-    check_primitive_api_with_lines(file, source.split("\n"))
-
-fn check_primitive_api_with_lines(file: text, lines: [text]) -> [EasyFix]:
     var fixes: [EasyFix] = []
+    val lines = source.split("\n")
     var line_num = 0
     var byte_offset = 0
-
-    # File-scope suppression: `#![allow(primitive_api)]` in the header block.
-    if lines_allow_rule(lines, "primitive_api"):
-        return fixes
 
     for line in lines:
         line_num = line_num + 1
         val trimmed = line.trim()
 
         val is_extern_fn = trimmed.starts_with("extern fn ")
-        val is_pub_fn = trimmed.starts_with("pub fn ") or
-            trimmed.starts_with("pub me ") or
-            trimmed.starts_with("pub static fn ")
-        if is_extern_fn or not is_pub_fn:
-            byte_offset = byte_offset + line.len() + 1
-            continue
-
-        # Item-scope suppression: `@allow(primitive_api)` / `#[allow(...)]`
-        # on the comment/annotation lines directly above this declaration.
-        if line_is_allowed(lines, line_num - 1, "primitive_api"):
-            byte_offset = byte_offset + line.len() + 1
-            continue
-
+        val is_pub_fn = trimmed.starts_with("pub fn ") or trimmed.starts_with("pub me ") or trimmed.starts_with("pub static fn ")
         if not is_extern_fn and is_pub_fn:
             val params = _extract_params(trimmed)
             val return_type = _extract_return_type(trimmed)

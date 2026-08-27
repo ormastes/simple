@@ -1,6 +1,29 @@
 # Native Backend E2e System Specification
 
-> Tests covering Native Backend E2E - Control Flow, Native Backend E2E - Structs and Pattern Matching, Native Backend E2E - Error Handling.
+> <details>
+
+<!-- sdn-diagram:id=native_backend_e2e_system_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=native_backend_e2e_system_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+native_backend_e2e_system_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=native_backend_e2e_system_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -20,25 +43,22 @@
 
 #### compiles while loop with counter _(slow)_
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- compiles while loop with counter
+1. print "
+2. write source
    - Expected: comp_code equals `0`
    - Expected: code equals `0`
    - Expected: stdout.trim() equals `5`
+3. file delete
+4. file delete
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("compiles while loop with counter")
 if gcc_available() == false:
     print "  (skipped: gcc not found)"
     return
@@ -69,21 +89,22 @@ file_delete(out_path)
 
 #### compiles while loop with break _(slow)_
 
-- compiles while loop with break
+1. print "
+2. write source
    - Expected: comp_code equals `0`
    - Expected: code equals `0`
    - Expected: stdout.trim() equals `3`
+3. file delete
+4. file delete
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("compiles while loop with break")
 if gcc_available() == false:
     print "  (skipped: gcc not found)"
     return
@@ -114,20 +135,21 @@ file_delete(out_path)
 
 #### compiles nested if-else chain _(slow)_
 
-- compiles nested if-else chain
+1. print "
+2. write source
    - Expected: comp_code equals `0`
    - Expected: code equals `0`
+3. file delete
+4. file delete
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("compiles nested if-else chain")
 if gcc_available() == false:
     print "  (skipped: gcc not found)"
     return
@@ -162,21 +184,22 @@ file_delete(out_path)
 
 #### compiles struct construction and field access _(slow)_
 
-- compiles struct construction and field access
+1. print "
+2. write source
    - Expected: comp_code equals `0`
    - Expected: code equals `0`
    - Expected: stdout.trim() equals `42`
+3. file delete
+4. file delete
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("compiles struct construction and field access")
 if gcc_available() == false:
     print "  (skipped: gcc not found)"
     return
@@ -207,21 +230,22 @@ file_delete(out_path)
 
 #### compiles match expressions _(slow)_
 
-- compiles match expressions
+1. print "
+2. write source
    - Expected: comp_code equals `0`
    - Expected: code equals `0`
    - Expected: stdout.trim() equals `two`
+3. file delete
+4. file delete
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("compiles match expressions")
 if gcc_available() == false:
     print "  (skipped: gcc not found)"
     return
@@ -254,18 +278,16 @@ file_delete(out_path)
 
 #### reports non-zero exit code for missing source file _(slow)_
 
-- reports non-zero exit code for missing source file
+1. print "
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("reports non-zero exit code for missing source file")
 if gcc_available() == false:
     print "  (skipped: gcc not found)"
     return
@@ -287,18 +309,18 @@ expect(comp_code).to_be_greater_than(0)
 
 #### reports non-zero exit code for syntax error in source _(slow)_
 
-- reports non-zero exit code for syntax error in source
+1. print "
+2. file write
+3. file delete
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("reports non-zero exit code for syntax error in source")
 if gcc_available() == false:
     print "  (skipped: gcc not found)"
     return
@@ -325,12 +347,12 @@ file_delete(src_path)
 | Category | Compiler |
 | Status | Active |
 | Source | `test/03_system/compiler/native_backend_e2e_system_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Native Backend E2E - Control Flow, Native Backend E2E - Structs and Pattern Matching, Native Backend E2E - Error Handling.
+Tests covering:
 - Native Backend E2E - Control Flow
 - Native Backend E2E - Structs and Pattern Matching
 - Native Backend E2E - Error Handling
@@ -347,54 +369,3 @@ Tests covering Native Backend E2E - Control Flow, Native Backend E2E - Structs a
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `e0226246a22e556dad0272cc189bf0c344bf99c14b49649598f943567e43a6a2`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `e0226246a22e556dad0272cc189bf0c344bf99c14b49649598f943567e43a6a2`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `e0226246a22e556dad0272cc189bf0c344bf99c14b49649598f943567e43a6a2`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/03_system/compiler/native_backend_e2e_system_spec.spl
-mirror: doc/06_spec/03_system/compiler/native_backend_e2e_system_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/compiler/native_backend_e2e_system_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/compiler/native_backend_e2e_system_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/compiler/native_backend_e2e_system_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 10 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/compiler/native_backend_e2e_system_spec.spl:79:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compiles while loop with counter' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/compiler/native_backend_e2e_system_spec.spl:101:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compiles while loop with break' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/compiler/native_backend_e2e_system_spec.spl:123:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compiles nested if-else chain' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

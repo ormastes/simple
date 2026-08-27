@@ -5,6 +5,9 @@ description: Create architecture, UI design, system tests, and detail design for
 
 # Design — Self-Sufficient
 
+Consume the retained feature-plus-layer knowledge receipt before design.
+Missing/ambiguous routes and MDSOC+ on kernel/drivers fail closed.
+
 **Self-sufficient.** If research/requirements missing, do them first.
 
 ## Prerequisites Check
@@ -73,17 +76,6 @@ description: Create architecture, UI design, system tests, and detail design for
 - Generate/read mirrored `doc/06_spec/...` for scenario-oriented specs and
   update steps/captures/visibility until the manual is usable without opening
   the source test.
-- Run `simple sspec-maintain scan <spec>` and review all seven scores, stable
-  findings, blocker cap, mirror state, and REQ-to-scenario traceability. A
-  blocker, missing/stale mirror, configured policy failure, contaminated
-  machine output, or unresolved scaffold presented as coverage blocks handoff.
-  Reference scaffolds preserve source path/hash, REQ ID, and source line; they
-  never infer a passing oracle. `documentize` delegates the complete manual to
-  SPipe. Full external standards follow the planned lossless `spec-to-spipe`
-  architecture; `spec-to-sspec` must be a compatibility route to that same
-  implementation when its production CLI lands, not a second importer.
-  Design `improve` as preview-only; exact confirmation and rollback are required
-  for apply, and semantic prose/assertion/REQ/evidence edits remain manual.
 - If design changes workflow/tooling, evidence wrappers, generated spec shape,
   or verification contracts, update matching `doc/07_guide`, `doc/06_spec`,
   `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
@@ -92,7 +84,6 @@ description: Create architecture, UI design, system tests, and detail design for
 
 ## Rules
 
-- **One App, One Host Interface:** Design apps for all OSes identically; only HAL/backend, config, and optional capabilities vary. No per-OS code forks, platform conditionals, or adapter copying in app logic. See `doc/04_architecture/os/one_app_host_interface_rule.md`.
 - If requirements missing, do research first
 - If another LLM already created artifacts, review and extend — never overwrite
 - Every REQ-NNN must have test coverage

@@ -2,6 +2,29 @@
 
 > Tests for variable declarations including val (immutable) and var (mutable) bindings, type inference, and scoping rules.
 
+<!-- sdn-diagram:id=variables_let_bindings_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=variables_let_bindings_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+variables_let_bindings_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=variables_let_bindings_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 23 | 23 | 0 | 0 |
@@ -21,7 +44,7 @@ Tests for variable declarations including val (immutable) and var (mutable) bind
 | Category | Language |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/variables_let_bindings_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -33,8 +56,6 @@ bindings, type inference, and scoping rules.
 
 ```simple
 # Immutable binding (preferred)
-use std.spec.step
-
 val name = "Alice"
 
 # Mutable binding
@@ -65,18 +86,13 @@ var (a, b) = (1, 2)
 
 #### creates immutable binding
 
-- creates immutable binding
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates immutable binding")
 val x = 42
 expect x == 42
 ```
@@ -85,18 +101,13 @@ expect x == 42
 
 #### allows shadowing with new val
 
-- allows shadowing with new val
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("allows shadowing with new val")
 val x = 1
 val x = 2
 expect x == 2
@@ -106,18 +117,13 @@ expect x == 2
 
 #### binds expression results
 
-- binds expression results
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("binds expression results")
 val result = 10 + 20 * 2
 expect result == 50
 ```
@@ -126,18 +132,13 @@ expect result == 50
 
 #### binds complex expressions
 
-- binds complex expressions
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("binds complex expressions")
 val result = (5 + 3) * 4 - 10 / 2
 expect result == 27
 ```
@@ -148,18 +149,13 @@ expect result == 27
 
 #### creates mutable binding
 
-- creates mutable binding
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates mutable binding")
 var x = 0
 x = 10
 expect x == 10
@@ -169,18 +165,13 @@ expect x == 10
 
 #### allows multiple reassignments
 
-- allows multiple reassignments
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("allows multiple reassignments")
 var x = 1
 x = 2
 x = 3
@@ -195,18 +186,13 @@ expect x == 3
 
 #### inner scope shadows outer
 
-- inner scope shadows outer
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("inner scope shadows outer")
 # The interpreter does not restore block scope after if-blocks,
 # so we verify shadowing via a function scope which is isolated.
 val x = 1
@@ -219,18 +205,13 @@ expect x == 1
 
 #### inner scope can read outer
 
-- inner scope can read outer
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("inner scope can read outer")
 val x = 10
 var result = 0
 if true:
@@ -247,18 +228,13 @@ expect result == 15
 
 #### loop variable isolated to loop
 
-- loop variable isolated to loop
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("loop variable isolated to loop")
 # The interpreter leaks loop variables into the outer scope,
 # so we run the loop inside a function to get true isolation.
 val i = 100
@@ -278,18 +254,13 @@ expect sum == 10
 
 #### creates immutable boolean
 
-- creates immutable boolean
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates immutable boolean")
 val flag = true
 expect flag == true
 ```
@@ -298,18 +269,13 @@ expect flag == true
 
 #### creates immutable float
 
-- creates immutable float
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates immutable float")
 val pi = 3.14
 expect pi > 3.0
 ```
@@ -320,18 +286,13 @@ expect pi > 3.0
 
 #### initializes var with expression
 
-- initializes var with expression
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("initializes var with expression")
 var x = 5 * 2
 x = x + 10
 expect x == 20
@@ -344,18 +305,13 @@ expect x == 20
 
 #### modifies var in loop
 
-- modifies var in loop
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("modifies var in loop")
 var sum = 0
 for i in 1..4:
     sum = sum + i
@@ -373,18 +329,16 @@ expect sum == 6
 
 #### destructures tuple into mutable bindings
 
-- destructures tuple into mutable bindings
+1. var
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("destructures tuple into mutable bindings")
 var (a, b) = (1, 2)
 a = 10
 b = 20
@@ -397,18 +351,13 @@ expect a + b == 30
 
 #### destructures tuple into immutable bindings
 
-- destructures tuple into immutable bindings
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("destructures tuple into immutable bindings")
 val (x, y) = (3, 4)
 expect x + y == 7
 ```
@@ -421,18 +370,13 @@ expect x + y == 7
 
 #### infers integer type
 
-- infers integer type
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("infers integer type")
 val x = 42
 expect x + 8 == 50
 ```
@@ -441,18 +385,16 @@ expect x + 8 == 50
 
 #### infers string type
 
-- infers string type
+1. expect s len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("infers string type")
 val s = "hello"
 expect s.len() == 5
 ```
@@ -461,18 +403,16 @@ expect s.len() == 5
 
 #### infers array type
 
-- infers array type
+1. expect arr len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("infers array type")
 val arr = [1, 2, 3]
 expect arr.len() == 3
 ```
@@ -485,18 +425,16 @@ expect arr.len() == 3
 
 #### gets length of array
 
-- gets length of array
+1. expect len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("gets length of array")
 val arr = [1, 2, 3, 4, 5]
 expect len(arr) == 5
 ```
@@ -505,18 +443,16 @@ expect len(arr) == 5
 
 #### gets length using method syntax
 
-- gets length using method syntax
+1. expect arr len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("gets length using method syntax")
 val arr = [1, 2, 3]
 expect arr.len() == 3
 ```
@@ -529,18 +465,13 @@ expect arr.len() == 3
 
 #### binds Some value
 
-- binds Some value
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("binds Some value")
 val opt: Option<i64> = Some(42)
 expect opt.?
 ```
@@ -549,18 +480,16 @@ expect opt.?
 
 #### unwraps Some value
 
-- unwraps Some value
+1. expect opt unwrap
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("unwraps Some value")
 val opt: Option<i64> = Some(99)
 expect opt.unwrap() == 99
 ```
@@ -571,18 +500,13 @@ expect opt.unwrap() == 99
 
 #### binds None value
 
-- binds None value
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("binds None value")
 val opt: Option<i64> = None
 expect not opt.?
 ```
@@ -601,51 +525,3 @@ expect not opt.?
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `902cd49fccb1cc9fb89e0ceeb3f7d14a02b75dfadbe810e7c53ddb0915ae65bd`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `902cd49fccb1cc9fb89e0ceeb3f7d14a02b75dfadbe810e7c53ddb0915ae65bd`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `902cd49fccb1cc9fb89e0ceeb3f7d14a02b75dfadbe810e7c53ddb0915ae65bd`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/variables_let_bindings_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/variables_let_bindings_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/variables_let_bindings_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/variables_let_bindings_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/variables_let_bindings_spec.spl:79:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates immutable binding' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/variables_let_bindings_spec.spl:85:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'allows shadowing with new val' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/variables_let_bindings_spec.spl:92:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'binds expression results' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

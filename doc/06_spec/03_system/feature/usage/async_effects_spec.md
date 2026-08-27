@@ -17,8 +17,9 @@ Purpose: async effect behavior is observed through the production async
 
 | Field | Value |
 |-------|-------|
-| Category | Language Features |
-| Status | Active |
+| Feature IDs | #RUNTIME-011 |
+| Category | Runtime |
+| Status | In Progress |
 | Source | `test/03_system/feature/usage/async_effects_spec.spl` |
 | Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |

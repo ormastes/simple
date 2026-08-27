@@ -355,12 +355,10 @@ The pure-Simple builders and shared LFN reader are canonical. The still-live C
 image writer mirrors the same 16 readable names and fixed short aliases for its
 existing toolchain/evidence payload callers; it does not become a second font
 registry or renderer.
-The pure-Simple writer accepts valid VFAT components up to 255 UTF-16 code
-units, emits standard 13-code-unit UTF-16LE slots and checksums, and sizes
-nested directory FAT chains from the actual slot count. The shared readers
-decode complete chains so valid surrogate pairs may cross slot boundaries;
-malformed pairs fail closed to the backing 8.3 alias. The writer rejects
-invalid characters and fixed-root overflow.
+The writer accepts ASCII VFAT components up to 255 characters, emits standard
+13-code-unit slots and checksums, and sizes nested directory FAT chains from the
+actual slot count. It rejects invalid characters and fixed-root overflow;
+non-ASCII UTF-16 names are outside this slice.
 
 Remaining completion behavior is intentionally narrow:
 
@@ -471,3 +469,57 @@ Implementation updates the Unicode font, UI stack, Engine2D, Engine3D, GPU API,
 backend-order, and pixel-comparison guides plus `THIRD_PARTY_NOTICES` and the
 font-specific SPipe evidence recipe. Generic workflow skills change only where
 the evidence semantics actually change.
+
+## GSUB/GPOS staged-completion detail — 2026-07-25
+
+<!-- codex-design -->
+
+1. Harden one shared active-layout selector. Exact Script/LangSys wins; a
+   missing exact language uses that Script's DefaultLangSys; `DFLT` is
+   considered only when the requested Script is absent. Malformed exact
+   records never fall through.
+2. Reject nonzero `lookupOrder`, duplicate or aliased structural records,
+   invalid section offsets, bad feature/lookup indices, and unsupported active
+   LookupFlags. Permit nondecreasing duplicate FeatureTags because LangSys
+   selects FeatureRecords by index. Build the required-plus-enabled feature
+   union, deduplicate lookups, and execute ascending LookupList indices.
+3. Replace scalar general substitution with a bounded mutable glyph sequence.
+   Each supported lookup is transactional: validation completes before the
+   sequence changes. Nested lookup depth and total applications are capped by
+   run/table size.
+4. Apply GPOS to the substituted sequence and preserve x/y placement and
+   advance. Device/variation data and unavailable GDEF-dependent filtering
+   reject the plan.
+5. Set `substitution_complete` and `positioning_complete` independently only
+   after their entire active plans execute. An incomplete result cannot produce
+   a valid `FontGlyphRun`; the renderer reports `font-shaping-unavailable`.
+
+Focused fixtures cover exact/default/`DFLT`, malformed exact no-fallback,
+required and optional feature selection, lookup order/deduplication,
+duplicates/aliases/bad indices/nonzero `lookupOrder`, supported application,
+and every unsupported active operation. Existing pinned Hindi and Arabic/Urdu
+vectors remain regression tests. Runtime evidence must additionally show a
+nonzero bearing or GPOS offset surviving the handle-free Draw IR round trip.
+
+Option A and NFR A were selected on 2026-07-25. No general completion claim is
+allowed from selector hardening alone.
+
+### Generic sequence surface
+
+`ot_layout_apply.spl` owns one internal `LayoutGlyphRecord` with glyph ID,
+source index, cluster, font-unit advances, and font-unit offsets. Its GSUB and
+GPOS validators walk the entire selected plan, including reachable nested
+lookups, before either phase mutates a copied sequence. Multiple substitutions
+retain source/cluster provenance; ligatures retain the first source and minimum
+participating cluster. GPOS changes only advances/offsets.
+
+`ot_layout_shaper.spl` selects the pinned feature plans, builds nominal records,
+applies GSUB, recomputes substituted advances, applies GPOS, and hands the
+font-unit records to `shaper.spl` for one final scale and RTL visual ordering.
+`ot_layout_gpos_data.spl` holds the bounded Coverage, ClassDef, ValueRecord,
+anchor, GDEF-filter, and shared-budget readers used by the GPOS semantic owner.
+
+Work is capped by run, lookup, and subtable counts, with bounded nested depth.
+Failure returns the original nominal sequence with `complete=false`. The shaper
+scales successful font-unit records into the existing `ShapedGlyph`; no new
+renderer, Draw IR field, or shaping cache is introduced.

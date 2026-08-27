@@ -2,17 +2,13 @@
 #
 # Uses shared mcp_sdk for JSON, shell helpers, and tool result building.
 
-use .json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, extract_field, escape_json, jsonrpc_result, jsonrpc_error, find_simple_binary, clean_command_output, strip_ansi, make_tool_result, make_tool_error, has_method, _char_at, _is_ws, _find_json_value_start}
+use .json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, extract_field, escape_json, jsonrpc_result, jsonrpc_error, find_simple_binary, clean_command_output, strip_ansi, run_command_text, make_tool_result, make_tool_error, has_method, _char_at, _is_ws, _find_json_value_start}
 use std.io_runtime.{process_run}
-# Import process_run_bounded from the light std module, NOT app.io.mod — the
+# Import process_run_timeout from the light std module, NOT app.io.mod — the
 # latter is a CLI/compiler re-export hub whose graph makes `bin/simple run` skip
 # main() (LSP MCP server never starts). See
 # doc/08_tracking/bug/mcp_source_mode_large_import_graph_2026-06-23.md
-use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
-
-val LSP_DIAGNOSTICS_OUTPUT_CAPTURE_BYTES: i64 = 1024 * 1024
-val LSP_COMMAND_TIMEOUT_MS: i64 = 10000
-val LSP_COMMAND_OUTPUT_CAPTURE_BYTES: i64 = 1024 * 1024
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
 
 fn lsp_query_path() -> text:
     "src/lib/nogc_sync_mut/lsp/lsp_query.spl"
@@ -78,16 +74,15 @@ fn run_lsp_diagnostics(file: text) -> text:
     val enabled = env_get("SIMPLE_LSP_ENABLE_DIAGNOSTICS") ?? ""
     if enabled != "1":
         return "diagnostics unavailable in source mode (process_run deadlocks on the `simple check` subcommand spawn). Run `simple check " + file + "` directly, or set SIMPLE_LSP_ENABLE_DIAGNOSTICS=1 on a working native build."
-    val (stdout, stderr, code) = process_run_bounded(
-        find_simple_binary(),
-        ["check", file],
-        10000,
-        LSP_DIAGNOSTICS_OUTPUT_CAPTURE_BYTES
-    )
+    val (stdout, stderr, code) = process_run_timeout(find_simple_binary(), ["check", file], 10000)
     val clean = clean_command_output(stdout)
     if code == 0:
         return clean
-    command_failure(code, stderr, clean)
+    if stderr.trim() != "":
+        return stderr.trim()
+    if clean != "":
+        return clean
+    "command failed with exit code " + str(code)
 
 fn lsp_parse_diag_line(line: text) -> text:
     # Parses: path:line:col: error/warning: message
@@ -290,7 +285,35 @@ fn parse_nonnegative_int_or_minus_one(value: text) -> i64:
     result
 
 fn detect_tool_name(body: text) -> text:
-    val requested = arg_field(args: body, key: "name")
+    val params = extract_field(json: body, key: "params")
+    val requested = extract_field(json: params, key: "name")
+    if requested == "":
+        val direct = arg_field(args: body, key: "name")
+        if direct != "":
+            if direct == "lsp_definition":
+                return "lsp_definition"
+            if direct == "lsp_references":
+                return "lsp_references"
+            if direct == "lsp_hover":
+                return "lsp_hover"
+            if direct == "lsp_symbols":
+                return "lsp_symbols"
+            if direct == "lsp_diagnostics":
+                return "lsp_diagnostics"
+            if direct == "lsp_completion":
+                return "lsp_completion"
+            if direct == "lsp_type_at":
+                return "lsp_type_at"
+            if direct == "lsp_signature_help":
+                return "lsp_signature_help"
+            if direct == "lsp_implementation":
+                return "lsp_implementation"
+            if direct == "lsp_document_highlight":
+                return "lsp_document_highlight"
+            if direct == "lsp_type_definition":
+                return "lsp_type_definition"
+            if direct == "saml_analyze":
+                return "saml_analyze"
     if requested == "lsp_definition":
         return "lsp_definition"
     if requested == "lsp_references":
@@ -351,11 +374,15 @@ fn handle_tool_call(id: text, body: text) -> text:
     if tool_name == "":
         return make_tool_error(id, "Missing tool name")
 
+    val params = extract_field(json: body, key: "params")
+    val arguments = extract_field(json: params, key: "arguments")
+    val args_body = if arguments == "": body else: arguments
+
     # Position-based tools (file + line + character)
     if tool_name == "lsp_definition" or tool_name == "lsp_references" or tool_name == "lsp_hover" or tool_name == "lsp_completion" or tool_name == "lsp_type_at" or tool_name == "lsp_signature_help" or tool_name == "lsp_implementation" or tool_name == "lsp_document_highlight" or tool_name == "lsp_type_definition":
-        val file = arg_field(args: body, key: "file")
-        val line0 = arg_int_field(args: body, key: "line")
-        val char0 = arg_int_field(args: body, key: "character")
+        val file = arg_field(args: args_body, key: "file")
+        val line0 = arg_int_field(args: args_body, key: "line")
+        val char0 = arg_int_field(args: args_body, key: "character")
         if file == "" or line0 < 0 or char0 < 0:
             return make_tool_error(id, "Missing required argument: file/line/character")
 
@@ -406,7 +433,6 @@ export arg_int_field
 export run_lsp_query
 export run_visibility_query
 export run_visibility_symbols
-export run_command_text
 export run_lsp_diagnostics
 export run_saml_analyze
 export format_lsp_diagnostics_block

@@ -1,0 +1,150 @@
+"""
+# Pointcut identity: canonical digests and stable join-point identity
+
+Three properties the AOP cache-group split depends on, none of which had a
+substrate before the typed pointcut layer landed:
+
+1. **Equal queries digest equally.** Two predicates that differ only in term
+   order or duplication normalize to the same query and therefore the same
+   `normalized_query_digest`.
+2. **The selector read set bounds invalidation.** Changing a descriptor field
+   OUTSIDE a query's read set must not move that query's selection digest —
+   otherwise every attribute edit invalidates every pointcut.
+3. **Join-point identity excludes `BlockId`.** `BlockId{id: i64}` is a transient
+   MIR index, classified LOCAL_STATE by the frozen cache protocol. Renumbering
+   an unrelated block must not shift any descriptor's identity.
+
+A false miss is acceptable; a false hit is not. So an unparseable predicate is
+required to read every field and to match everything.
+"""
+
+use std.spec
+use compiler.mir.mir_instructions.{BlockId}
+use compiler.mdsoc.weaving.join_point.{JoinPoint, JoinPointContext}
+use compiler.mdsoc.weaving.join_point_kind.{JoinPointKind}
+use compiler.mdsoc.aop_index.pointcut_parser.{pointcut_parse}
+use compiler.mdsoc.aop_index.pointcut_query.{
+    POINTCUT_KIND_DNF, POINTCUT_KIND_UNPARSED, pointcut_query_read_set
+}
+use compiler.mdsoc.aop_index.pointcut_matcher.{pointcut_query_matches}
+use compiler.mdsoc.aop_index.join_point_descriptor.{
+    join_point_descriptor_of, join_point_descriptors_of
+}
+use compiler.mdsoc.aop_cache.pointcut_digest.{
+    join_point_descriptor_digest, pointcut_normalized_query_digest, pointcut_selection_digest
+}
+
+fn spec_ctx(attrs: [text], effects: [text]) -> JoinPointContext:
+    """A router join-point context varying only in attributes and effects."""
+    JoinPointContext(
+        function_name: "http_server.Router.handle_request",
+        module_path: "http_server.router",
+        signature: "(Request) -> Response",
+        attributes: attrs,
+        effects: effects
+    )
+
+fn spec_exec_kind() -> JoinPointKind:
+    """The execution join-point kind used across these examples."""
+    JoinPointKind.Execution(
+        function_name: "handle_request",
+        signature: "(Request) -> Response"
+    )
+
+describe("pointcut normalization is canonical"):
+    it("digests logically equal predicates identically"):
+        val a = pointcut_parse("execution(*.handle_request) & within(http_server.**)")
+        val b = pointcut_parse("within(http_server.**) & execution(*.handle_request) & within(http_server.**)")
+        assert_equal(a.kind, POINTCUT_KIND_DNF)
+        assert_equal(pointcut_normalized_query_digest(a), pointcut_normalized_query_digest(b))
+
+    it("digests a disjunction the same in either written order"):
+        val a = pointcut_parse("execution(*.authenticate*) | execution(*.verify_password*)")
+        val b = pointcut_parse("execution(*.verify_password*) | execution(*.authenticate*)")
+        assert_equal(pointcut_normalized_query_digest(a), pointcut_normalized_query_digest(b))
+
+    it("separates genuinely different predicates"):
+        val a = pointcut_parse("attr(requires_auth) & within(http_server.**)")
+        val b = pointcut_parse("attr(deny_all) & within(http_server.**)")
+        assert_not_equal(pointcut_normalized_query_digest(a), pointcut_normalized_query_digest(b))
+
+    it("falls back to unparsed, reading every field, on an unknown selector"):
+        val q = pointcut_parse("nosuchselector(x) & within(http_server.**)")
+        assert_equal(q.kind, POINTCUT_KIND_UNPARSED)
+        val rs = pointcut_query_read_set(q)
+        assert_true(rs.qualified_name)
+        assert_true(rs.owning_scope)
+        assert_true(rs.signature)
+        assert_true(rs.attributes)
+        assert_true(rs.effects)
+
+describe("the selector read set bounds invalidation"):
+    it("reports only the fields the query actually reads"):
+        val rs = pointcut_query_read_set(pointcut_parse("within(http_server.**)"))
+        assert_true(rs.owning_scope)
+        assert_false(rs.qualified_name)
+        assert_false(rs.signature)
+        assert_false(rs.attributes)
+        assert_false(rs.effects)
+
+    it("holds the selection digest steady when a field outside the read set changes"):
+        val q = pointcut_parse("within(http_server.**)")
+        val before = join_point_descriptor_of(spec_exec_kind(), spec_ctx(attrs: [], effects: ["io"]))
+        val after = join_point_descriptor_of(spec_exec_kind(), spec_ctx(attrs: ["requires_auth"], effects: ["io"]))
+        assert_not_equal(
+            join_point_descriptor_digest(before),
+            join_point_descriptor_digest(after)
+        )
+        assert_equal(
+            pointcut_selection_digest(q, before),
+            pointcut_selection_digest(q, after)
+        )
+
+    it("moves the selection digest when a field inside the read set changes"):
+        val q = pointcut_parse("attr(requires_auth)")
+        val before = join_point_descriptor_of(spec_exec_kind(), spec_ctx(attrs: [], effects: []))
+        val after = join_point_descriptor_of(spec_exec_kind(), spec_ctx(attrs: ["requires_auth"], effects: []))
+        assert_false(pointcut_query_matches(q, before))
+        assert_true(pointcut_query_matches(q, after))
+        assert_not_equal(
+            pointcut_selection_digest(q, before),
+            pointcut_selection_digest(q, after)
+        )
+
+describe("join-point identity excludes the transient BlockId"):
+    it("keeps every descriptor digest fixed when unrelated blocks are renumbered"):
+        val kind_a = JoinPointKind.Execution(function_name: "a", signature: "() -> Unit")
+        val kind_b = JoinPointKind.Execution(function_name: "b", signature: "() -> Unit")
+        val ctx = spec_ctx(attrs: [], effects: [])
+        val first = [
+            JoinPoint(kind: kind_a, block_id: BlockId(id: 0), instruction_index: 0, context: ctx),
+            JoinPoint(kind: kind_b, block_id: BlockId(id: 7), instruction_index: 3, context: ctx)
+        ]
+        val renumbered = [
+            JoinPoint(kind: kind_b, block_id: BlockId(id: 41), instruction_index: 9, context: ctx),
+            JoinPoint(kind: kind_a, block_id: BlockId(id: 12), instruction_index: 1, context: ctx)
+        ]
+        val d1 = join_point_descriptors_of(first)
+        val d2 = join_point_descriptors_of(renumbered)
+        assert_equal(d1.len(), d2.len())
+        var i = 0
+        while i < d1.len():
+            assert_equal(
+                join_point_descriptor_digest(d1[i]),
+                join_point_descriptor_digest(d2[i])
+            )
+            i = i + 1
+
+    it("still distinguishes two byte-identical sites by a content-order ordinal"):
+        val kind = JoinPointKind.Decision(location: "if")
+        val ctx = spec_ctx(attrs: [], effects: [])
+        val jps = [
+            JoinPoint(kind: kind, block_id: BlockId(id: 3), instruction_index: 0, context: ctx),
+            JoinPoint(kind: kind, block_id: BlockId(id: 4), instruction_index: 0, context: ctx)
+        ]
+        val descs = join_point_descriptors_of(jps)
+        assert_equal(descs.len(), 2)
+        assert_not_equal(
+            join_point_descriptor_digest(descs[0]),
+            join_point_descriptor_digest(descs[1])
+        )

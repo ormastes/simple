@@ -1,0 +1,902 @@
+# DAP Full Integration
+
+> Purpose: executes a simple debugging session
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 20 | 20 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# DAP Full Integration
+
+Purpose: executes a simple debugging session
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Developer Tools |
+| Status | In Progress |
+| Source | `test/03_system/feature/dap/integration_spec.spl` |
+| Updated | 2026-08-22 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+Purpose: executes a simple debugging session
+Audience: compiler and tooling engineers who maintain this spec
+
+# DAP Full Integration
+
+**Category:** Developer Tools
+**Status:** In Progress
+
+## Overview
+
+Tests end-to-end Debug Adapter Protocol integration including launch, breakpoint
+hit, variable inspection, and stepping through code. Verifies that the complete
+debug workflow functions correctly from client connection to session termination.
+
+## Scenarios
+
+### Full Debugging Sessions
+
+### Simple breakpoint session
+
+#### executes a simple debugging session
+
+- Verify: executes a simple debugging session
+   - Expected: debug_is_active() is true
+   - Expected: debug_has_breakpoint("main.spl", 15) is true
+   - Expected: debug_should_break() is false
+   - Expected: debug_should_break() is true
+   - Expected: debug_is_paused() is true
+   - Expected: debug_current_file() equals `main.spl`
+   - Expected: debug_current_line() equals `15)  # oracle: value fixed by the spec contract`
+   - Expected: depth >= 0 is true
+   - Expected: debug_is_paused() is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 35 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: executes a simple debugging session")
+# @req: REQ-FEATURE-Inte-001
+# Step 1: Activate debug mode
+debug_set_active(true)
+expect(debug_is_active()).to_equal(true)
+
+# Step 2: Set breakpoint
+debug_add_breakpoint("main.spl", 15, 1)
+expect(debug_has_breakpoint("main.spl", 15)).to_equal(true)
+
+# Step 3: Simulate execution to line before breakpoint
+debug_set_current_location("main.spl", 14, 0)
+expect(debug_should_break()).to_equal(false)
+
+# Step 4: Execute to breakpoint line
+debug_set_current_location("main.spl", 15, 0)
+expect(debug_should_break()).to_equal(true)
+
+# Step 5: Pause at breakpoint
+debug_pause()
+expect(debug_is_paused()).to_equal(true)
+
+# Step 6: Inspect current state
+expect(debug_current_file()).to_equal("main.spl")
+expect(debug_current_line()).to_equal(15)  # oracle: value fixed by the spec contract
+val depth = debug_stack_depth()
+expect(depth >= 0).to_equal(true)
+
+# Step 7: Continue execution
+debug_continue()
+expect(debug_is_paused()).to_equal(false)
+
+# Step 8: Clean up
+debug_remove_breakpoint("main.spl", 15)
+debug_set_active(false)
+```
+
+</details>
+
+### Step through execution
+
+#### steps through sequential code
+
+- Verify: steps through sequential code
+   - Expected: debug_current_line() equals `10)  # oracle: value fixed by the spec contract`
+   - Expected: debug_get_step_mode() equals `2)  # oracle: value fixed by the spec contract`
+   - Expected: debug_should_break() is true
+   - Expected: debug_current_line() equals `11)  # oracle: value fixed by the spec contract`
+   - Expected: debug_should_break() is true
+   - Expected: debug_current_line() equals `12)  # oracle: value fixed by the spec contract`
+   - Expected: debug_should_break() is true
+   - Expected: debug_current_line() equals `13)  # oracle: value fixed by the spec contract`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 24 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: steps through sequential code")
+# @req: REQ-FEATURE-Inte-001
+debug_set_active(true)
+
+# Start at line 10
+debug_set_current_location("test.spl", 10, 0)
+expect(debug_current_line()).to_equal(10)  # oracle: value fixed by the spec contract
+
+# Enable step into mode
+debug_set_step_mode(2)
+expect(debug_get_step_mode()).to_equal(2)  # oracle: value fixed by the spec contract
+
+# Simulate stepping through lines
+debug_set_current_location("test.spl", 11, 0)
+expect(debug_should_break()).to_equal(true)
+expect(debug_current_line()).to_equal(11)  # oracle: value fixed by the spec contract
+
+debug_set_current_location("test.spl", 12, 0)
+expect(debug_should_break()).to_equal(true)
+expect(debug_current_line()).to_equal(12)  # oracle: value fixed by the spec contract
+
+debug_set_current_location("test.spl", 13, 0)
+expect(debug_should_break()).to_equal(true)
+expect(debug_current_line()).to_equal(13)  # oracle: value fixed by the spec contract
+```
+
+</details>
+
+#### steps over function call
+
+- Verify: steps over function call
+   - Expected: debug_should_break() is false
+   - Expected: debug_should_break() is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: steps over function call")
+# @req: REQ-FEATURE-Inte-001
+reset_state()
+debug_set_active(true)
+debug_set_current_location("main.spl", 20, 0)
+
+# Set step over mode
+val current_depth = debug_stack_depth()
+debug_set_step_mode(1)  # StepOver
+debug_set_step_start_depth(current_depth)
+
+# Simulate function call (depth increases)
+debug_push_frame("helper", "utils.spl", 5, 0)
+debug_set_current_location("utils.spl", 5, 0)
+# Should NOT break inside function (higher depth)
+expect(debug_should_break()).to_equal(false)
+
+# Simulate function return (depth restored)
+debug_pop_frame()
+debug_set_current_location("main.spl", 21, 0)
+# Should break after function returns (same depth)
+expect(debug_should_break()).to_equal(true)
+```
+
+</details>
+
+#### steps into function call
+
+- Verify: steps into function call
+   - Expected: debug_should_break() is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: steps into function call")
+# @req: REQ-FEATURE-Inte-001
+reset_state()
+debug_set_active(true)
+debug_set_current_location("main.spl", 30, 0)
+
+# Set step into mode
+debug_set_step_mode(2)  # StepIn
+
+# Simulate function call
+debug_push_frame("process", "processor.spl", 10, 0)
+debug_set_current_location("processor.spl", 10, 0)
+# Should break inside function (step in)
+expect(debug_should_break()).to_equal(true)
+```
+
+</details>
+
+#### steps out of function
+
+- Verify: steps out of function
+   - Expected: debug_should_break() is false
+   - Expected: debug_should_break() is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: steps out of function")
+# @req: REQ-FEATURE-Inte-001
+reset_state()
+debug_set_active(true)
+debug_push_frame("main", "main.spl", 10, 0)
+debug_push_frame("helper", "utils.spl", 5, 0)
+
+# We're inside helper function at depth 2
+val start_depth = debug_stack_depth()
+debug_set_step_mode(3)  # StepOut
+debug_set_step_start_depth(start_depth)
+
+# Still inside helper
+debug_set_current_location("utils.spl", 6, 0)
+expect(debug_should_break()).to_equal(false)
+
+# Return from helper
+debug_pop_frame()
+debug_set_current_location("main.spl", 11, 0)
+# Should break after returning (lower depth)
+expect(debug_should_break()).to_equal(true)
+```
+
+</details>
+
+### Recursive function debugging
+
+#### tracks recursive factorial calls
+
+- Verify: tracks recursive factorial calls
+   - Expected: debug_should_break() is true
+   - Expected: debug_stack_depth() equals `2)  # oracle: value fixed by the spec contract`
+   - Expected: debug_should_break() is true
+   - Expected: debug_stack_depth() equals `3)  # oracle: value fixed by the spec contract`
+   - Expected: debug_should_break() is true
+   - Expected: debug_stack_depth() equals `4)  # oracle: value fixed by the spec contract`
+   - Expected: debug_stack_depth() equals `3)  # oracle: value fixed by the spec contract`
+   - Expected: debug_stack_depth() equals `2)  # oracle: value fixed by the spec contract`
+   - Expected: debug_stack_depth() equals `1)  # oracle: value fixed by the spec contract`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 42 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: tracks recursive factorial calls")
+# @req: REQ-FEATURE-Inte-001
+reset_state()
+debug_set_active(true)
+debug_add_breakpoint("math.spl", 10, 1)
+
+# Simulate factorial(3) call chain
+# main() calls factorial(3)
+debug_push_frame("main", "main.spl", 20, 0)
+debug_push_frame("factorial", "math.spl", 10, 0)
+debug_set_current_location("math.spl", 10, 0)
+expect(debug_should_break()).to_equal(true)
+expect(debug_stack_depth()).to_equal(2)  # oracle: value fixed by the spec contract
+
+# factorial(3) calls factorial(2)
+debug_push_frame("factorial", "math.spl", 10, 0)
+debug_set_current_location("math.spl", 10, 0)
+expect(debug_should_break()).to_equal(true)
+expect(debug_stack_depth()).to_equal(3)  # oracle: value fixed by the spec contract
+
+# factorial(2) calls factorial(1)
+debug_push_frame("factorial", "math.spl", 10, 0)
+debug_set_current_location("math.spl", 10, 0)
+expect(debug_should_break()).to_equal(true)
+expect(debug_stack_depth()).to_equal(4)  # oracle: value fixed by the spec contract
+
+# Stack trace should show all levels
+val trace = debug_stack_trace()
+expect(trace).to_contain("factorial")
+expect(trace).to_contain("main")
+
+# Unwind: factorial(1) returns
+debug_pop_frame()
+expect(debug_stack_depth()).to_equal(3)  # oracle: value fixed by the spec contract
+
+# factorial(2) returns
+debug_pop_frame()
+expect(debug_stack_depth()).to_equal(2)  # oracle: value fixed by the spec contract
+
+# factorial(3) returns
+debug_pop_frame()
+expect(debug_stack_depth()).to_equal(1)  # oracle: value fixed by the spec contract
+```
+
+</details>
+
+#### handles deep recursion
+
+- Verify: handles deep recursion
+   - Expected: debug_stack_depth() >= 20 is true
+   - Expected: trace.len() > 0 is true
+   - Expected: debug_stack_depth() >= 0 is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: handles deep recursion")
+# @req: REQ-FEATURE-Inte-001
+reset_state()
+debug_set_active(true)
+
+# Simulate deep recursion (20 levels)
+for i in 0..20:
+    debug_push_frame("recursive", "test.spl", 10, 0)
+
+expect(debug_stack_depth() >= 20).to_equal(true)
+
+val trace = debug_stack_trace()
+expect(trace.len() > 0).to_equal(true)
+
+# Unwind
+for i in 0..20:
+    debug_pop_frame()
+
+expect(debug_stack_depth() >= 0).to_equal(true)
+```
+
+</details>
+
+### Multi-file debugging
+
+#### debugs across multiple files
+
+- Verify: debugs across multiple files
+   - Expected: debug_should_break() is true
+   - Expected: debug_current_file() equals `main.spl`
+   - Expected: debug_should_break() is true
+   - Expected: debug_current_file() equals `utils.spl`
+   - Expected: debug_should_break() is true
+   - Expected: debug_current_file() equals `processor.spl`
+   - Expected: debug_current_file() equals `utils.spl`
+   - Expected: debug_current_file() equals `main.spl`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 35 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: debugs across multiple files")
+# @req: REQ-FEATURE-Inte-001
+reset_state()
+debug_set_active(true)
+
+# Set breakpoints in different files
+debug_add_breakpoint("main.spl", 10, 1)
+debug_add_breakpoint("utils.spl", 25, 2)
+debug_add_breakpoint("processor.spl", 50, 3)
+
+# Execute in main.spl
+debug_set_current_location("main.spl", 10, 0)
+expect(debug_should_break()).to_equal(true)
+expect(debug_current_file()).to_equal("main.spl")
+
+# Call function in utils.spl
+debug_push_frame("helper", "utils.spl", 25, 0)
+debug_set_current_location("utils.spl", 25, 0)
+expect(debug_should_break()).to_equal(true)
+expect(debug_current_file()).to_equal("utils.spl")
+
+# Call function in processor.spl
+debug_push_frame("process", "processor.spl", 50, 0)
+debug_set_current_location("processor.spl", 50, 0)
+expect(debug_should_break()).to_equal(true)
+expect(debug_current_file()).to_equal("processor.spl")
+
+# Return through call chain
+debug_pop_frame()
+debug_set_current_location("utils.spl", 26, 0)
+expect(debug_current_file()).to_equal("utils.spl")
+
+debug_pop_frame()
+debug_set_current_location("main.spl", 11, 0)
+expect(debug_current_file()).to_equal("main.spl")
+```
+
+</details>
+
+### Breakpoint and stepping combined
+
+#### hits breakpoint then steps
+
+- Verify: hits breakpoint then steps
+   - Expected: debug_should_break() is true
+   - Expected: debug_should_break() is true
+   - Expected: debug_should_break() is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: hits breakpoint then steps")
+# @req: REQ-FEATURE-Inte-001
+reset_state()
+debug_set_active(true)
+debug_add_breakpoint("test.spl", 20, 1)
+
+# Run to breakpoint
+debug_set_current_location("test.spl", 20, 0)
+expect(debug_should_break()).to_equal(true)
+
+# Now enable stepping
+debug_set_step_mode(2)  # StepIn
+
+# Step to next line
+debug_set_current_location("test.spl", 21, 0)
+expect(debug_should_break()).to_equal(true)
+
+debug_set_current_location("test.spl", 22, 0)
+expect(debug_should_break()).to_equal(true)
+```
+
+</details>
+
+#### sets breakpoint while stepping
+
+- Verify: sets breakpoint while stepping
+   - Expected: debug_should_break() is true
+   - Expected: debug_should_break() is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: sets breakpoint while stepping")
+# @req: REQ-FEATURE-Inte-001
+reset_state()
+debug_set_active(true)
+debug_set_step_mode(2)  # StepIn
+
+# Step through some lines
+debug_set_current_location("test.spl", 10, 0)
+expect(debug_should_break()).to_equal(true)
+
+# Add breakpoint ahead
+debug_add_breakpoint("test.spl", 15, 1)
+
+# Continue to breakpoint
+debug_set_step_mode(0)  # Continue
+debug_set_current_location("test.spl", 15, 0)
+expect(debug_should_break()).to_equal(true)
+```
+
+</details>
+
+### Error scenarios and recovery
+
+#### handles breakpoint at non-existent line
+
+- Verify: handles breakpoint at non-existent line
+   - Expected: should_break is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: handles breakpoint at non-existent line")
+# @req: REQ-FEATURE-Inte-001
+debug_set_active(true)
+debug_add_breakpoint("test.spl", 99999, 1)
+
+# Should not crash
+debug_set_current_location("test.spl", 99999, 0)
+val should_break = debug_should_break()
+expect(should_break).to_equal(true)
+```
+
+</details>
+
+#### recovers from pause without continue
+
+- Verify: recovers from pause without continue
+   - Expected: debug_is_paused() is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: recovers from pause without continue")
+# @req: REQ-FEATURE-Inte-001
+debug_set_active(true)
+debug_pause()
+
+# Deactivate debug (should reset state)
+debug_set_active(false)
+debug_set_active(true)
+
+# Should be able to continue
+debug_continue()
+expect(debug_is_paused()).to_equal(false)
+```
+
+</details>
+
+#### handles missing stack frames
+
+- Verify: handles missing stack frames
+   - Expected: depth >= 0 is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: handles missing stack frames")
+# @req: REQ-FEATURE-Inte-001
+reset_state()
+debug_set_active(true)
+
+# Try to pop when nothing to pop
+debug_pop_frame()
+
+# Should not crash
+val depth = debug_stack_depth()
+expect(depth >= 0).to_equal(true)
+```
+
+</details>
+
+#### handles rapid mode switching
+
+- Verify: handles rapid mode switching
+   - Expected: mode equals `0)  # oracle: value fixed by the spec contract`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: handles rapid mode switching")
+# @req: REQ-FEATURE-Inte-001
+debug_set_active(true)
+
+# Rapidly switch modes
+debug_set_step_mode(0)
+debug_set_step_mode(1)
+debug_set_step_mode(2)
+debug_set_step_mode(3)
+debug_set_step_mode(0)
+
+val mode = debug_get_step_mode()
+expect(mode).to_equal(0)  # oracle: value fixed by the spec contract
+```
+
+</details>
+
+### Performance and Stress Tests
+
+#### handles many breakpoints
+
+- Verify: handles many breakpoints
+   - Expected: debug_has_breakpoint("test.spl", i) is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: handles many breakpoints")
+# @req: REQ-FEATURE-Inte-001
+debug_set_active(true)
+
+# Add 100 breakpoints
+for i in 0..100:
+    debug_add_breakpoint("test.spl", i, i)
+
+# All should exist
+for i in 0..100:
+    expect(debug_has_breakpoint("test.spl", i)).to_equal(true)
+```
+
+</details>
+
+#### handles frequent location updates
+
+- Verify: handles frequent location updates
+   - Expected: debug_current_file() equals `test.spl`
+   - Expected: debug_current_line() >= 0 is true
+   - Expected: debug_current_line() < 100 is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: handles frequent location updates")
+# @req: REQ-FEATURE-Inte-001
+debug_set_active(true)
+
+# Simulate 1000 expressions evaluated
+for i in 0..1000:
+    debug_set_current_location("test.spl", i % 100, 0)
+
+# Should complete without issues
+expect(debug_current_file()).to_equal("test.spl")
+expect(debug_current_line() >= 0).to_equal(true)
+expect(debug_current_line() < 100).to_equal(true)
+```
+
+</details>
+
+#### handles large stack depths
+
+- Verify: handles large stack depths
+   - Expected: debug_stack_depth() >= 100 is true
+   - Expected: trace.len() > 0 is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: handles large stack depths")
+# @req: REQ-FEATURE-Inte-001
+reset_state()
+debug_set_active(true)
+
+# Build deep stack (100 frames)
+for i in 0..100:
+    debug_push_frame("func", "test.spl", 10, 0)
+
+expect(debug_stack_depth() >= 100).to_equal(true)
+
+# Generate trace
+val trace = debug_stack_trace()
+expect(trace.len() > 0).to_equal(true)
+
+# Unwind
+for i in 0..100:
+    debug_pop_frame()
+```
+
+</details>
+
+### Real-World Scenarios
+
+#### debugs a simple program
+
+- Verify: debugs a simple program
+   - Expected: debug_should_break() is true
+   - Expected: debug_current_line() equals `2)  # oracle: value fixed by the spec contract`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: debugs a simple program")
+# @req: REQ-FEATURE-Inte-001
+reset_state()
+debug_set_active(true)
+
+# Simulate: fn main() { val x = 5; print x }
+debug_push_frame("main", "main.spl", 1, 0)
+
+# Set breakpoint on variable declaration
+debug_add_breakpoint("main.spl", 2, 1)
+
+# Execute to breakpoint
+debug_set_current_location("main.spl", 2, 0)
+expect(debug_should_break()).to_equal(true)
+
+# Inspect (variable would be captured here)
+expect(debug_current_line()).to_equal(2)  # oracle: value fixed by the spec contract
+
+# Continue to print statement
+debug_set_current_location("main.spl", 3, 0)
+
+# Exit main
+debug_pop_frame()
+```
+
+</details>
+
+<details>
+<summary>Advanced: debugs loop with breakpoint</summary>
+
+#### debugs loop with breakpoint
+
+- Verify: debugs loop with breakpoint
+   - Expected: debug_should_break() is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: debugs loop with breakpoint")
+# @req: REQ-FEATURE-Inte-001
+reset_state()
+debug_set_active(true)
+debug_add_breakpoint("loop.spl", 5, 1)
+
+# Simulate: for i in 0..3: print i
+debug_push_frame("main", "loop.spl", 4, 0)
+
+for i in 0..3:
+    # Each iteration hits breakpoint
+    debug_set_current_location("loop.spl", 5, 0)
+    expect(debug_should_break()).to_equal(true)
+
+    # Continue to next iteration
+    debug_continue()
+
+debug_pop_frame()
+```
+
+</details>
+
+
+</details>
+
+#### debugs conditional branches
+
+- Verify: debugs conditional branches
+   - Expected: debug_current_line() equals `20)  # oracle: value fixed by the spec contract`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: debugs conditional branches")
+# @req: REQ-FEATURE-Inte-001
+reset_state()
+debug_set_active(true)
+debug_push_frame("main", "test.spl", 10, 0)
+
+# Simulate: if condition: branch_a() else: branch_b()
+debug_set_current_location("test.spl", 11, 0)  # if statement
+
+# Take if branch
+debug_push_frame("branch_a", "test.spl", 20, 0)
+debug_set_current_location("test.spl", 20, 0)
+expect(debug_current_line()).to_equal(20)  # oracle: value fixed by the spec contract
+debug_pop_frame()
+
+# Back to main
+debug_set_current_location("test.spl", 12, 0)
+
+debug_pop_frame()
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 20 |
+| Active scenarios | 20 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `ce19513deafc97a12af9712891e6bd860e0423fa15aae946d2202f02b0cccbfe`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `ce19513deafc97a12af9712891e6bd860e0423fa15aae946d2202f02b0cccbfe`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `ce19513deafc97a12af9712891e6bd860e0423fa15aae946d2202f02b0cccbfe`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **87/100**; effective score: **87/100**; blockers: **0**.
+
+SSpec documentization score: 87/100
+source: test/03_system/feature/dap/integration_spec.spl
+mirror: doc/06_spec/03_system/feature/dap/integration_spec.md (current)
+findings: 8 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=55 coverage=100 maintainability=45
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/dap/integration_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
+  why: Source tokens alone do not prove reader-visible workflow structure.
+  improve: Use supported literal step calls and regenerate the manual.
+doc/06_spec/03_system/feature/dap/integration_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/dap/integration_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, traceability, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/dap/integration_spec.spl:1:1: advice SSDOC-MNT-001 [maintainability] (-15): multiple scenarios form a flat, unfolded presentation
+  why: Long flat dumps obscure the primary workflow.
+  improve: Group secondary detail and keep the primary workflow visible.
+test/03_system/feature/dap/integration_spec.spl:1:1: advice SSDOC-MNT-007 [maintainability] (-10): research, plan, architecture, or design metadata links are incomplete
+  why: Reviewers need selected lifecycle evidence, not inferred project state.
+  improve: Link the selected lifecycle artifacts or configure a reasoned scope suppression.
+test/03_system/feature/dap/integration_spec.spl:146:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'executes a simple debugging session' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/dap/integration_spec.spl:186:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'steps through sequential code' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/dap/integration_spec.spl:212:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'steps over function call' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

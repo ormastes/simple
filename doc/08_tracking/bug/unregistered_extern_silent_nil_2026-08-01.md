@@ -1,17 +1,9 @@
 # An unregistered `@extern fn` is not a link error — it is a silent nil, a silent 0, or a SIGILL (2026-08-01)
 
-**Status:** PARTIALLY FIXED. The live `_cos`/`_sin` instance is fixed, a
-detection gate (`scripts/check/check-extern-registration.shs`) enumerates the
-family, and as of the update below the JIT fall-through now **warns by
-default** and can be made fatal on demand. The individual unbacked symbols are
-still unbacked.
-
-> **Update 2026-08-01 (later lane) — the fall-through is no longer silent.**
-> `interp_call_handler` swallowed *every* extern error into
-> `RuntimeValue::NIL` and exited 0. It now distinguishes "no implementation
-> exists" from a real error inside a backed extern and reports the former.
-> Default is **warn-only** (values and exit codes unchanged);
-> `SIMPLE_STRICT_EXTERN=1` makes it fatal. See "Loud diagnostic" below.
+**Status:** PARTIALLY FIXED. The live `_cos`/`_sin` instance is fixed and a
+detection gate (`scripts/check/check-extern-registration.shs`) now enumerates
+the family. The per-lane fall-through sites are located but NOT patched — each
+needs a bootstrap rebuild.
 
 **Class:** silent wrong answer. Related:
 `game2d_f64_to_i32_extern_unregistered_2026-07-31.md` (same family; commit
@@ -361,7 +353,7 @@ a genuine error raised *inside* a backed extern. Only the former is reported.
 - **default:** one warning per distinct name per process, naming the symbol,
   the arg count, and the fact that nil was substituted. Return value and exit
   status are **unchanged** — this is warn-only on purpose.
-- `SIMPLE_STRICT_EXTERN=1`: fail cleanly (diagnostic on stderr, exit 1 -- NOT `abort()`/SIGABRT/core dump) instead of substituting nil. Changed 2026-08-18: it used to `std::process::abort()`, which produced exit 134 and "dumped core" for a fully-diagnosed refusal.
+- `SIMPLE_STRICT_EXTERN=1`: abort instead of substituting nil.
 - `SIMPLE_QUIET_EXTERN_WARN=1`: silence the warning without changing any value.
 
 Deliberately **not** promoted to fatal by default: ~919 symbols are unbacked on
@@ -375,10 +367,6 @@ Control = the *same* source tree at the *same* tip with only
 command. Control: no warning, rc=0, `ghost returned: 3`, and
 `SIMPLE_STRICT_EXTERN=1` has **zero** effect. Fixed: warning present; strict
 mode aborts (rc=134). The delta is attributable to the change, not to drift.
-(As of 2026-08-18 strict mode exits 1 cleanly instead of aborting; re-measured
-on the fixture `lane_definitely_absent_probe`: default rc=0 `got 3` + warning,
-strict rc=1 with the `error: extern ... refuses to substitute nil` line and no
-core dump.)
 
 ### Measured fallout of the warning — 0
 
@@ -428,11 +416,12 @@ treat that as the actionable core, not 1,418 and not 2,378.
 
 ## Remaining work
 
-1. ~~Patch the per-lane fall-throughs so an unregistered `@extern` aborts with
-   the symbol name instead of yielding nil/0/SIGILL.~~ Done for the JIT path
-   as warn-only + opt-in strict (above). Still to do: decide whether the
-   `@extern`-attribute form reaches the same handler, and measure the SIGILL
-   variant reported earlier in this file at the current tip.
+1. Patch the per-lane fall-throughs so an unregistered `@extern` aborts with the
+   symbol name instead of yielding nil/0/SIGILL. The cheapest correct fix is to
+   register `@extern`-decorated names into `EXTERN_FUNCTIONS` alongside
+   `Node::Extern` so the existing `unknown extern function` path fires — but
+   note that path currently only *logs*, so it must be made fatal too. Needs a
+   bootstrap rebuild.
 2. Narrow the gate's scope to exclude sffi_gen generator inputs, resolve the
    `ffi_`/`sffi_` naming question, then flip it to `--strict` in the pre-push
    guards.

@@ -160,3 +160,35 @@ The `font_license_coverage` and `font_gpu_emission` sidecars independently resea
 Current implementation and evidence status is maintained in
 `doc/07_guide/lib/shared_multilingual_gpu_fonts.md`; this research remains the
 pre-selection domain record.
+
+## OpenType layout staged-completion addendum — 2026-07-25
+
+<!-- codex-research -->
+
+Microsoft's OpenType common-layout specification defines the shared
+ScriptList → LangSys → FeatureList → LookupList structure used by both GSUB and
+GPOS. Coverage format 1 glyphs are increasing; format 2 ranges are ordered,
+non-overlapping, and carry contiguous coverage indices. A required feature uses
+one FeatureList index (`0xFFFF` means none), while feature tables reference
+LookupList indices.
+
+Authoritative references:
+
+- https://learn.microsoft.com/en-us/typography/opentype/spec/chapter2
+- https://learn.microsoft.com/en-us/typography/opentype/spec/gsub
+- https://learn.microsoft.com/en-us/typography/opentype/spec/gpos
+- https://learn.microsoft.com/en-us/typography/opentype/spec/scripttags
+- https://learn.microsoft.com/en-us/typography/opentype/spec/languagetags
+- https://www.unicode.org/reports/tr24/
+
+The standard says selected lookups form a union executed in LookupList order.
+Option A selected that standards order on 2026-07-25; the earlier proposed
+required-first, first-seen compatibility order is rejected.
+
+GSUB SingleSubst 1/2 and GPOS SinglePos 1/2 are compact primitives. Ligature,
+context/chained-context, reverse-chain, PairPos, cursive, and mark attachment
+require sequence, cluster, class, GDEF, or anchor state. Lookup flags that
+depend on unavailable GDEF behavior and ValueRecords with unimplemented
+device/variation data must fail closed. Completion means every active operation
+in the declared plan validated and executed; unsupported active behavior is
+never silently ignored.

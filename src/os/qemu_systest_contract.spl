@@ -7,7 +7,7 @@ QEMU System Test Contract — Per-Architecture Descriptors and Classification.
 Provides hardcoded per-arch QEMU boot descriptors and a pure classifier
 function for use by system specs. Does NOT call simpleos_platform_* or any
 catalog-lane accessor (those crash in interpreter mode). All argv is hardcoded
-from the lane reference data in src/os/port/_SimpleosMultiplatformBuild/platform_target_catalog.spl.
+from the lane reference data in src/os/port/simpleos_multiplatform_build_part2.spl.
 
 Serial logs are written to build/os/systest/<arch>.serial.log.
 """
@@ -153,18 +153,6 @@ pub fn riscv64_markers() -> [text]:
 pub fn riscv64_timeout_ms() -> i64:
     default_qemu_timeout_ms()
 
-pub fn riscv64_desktop_kernel_path() -> text:
-    qemu_riscv64_desktop_kernel_path()
-
-pub fn riscv64_desktop_image_path() -> text:
-    qemu_riscv64_desktop_image_path()
-
-pub fn riscv64_desktop_qemu_args() -> [text]:
-    qemu_riscv64_desktop_qemu_args()
-
-pub fn riscv64_desktop_qemu_args_status() -> text:
-    qemu_riscv64_desktop_qemu_args_status(riscv64_desktop_qemu_args())
-
 # ---------------------------------------------------------------------------
 # riscv32 descriptor
 # ---------------------------------------------------------------------------
@@ -237,11 +225,10 @@ pub fn arm64_markers() -> [text]:
     #                        time — the same load-proof bar riscv64/x86_64 assert
     #   SMF_CLI_LAUNCH_OK  = a launchable bootstrap task (pid) registered from that image
     #   process-backed:ok  = a process was spawned from a disk-sourced executable (TCB+pid+image)
-    #   mounted-elf-ok     = the CPU eret'd to the disk-mounted /FSEXEC.ELF and its
-    #                        AArch64 code emitted the nonce through syscall 60.
-    #   user-svc-exit:ok   = the mounted payload then exited through syscall 0.
-    #   kernel-resumed     = EL1 restored its saved translation/call frame and observed
-    #                        the payload's raw zero exit status before ending this QEMU gate.
+    #   user-svc-exit:ok   = the CPU eret'd to EL0, ran real `mov x8,#0; svc #0` usercode, and
+    #                        the svc trapped back via vbar_el1 into the EL1 syscall handler —
+    #                        a genuine EL0 execution + syscall round-trip (arm64 is the first
+    #                        SimpleOS arch to do this; riscv64/x86_64 remain load-proof only).
     ["[vfs-init] FAT32 bpb parsed",
      "[arm-fs-exec] vfs:ok",
      "FS_LS_BEGIN path=/SYS/APPS",
@@ -326,11 +313,19 @@ pub fn x86_64_image_path() -> text:
     "build/os/fat32-x86_64.img"
 
 pub fn x86_64_qemu_bin() -> text:
-    "scripts/os/run_x86_64_fs_exec_ovmf.shs"
+    "qemu-system-x86_64"
 
 pub fn x86_64_qemu_args() -> [text]:
-    ["--kernel", "build/os/simpleos_x86_64_fs_exec.elf",
-     "--image", "build/os/fat32-x86_64.img"]
+    ["-machine", "q35",
+     "-cpu", "qemu64",
+     "-m", "512M",
+     "-nographic",
+     "-no-reboot",
+     "-device", "loader,file=build/os/simpleos_x86_64_fs_exec.elf,cpu-num=0",
+     "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+     "-device", "nvme,id=fsexec,serial=x86-64-fs-exec",
+     "-drive", "file=build/os/fat32-x86_64.img,if=none,id=fsexecns1,format=raw",
+     "-device", "nvme-ns,drive=fsexecns1,bus=fsexec,nsid=1"]
 
 pub fn x86_64_markers() -> [text]:
     ["SimpleOS x86_64 boot OK",

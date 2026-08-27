@@ -24,7 +24,6 @@ use compiler.driver.smf_binary_helpers.{smf_u32_to_bytes, smf_u64_to_bytes, text
 extern fn rt_text_to_bytes(s: text) -> [u8]
 use compiler.driver.smf_elf_parser.{extract_code_from_object, extract_elf_relocations, elf_reloc_type_to_smf, ElfRelocEntry, ElfSymEntry}
 use compiler.driver.smf_serialization.{serialize_templates, serialize_metadata, serialize_note_sdn}
-use compiler.backend.linker.smf_writer.{smf_build_aspect_pack_image}
 
 # Target platform information
 struct Target:
@@ -48,10 +47,9 @@ struct SmfBuildOptions:
     metadata: MonomorphizationMetadata?
     note_sdn: NoteSdnMetadata?
     target: Target
-    deps: [SmfDependencyEntry]  # Dependency content hashes for staleness checking
+    deps: [SmfDependencyEntry]  # Dependency interface hashes for staleness checking
     driver_manifest_bytes: [u8] # Concatenated DRVS records from @driver/@native_lib
     launch_metadata_bytes: [u8] # SDN launch metadata for startup policy
-    source_hash: i64
 
 impl SmfBuildOptions:
     static fn create(target: Target) -> SmfBuildOptions:
@@ -62,12 +60,11 @@ impl SmfBuildOptions:
             target: target,
             deps: [],
             driver_manifest_bytes: [],
-            launch_metadata_bytes: [],
-            source_hash: 0
+            launch_metadata_bytes: []
         )
 
     fn has_any_sections() -> bool:
-        self.templates.? or self.metadata.? or self.note_sdn.? or self.deps.len() > 0 or self.driver_manifest_bytes.len() > 0 or self.launch_metadata_bytes.len() > 0
+        self.templates.? or self.metadata.? or self.note_sdn.? or self.deps.len() > 0 or self.driver_manifest_bytes.len() > 0 or self.launch_metadata_bytes.len() > 0 or self.mcdc_manifest_bytes.len() > 0
 
 # ============================================================================
 # Dependency Tracking for SMF Staleness
@@ -75,16 +72,12 @@ impl SmfBuildOptions:
 
 struct SmfDependencyEntry:
     module_path: text
-    content_hash: i64
-
-val SMF_DEPS_MAGIC: i64 = 1397573188
-val SMF_DEPS_VERSION: i64 = 1
+    interface_hash: i64
 
 fn serialize_smf_dependencies(deps: [SmfDependencyEntry]) -> [u8]:
     """Serialize dependency list to binary format for .note.deps section.
 
-    Format: [u32: magic][u32: version][u32: count] + per entry:
-    [u32: path_len][path_bytes][i64: content_hash].
+    Format: [u32: count] + per entry: [u32: path_len][path_bytes][i64: interface_hash]
     """
     var buf: [u8] = []
     buf = buf.concat(smf_u32_to_bytes(SMF_DEPS_MAGIC))
@@ -99,36 +92,33 @@ fn serialize_smf_dependencies(deps: [SmfDependencyEntry]) -> [u8]:
 
 fn deserialize_smf_dependencies(data: [u8]) -> [SmfDependencyEntry]:
     """Deserialize dependency list from binary .note.deps section."""
-    if data.len() < 12:
+    if data.len() < 4:
         return []
-    if bytes_to_u32_le(data, 0) != SMF_DEPS_MAGIC or bytes_to_u32_le(data, 4) != SMF_DEPS_VERSION:
-        return []
-    val count = bytes_to_u32_le(data, 8)
+
+    val count = bytes_to_u32_le(data, 0)
     var deps: [SmfDependencyEntry] = []
-    var offset = 12
+    var offset = 4
 
     var i = 0
     while i < count:
         if offset + 4 > data.len():
-            return []
+            break
         val path_len = bytes_to_u32_le(data, offset)
         offset = offset + 4
 
         if offset + path_len > data.len():
-            return []
+            break
         val path_bytes = data[offset:offset + path_len]
         val module_path = bytes_to_text(path_bytes)
         offset = offset + path_len
 
         if offset + 8 > data.len():
-            return []
-        val content_hash = bytes_to_i64_le(data, offset)
+            break
+        val interface_hash = bytes_to_i64_le(data, offset)
         offset = offset + 8
 
-        deps.push(SmfDependencyEntry(module_path: module_path, content_hash: content_hash))
+        deps.push(SmfDependencyEntry(module_path: module_path, interface_hash: interface_hash))
         i = i + 1
-    if offset != data.len():
-        return []
     deps
 
 fn bytes_to_u32_le(data: [u8], offset: i64) -> i64:
@@ -151,9 +141,10 @@ fn bytes_to_i64_le(data: [u8], offset: i64) -> i64:
 
 fn bytes_to_text(data: [u8]) -> text:
     """Convert byte array to text (UTF-8)."""
-    rt_bytes_to_text(data)
-
-extern fn rt_bytes_to_text(data: [u8]) -> text
+    var chars: [text] = []
+    for b in data:
+        chars.push(char_from_byte_smf(b))
+    chars.join("")
 
 fn char_from_byte_smf(b: u8) -> text:
     val ascii_table = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
@@ -180,8 +171,7 @@ fn generate_smf_with_templates(
         target: target,
         deps: [],
         driver_manifest_bytes: [],
-        launch_metadata_bytes: [],
-        source_hash: 0
+        launch_metadata_bytes: []
     )
     generate_smf_with_options(object_code, options)
 
@@ -202,8 +192,7 @@ fn generate_smf_with_all_sections(
         target: target,
         deps: [],
         driver_manifest_bytes: [],
-        launch_metadata_bytes: [],
-        source_hash: 0
+        launch_metadata_bytes: []
     )
     generate_smf_with_options(object_code, options)
 
@@ -217,10 +206,6 @@ fn generate_smf_with_options(object_code: [u8], options: SmfBuildOptions) -> [u8
 
     # Build SMF with template sections
     build_smf_with_templates_internal(code_bytes, options)
-
-"""Emit a standalone aspect-pack SMF through the canonical linker writer."""
-fn generate_aspect_pack_smf(pack_bytes: [u8]) -> Result<[u8], text>:
-    smf_build_aspect_pack_image(pack_bytes)
 
 fn generate_smf_with_raw_code_options(code_bytes: [u8], options: SmfBuildOptions) -> [u8]:
     if not options.has_any_sections():
@@ -270,6 +255,7 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
     val has_deps = not deps_bytes.is_empty()
     val has_driver_manifest = options.driver_manifest_bytes.len() > 0
     val has_launch_metadata = options.launch_metadata_bytes.len() > 0
+    val has_mcdc_manifest = options.mcdc_manifest_bytes.len() > 0
 
     # Calculate section count
     var section_count = 1  # Code section
@@ -285,6 +271,8 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
         section_count = section_count + 1  # .drv_manifest section
     if has_launch_metadata:
         section_count = section_count + 1  # .launch_meta section
+    if has_mcdc_manifest:
+        section_count = section_count + 1  # .mcdc_expr_v1 section
 
     # Calculate offsets (sections come FIRST now, not after header)
     val header_size = 128  # SmfHeader::SIZE (written at END)
@@ -296,7 +284,13 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
     val deps_offset = note_sdn_offset + note_sdn_bytes.len()
     val driver_manifest_offset = deps_offset + deps_bytes.len()
     val launch_metadata_offset = driver_manifest_offset + options.driver_manifest_bytes.len()
-    val section_table_offset = launch_metadata_offset + options.launch_metadata_bytes.len()
+    val mcdc_unaligned_offset = launch_metadata_offset + options.launch_metadata_bytes.len()
+    val mcdc_padding = if has_mcdc_manifest:
+        (16 - (mcdc_unaligned_offset % 16)) % 16
+    else:
+        0
+    val mcdc_manifest_offset = mcdc_unaligned_offset + mcdc_padding
+    val section_table_offset = mcdc_manifest_offset + options.mcdc_manifest_bytes.len()
     val section_table_size = section_count * section_entry_size
     val symbol_table_offset = section_table_offset + section_table_size
     val string_table_offset = symbol_table_offset + 56  # One symbol
@@ -317,7 +311,7 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
     if has_note_sdn:
         buf = buf.concat(note_sdn_bytes)
 
-    # Write note.deps section (dependency content hashes)
+    # Write note.deps section (dependency interface hashes)
     if has_deps:
         buf = buf.concat(deps_bytes)
 
@@ -328,6 +322,13 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
     # Write .launch_meta section payload
     if has_launch_metadata:
         buf = buf.concat(options.launch_metadata_bytes)
+
+    if has_mcdc_manifest:
+        var mcdc_pad_index = 0
+        while mcdc_pad_index < mcdc_padding:
+            buf = buf.push(0)
+            mcdc_pad_index = mcdc_pad_index + 1
+        buf = buf.concat(options.mcdc_manifest_bytes)
 
     # 2. Write section table
 
@@ -370,7 +371,7 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
             name: "note.sdn"
         ))
 
-    # note.deps section (dependency content hashes for staleness checking)
+    # note.deps section (dependency interface hashes for staleness checking)
     if has_deps:
         buf = buf.concat(build_section_entry(
             section_type: 7,  # SectionType::Note
@@ -400,6 +401,17 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
             name: ".launch_meta"
         ))
 
+    if has_mcdc_manifest:
+        buf = buf.concat(build_section_entry(
+            # Use the registered Note attachment type. Wire 16 is already the
+            # aspect-pack directory and cannot be repurposed.
+            section_type: 7,
+            flags: 0x01,
+            offset: mcdc_manifest_offset,
+            size: options.mcdc_manifest_bytes.len(),
+            name: ".mcdc_expr_v1"
+        ))
+
     # 3. Write symbol table
     buf = buf.concat(build_symbol_entry("main", 0, code_bytes.len()))
 
@@ -413,7 +425,6 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
     val platform = text_to_platform(options.target.os)
     val arch = text_to_arch(options.target.arch)
     var header: SmfHeader = SmfHeader.new_v1_1(platform, arch)
-    header.source_hash = options.source_hash as u64
 
     # Set flags
     header.set_executable(true)
@@ -445,6 +456,7 @@ fn smf_name_bytes(name: text) -> [u8]:
         "note.deps": [110, 111, 116, 101, 46, 100, 101, 112, 115]
         ".drv_manifest": [46, 100, 114, 118, 95, 109, 97, 110, 105, 102, 101, 115, 116]
         ".launch_meta": [46, 108, 97, 117, 110, 99, 104, 95, 109, 101, 116, 97]
+        ".mcdc_expr_v1": [46, 109, 99, 100, 99, 95, 101, 120, 112, 114, 95, 118, 49]
         _: []
 
 fn smf_name_hash(name: text) -> i32:
@@ -458,8 +470,8 @@ fn smf_name_hash(name: text) -> i32:
 fn build_section_entry(
     section_type: i32,
     flags: i32,
-    offset: i32,
-    size: i32,
+    offset: i64,
+    size: i64,
     name: text
 ) -> [u8]:
     var buf: [u8] = []
@@ -556,8 +568,7 @@ fn build_smf_with_code_for_target(code_bytes: [u8], target: Target) -> [u8]:
         target: target,
         deps: [],
         driver_manifest_bytes: [],
-        launch_metadata_bytes: [],
-        source_hash: 0
+        launch_metadata_bytes: []
     )
     build_smf_with_templates_internal(code_bytes, options)
 
@@ -602,6 +613,7 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
     val has_deps = deps_bytes.len() > 0
     val has_driver_manifest = options.driver_manifest_bytes.len() > 0
     val has_launch_metadata = options.launch_metadata_bytes.len() > 0
+    val has_mcdc_manifest = options.mcdc_manifest_bytes.len() > 0
 
     # Build SMF with Code + Reloc sections
     var buf: [u8] = []
@@ -610,7 +622,13 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
     val deps_offset = reloc_offset + reloc_bytes.len()
     val driver_manifest_offset = deps_offset + deps_bytes.len()
     val launch_metadata_offset = driver_manifest_offset + options.driver_manifest_bytes.len()
-    val section_table_offset = launch_metadata_offset + options.launch_metadata_bytes.len()
+    val mcdc_unaligned_offset = launch_metadata_offset + options.launch_metadata_bytes.len()
+    val mcdc_padding = if has_mcdc_manifest:
+        (16 - (mcdc_unaligned_offset % 16)) % 16
+    else:
+        0
+    val mcdc_manifest_offset = mcdc_unaligned_offset + mcdc_padding
+    val section_table_offset = mcdc_manifest_offset + options.mcdc_manifest_bytes.len()
 
     var section_count = 2  # Code + Reloc
     if has_deps:
@@ -618,6 +636,8 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
     if has_driver_manifest:
         section_count = section_count + 1
     if has_launch_metadata:
+        section_count = section_count + 1
+    if has_mcdc_manifest:
         section_count = section_count + 1
 
     val section_entry_size = 64
@@ -640,6 +660,13 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
 
     if has_launch_metadata:
         buf = buf + (options.launch_metadata_bytes)
+
+    if has_mcdc_manifest:
+        var mcdc_pad_index = 0
+        while mcdc_pad_index < mcdc_padding:
+            buf = buf.push(0)
+            mcdc_pad_index = mcdc_pad_index + 1
+        buf = buf + (options.mcdc_manifest_bytes)
 
     # Write section table - Code section
     buf = buf + (build_section_entry(
@@ -686,6 +713,15 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
             name: ".launch_meta"
         ))
 
+    if has_mcdc_manifest:
+        buf = buf + (build_section_entry(
+            section_type: 7,
+            flags: 0x01,
+            offset: mcdc_manifest_offset,
+            size: options.mcdc_manifest_bytes.len(),
+            name: ".mcdc_expr_v1"
+        ))
+
     # Write symbol table
     buf = buf + (build_symbol_entry("main", 0, code_bytes.len()))
 
@@ -696,7 +732,6 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
     val platform = text_to_platform(options.target.os)
     val arch = text_to_arch(options.target.arch)
     var header: SmfHeader = SmfHeader.new_v1_1(platform, arch)
-    header.source_hash = options.source_hash as u64
     header.set_executable(true)
     header.section_count = section_count
     header.section_table_offset = section_table_offset

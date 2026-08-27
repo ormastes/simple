@@ -1,13 +1,12 @@
-# main_spec
+# LLM Caret Main Unit Spec
 
-> Purpose: Prove that parse_main_args.
+> Source-synchronized unit manual. The current self-hosted SSpec runner is
+> blocked before trustworthy scenario execution, so this document records
+> 64 active scenarios and 0 executed scenarios.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 64 | 64 | 0 | 0 |
-
-<details>
-<summary>Full Scenario Manual</summary>
+| Tests | Active | Skipped | Pending | Executed |
+|------:|-------:|--------:|--------:|---------:|
+| 64 | 64 | 0 | 0 | 0 |
 
 # main_spec
 
@@ -43,18 +42,12 @@ Audience: compiler and tooling engineers who maintain this spec.
    - Expected: a.ui_mode equals `auto`
    - Expected: a.unknown equals ``
 
+**Group:** parse_main_args
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should default to auto ui mode, claude_cli-less provider, no server")
-step("Verify: should default to auto ui mode, claude_cli-less provider, no server")
-# @req: REQ-APP-LLM-CARET-001
 val a = parse_main_args([])
 expect(a.provider).to_equal("")
 expect(a.ui_mode).to_equal("auto")
@@ -65,24 +58,14 @@ expect(a.unknown).to_equal("")
 
 </details>
 
-#### should parse --provider and --model (space form)
+## should parse --provider and --model (space form)
 
-- should parse --provider and --model (space form)
-- Verify: should parse --provider and --model (space form)
-   - Expected: a.provider equals `claude_api`
-   - Expected: a.model equals `claude-opus-4-20250514`
-
+**Group:** parse_main_args
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should parse --provider and --model (space form)")
-step("Verify: should parse --provider and --model (space form)")
 val a = parse_main_args(["--provider", "claude_api", "--model", "claude-opus-4-20250514"])
 expect(a.provider).to_equal("claude_api")
 expect(a.model).to_equal("claude-opus-4-20250514")
@@ -90,24 +73,14 @@ expect(a.model).to_equal("claude-opus-4-20250514")
 
 </details>
 
-#### should parse --provider= and --model= (equals form)
+## should parse --provider= and --model= (equals form)
 
-- should parse --provider= and --model= (equals form)
-- Verify: should parse --provider= and --model= (equals form)
-   - Expected: a.provider equals `openai`
-   - Expected: a.model equals `gpt-4o`
-
+**Group:** parse_main_args
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should parse --provider= and --model= (equals form)")
-step("Verify: should parse --provider= and --model= (equals form)")
 val a = parse_main_args(["--provider=openai", "--model=gpt-4o"])
 expect(a.provider).to_equal("openai")
 expect(a.model).to_equal("gpt-4o")
@@ -115,48 +88,28 @@ expect(a.model).to_equal("gpt-4o")
 
 </details>
 
-#### should parse --plain and --tui
+## should parse --plain and --tui
 
-- should parse --plain and --tui
-- Verify: should parse --plain and --tui
-   - Expected: parse_main_args(["--plain"]).ui_mode equals `plain`
-   - Expected: parse_main_args(["--tui"]).ui_mode equals `tui`
-
+**Group:** parse_main_args
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should parse --plain and --tui")
-step("Verify: should parse --plain and --tui")
 expect(parse_main_args(["--plain"]).ui_mode).to_equal("plain")
 expect(parse_main_args(["--tui"]).ui_mode).to_equal("tui")
 ```
 
 </details>
 
-#### should parse --gui and one-shot --prompt
+## should parse --gui and one-shot --prompt
 
-- should parse --gui and one-shot --prompt
-- Verify: should parse --gui and one-shot --prompt
-   - Expected: a.ui_mode equals `gui`
-   - Expected: a.prompt equals `hi`
-
+**Group:** parse_main_args
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should parse --gui and one-shot --prompt")
-step("Verify: should parse --gui and one-shot --prompt")
 val a = parse_main_args(["--gui", "--prompt", "hi"])
 expect(a.ui_mode).to_equal("gui")
 expect(a.prompt).to_equal("hi")
@@ -164,25 +117,14 @@ expect(a.prompt).to_equal("hi")
 
 </details>
 
-#### should parse Electron and pure-Simple Metal GUI modes
+## should parse Electron and pure-Simple Metal GUI modes
 
-- should parse Electron and pure-Simple Metal GUI modes
-- Verify: should parse Electron and pure-Simple Metal GUI modes
-   - Expected: parse_main_args(["--electron"]).ui_mode equals `electron`
-   - Expected: metal.ui_mode equals `metal_gui`
-   - Expected: metal.prompt equals `test`
-
+**Group:** parse_main_args
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should parse Electron and pure-Simple Metal GUI modes")
-step("Verify: should parse Electron and pure-Simple Metal GUI modes")
 expect(parse_main_args(["--electron"]).ui_mode).to_equal("electron")
 val metal = parse_main_args(["--metal-gui", "--prompt", "test"])
 expect(metal.ui_mode).to_equal("metal_gui")
@@ -191,72 +133,42 @@ expect(metal.prompt).to_equal("test")
 
 </details>
 
-#### should parse --server and --port
+## should parse --server and --port
 
-- should parse --server and --port
-- Verify: should parse --server and --port
-   - Expected: a.port equals `9000`
-
+**Group:** parse_main_args
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should parse --server and --port")
-step("Verify: should parse --server and --port")
 val a = parse_main_args(["--server", "--port", "9000"])
 expect(a.server_mode).to_be(true)
-expect(a.port).to_equal(9000)  # oracle: 9000 — named expected value from the requirement
+expect(a.port).to_equal(9000)
 ```
 
 </details>
 
-#### should parse --port= form
+## should parse --port= form
 
-- should parse --port= form
-- Verify: should parse --port= form
-   - Expected: parse_main_args(["--port=1234"]).port equals `1234`
-
+**Group:** parse_main_args
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should parse --port= form")
-step("Verify: should parse --port= form")
 expect(parse_main_args(["--port=1234"]).port).to_equal(1234)
 ```
 
 </details>
 
-#### should parse --resume, --config, --system, --workspace
+## should parse --resume, --config, --system, --workspace
 
-- should parse --resume, --config, --system, --workspace
-- Verify: should parse --resume, --config, --system, --workspace
-   - Expected: a.resume_id equals `sess-9`
-   - Expected: a.config_path equals `cfg.sdn`
-   - Expected: a.system_prompt equals `be nice`
-   - Expected: a.workspace_root equals `/tmp/ws`
-
+**Group:** parse_main_args
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should parse --resume, --config, --system, --workspace")
-step("Verify: should parse --resume, --config, --system, --workspace")
 val a = parse_main_args(["--resume", "sess-9", "--config", "cfg.sdn", "--system", "be nice", "--workspace", "/tmp/ws"])
 expect(a.resume_id).to_equal("sess-9")
 expect(a.config_path).to_equal("cfg.sdn")
@@ -266,122 +178,59 @@ expect(a.workspace_root).to_equal("/tmp/ws")
 
 </details>
 
-#### should parse --dangerously-allow-all
+## should parse --dangerously-allow-all
 
-- should parse --dangerously-allow-all
-- Verify: should parse --dangerously-allow-all
-
+**Group:** parse_main_args
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should parse --dangerously-allow-all")
-step("Verify: should parse --dangerously-allow-all")
 expect(parse_main_args(["--dangerously-allow-all"]).allow_all).to_be(true)
 ```
 
 </details>
 
-#### should parse -h/--help
+## should parse -h/--help
 
-- should parse -h/--help
-- Verify: should parse -h/--help
-
+**Group:** parse_main_args
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should parse -h/--help")
-step("Verify: should parse -h/--help")
 expect(parse_main_args(["-h"]).help).to_be(true)
 expect(parse_main_args(["--help"]).help).to_be(true)
 ```
 
 </details>
 
-#### should record the first unrecognized flag
+## should record the first unrecognized flag
 
-- should record the first unrecognized flag
-- Verify: should record the first unrecognized flag
-   - Expected: a.unknown equals `--bogus-flag`
-
+**Group:** parse_main_args
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should record the first unrecognized flag")
-step("Verify: should record the first unrecognized flag")
 val a = parse_main_args(["--bogus-flag", "--another"])
 expect(a.unknown).to_equal("--bogus-flag")
 ```
 
 </details>
 
-### production entry orchestration
+## should return success for help without mutating configured owner state
 
-#### should keep Metal GUI out of the core Caret entry
+**Group:** production entry orchestration
 
-- should keep Metal GUI out of the core Caret entry
-- Request the GPU-only flag through the regular Caret entry
-- Require the explicit GPU companion boundary
-   - Expected: exit_code equals `2`
-
+1. Prepare injected CLI arguments
+2. Run production entry orchestration
+3. Check exact exit and owner effects
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should keep Metal GUI out of the core Caret entry")
-step("Request the GPU-only flag through the regular Caret entry")
-_reset_main_state()
-val exit_code = run_main_args(["--provider", "dummy", "--metal-gui"])
-
-step("Require the explicit GPU companion boundary")
-expect(exit_code).to_equal(2)  # oracle: 2 — named expected value from the requirement
-```
-
-</details>
-
-#### should return success for help without mutating configured owner state
-
-- should return success for help without mutating configured owner state
-- Prepare injected CLI arguments
-- Run production entry orchestration
-- Check exact exit and owner effects
-   - Expected: exit_code equals `0`
-   - Expected: observed.provider equals `dummy`
-   - Expected: observed.model equals `before-model`
-   - Expected: provider_session_id equals `keep-provider-session`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 20 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-APP
-step("should return success for help without mutating configured owner state")
 step("Prepare injected CLI arguments")
 main_configure(
     "dummy", "before-model", "", "", "", "",
@@ -396,7 +245,7 @@ step("Check exact exit and owner effects")
 val observed = _slash_on_provider("not-a-provider")
 val provider_session_id = main_session_id()
 _reset_main_state()
-expect(exit_code).to_equal(0)  # oracle: 0 — named expected value from the requirement
+expect(exit_code).to_equal(0)
 expect(observed.provider).to_equal("dummy")
 expect(observed.model).to_equal("before-model")
 expect(provider_session_id).to_equal("keep-provider-session")
@@ -404,7 +253,7 @@ expect(provider_session_id).to_equal("keep-provider-session")
 
 </details>
 
-#### should reject an unknown option before mutating configured owner state
+## should keep Metal GUI out of the core Caret entry
 
 - should reject an unknown option before mutating configured owner state
 - Prepare injected CLI arguments
@@ -415,16 +264,25 @@ expect(provider_session_id).to_equal("keep-provider-session")
    - Expected: observed.model equals `before-model`
    - Expected: provider_session_id equals `keep-provider-session`
 
+1. Request the GPU-only flag through the regular Caret entry.
+2. Require the explicit GPU companion boundary.
+
+**Expected:** The core CLI returns exit code 2 rather than importing the
+GPU/Winit implementation. `gui_metal.spl` remains the separate companion entry
+for a GPU-capable runtime lane.
+
+## should reject an unknown option before mutating configured owner state
+
+**Group:** production entry orchestration
+
+1. Prepare injected CLI arguments
+2. Run production entry orchestration
+3. Check exact exit and owner effects
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should reject an unknown option before mutating configured owner state")
 step("Prepare injected CLI arguments")
 main_configure(
     "dummy", "before-model", "", "", "", "",
@@ -439,7 +297,7 @@ step("Check exact exit and owner effects")
 val observed = _slash_on_provider("not-a-provider")
 val provider_session_id = main_session_id()
 _reset_main_state()
-expect(exit_code).to_equal(2)  # oracle: 2 — named expected value from the requirement
+expect(exit_code).to_equal(2)
 expect(observed.provider).to_equal("dummy")
 expect(observed.model).to_equal("before-model")
 expect(provider_session_id).to_equal("keep-provider-session")
@@ -447,27 +305,18 @@ expect(provider_session_id).to_equal("keep-provider-session")
 
 </details>
 
-#### should reject a missing config before mutating configured owner state
+## should reject a missing config before mutating configured owner state
 
-- should reject a missing config before mutating configured owner state
-- Prepare injected CLI arguments
-- Run production entry orchestration
-- Check exact exit and owner effects
-   - Expected: exit_code equals `2`
-   - Expected: observed.provider equals `dummy`
-   - Expected: observed.model equals `before-model`
-   - Expected: provider_session_id equals `keep-provider-session`
+**Group:** production entry orchestration
 
+1. Prepare injected CLI arguments
+2. Run production entry orchestration
+3. Check exact exit and owner effects
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should reject a missing config before mutating configured owner state")
 step("Prepare injected CLI arguments")
 main_configure(
     "dummy", "before-model", "", "", "", "",
@@ -484,7 +333,7 @@ step("Check exact exit and owner effects")
 val observed = _slash_on_provider("not-a-provider")
 val provider_session_id = main_session_id()
 _reset_main_state()
-expect(exit_code).to_equal(2)  # oracle: 2 — named expected value from the requirement
+expect(exit_code).to_equal(2)
 expect(observed.provider).to_equal("dummy")
 expect(observed.model).to_equal("before-model")
 expect(provider_session_id).to_equal("keep-provider-session")
@@ -492,27 +341,18 @@ expect(provider_session_id).to_equal("keep-provider-session")
 
 </details>
 
-#### should reject an invalid provider before mutating configured owner state
+## should reject an invalid provider before mutating configured owner state
 
-- should reject an invalid provider before mutating configured owner state
-- Prepare injected CLI arguments
-- Run production entry orchestration
-- Check exact exit and owner effects
-   - Expected: exit_code equals `2`
-   - Expected: observed.provider equals `dummy`
-   - Expected: observed.model equals `before-model`
-   - Expected: provider_session_id equals `keep-provider-session`
+**Group:** production entry orchestration
 
+1. Prepare injected CLI arguments
+2. Run production entry orchestration
+3. Check exact exit and owner effects
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should reject an invalid provider before mutating configured owner state")
 step("Prepare injected CLI arguments")
 main_configure(
     "dummy", "before-model", "", "", "", "",
@@ -527,7 +367,7 @@ step("Check exact exit and owner effects")
 val observed = _slash_on_provider("still-not-a-provider")
 val provider_session_id = main_session_id()
 _reset_main_state()
-expect(exit_code).to_equal(2)  # oracle: 2 — named expected value from the requirement
+expect(exit_code).to_equal(2)
 expect(observed.provider).to_equal("dummy")
 expect(observed.model).to_equal("before-model")
 expect(provider_session_id).to_equal("keep-provider-session")
@@ -535,27 +375,18 @@ expect(provider_session_id).to_equal("keep-provider-session")
 
 </details>
 
-#### should reject a missing resumed session before mutating configured owner state
+## should reject a missing resumed session before mutating configured owner state
 
-- should reject a missing resumed session before mutating configured owner state
-- Prepare injected CLI arguments
-- Run production entry orchestration
-- Check exact exit and owner effects
-   - Expected: exit_code equals `2`
-   - Expected: observed.provider equals `dummy`
-   - Expected: observed.model equals `before-model`
-   - Expected: provider_session_id equals `keep-provider-session`
+**Group:** production entry orchestration
 
+1. Prepare injected CLI arguments
+2. Run production entry orchestration
+3. Check exact exit and owner effects
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should reject a missing resumed session before mutating configured owner state")
 step("Prepare injected CLI arguments")
 main_configure(
     "dummy", "before-model", "", "", "", "",
@@ -573,7 +404,7 @@ _restore_main_home(original_home, fixture_home)
 val observed = _slash_on_provider("not-a-provider")
 val provider_session_id = main_session_id()
 _reset_main_state()
-expect(exit_code).to_equal(2)  # oracle: 2 — named expected value from the requirement
+expect(exit_code).to_equal(2)
 expect(observed.provider).to_equal("dummy")
 expect(observed.model).to_equal("before-model")
 expect(provider_session_id).to_equal("keep-provider-session")
@@ -581,27 +412,18 @@ expect(provider_session_id).to_equal("keep-provider-session")
 
 </details>
 
-#### should reject Metal GUI for a non-dummy provider after configuring that owner
+## should reject Metal GUI for a non-dummy provider after configuring that owner
 
-- should reject Metal GUI for a non-dummy provider after configuring that owner
-- Prepare injected CLI arguments
-- Run production entry orchestration
-- Check exact exit and owner effects
-   - Expected: exit_code equals `2`
-   - Expected: observed.provider equals `claude_cli`
-   - Expected: observed.model equals `direct-entry-model`
-   - Expected: provider_session_id equals ``
+**Group:** production entry orchestration
 
+1. Prepare injected CLI arguments
+2. Run production entry orchestration
+3. Check exact exit and owner effects
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should reject Metal GUI for a non-dummy provider after configuring that owner")
 step("Prepare injected CLI arguments")
 main_configure(
     "dummy", "before-model", "", "", "", "",
@@ -620,7 +442,7 @@ step("Check exact exit and owner effects")
 val observed = _slash_on_provider("not-a-provider")
 val provider_session_id = main_session_id()
 _reset_main_state()
-expect(exit_code).to_equal(2)  # oracle: 2 — named expected value from the requirement
+expect(exit_code).to_equal(2)
 expect(observed.provider).to_equal("claude_cli")
 expect(observed.model).to_equal("direct-entry-model")
 expect(provider_session_id).to_equal("")
@@ -628,24 +450,14 @@ expect(provider_session_id).to_equal("")
 
 </details>
 
-### workspace and permission policy resolution
+## should prefer the explicit workspace without reading process state
 
-#### should prefer the explicit workspace without reading process state
-
-- should prefer the explicit workspace without reading process state
-- Verify: should prefer the explicit workspace without reading process state
-
+**Group:** workspace and permission policy resolution
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should prefer the explicit workspace without reading process state")
-step("Verify: should prefer the explicit workspace without reading process state")
 val args = parse_main_args([
     "--workspace", "build/tmp/llm_caret_main_test/explicit"
 ])
@@ -656,22 +468,14 @@ expect(_resolve_workspace(args)).to_equal(
 
 </details>
 
-#### should resolve the workspace from PWD and restore the environment
+## should resolve the workspace from PWD and restore the environment
 
-- should resolve the workspace from PWD and restore the environment
-- Verify: should resolve the workspace from PWD and restore the environment
-
+**Group:** workspace and permission policy resolution
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should resolve the workspace from PWD and restore the environment")
-step("Verify: should resolve the workspace from PWD and restore the environment")
 val original = env_get("PWD") ?? ""
 val changed = env_set(
     "PWD", "build/tmp/llm_caret_main_test/pwd-fixture"
@@ -687,23 +491,14 @@ expect(workspace).to_equal(
 
 </details>
 
-#### should use dot when PWD and explicit workspace are empty
+## should use dot when PWD and explicit workspace are empty
 
-- should use dot when PWD and explicit workspace are empty
-- Verify: should use dot when PWD and explicit workspace are empty
-   - Expected: workspace equals `.`
-
+**Group:** workspace and permission policy resolution
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should use dot when PWD and explicit workspace are empty")
-step("Verify: should use dot when PWD and explicit workspace are empty")
 val original = env_get("PWD") ?? ""
 val changed = env_set("PWD", "")
 val workspace = _resolve_workspace(parse_main_args([]))
@@ -715,23 +510,14 @@ expect(workspace).to_equal(".")
 
 </details>
 
-#### should build the default restricted policy
+## should build the default restricted policy
 
-- should build the default restricted policy
-- Verify: should build the default restricted policy
-   - Expected: policy.default_mode equals `ask`
-
+**Group:** workspace and permission policy resolution
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should build the default restricted policy")
-step("Verify: should build the default restricted policy")
 val policy = _build_policy(
     parse_main_args([]), "build/tmp/caret-policy/default///"
 )
@@ -745,23 +531,14 @@ expect(policy.interactive).to_be(false)
 
 </details>
 
-#### should build the explicit allow-all policy
+## should build the explicit allow-all policy
 
-- should build the explicit allow-all policy
-- Verify: should build the explicit allow-all policy
-   - Expected: policy.default_mode equals `allow`
-
+**Group:** workspace and permission policy resolution
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should build the explicit allow-all policy")
-step("Verify: should build the explicit allow-all policy")
 val policy = _build_policy(
     parse_main_args(["--dangerously-allow-all"]),
     "build/tmp/caret-policy/allow-all/"
@@ -776,25 +553,14 @@ expect(policy.interactive).to_be(false)
 
 </details>
 
-### main_configure / main_session_id
+## should round-trips the session id set by main_configure
 
-#### should round-trips the session id set by main_configure
-
-- should round-trips the session id set by main_configure
-- Verify: should round-trips the session id set by main_configure
-   - Expected: session_id equals `seeded-session`
-
+**Group:** main_configure / main_session_id
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should round-trips the session id set by main_configure")
-step("Verify: should round-trips the session id set by main_configure")
 main_configure("claude_cli", "m", "", "", "claude", "", "seeded-session", 0)
 val session_id = main_session_id()
 _reset_main_state()
@@ -803,23 +569,14 @@ expect(session_id).to_equal("seeded-session")
 
 </details>
 
-#### should clear the provider session for a new conversation
+## should clear the provider session for a new conversation
 
-- should clear the provider session for a new conversation
-- Verify: should clear the provider session for a new conversation
-   - Expected: session_id equals ``
-
+**Group:** main_configure / main_session_id
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should clear the provider session for a new conversation")
-step("Verify: should clear the provider session for a new conversation")
 main_configure("claude_cli", "sonnet", "", "", "claude", "", "provider-session", 0)
 val new_id = _slash_on_new()
 val session_id = main_session_id()
@@ -830,25 +587,14 @@ expect(session_id).to_equal("")
 
 </details>
 
-#### should refresh provider defaults and clear a foreign provider session
+## should refresh provider defaults and clear a foreign provider session
 
-- should refresh provider defaults and clear a foreign provider session
-- Verify: should refresh provider defaults and clear a foreign provider session
-   - Expected: changed.provider equals `dummy`
-   - Expected: changed.model equals `dummy-hello`
-   - Expected: session_id equals ``
-
+**Group:** main_configure / main_session_id
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should refresh provider defaults and clear a foreign provider session")
-step("Verify: should refresh provider defaults and clear a foreign provider session")
 main_configure("claude_cli", "sonnet", "", "", "claude", "", "provider-session", 0)
 val changed = _slash_on_provider("dummy")
 val session_id = main_session_id()
@@ -861,24 +607,14 @@ expect(session_id).to_equal("")
 
 </details>
 
-#### should update the active model through the production model hook
+## should update the active model through the production model hook
 
-- should update the active model through the production model hook
-- Verify: should update the active model through the production model hook
-   - Expected: message equals `model set to after-model`
-   - Expected: observed.model equals `after-model`
-
+**Group:** main_configure / main_session_id
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should update the active model through the production model hook")
-step("Verify: should update the active model through the production model hook")
 main_configure(
     "dummy", "before-model", "", "", "", "",
     "provider-session", 0
@@ -893,26 +629,14 @@ expect(observed.model).to_equal("after-model")
 
 </details>
 
-### resume backend resolution
+## should restore the saved provider model and provider session by default
 
-#### should restore the saved provider model and provider session by default
-
-- should restore the saved provider model and provider session by default
-- Verify: should restore the saved provider model and provider session by default
-   - Expected: backend.provider equals `claude_cli`
-   - Expected: backend.model equals `sonnet`
-
+**Group:** resume backend resolution
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should restore the saved provider model and provider session by default")
-step("Verify: should restore the saved provider model and provider session by default")
 val backend = resolve_resume_backend("", "", "claude_cli", "sonnet")
 expect(backend.provider).to_equal("claude_cli")
 expect(backend.model).to_equal("sonnet")
@@ -921,24 +645,14 @@ expect(backend.reuse_provider_session).to_be(true)
 
 </details>
 
-#### should use the overridden provider default instead of the saved model
+## should use the overridden provider default instead of the saved model
 
-- should use the overridden provider default instead of the saved model
-- Verify: should use the overridden provider default instead of the saved model
-   - Expected: backend.provider equals `dummy`
-   - Expected: backend.model equals `dummy-hello`
-
+**Group:** resume backend resolution
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should use the overridden provider default instead of the saved model")
-step("Verify: should use the overridden provider default instead of the saved model")
 val backend = resolve_resume_backend("dummy", "", "claude_cli", "sonnet")
 expect(backend.provider).to_equal("dummy")
 expect(backend.model).to_equal("dummy-hello")
@@ -947,23 +661,14 @@ expect(backend.reuse_provider_session).to_be(false)
 
 </details>
 
-#### should normalize a legacy empty saved model before session reuse
+## should normalize a legacy empty saved model before session reuse
 
-- should normalize a legacy empty saved model before session reuse
-- Verify: should normalize a legacy empty saved model before session reuse
-   - Expected: backend.model equals `dummy-hello`
-
+**Group:** resume backend resolution
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should normalize a legacy empty saved model before session reuse")
-step("Verify: should normalize a legacy empty saved model before session reuse")
 val backend = resolve_resume_backend("", "", "dummy", "")
 expect(backend.model).to_equal("dummy-hello")
 expect(backend.reuse_provider_session).to_be(true)
@@ -971,23 +676,14 @@ expect(backend.reuse_provider_session).to_be(true)
 
 </details>
 
-#### should discard the provider session when the model is overridden
+## should discard the provider session when the model is overridden
 
-- should discard the provider session when the model is overridden
-- Verify: should discard the provider session when the model is overridden
-   - Expected: backend.model equals `different-model`
-
+**Group:** resume backend resolution
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should discard the provider session when the model is overridden")
-step("Verify: should discard the provider session when the model is overridden")
 val backend = resolve_resume_backend(
     "", "different-model", "claude_cli", "sonnet"
 )
@@ -997,29 +693,14 @@ expect(backend.reuse_provider_session).to_be(false)
 
 </details>
 
-### production session restoration
+## should restore provider model messages and provider session atomically
 
-#### should restore provider model messages and provider session atomically
-
-- should restore provider model messages and provider session atomically
-- Verify: should restore provider model messages and provider session atomically
-   - Expected: resumed.provider equals `dummy`
-   - Expected: resumed.model equals `dummy-hello`
-   - Expected: resumed.session_id equals `saved-app-session`
-   - Expected: resumed.messages.len() equals `1`
-   - Expected: provider_session_id equals `saved-provider-session`
-
+**Group:** production session restoration
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should restore provider model messages and provider session atomically")
-step("Verify: should restore provider model messages and provider session atomically")
 main_configure(
     "claude_cli", "sonnet", "", "", "claude", "",
     "old-provider-session", 0
@@ -1038,29 +719,20 @@ expect(resumed.found).to_be(true)
 expect(resumed.provider).to_equal("dummy")
 expect(resumed.model).to_equal("dummy-hello")
 expect(resumed.session_id).to_equal("saved-app-session")
-expect(resumed.messages.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+expect(resumed.messages.len()).to_equal(1)
 expect(provider_session_id).to_equal("saved-provider-session")
 ```
 
 </details>
 
-#### should reject an invalid saved provider without mutating the session
+## should reject an invalid saved provider without mutating the session
 
-- should reject an invalid saved provider without mutating the session
-- Verify: should reject an invalid saved provider without mutating the session
-   - Expected: provider_session_id equals `keep-provider-session`
-
+**Group:** production session restoration
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should reject an invalid saved provider without mutating the session")
-step("Verify: should reject an invalid saved provider without mutating the session")
 main_configure(
     "dummy", "dummy-hello", "", "", "", "",
     "keep-provider-session", 0
@@ -1082,25 +754,14 @@ expect(provider_session_id).to_equal("keep-provider-session")
 
 </details>
 
-### production session hook effects
+## should list no sessions and then the saved session under isolated HOME
 
-#### should list no sessions and then the saved session under isolated HOME
-
-- should list no sessions and then the saved session under isolated HOME
-- Verify: should list no sessions and then the saved session under isolated HOME
-   - Expected: empty equals `No saved sessions.`
-
+**Group:** production session hook effects
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should list no sessions and then the saved session under isolated HOME")
-step("Verify: should list no sessions and then the saved session under isolated HOME")
 val fixture_home = MAIN_SESSION_ROOT + "/list"
 val original_home = _isolate_main_home(fixture_home)
 val empty = _slash_on_sessions()
@@ -1118,23 +779,14 @@ expect(populated).to_contain("listed-session")
 
 </details>
 
-#### should report a missing session without changing runtime state
+## should report a missing session without changing runtime state
 
-- should report a missing session without changing runtime state
-- Verify: should report a missing session without changing runtime state
-   - Expected: provider_session_id equals `keep-provider-session`
-
+**Group:** production session hook effects
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should report a missing session without changing runtime state")
-step("Verify: should report a missing session without changing runtime state")
 val fixture_home = MAIN_SESSION_ROOT + "/resume-missing"
 val original_home = _isolate_main_home(fixture_home)
 main_configure(
@@ -1154,27 +806,14 @@ expect(provider_session_id).to_equal("keep-provider-session")
 
 </details>
 
-#### should resume a saved provider model transcript and provider session
+## should resume a saved provider model transcript and provider session
 
-- should resume a saved provider model transcript and provider session
-- Verify: should resume a saved provider model transcript and provider session
-   - Expected: resumed.provider equals `claude_cli`
-   - Expected: resumed.model equals `claude-model-fixture`
-   - Expected: resumed.messages.len() equals `1`
-   - Expected: resumed.messages[0].content equals `restored fixture`
-   - Expected: provider_session_id equals `provider-session-fixture`
-
+**Group:** production session hook effects
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should resume a saved provider model transcript and provider session")
-step("Verify: should resume a saved provider model transcript and provider session")
 val fixture_home = MAIN_SESSION_ROOT + "/resume-found"
 val original_home = _isolate_main_home(fixture_home)
 val saved = save_session(Session(
@@ -1196,33 +835,21 @@ expect(saved).to_be(true)
 expect(resumed.found).to_be(true)
 expect(resumed.provider).to_equal("claude_cli")
 expect(resumed.model).to_equal("claude-model-fixture")
-expect(resumed.messages.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+expect(resumed.messages.len()).to_equal(1)
 expect(resumed.messages[0].content).to_equal("restored fixture")
 expect(provider_session_id).to_equal("provider-session-fixture")
 ```
 
 </details>
 
-#### should persist the complete active backend and conversation
+## should persist the complete active backend and conversation
 
-- should persist the complete active backend and conversation
-- Verify: should persist the complete active backend and conversation
-   - Expected: provider equals `claude_cli`
-   - Expected: model equals `claude-model-fixture`
-   - Expected: provider_session equals `provider-session-fixture`
-   - Expected: content equals `persisted fixture`
-
+**Group:** production session hook effects
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should persist the complete active backend and conversation")
-step("Verify: should persist the complete active backend and conversation")
 val fixture_home = MAIN_SESSION_ROOT + "/persist"
 val original_home = _isolate_main_home(fixture_home)
 main_configure(
@@ -1260,22 +887,14 @@ expect(content).to_equal("persisted fixture")
 
 </details>
 
-#### should expose hidden commands only for explicit true values
+## should expose hidden commands only for explicit true values
 
-- should expose hidden commands only for explicit true values
-- Verify: should expose hidden commands only for explicit true values
-
+**Group:** production session hook effects
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should expose hidden commands only for explicit true values")
-step("Verify: should expose hidden commands only for explicit true values")
 val original = env_get("LLM_CARET_ENABLE_HIDDEN_COMMANDS") ?? ""
 val empty_set = env_set("LLM_CARET_ENABLE_HIDDEN_COMMANDS", "")
 val empty_disabled = _hidden_commands_enabled()
@@ -1319,27 +938,14 @@ expect(word_enabled).to_be(true)
 
 </details>
 
-#### should wire every session callback to the production implementation
+## should wire every session callback to the production implementation
 
-- should wire every session callback to the production implementation
-- Verify: should wire every session callback to the production implementation
-   - Expected: hooks.session_id equals `hook-active-session`
-   - Expected: model_message equals `model set to hook-model`
-   - Expected: provider_result.model equals `hook-model`
-   - Expected: empty_sessions equals `No saved sessions.`
-   - Expected: resumed.model equals `hook-model`
-
+**Group:** production session hook effects
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 49 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should wire every session callback to the production implementation")
-step("Verify: should wire every session callback to the production implementation")
 val fixture_home = MAIN_SESSION_ROOT + "/hooks"
 val original_home = _isolate_main_home(fixture_home)
 val original_hidden = env_get("LLM_CARET_ENABLE_HIDDEN_COMMANDS") ?? ""
@@ -1390,111 +996,66 @@ expect(resumed.model).to_equal("hook-model")
 
 </details>
 
-### build_model_response
+## should map a plain-text response with no tool_use blocks
 
-#### should map a plain-text response with no tool_use blocks
-
-- should map a plain-text response with no tool_use blocks
-- Verify: should map a plain-text response with no tool_use blocks
-   - Expected: mr.text equals `hello there`
-   - Expected: mr.tool_calls.len() equals `0`
-
+**Group:** build_model_response
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should map a plain-text response with no tool_use blocks")
-step("Verify: should map a plain-text response with no tool_use blocks")
 val mr = build_model_response(_llm_ok("hello there", "{}"))
 expect(mr.text).to_equal("hello there")
-expect(mr.tool_calls.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+expect(mr.tool_calls.len()).to_equal(0)
 ```
 
 </details>
 
-#### should map an error response to an ERROR-prefixed text turn
+## should map an error response to an ERROR-prefixed text turn
 
-- should map an error response to an ERROR-prefixed text turn
-- Verify: should map an error response to an ERROR-prefixed text turn
-   - Expected: mr.tool_calls.len() equals `0`
-
+**Group:** build_model_response
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should map an error response to an ERROR-prefixed text turn")
-step("Verify: should map an error response to an ERROR-prefixed text turn")
 val mr = build_model_response(new_llm_error("test", "boom"))
 expect(mr.text).to_contain("ERROR: boom")
-expect(mr.tool_calls.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+expect(mr.tool_calls.len()).to_equal(0)
 ```
 
 </details>
 
-#### should extract a tool_use block from the raw wire response
+## should extract a tool_use block from the raw wire response
 
-- should extract a tool_use block from the raw wire response
-- Verify: should extract a tool_use block from the raw wire response
-   - Expected: mr.tool_calls.len() equals `1`
-   - Expected: mr.tool_calls[0].name equals `bash`
-   - Expected: mr.tool_calls[0].id equals `t1`
-
+**Group:** build_model_response
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should extract a tool_use block from the raw wire response")
-step("Verify: should extract a tool_use block from the raw wire response")
 val raw = "{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"bash\",\"input\":{\"command\":\"echo hi\"}}"
 val mr = build_model_response(_llm_ok("", raw))
-expect(mr.tool_calls.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+expect(mr.tool_calls.len()).to_equal(1)
 expect(mr.tool_calls[0].name).to_equal("bash")
 expect(mr.tool_calls[0].id).to_equal("t1")
 ```
 
 </details>
 
-### scripted plain-mode conversation (end-to-end via chat.run_agent_loop)
+## should run a scripted 2-turn tool-call conversation to completion
 
-#### should run a scripted 2-turn tool-call conversation to completion
-
-- should run a scripted 2-turn tool-call conversation to completion
-- Verify: should run a scripted 2-turn tool-call conversation to completion
-   - Expected: result.tool_calls_made equals `1`
-   - Expected: result.final_text equals `final answer`
-   - Expected: result.stopped_reason equals `end_turn`
-
+**Group:** scripted plain-mode conversation (end-to-end via chat.run_agent_loop)
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should run a scripted 2-turn tool-call conversation to completion")
-step("Verify: should run a scripted 2-turn tool-call conversation to completion")
 SCRIPT_TURN = 0
 val p = default_policy(WS_ROOT)
 val result = run_agent_loop(p, [new_user_message("do the thing")], _scripted_responder, 10)
 SCRIPT_TURN = 0
-expect(result.tool_calls_made).to_equal(1)  # oracle: 1 — named expected value from the requirement
+expect(result.tool_calls_made).to_equal(1)
 expect(result.final_text).to_equal("final answer")
 expect(result.stopped_reason).to_equal("end_turn")
 # the tool_result turn must be threaded into final_transcript (the
@@ -1504,24 +1065,14 @@ expect(result.final_transcript.len() > 2).to_be(true)
 
 </details>
 
-### Hidden command inspection
+## should inspect a real tool envelope without echoing its input
 
-#### should inspect a real tool envelope without echoing its input
-
-- should inspect a real tool envelope without echoing its input
-- Verify: should inspect a real tool envelope without echoing its input
-
+**Group:** Hidden command inspection
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should inspect a real tool envelope without echoing its input")
-step("Verify: should inspect a real tool envelope without echoing its input")
 val result = _slash_on_hidden_command(
     "debug-tool-call",
     "{\"type\":\"tool_use\",\"id\":\"call-1\",\"name\":\"bash\",\"input\":{\"command\":\"echo sk-ant-fixture-secret\"}}"
@@ -1534,22 +1085,14 @@ expect(result.contains("sk-ant-fixture-secret")).to_be(false)
 
 </details>
 
-#### should reject missing, malformed, and unsupported hidden input
+## should reject missing, malformed, and unsupported hidden input
 
-- should reject missing, malformed, and unsupported hidden input
-- Verify: should reject missing, malformed, and unsupported hidden input
-
+**Group:** Hidden command inspection
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should reject missing, malformed, and unsupported hidden input")
-step("Verify: should reject missing, malformed, and unsupported hidden input")
 expect(_slash_on_hidden_command("debug-tool-call", "")).to_contain(
     "Usage:"
 )
@@ -1563,22 +1106,14 @@ expect(_slash_on_hidden_command("other-hidden", "{}")).to_contain(
 
 </details>
 
-#### should reject tool envelopes with incomplete public metadata
+## should reject tool envelopes with incomplete public metadata
 
-- should reject tool envelopes with incomplete public metadata
-- Verify: should reject tool envelopes with incomplete public metadata
-
+**Group:** Hidden command inspection
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should reject tool envelopes with incomplete public metadata")
-step("Verify: should reject tool envelopes with incomplete public metadata")
 expect(_slash_on_hidden_command(
     "debug-tool-call",
     "{\"type\":\"tool_use\",\"name\":\"bash\",\"input\":{}}"
@@ -1591,22 +1126,14 @@ expect(_slash_on_hidden_command(
 
 </details>
 
-#### should summarize only the first tool envelope without leaking payloads
+## should summarize only the first tool envelope without leaking payloads
 
-- should summarize only the first tool envelope without leaking payloads
-- Verify: should summarize only the first tool envelope without leaking payloads
-
+**Group:** Hidden command inspection
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should summarize only the first tool envelope without leaking payloads")
-step("Verify: should summarize only the first tool envelope without leaking payloads")
 val result = _slash_on_hidden_command(
     "debug-tool-call",
     "{\"content\":[" +
@@ -1624,308 +1151,190 @@ expect(result.contains("second-fixture-secret")).to_be(false)
 
 </details>
 
-### HTTP proxy pure core (proxy_handle)
+## should health and models routes return 200
 
-#### should health and models routes return 200
-
-- should health and models routes return 200
-- Verify: should health and models routes return 200
-   - Expected: status_for_path("/v1/health") equals `200`
-   - Expected: status_for_path("/v1/models") equals `200`
-
+**Group:** HTTP proxy pure core (proxy_handle)
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should health and models routes return 200")
-step("Verify: should health and models routes return 200")
 expect(status_for_path("/v1/health")).to_equal(200)
 expect(status_for_path("/v1/models")).to_equal(200)
 ```
 
 </details>
 
-#### should report unknown routes return 404
+## should report unknown routes return 404
 
-- should report unknown routes return 404
-- Verify: should report unknown routes return 404
-   - Expected: status_for_path("/nope") equals `404`
-
+**Group:** HTTP proxy pure core (proxy_handle)
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should report unknown routes return 404")
-step("Verify: should report unknown routes return 404")
 expect(status_for_path("/nope")).to_equal(404)
 ```
 
 </details>
 
-#### should GET /v1/health is routed through proxy_handle end to end
+## should GET /v1/health is routed through proxy_handle end to end
 
-- should GET /v1/health is routed through proxy_handle end to end
-- Verify: should GET /v1/health is routed through proxy_handle end to end
-   - Expected: code equals `200`
-
+**Group:** HTTP proxy pure core (proxy_handle)
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should GET /v1/health is routed through proxy_handle end to end")
-step("Verify: should GET /v1/health is routed through proxy_handle end to end")
 val (code, body) = proxy_handle("GET", "/v1/health", "", _fake_dispatch_ok)
-expect(code).to_equal(200)  # oracle: 200 — named expected value from the requirement
+expect(code).to_equal(200)
 expect(body).to_contain("ok")
 ```
 
 </details>
 
-#### should GET on an unknown path is a 404 through proxy_handle
+## should GET on an unknown path is a 404 through proxy_handle
 
-- should GET on an unknown path is a 404 through proxy_handle
-- Verify: should GET on an unknown path is a 404 through proxy_handle
-   - Expected: code equals `404`
-
+**Group:** HTTP proxy pure core (proxy_handle)
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should GET on an unknown path is a 404 through proxy_handle")
-step("Verify: should GET on an unknown path is a 404 through proxy_handle")
 val (code, body) = proxy_handle("GET", "/nope", "", _fake_dispatch_ok)
-expect(code).to_equal(404)  # oracle: 404 — named expected value from the requirement
+expect(code).to_equal(404)
 ```
 
 </details>
 
-#### should chat completions with empty content is a 400
+## should chat completions with empty content is a 400
 
-- should chat completions with empty content is a 400
-- Verify: should chat completions with empty content is a 400
-   - Expected: code equals `400`
-
+**Group:** HTTP proxy pure core (proxy_handle)
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should chat completions with empty content is a 400")
-step("Verify: should chat completions with empty content is a 400")
 val (code, body) = proxy_handle("POST", "/v1/chat/completions", "", _fake_dispatch_ok)
-expect(code).to_equal(400)  # oracle: 400 — named expected value from the requirement
+expect(code).to_equal(400)
 expect(body).to_contain("messages required")
 ```
 
 </details>
 
-#### should chat completions dispatches and returns 200 on success
+## should chat completions dispatches and returns 200 on success
 
-- should chat completions dispatches and returns 200 on success
-- Verify: should chat completions dispatches and returns 200 on success
-   - Expected: code equals `200`
-
+**Group:** HTTP proxy pure core (proxy_handle)
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should chat completions dispatches and returns 200 on success")
-step("Verify: should chat completions dispatches and returns 200 on success")
 val body_in = "{\"content\":\"hi\"}"
 val (code, body) = proxy_handle("POST", "/v1/chat/completions", body_in, _fake_dispatch_ok)
-expect(code).to_equal(200)  # oracle: 200 — named expected value from the requirement
+expect(code).to_equal(200)
 expect(body).to_contain("echo: hi")
 ```
 
 </details>
 
-#### should chat completions returns 502 when the backend errors
+## should chat completions returns 502 when the backend errors
 
-- should chat completions returns 502 when the backend errors
-- Verify: should chat completions returns 502 when the backend errors
-   - Expected: code equals `502`
-
+**Group:** HTTP proxy pure core (proxy_handle)
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should chat completions returns 502 when the backend errors")
-step("Verify: should chat completions returns 502 when the backend errors")
 val body_in = "{\"content\":\"hi\"}"
 val (code, body) = proxy_handle("POST", "/v1/chat/completions", body_in, _fake_dispatch_err)
-expect(code).to_equal(502)  # oracle: 502 — named expected value from the requirement
+expect(code).to_equal(502)
 expect(body).to_contain("upstream down")
 ```
 
 </details>
 
-#### should /v1/messages dispatches through the anthropic-shaped response
+## should /v1/messages dispatches through the anthropic-shaped response
 
-- should /v1/messages dispatches through the anthropic-shaped response
-- Verify: should /v1/messages dispatches through the anthropic-shaped response
-   - Expected: code equals `200`
-
+**Group:** HTTP proxy pure core (proxy_handle)
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should /v1/messages dispatches through the anthropic-shaped response")
-step("Verify: should /v1/messages dispatches through the anthropic-shaped response")
 val body_in = "{\"content\":\"hi\"}"
 val (code, body) = proxy_handle("POST", "/v1/messages", body_in, _fake_dispatch_ok)
-expect(code).to_equal(200)  # oracle: 200 — named expected value from the requirement
+expect(code).to_equal(200)
 expect(body).to_contain("\"message\"")
 ```
 
 </details>
 
-### Server hardening (guard_request)
+## should bearer_ok always allows when no token is required
 
-#### should bearer_ok always allows when no token is required
-
-- should bearer_ok always allows when no token is required
-- Verify: should bearer_ok always allows when no token is required
-
+**Group:** Server hardening (guard_request)
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should bearer_ok always allows when no token is required")
-step("Verify: should bearer_ok always allows when no token is required")
 expect(bearer_ok("", "")).to_be(true)
 expect(bearer_ok("garbage", "")).to_be(true)
 ```
 
 </details>
 
-#### should bearer_ok rejects a missing/garbage header when a token is required
+## should bearer_ok rejects a missing/garbage header when a token is required
 
-- should bearer_ok rejects a missing/garbage header when a token is required
-- Verify: should bearer_ok rejects a missing/garbage header when a token is required
-
+**Group:** Server hardening (guard_request)
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should bearer_ok rejects a missing/garbage header when a token is required")
-step("Verify: should bearer_ok rejects a missing/garbage header when a token is required")
 expect(bearer_ok("", "secret")).to_be(false)
 expect(bearer_ok("Bearer wrong", "secret")).to_be(false)
 ```
 
 </details>
 
-#### should bearer_ok accepts the exact configured token
+## should bearer_ok accepts the exact configured token
 
-- should bearer_ok accepts the exact configured token
-- Verify: should bearer_ok accepts the exact configured token
-
+**Group:** Server hardening (guard_request)
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should bearer_ok accepts the exact configured token")
-step("Verify: should bearer_ok accepts the exact configured token")
 expect(bearer_ok("Bearer secret", "secret")).to_be(true)
 ```
 
 </details>
 
-#### should guard_request returns 401 without a token when one is required
+## should guard_request returns 401 without a token when one is required
 
-- should guard_request returns 401 without a token when one is required
-- Verify: should guard_request returns 401 without a token when one is required
-   - Expected: code equals `401`
-
+**Group:** Server hardening (guard_request)
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should guard_request returns 401 without a token when one is required")
-step("Verify: should guard_request returns 401 without a token when one is required")
 rate_limit_reset()
 val (allowed, code, body) = guard_request("", "{}", "secret", "client-a", 1000)
 expect(allowed).to_be(false)
-expect(code).to_equal(401)  # oracle: 401 — named expected value from the requirement
+expect(code).to_equal(401)
 ```
 
 </details>
 
-#### should guard_request allows a matching bearer token
+## should guard_request allows a matching bearer token
 
-- should guard_request allows a matching bearer token
-- Verify: should guard_request allows a matching bearer token
-
+**Group:** Server hardening (guard_request)
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should guard_request allows a matching bearer token")
-step("Verify: should guard_request allows a matching bearer token")
 rate_limit_reset()
 val (allowed, code, body) = guard_request("Bearer secret", "{}", "secret", "client-b", 1000)
 expect(allowed).to_be(true)
@@ -1933,23 +1342,14 @@ expect(allowed).to_be(true)
 
 </details>
 
-#### should guard_request rejects an oversized body with 413
+## should guard_request rejects an oversized body with 413
 
-- should guard_request rejects an oversized body with 413
-- Verify: should guard_request rejects an oversized body with 413
-   - Expected: code equals `413`
-
+**Group:** Server hardening (guard_request)
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should guard_request rejects an oversized body with 413")
-step("Verify: should guard_request rejects an oversized body with 413")
 rate_limit_reset()
 # Double up to exceed MAX_BODY_BYTES (1_000_000) in O(log n) instead
 # of an O(n) append loop - a naive 100k-iteration `+=` loop over a
@@ -1959,27 +1359,19 @@ while big.len() < 1000001:
     big = big + big
 val (allowed, code, body) = guard_request("", big, "", "client-c", 1000)
 expect(allowed).to_be(false)
-expect(code).to_equal(413)  # oracle: 413 — named expected value from the requirement
+expect(code).to_equal(413)
 ```
 
 </details>
 
-#### should rate_limit_check allows the first N requests then rejects the N+1th
+## should rate_limit_check allows the first N requests then rejects the N+1th
 
-- should rate_limit_check allows the first N requests then rejects the N+1th
-- Verify: should rate_limit_check allows the first N requests then rejects the N+1th
-
+**Group:** Server hardening (guard_request)
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should rate_limit_check allows the first N requests then rejects the N+1th")
-step("Verify: should rate_limit_check allows the first N requests then rejects the N+1th")
 rate_limit_reset()
 var i = 0
 var last_ok = true
@@ -1993,22 +1385,14 @@ expect(over_limit).to_be(false)
 
 </details>
 
-#### should rate_limit_check resets after the window elapses
+## should rate_limit_check resets after the window elapses
 
-- should rate_limit_check resets after the window elapses
-- Verify: should rate_limit_check resets after the window elapses
-
+**Group:** Server hardening (guard_request)
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-APP
-step("should rate_limit_check resets after the window elapses")
-step("Verify: should rate_limit_check resets after the window elapses")
 rate_limit_reset()
 var i = 0
 while i < 60:
@@ -2028,79 +1412,6 @@ rate_limit_reset()
 |--------|------:|
 | Total scenarios | 64 |
 | Active scenarios | 64 |
-| Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
-
-
-</details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-APP`
-- `REQ-APP-LLM-CARET-001`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `2e8d37314f414257afb76feb37f879502b7a265aba20f6ea1480b11ecd507ad4`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `2e8d37314f414257afb76feb37f879502b7a265aba20f6ea1480b11ecd507ad4`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `2e8d37314f414257afb76feb37f879502b7a265aba20f6ea1480b11ecd507ad4`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **82/100**; effective score: **82/100**; blockers: **0**.
-
-SSpec documentization score: 82/100
-source: test/01_unit/app/llm_caret/main_spec.spl
-mirror: doc/06_spec/01_unit/app/llm_caret/main_spec.md (current)
-findings: 12 blockers: 0
-  narrative=100 structure=70 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/llm_caret/main_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/llm_caret/main_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/llm_caret/main_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 4 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/app/llm_caret/main_spec.spl:79:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should default to auto ui mode, claude_cli-less provider, no server' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/app/llm_caret/main_spec.spl:79:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should default to auto ui mode, claude_cli-less provider, no server' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/llm_caret/main_spec.spl:91:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should parse --provider and --model (space form)' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/app/llm_caret/main_spec.spl:91:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should parse --provider and --model (space form)' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/llm_caret/main_spec.spl:99:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should parse --provider= and --model= (equals form)' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/app/llm_caret/main_spec.spl:99:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should parse --provider= and --model= (equals form)' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/llm_caret/main_spec.spl:107:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should parse --plain and --tui' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/app/llm_caret/main_spec.spl:114:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should parse --gui and one-shot --prompt' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/app/llm_caret/main_spec.spl:122:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should parse Electron and pure-Simple Metal GUI modes' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-<!-- sspec-maintain:scorecard:end -->
+| Executed scenarios | 0 |

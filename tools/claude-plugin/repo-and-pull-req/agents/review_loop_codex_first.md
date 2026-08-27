@@ -3,8 +3,7 @@
 ## Role
 
 Sub-agent invoked by `review_loop.md` (L2 only — L1 is opportunistic
-single-pass; L3 waits on an eligible independent provider `User` account).
-Produces a single exact-head bot-reviewer
+single-pass; L3 waits on humans). Produces a single bot-reviewer
 verdict for a PR diff: `approve | request-changes | comment`.
 
 Codex is preferred (cheaper, faster, separate token); Claude
@@ -16,9 +15,6 @@ or returns a non-decisive `comment`.
 - `PR_NUMBER` — pull-request number
 - `TARGET` — `gh` | `bb`
 - `BRANCH` — head branch
-- `HEAD_SHA` — exact provider-resolved head reviewed by this invocation
-- `REVIEWER_MODEL` — concrete model identifier
-- `REVIEWER_EFFORT` — `high|xhigh|max|ultra` for scoped self-review admission
 - `PR_DIFF` — diff text (caller pre-fetches via
   `gh pr diff ${PR_NUMBER}` or the bb adapter equivalent)
 - `PR_BODY` — PR description (for context)
@@ -30,11 +26,6 @@ or returns a non-decisive `comment`.
   "verdict": "approve|request-changes|comment",
   "approver": "codex|claude",
   "verdict_source": "codex:rescue|claude:general-purpose",
-  "head_sha": "40-hex exact reviewed head",
-  "reviewer_model": "concrete model identifier",
-  "reviewer_effort": "high|xhigh|max|ultra",
-  "p0_count": 0,
-  "p1_count": 0,
   "reasoning": "1-3 sentence summary",
   "inline_comments": [
     {"path": "src/foo.spl", "line": 42, "body": "..."}
@@ -42,10 +33,7 @@ or returns a non-decisive `comment`.
 }
 ```
 
-`inline_comments` is empty for `approve`. `approve` is eligible for scoped
-self-review dispatch only when the output binds the current `HEAD_SHA`, effort
-is at least `high`, and both counts are zero. The verdict is review evidence,
-not a GitHub provider approval.
+`inline_comments` is empty for `approve`.
 
 ## Procedure
 
@@ -88,8 +76,6 @@ Prompt to codex:rescue:
     - comment          (worth flagging but not blocking)
   Return STRICT JSON matching the schema in
   agents/review_loop_codex_first.md §Outputs.
-  Bind the exact HEAD_SHA, concrete reviewer model/effort, and counted P0/P1
-  findings. Never describe this verdict as a GitHub APPROVED review.
   Diff:
   <PR_DIFF>
   Body:
@@ -130,11 +116,9 @@ flip the merge gate.
 
 The returned JSON's `approver` + `verdict_source` are written into
 the PR `state.json` by the caller (see `review_loop.md` §Audit Trail).
-When an independent credential submits a provider review, the PR UI separately
-shows that token principal. For a same-author GitHub credential, the caller
-dispatches the self-attested `SPipe Self Review Admission` status instead;
-`approver` remains the model that reviewed and is never represented as a
-provider approver.
+The PR UI separately shows the token-principal (the bot account that
+owns the gh/bb token used to POST comments and approves). Together
+these give: WHICH agent decided, WHICH bot account acted.
 
 ## Error Handling
 

@@ -3,7 +3,7 @@
 - **ID:** string_literal_double_brace_collapse_2026-06-16
 - **Severity:** P2 (silently corrupts any literal building JSON/braces; root cause of broken LSP code-action edits)
 - **Area:** language / interpreter (string-literal lexing)
-- **Status:** RECLASSIFIED 2026-08-25 — works as documented (see "Reclassification" below); no lexer change
+- **Status:** open — minimal repro confirmed
 - **Found while:** isolating the "substring off-by-one" suspected during reliable-mode P1/R3 (turns out NOT substring — see below)
 
 ## Summary

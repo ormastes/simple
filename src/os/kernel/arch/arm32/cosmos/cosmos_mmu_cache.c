@@ -13,6 +13,7 @@
 #include "cosmos_profile_openssd2_8ch8way_v300.h"
 #else
 #include "cosmos_hal.h"
+#include "cosmos_mmu_cache_policy.h"
 #if COSMOS_IS_QEMU
 #define COSMOS_DDR_IDENTITY_BASE 0x00100000U
 #define COSMOS_DDR_IDENTITY_END 0x3FFFFFFFU
@@ -120,6 +121,11 @@ _Static_assert((COSMOS_DDR_IDENTITY_BASE & (COSMOS_SECTION_SIZE - 1U)) == 0U &&
     ((COSMOS_NFC_DMA_IDENTITY_END + 1U) & (COSMOS_SECTION_SIZE - 1U)) == 0U,
     "Cosmos+ DDR and DMA bounds must be section aligned");
 
+#ifdef COSMOS_CONTRACT_TEST
+/*
+ * Frozen pre-migration C oracle. Production firmware does not compile these
+ * bodies; it resolves the macro-mapped names below to pure-Simple exports.
+ */
 static unsigned int cosmos_cache_way_shift(unsigned int ways) {
     return ways > 1U ? (unsigned int)__builtin_clz(ways - 1U) : 0U;
 }
@@ -315,6 +321,53 @@ static unsigned int cosmos_ocm_l2_descriptor_for_address(unsigned int address) {
 static int cosmos_mmu_poll_allowed(unsigned int poll) {
     return poll < COSMOS_POLL_LIMIT;
 }
+#endif
+
+#else
+#define cosmos_cache_way_shift \
+    cosmos_mmu_cache_policy_cache_way_shift
+#define cosmos_cache_setway_operand \
+    cosmos_mmu_cache_policy_cache_setway_operand
+#define cosmos_ttbr0_value \
+    cosmos_mmu_cache_policy_ttbr0_value
+#define cosmos_sctlr_apply_policy \
+    cosmos_mmu_cache_policy_sctlr_apply_policy
+#define cosmos_sctlr_policy_valid \
+    cosmos_mmu_cache_policy_sctlr_policy_valid
+#define cosmos_control_registers_valid \
+    cosmos_mmu_cache_policy_control_registers_valid
+#define cosmos_control_policy_contract \
+    cosmos_mmu_cache_policy_control_policy_contract
+#define cosmos_scu_invalidate_mask \
+    cosmos_mmu_cache_policy_scu_invalidate_mask
+#define cosmos_cache_enable_allowed \
+    cosmos_mmu_cache_policy_cache_enable_allowed
+#define cosmos_section_descriptor \
+    cosmos_mmu_cache_policy_section_descriptor
+#define cosmos_coarse_descriptor \
+    cosmos_mmu_cache_policy_coarse_descriptor
+#define cosmos_small_page_descriptor \
+    cosmos_mmu_cache_policy_small_page_descriptor
+#define cosmos_small_page_cached_rx_descriptor \
+    cosmos_mmu_cache_policy_small_page_cached_rx_descriptor
+#define cosmos_small_page_cached_rw_xn_descriptor \
+    cosmos_mmu_cache_policy_small_page_cached_rw_xn_descriptor
+#define cosmos_l2_descriptor_executable \
+    cosmos_mmu_cache_policy_l2_descriptor_executable
+#define cosmos_l2_descriptor_priv_writable \
+    cosmos_mmu_cache_policy_l2_descriptor_priv_writable
+#define cosmos_l2_descriptor_write_execute \
+    cosmos_mmu_cache_policy_l2_descriptor_write_execute
+#define cosmos_firmware_l2_descriptor_for_address \
+    cosmos_mmu_cache_policy_firmware_l2_descriptor_for_address
+#define cosmos_device_section \
+    cosmos_mmu_cache_policy_device_section
+#define cosmos_l1_descriptor_for_address \
+    cosmos_mmu_cache_policy_l1_descriptor_for_address
+#define cosmos_ocm_l2_descriptor_for_address \
+    cosmos_mmu_cache_policy_ocm_l2_descriptor_for_address
+#define cosmos_mmu_poll_allowed \
+    cosmos_mmu_cache_policy_mmu_poll_allowed
 #endif
 
 #ifdef COSMOS_CONTRACT_TEST

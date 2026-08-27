@@ -9,10 +9,9 @@ val RETURN_SIGNAL = "__return__"
 class Environment:
     bindings: Dict<text, JsValue>
     is_strict: bool
-    parent: i64
 
 fn env_new() -> Environment:
-    Environment(bindings: {}, is_strict: false, parent: -1)
+    Environment(bindings: {}, is_strict: false)
 
 class EnvironmentStack:
     frames: [Environment]
@@ -22,12 +21,8 @@ fn env_stack_new() -> EnvironmentStack:
 
 impl EnvironmentStack:
     me create_env(parent: i64) -> i64:
-        var frame = env_new()
-        val new_id = self.frames.len()
-        if parent >= 0 and parent < new_id:
-            frame.parent = parent
-        self.frames.push(frame)
-        new_id
+        self.frames.push(env_new())
+        self.frames.len() - 1
 
     me define_var(env: i64, name: text, value: JsValue):
         if env < 0 or env >= self.frames.len():
@@ -36,27 +31,13 @@ impl EnvironmentStack:
         frame.bindings[name] = value
         self.frames[env] = frame
 
-    # Walk the parent chain from `env` looking for an existing binding.
-    # Returns the env id holding the binding, or -1 if none in the chain.
-    me _resolve_env(env: i64, name: text) -> i64:
-        var current = env
-        var hops = 0
-        val max_hops = self.frames.len()
-        while current >= 0 and current < self.frames.len() and hops <= max_hops:
-            val frame = self.frames.get(current)
-            if frame.bindings.has(name):
-                return current
-            current = frame.parent
-            hops = hops + 1
-        -1
-
     me set_var(env: i64, name: text, value: JsValue):
-        val holder = self._resolve_env(env, name)
-        if holder >= 0:
-            var frame = self.frames.get(holder)
-            frame.bindings[name] = value
-            self.frames[holder] = frame
-            return
+        if env >= 0 and env < self.frames.len():
+            var frame = self.frames.get(env)
+            if frame.bindings.has(name):
+                frame.bindings[name] = value
+                self.frames[env] = frame
+                return
         if env != 0 and self.frames.len() > 0:
             var global_frame = self.frames.get(0)
             if global_frame.bindings.has(name):
@@ -71,10 +52,10 @@ impl EnvironmentStack:
         self.define_var(0, name, value)
 
     me get_var(env: i64, name: text) -> JsValue?:
-        val holder = self._resolve_env(env, name)
-        if holder >= 0:
-            val frame = self.frames.get(holder)
-            return Some(frame.bindings[name])
+        if env >= 0 and env < self.frames.len():
+            val frame = self.frames.get(env)
+            if frame.bindings.has(name):
+                return Some(frame.bindings[name])
         if env != 0 and self.frames.len() > 0:
             val global_frame = self.frames.get(0)
             if global_frame.bindings.has(name):
@@ -106,19 +87,16 @@ class NativeIdMapping:
     first: i64
     second: i64
 
-# NaN is produced via js_nan() (float overflow, no division) rather than the
-# literal `0.0 / 0.0`, which the Simple runtime traps as a fatal E2001 —
-# `to_number` of a non-numeric JsValue used to crash the interpreter.
 fn to_number(v: JsValue) -> f64:
     match v:
-        JsValue.Undefined: js_nan()
+        JsValue.Undefined: 0.0 / 0.0
         JsValue.Null: 0.0
         JsValue.Boolean(b): if b: 1.0 else: 0.0
         JsValue.Number(n): n
-        JsValue.String(s): s.parse_f64() ?? js_nan()
-        JsValue.Object(_): js_nan()
+        JsValue.String(s): s.parse_f64() ?? (0.0 / 0.0)
+        JsValue.Object(_): 0.0 / 0.0
         JsValue.Array(_): 0.0
-        JsValue.Function(_): js_nan()
+        JsValue.Function(_): 0.0 / 0.0
 
 fn js_number_to_string(n: f64) -> text:
     """ECMA-262 ToString(Number): an integral value carries no fractional part."""
@@ -134,7 +112,7 @@ fn js_to_string(v: JsValue) -> text:
         JsValue.Undefined: "undefined"
         JsValue.Null: "null"
         JsValue.Boolean(b): if b: "true" else: "false"
-        JsValue.Number(n): js_number_to_string(n)
+        JsValue.Number(n): if n != n: "NaN" else: "{n}"
         JsValue.String(s): s
         JsValue.Object(_): "[object Object]"
         JsValue.Array(_): ""

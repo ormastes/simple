@@ -5,10 +5,60 @@
 # mir_lowering.spl and its split modules (expr, stmts, ml).
 
 use compiler.mir.mir_data.*
-use compiler.hir.hir_types.*
-use compiler.hir.hir_definitions.*
+use compiler.hir.hir.*
 use compiler.common.diagnostics.span.{Span}
-use compiler.common.mir_target_context.{MirTargetContext}
+
+# Bounded Stage-3 invalid-type receipt.  This is diagnostic state only: it
+# emits at most 16 rows and only when lower_type receives a non-enum kind.
+var mir_type_diag_function: text = "<outside-function>"
+var mir_type_diag_site: text = "direct"
+var mir_type_diag_index_seq: i64 = 0
+var mir_type_diag_index: i64 = -1
+var mir_type_diag_index_base_disc: i64 = -2
+var mir_type_diag_index_expr_disc: i64 = -2
+var mir_type_diag_index_local: i64 = -1
+var mir_type_diag_receipts: i64 = 0
+var mir_type_diag_enabled: bool = false
+
+fn mir_type_diag_begin_function(name: text):
+    mir_type_diag_enabled = true
+    mir_type_diag_function = name
+    mir_type_diag_site = "direct"
+    mir_type_diag_index_seq = 0
+    mir_type_diag_index = -1
+
+fn mir_type_diag_push_site(site: text) -> text:
+    val previous = mir_type_diag_site
+    if mir_type_diag_enabled:
+        mir_type_diag_site = site
+    previous
+
+fn mir_type_diag_restore_site(site: text):
+    if mir_type_diag_enabled:
+        mir_type_diag_site = site
+
+fn mir_type_diag_enter_index(base_disc: i64, index_disc: i64, local_id: i64):
+    if not mir_type_diag_enabled:
+        return
+    mir_type_diag_index_seq = mir_type_diag_index_seq + 1
+    mir_type_diag_index = mir_type_diag_index_seq
+    mir_type_diag_index_base_disc = base_disc
+    mir_type_diag_index_expr_disc = index_disc
+    mir_type_diag_index_local = local_id
+
+fn mir_type_diag_leave_index():
+    if not mir_type_diag_enabled:
+        return
+    mir_type_diag_index = -1
+    mir_type_diag_index_base_disc = -2
+    mir_type_diag_index_expr_disc = -2
+    mir_type_diag_index_local = -1
+
+fn mir_type_diag_invalid_receipt(type_disc: i64, file: text, line: i64, col: i64) -> text:
+    if not mir_type_diag_enabled or mir_type_diag_receipts >= 16:
+        return ""
+    mir_type_diag_receipts = mir_type_diag_receipts + 1
+    "[mir-invalid-type] n={mir_type_diag_receipts} fn={mir_type_diag_function} site={mir_type_diag_site} type_disc={type_disc} index={mir_type_diag_index} base_disc={mir_type_diag_index_base_disc} index_disc={mir_type_diag_index_expr_disc} local={mir_type_diag_index_local} at={file}:{line}:{col}"
 
 # ============================================================================
 # MIR Lowering Types
@@ -23,11 +73,6 @@ struct MirLowering:
     # mutations to a Dict stored inside MirLowering.
     local_symbol_ids: [i64]
     local_symbol_values: [LocalId]
-    # Symbol-id -> local_symbol_ids/local_symbol_values slot. A primitive-array
-    # open-address table avoids the staged-native Dict-field mutation failure
-    # while removing linear binding/name lookup from MIR lowering.
-    # -1 is empty; symbol ids and LocalIds are already rejected when negative.
-    local_symbol_index_slots: [i64]
     # MIR local ID -> declared HIR value type for erased generic call results.
     # Parallel arrays are authoritative for the same Stage4 reason as
     # local_symbol_ids/local_symbol_values above.
@@ -50,12 +95,6 @@ struct MirLowering:
     current_function_symbols: [SymbolId]
     current_function_names: [text]
     loop_stack: [(BlockId, BlockId)]  # (continue_block, break_block)
-    # Lexical finally blocks active at the current lowering point. This is
-    # compiler state only and adds no runtime storage in functions without EH.
-    finally_stack: [HirBlock]
-    # Lexical unsafe-block nesting. This prerequisite tracks authority only;
-    # reference/address MIR semantics remain unchanged.
-    unsafe_depth: i64
     errors: [MirError]
     # Per-lowering-session malformed HirType receipt state. Keeping this on
     # the owner prevents one compilation's cap from making a later one pass.
@@ -63,21 +102,6 @@ struct MirLowering:
     type_transport_owner: text
     type_transport_context: text
     type_transport_param_index: i64
-    # MC/DC instrumentation is compiler-owned and entirely absent when mode is
-    # zero.  Modes 1/2 mean static recorder / dynamic-aspect patchpoint.
-    # The active decision fields are compile-time lowering state only; they do
-    # not become program storage and therefore add no runtime allocation.
-    mcdc_mode: i64
-    mcdc_owner_bytes: i64
-    mcdc_global_bytes: i64
-    mcdc_include_csv: text
-    mcdc_exclude_csv: text
-    mcdc_next_runtime_id: i64
-    mcdc_active_decision_id: i64
-    mcdc_active_decision_semantic: text
-    mcdc_next_condition_ordinal: i64
-    mcdc_active_dynamic_token: LocalId
-    mcdc_active_tokens: [LocalId]
     field_map: Dict<i64, [text]>  # type symbol ID -> ordered field names
     bitfield_map: Dict<i64, [HirBitfieldField]>  # type symbol ID -> bitfield fields
     # MIR local ID -> bitfield type symbol ID, for locals holding a value
@@ -122,14 +146,6 @@ struct MirLowering:
     # plain (non-`mut`, non-`me`) `struct` param keeps Bug #167's value-copy.
     # See bug s19_class_free_fn_mutation_dropped_native_2026-07-17.
     class_type_names: Dict<text, bool>
-    # Struct NAME -> ordered field TYPE OWNERSHIP KEYS (module-qualified
-    # `composite_layout_key`s, parallel to `struct_field_type_name`; "" when
-    # the field's type is not a Named struct/class). A nested field spelled
-    # `Child` can be a value struct in one module and a class in another;
-    # the raw name alone cannot tell them apart, so nested value-copy and
-    # struct-spread decide class ownership from this qualified key and keep
-    # the raw name only for SymbolTable/struct_field_order lookups.
-    struct_field_type_ownership_key: Dict<text, [text]>
     # Struct NAME -> ordered field TYPE names (parallels struct_field_order;
     # "" when the field's type is not itself a Named struct/class). Bug #166:
     # a chained field access `r.origin.y` lowers the inner Field's `base`
@@ -145,9 +161,6 @@ struct MirLowering:
     # Opaque("str"); leaving it as the generic i64 fallback breaks native
     # string equality/interpolation after an otherwise-correct struct load.
     struct_field_repr_name: Dict<text, [text]>
-    # Struct/class NAME -> full declared field HIR types. Optional fields use
-    # this owner to normalize constructor, projection, and assignment values.
-    struct_field_hir_type: Dict<text, [HirType]>
     # Struct NAME -> ordered array-element struct names for fields such as
     # `commands: [DrawIrCommand]`. Field loads use this to preserve both the
     # runtime-array identity and the decoded element layout.
@@ -209,10 +222,6 @@ struct MirLowering:
     # local into runtime_array_locals so a chained `[idx]` indexes through the
     # runtime array path instead of misreading the raw boxed handle.
     struct_method_return_is_array: Dict<text, bool>
-    # "{struct NAME}::{method name}" -> true when the method's declared return
-    # type is Optional(T), for unresolved native-call recovery in
-    # method_calls_literals.spl. Sourced from HirImpl.method_return_is_optional.
-    struct_method_return_is_optional: Dict<text, bool>
     # "{enum NAME}::{variant name}" -> the struct NAME held by that variant's
     # SINGLE-field payload, when it was constructed from a value already known
     # to be that struct (see struct_value_syms.get(payload_local.id) at the
@@ -257,16 +266,6 @@ struct MirLowering:
     # raw getelementptr. The flat-bridge path does not thread a Dict MIR type,
     # so this id-keyed tag is authoritative.
     runtime_dict_locals: Dict<i64, bool>
-    # Container local id (array OR dict) -> the f64/f32 element MIR type
-    # observed at a store (`d[k] = 0.1`, `a.push(0.1)`, `a[i] = 0.1`). An
-    # empty `{}`/`[]` literal fixes the declared element type at the i64
-    # default and stores never retype the local, so without this the read
-    # side decodes the heap-boxed float via the integer `>>3` arm and leaks
-    # the box POINTER as an int (`var d = {}; d["k"] = 0.1; d["k"]` printed
-    # 13668775811778). Reads consult this map only when their statically
-    # resolved element type is the erased i64 default. Reset wherever
-    # runtime_dict_locals is reset (same local-id-collision lifecycle).
-    runtime_elem_value_type: Dict<i64, MirType>
     # MIR local ID of an ARRAY value -> the struct NAME of its elements, when
     # every element's struct name was known at literal-build time (see
     # lower_array_lit in method_calls_literals.spl). Bug (array-of-structs
@@ -300,21 +299,6 @@ struct MirLowering:
     enum_variant_index: Dict<text, [text]>
     # Enum NAME -> runtime discriminants, parallel to enum_variant_index.
     enum_variant_discriminants: Dict<text, [i64]>
-    # Variant LEAF name -> every bare enum owner currently registered under
-    # `enum_variant_index` that declares that leaf. Maintained incrementally by
-    # `reindex_enum_variant_owners` at each enum registration (including the
-    # divergent bare-name eviction path, so an evicted owner is withdrawn).
-    #
-    # Exists purely as the O(1) inverse of a full-keyspace scan. Dot-qualified
-    # enum construction (`CompileResult.CodegenError(..)`) arrives as a
-    # MethodCall whose receiver payload must NOT be re-matched on the Stage-3
-    # native lane (see the bug record). The conservative recovery therefore
-    # searches by variant leaf instead -- but doing that as a nested loop over
-    # `enum_variant_index.keys()` runs per METHOD CALL and allocates a fresh key
-    # array each time, which is the phase-5 MIR allocation runaway. A unique
-    # owner is exactly a single-element list here, matching the old scan's
-    # `count == 1` acceptance.
-    enum_variant_owners: Dict<text, [text]>
     # Bare enum NAME -> a description of a DIVERGENT same-bare-name registration
     # that overwrote an earlier one. enum_variant_index above is keyed by the
     # BARE enum name and is LAST-WINS, so an enum declared in another module
@@ -371,15 +355,6 @@ struct MirLowering:
     # live (possibly SSA-reassigned) one.
     lambda_capture_snapshot: Dict<i64, Dict<i64, LocalId>>
     current_has_vhdl_metadata: bool
-    # Normalized @gpu target while lowering one function body.
-    current_gpu_kernel_target: text
-    # True while lowering the body of a function declared `-> bool`.
-    # lower_return_expr needs the DECLARED return type to put a bare `.?`
-    # in bool position, and resolved_call_hir_return_type only answers for
-    # symbols present in the symbol table -- it returns nil for locally
-    # lowered functions, which silently skipped the coercion. lower_function
-    # has fn_.return_type in hand, so it records the answer here instead.
-    current_fn_returns_bool: bool
     # Compilation-wide identity for named types. HIR SymbolIds are local to
     # each module, so cross-module Struct/Enum references need one shared key.
     canonical_type_symbols: Dict<text, i64>
@@ -414,10 +389,6 @@ struct MirLowering:
     # mir_lowering_stmts.spl's `lower_assign_var` write hook (to emit
     # `StoreGlobal` for the mutable subset).
     global_symbol_ids: Dict<i64, bool>
-    # O(1), allocation-free hot lookup mirrors for the struct-keyed module
-    # dictionaries. i64 identity avoids the seed's SymbolId-key lookup bug.
-    global_statics_by_id: Dict<i64, MirStatic>
-    global_constants_by_id: Dict<i64, MirConstant>
     # array_global_2026-07-25: companion map, symbol id -> the module-level
     # `val`/`var` binding's ORIGINAL HIR initializer expression. Populated
     # alongside `global_symbol_ids` (see `lower_const`, function_lowering.spl).
@@ -446,9 +417,30 @@ struct MirLowering:
     # per symbol instead of once per reference site.
     array_global_mutation_warned: Dict<i64, bool>
     target_context: MirTargetContext
-    # Compiler-owned source compilation must not inherit bootstrap shortcuts
-    # from the process environment. Legacy driver entrypoints leave this true.
-    allow_ambient_bootstrap_policy: bool
+    # Compiler-resolved MC/DC policy. Empty/off emits no MIR probe rows.
+    mcdc_policy: text
+    mcdc_authored_path: text
+    mcdc_source_digest: i64
+    mcdc_current_function_name: text
+    mcdc_current_decision_runtime_id: i64
+    mcdc_current_decision_semantic_id: text
+    # Fixed function-entry slots used only while lowering an instrumented
+    # decision.  They become ordinary stack locals in native code; no heap or
+    # runtime-side mutable aggregation is required.
+    mcdc_evaluated_mask_slot: LocalId
+    mcdc_true_mask_slot: LocalId
+    mcdc_next_condition_ordinal: i64
+    mcdc_condition_count: i64
+    # Frozen masking-analysis input. Parallel scalar arrays are the bounded,
+    # pointer-free compiler/runtime boundary; opcodes match runtime_mcdc_v1.h.
+    mcdc_manifest_semantic_ids: [text]
+    mcdc_manifest_decision_ids: [i64]
+    mcdc_manifest_source_digests: [i64]
+    mcdc_manifest_condition_counts: [i64]
+    mcdc_manifest_token_offsets: [i64]
+    mcdc_manifest_token_counts: [i64]
+    mcdc_manifest_token_opcodes: [i64]
+    mcdc_manifest_token_conditions: [i64]
     # WP-E (resource ownership): every MIR local, in the CURRENT function,
     # that owns an affine `resource`-typed value (an `iso`-wrapped Named
     # type registered in compiler.frontend.resource_registry -- see
@@ -463,86 +455,29 @@ struct MirLowering:
     consumed_resource_locals: Dict<i64, bool>
 
 impl MirLowering:
-    fn local_symbol_slot(symbol_id: i64) -> i64:
-        if symbol_id < 0:
-            return -1
-        if self.local_symbol_index_slots.len() == 0:
-            if self.local_symbol_ids.len() > 0:
-                return -2
-            return -1
-        val capacity = self.local_symbol_index_slots.len()
-        var bucket = symbol_id % capacity
-        var probes = 0
-        while probes < capacity:
-            val slot = self.local_symbol_index_slots[bucket]
-            if slot < 0:
-                return -1
-            if slot >= self.local_symbol_ids.len() or slot >= self.local_symbol_values.len():
-                return -2
-            if self.local_symbol_ids[slot] == symbol_id:
-                return slot
-            bucket = (bucket + 1) % capacity
-            probes = probes + 1
-        -1
-
-    fn linear_local_symbol_slot(symbol_id: i64) -> i64:
-        var slot = self.local_symbol_ids.len() - 1
-        while slot >= 0:
-            if self.local_symbol_ids[slot] == symbol_id:
-                return slot
-            slot = slot - 1
-        -1
-
-    me rebuild_local_symbol_index(min_capacity: i64):
-        var capacity = 16
-        while capacity < min_capacity or
-              (self.local_symbol_ids.len() + 1) * 10 >= capacity * 7:
-            capacity = capacity * 2
-        var slots: [i64] = []
-        var fill = 0
-        while fill < capacity:
-            slots.push(-1)
-            fill = fill + 1
-        var slot = 0
-        while slot < self.local_symbol_ids.len():
-            val symbol_id = self.local_symbol_ids[slot]
-            var bucket = symbol_id % capacity
-            while slots[bucket] >= 0:
-                bucket = (bucket + 1) % capacity
-            slots[bucket] = slot
-            slot = slot + 1
-        self.local_symbol_index_slots = slots
-
     me bind_local(symbol_id: i64, local: LocalId):
         if symbol_id < 0 or local.id < 0:
             return
-        var existing_slot = self.local_symbol_slot(symbol_id)
-        if existing_slot == -2:
-            self.rebuild_local_symbol_index(self.local_symbol_ids.len() * 2)
-            existing_slot = self.local_symbol_slot(symbol_id)
-        if existing_slot >= 0:
-            self.local_symbol_values[existing_slot] = local
-            return
-        if self.local_symbol_index_slots.len() == 0 or
-           (self.local_symbol_ids.len() + 1) * 10 >= self.local_symbol_index_slots.len() * 7:
-            self.rebuild_local_symbol_index(self.local_symbol_index_slots.len() * 2)
-        val capacity = self.local_symbol_index_slots.len()
-        var bucket = symbol_id % capacity
-        while self.local_symbol_index_slots[bucket] >= 0:
-            bucket = (bucket + 1) % capacity
-        val new_slot = self.local_symbol_ids.len()
-        self.local_symbol_ids.push(symbol_id)
-        self.local_symbol_values.push(local)
-        self.local_symbol_index_slots[bucket] = new_slot
+        var ids = self.local_symbol_ids
+        var values = self.local_symbol_values
+        var i = 0
+        while i < ids.len():
+            if ids[i] == symbol_id:
+                values[i] = local
+                self.local_symbol_values = values
+                return
+            i = i + 1
+        ids.push(symbol_id)
+        values.push(local)
+        self.local_symbol_ids = ids
+        self.local_symbol_values = values
 
     fn find_local(symbol_id: i64) -> LocalId:
-        val slot = self.local_symbol_slot(symbol_id)
-        if slot >= 0:
-            return self.local_symbol_values[slot]
-        if slot == -2:
-            val authoritative_slot = self.linear_local_symbol_slot(symbol_id)
-            if authoritative_slot >= 0 and authoritative_slot < self.local_symbol_values.len():
-                return self.local_symbol_values[authoritative_slot]
+        var i = self.local_symbol_ids.len() - 1
+        while i >= 0:
+            if self.local_symbol_ids[i] == symbol_id:
+                return self.local_symbol_values[i]
+            i = i - 1
         LocalId(id: -1)
 
     me remember_local_hir_type(local_id: i64, type_: HirType, isolation_state: i64, resource_state: i64):
@@ -609,6 +544,55 @@ impl MirLowering:
             self.local_hir_type_isolation_states.push(source_state)
             self.local_hir_type_resource_states.push(source_resource_state)
 
+    me copy_local_hir_type_metadata(source_local_id: i64, destination_local_id: i64):
+        """Copy aligned HIR metadata without transporting HirType as an ABI arg.
+
+        The admitted Stage 2 native ABI can corrupt an aggregate `HirType`
+        passed from `maybe_copy_array_value` into `remember_local_hir_type`.
+        Keep both method arguments scalar and copy the aggregate only while it
+        remains an element of this owner's aligned local arrays.
+        """
+        var source_index: i64 = -1
+        var i = self.local_hir_type_ids.len() - 1
+        while i >= 0:
+            if self.local_hir_type_ids[i] == source_local_id:
+                source_index = i
+                break
+            i = i - 1
+        if source_index < 0:
+            return
+
+        var ids = self.local_hir_type_ids
+        var values = self.local_hir_type_values
+        var states = self.local_hir_type_isolation_states
+        var resource_states = self.local_hir_type_resource_states
+        val source_type = values[source_index]
+        # Match find_local_hir_type's fail-closed sentinel contract. A raw
+        # staged-native zero is not valid HIR metadata and must not be copied
+        # into a second local.
+        if source_type == nil or source_type == 0:
+            return
+        var destination_index: i64 = -1
+        i = ids.len() - 1
+        while i >= 0:
+            if ids[i] == destination_local_id:
+                destination_index = i
+                break
+            i = i - 1
+        if destination_index >= 0:
+            values[destination_index] = source_type
+            states[destination_index] = states[source_index]
+            resource_states[destination_index] = resource_states[source_index]
+        else:
+            ids.push(destination_local_id)
+            values.push(source_type)
+            states.push(states[source_index])
+            resource_states.push(resource_states[source_index])
+        self.local_hir_type_ids = ids
+        self.local_hir_type_values = values
+        self.local_hir_type_isolation_states = states
+        self.local_hir_type_resource_states = resource_states
+
     fn find_local_hir_type(local_id: i64) -> HirType?:
         var i = self.local_hir_type_ids.len() - 1
         while i >= 0:
@@ -667,7 +651,9 @@ impl MirLowering:
     me mark_runtime_value_local(local_id: i64):
         if self.is_runtime_value_local(local_id):
             return
-        self.runtime_value_local_ids.push(local_id)
+        var ids = self.runtime_value_local_ids
+        ids.push(local_id)
+        self.runtime_value_local_ids = ids
 
     me mark_tagged_text_local(local_id: i64):
         self.tagged_text_locals[local_id] = true
@@ -691,23 +677,9 @@ impl MirLowering:
         self.runtime_value_local_ids = ids
 
 struct MirError:
-    """MIR lowering error.
-
-    `fatal` is the call site's own declaration that this error must abort the
-    build before codegen. It exists so that fatality is a property the site
-    states explicitly, instead of being re-derived in 80.driver by matching the
-    message text against a prefix allowlist (`_mir_error_is_fatal`). Message
-    text is a display concern; when it was also the control-flow signal, any
-    reworded diagnostic silently changed build semantics -- e.g. the site that
-    emits "unsupported Result {operation} payload type" was fatal for `unwrap`
-    and fail-open for `unwrap_err`, purely because `_err` broke `starts_with`.
-
-    Set it with `self.error_fatal(...)` rather than `self.error(...)`. Sites
-    that record a genuinely advisory diagnostic keep using `self.error(...)`.
-    """
+    """MIR lowering error."""
     message: text
     span: Span?
-    fatal: bool
 
 # ============================================================================
 # Exports

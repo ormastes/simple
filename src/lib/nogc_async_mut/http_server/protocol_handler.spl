@@ -20,7 +20,7 @@ enum ProtocolKind:
     """Enumeration of supported application-layer HTTP protocol versions."""
     Http1
     Http2
-    Unsupported
+    Http3
 
 # ============================================================================
 # ALPN Dispatch
@@ -30,8 +30,8 @@ fn protocol_from_alpn(alpn: text) -> ProtocolKind:
     """Map a negotiated ALPN protocol string to a ProtocolKind.
 
     "h2"  → Http2
-    "http/1.1" or empty → Http1
-    "h3" and every unknown value → Unsupported
+    "h3"  → Http3 (rejected on TCP by the caller; signalled here for logging)
+    Any other value (including "http/1.1" or empty) → Http1
 
     Args:
         alpn: Negotiated ALPN string from TLS handshake. May be empty.
@@ -41,12 +41,9 @@ fn protocol_from_alpn(alpn: text) -> ProtocolKind:
     """
     if alpn == "h2":
         return ProtocolKind.Http2
-    if alpn == "" or alpn == "http/1.1":
-        return ProtocolKind.Http1
-    # ALPN is an exact negotiated identifier. Treating an unknown value as
-    # HTTP/1.1 silently downgrades a connection the peer did not negotiate.
-    # HTTP/3 is unsupported here because this owner is TCP/TLS, not QUIC.
-    ProtocolKind.Unsupported
+    if alpn == "h3":
+        return ProtocolKind.Http3
+    ProtocolKind.Http1
 
 fn protocol_handler_label(kind: ProtocolKind) -> text:
     """Return a human-readable label for a ProtocolKind (used in logs).
@@ -62,5 +59,5 @@ fn protocol_handler_label(kind: ProtocolKind) -> text:
             "http/1.1"
         ProtocolKind.Http2:
             "h2"
-        ProtocolKind.Unsupported:
-            "unsupported"
+        ProtocolKind.Http3:
+            "h3"

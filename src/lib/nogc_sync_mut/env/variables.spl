@@ -2,28 +2,11 @@
 #
 # Core operations for getting, setting, and managing environment variables.
 
-use std.env.types.{rt_env_get, rt_env_get_i64, rt_env_remove, rt_env_vars}
-use std.io_runtime
-
-@always_inline
-fn _env_get_raw(key: text) -> text?:
-    unsafe(capabilities: [ffi]):
-        rt_env_get(key)
-
-@always_inline
-fn _env_get_i64_raw(key: text, default: i64) -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_env_get_i64(key, default)
-
-@always_inline
-fn _env_remove_raw(key: text) -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_env_remove(key)
-
-@always_inline
-fn _env_vars_raw() -> [(text, text)]?:
-    unsafe(capabilities: [ffi]):
-        rt_env_vars()
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_get_i64(key: text, default: i64) -> i64
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_env_remove(key: text) -> bool
+extern fn rt_env_vars() -> [(text, text)]
 
 # ============================================================================
 # Core Environment Variable Operations
@@ -36,7 +19,7 @@ fn env_get(key: text) -> text:
         env_get("HOME")  # "/home/user"
         env_get("NONEXISTENT")  # ""
     """
-    val value = _env_get_raw(key)
+    val value = rt_env_get(key)
     if value == nil:
         ""
     else:
@@ -56,7 +39,7 @@ fn env_get_or(key: text, default: text) -> text:
 
 fn env_get_i64(key: text, default: i64) -> i64:
     """Get and parse a decimal environment value, or return default."""
-    _env_get_i64_raw(key, default)
+    rt_env_get_i64(key, default)
 
 fn env_set(key: text, value: text) -> bool:
     """Set environment variable.
@@ -64,7 +47,7 @@ fn env_set(key: text, value: text) -> bool:
     Example:
         env_set("MY_VAR", "hello")  # true
     """
-    io_runtime.env_set(key, value)
+    rt_env_set(key, value)
 
 fn env_unset(key: text) -> bool:
     """Remove environment variable.
@@ -72,7 +55,7 @@ fn env_unset(key: text) -> bool:
     Example:
         env_unset("MY_VAR")  # true
     """
-    _env_remove_raw(key)
+    rt_env_remove(key)
 
 fn env_has(key: text) -> bool:
     """Check if environment variable exists.
@@ -81,26 +64,19 @@ fn env_has(key: text) -> bool:
         env_has("HOME")  # true
         env_has("NONEXISTENT")  # false
     """
-    val value = _env_get_raw(key)
+    val value = rt_env_get(key)
     if value == nil:
         false
     else:
         value != ""
 
-@unsafe(reason: "legacy environment-list API collapses snapshot allocation failure to an empty list", capabilities: [ffi])
 fn env_list() -> [(text, text)]:
     """Get all environment variables as list of (name, value) tuples.
 
     Example:
         env_list()  # [("HOME", "/home/user"), ("PATH", "/usr/bin"), ...]
     """
-    _env_vars_raw() ?? []
-
-fn env_list_checked() -> Result<[(text, text)], text>:
-    val values = _env_vars_raw()
-    if values == nil:
-        return Err("rt_env_vars failed to allocate an environment snapshot")
-    Ok(values)
+    rt_env_vars()
 
 fn env_clear():
     """Clear all environment variables (dangerous, use with caution)."""
@@ -384,15 +360,10 @@ fn expand_var(text: text) -> text:
     var pos = 0
 
     while pos < result.len():
-        # find returns a plain i64 (-1 == not found), not an Option — see the
-        # matching guard below at `close_offset >= 0`. The previous `.? ` guard
-        # here was wrong in BOTH directions: on the JIT `.?` on an i64 is a
-        # zero-test, so it fired for a valid match at index 0 (breaking
-        # expansion of a leading "$VAR") and did NOT fire for the -1 not-found
-        # sentinel. Use the explicit sign test.
-        val dollar_idx = result.substring(pos).find("$")
-        if dollar_idx < 0:
+        val dollar_pos = result.substring(pos).find("$")
+        if not dollar_pos.?:
             break
+        val Some(dollar_idx) = dollar_pos
 
         val start = pos + dollar_idx
         if start + 1 >= result.len():
@@ -400,9 +371,8 @@ fn expand_var(text: text) -> text:
 
         if result[start + 1] == "{":
             # Find closing brace
-            # find returns a plain i64 (-1 == not found), not an Option.
-            val close_offset = result.substring(start + 2).find("}")
-            if close_offset >= 0:
+            val close_pos = result.substring(start + 2).find("}")
+            if val Some(close_offset) = close_pos:
                 val close_idx = start + 2 + close_offset
                 val var_expr = result.substring(start + 2, close_idx)
                 val expanded = expand_var_expr(var_expr)
@@ -425,18 +395,15 @@ fn expand_var_expr(expr: text) -> text:
     Internal helper for expand_var.
     """
     # Check for :- (use default)
-    # find returns a plain i64 (-1 == not found), not an Option.
-    val default_sep = expr.find(":-")
-    if default_sep >= 0:
-        val sep_idx = default_sep
+    val default_pos = expr.find(":-")
+    if val Some(sep_idx) = default_pos:
         val var_name = expr.substring(0, sep_idx)
         val default_val = expr.substring(sep_idx + 2)
         return env_get_or(key: var_name, default: default_val)
 
     # Check for := (set default)
-    val set_sep = expr.find(":=")
-    if set_sep >= 0:
-        val sep_idx = set_sep
+    val set_pos = expr.find(":=")
+    if val Some(sep_idx) = set_pos:
         val var_name = expr.substring(0, sep_idx)
         val default_val = expr.substring(sep_idx + 2)
 

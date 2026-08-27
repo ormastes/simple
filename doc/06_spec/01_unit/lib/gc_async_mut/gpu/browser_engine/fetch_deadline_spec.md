@@ -53,7 +53,16 @@ would cross the deadline fails before its response is committed.
 
 - should stop a mixed-scheme redirect chain at one absolute deadline
 - Register three local hops whose aggregate latency exceeds five seconds
+- var registry = MockResponseRegistry create at
+- [Pair
+- [Pair
+- [Pair
+- set mock registry
+- Logger new
 - Fetch with one absolute deadline shared by every redirect
+- Ok
+- fail
+- Err
    - Expected: error.source equals `network`
 - Reject the late response without committing cache state
    - Expected: get_mock_registry().observed_requests.len() equals `3`
@@ -64,7 +73,7 @@ would cross the deadline fails before its response is committed.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -112,6 +121,11 @@ expect(fetch.cache.entries.len()).to_equal(0)
 
 - should complete a mixed-scheme redirect chain within the same budget
 - Register a local HTTP to HTTPS chain within five seconds
+- var registry = MockResponseRegistry create at
+- [Pair
+- [Pair
+- set mock registry
+- Logger new
 - Complete all hops before the absolute deadline
    - Expected: response.status equals `200`
    - Expected: response.body_text() equals `done`
@@ -122,7 +136,7 @@ expect(fetch.cache.entries.len()).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -167,6 +181,10 @@ expect(get_mock_registry().now_ms).to_equal(5500)
 
 - should retain the twenty-redirect ceiling inside the deadline
 - Register a zero-latency local redirect loop
+- var registry = MockResponseRegistry create at
+- [Pair
+- set mock registry
+- Logger new
 - Stop after twenty redirects without refreshing the deadline
    - Expected: get_mock_registry().observed_requests.len() equals `21`
    - Expected: get_mock_registry().now_ms equals `1000`

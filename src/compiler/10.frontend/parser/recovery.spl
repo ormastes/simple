@@ -14,6 +14,7 @@
 enum CommonMistake:
     # Python
     PythonDef           # def instead of fn
+    PythonSelf          # self. instead of implicit self
     PythonTrue          # True instead of true
     PythonFalse         # False instead of false
     # Rust
@@ -51,6 +52,8 @@ fn mistake_message(m: CommonMistake) -> text:
     match m:
         case PythonDef:
             "Use 'fn' to define functions in Simple, not 'def'.\n  Python:  def add(a, b):\n  Simple:  fn add(a, b):"
+        case PythonSelf:
+            "In Simple, 'self' is implicit in methods. Don't write 'self.'.\n  Python:  self.x = value\n  Simple:  x = value"
         case PythonTrue:
             "Use lowercase 'true' and 'false' in Simple."
         case PythonFalse:
@@ -72,11 +75,7 @@ fn mistake_message(m: CommonMistake) -> text:
         case JavaNew:
             "Use struct literal: Type(field: value) or Type { field: value }"
         case JavaThis:
-            # 'self' is implicit in the PARAMETER LIST only, never in field
-            # access: a bare `x = value` inside a method does not assign the
-            # receiver's field. See
-            # doc/08_tracking/bug/interp_implicit_self_field_assignment_silent_noop_2026-07-17.md
-            "Use 'self' instead of 'this'. Field access keeps the 'self.' prefix.\n  Java:    this.x = value;\n  Simple:  self.x = value"
+            "Use 'self' (which is implicit in methods)."
         case CppTemplate:
             "Generic parameters come after the name: struct Vec<T>:"
         case CppNamespace:
@@ -90,7 +89,12 @@ fn mistake_message(m: CommonMistake) -> text:
         case TsInterface:
             "Use 'trait' instead of 'interface'."
         case TsArrowFunction:
-            "Use ':' for function bodies, '=>' is not used.\n  Simple:  val add = \\a, b: a + b"
+            # `(x) => e` / `(x, y) => e` / `() => e` ARE supported arrow
+            # lambdas in both parsers. Only the BARE `x => e` form (no
+            # parentheses) is unimplemented, because `=>` is also the
+            # match-arm separator. doc/08_tracking/bug/
+            # seed_parser_arrow_lambda_block_expr_wrapped_return_type_2026-08-23.md
+            "Parenthesise the parameter list: '(x) => x + 1'. A bare 'x => e' is not\n  parsed, because '=>' is also the match-arm separator.\n  Simple:  val add = (a, b) => a + b   # or  \\a, b: a + b"
         case CSemicolon:
             "Semicolons are optional in Simple."
         case CTypeFirst:
@@ -121,7 +125,7 @@ fn mistake_suggestion(m: CommonMistake) -> text:
         case JavaPublicClass: "Use 'pub class' or 'pub struct'"
         case JavaVoid: "Omit the return type"
         case JavaNew: "Use struct literal: Type(field: value)"
-        case JavaThis: "Replace 'this.' with 'self.' (keep the prefix on field access)"
+        case JavaThis: "Use 'self' (implicit in methods)"
         case TsFunction: "Replace 'function' with 'fn'"
         case TsConst: "Replace 'const' with 'val'"
         case TsLet: "Use 'val' or 'var'"
@@ -140,29 +144,33 @@ val C_TYPE_NAMES = ["int", "uint", "float", "double", "char", "long",
                      "short", "byte", "boolean", "void", "string", "String"]
 
 fn detect_common_mistake(current_lexeme: text, current_kind: text,
-                         prev_kind: text, next_lexeme: text?,
-                         next_kind: text?) -> has_CommonMistake:
+                         prev_kind: text, next_lexeme: text?) -> has_CommonMistake:
     """Detect common mistakes from other languages based on token sequence."""
 
     # Python: def
-    if current_lexeme == "def" and current_kind == "Identifier":
+    if current_lexeme == "def":
+        if current_kind == "Identifier":
         return CommonMistake.PythonDef
 
     # `None` is a valid Simple enum/unit variant. This token-level recovery
     # pass has no type information, so it must not warn on ambiguous None uses.
-    if current_lexeme == "None" and current_kind == "Identifier":
+    if current_lexeme == "None":
+        if current_kind == "Identifier":
         return nil
 
     # Python: True/False (not in enum/declaration contexts — enum variant names start lines)
-    if current_lexeme == "True" and current_kind == "Identifier":
+    if current_lexeme == "True":
+        if current_kind == "Identifier":
         if prev_kind != "Newline" and prev_kind != "Indent":
             return CommonMistake.PythonTrue
-    if current_lexeme == "False" and current_kind == "Identifier":
+    if current_lexeme == "False":
+        if current_kind == "Identifier":
         if prev_kind != "Newline" and prev_kind != "Indent":
             return CommonMistake.PythonFalse
 
     # Rust: let mut
-    if prev_kind == "Let" and current_lexeme == "mut" and current_kind == "Identifier":
+    if prev_kind == "Let":
+        if current_lexeme == "mut" and current_kind == "Identifier":
         return CommonMistake.RustLetMut
 
     # Java: public class
@@ -171,35 +179,42 @@ fn detect_common_mistake(current_lexeme: text, current_kind: text,
             return CommonMistake.JavaPublicClass
 
     # Java: void (not after ->)
-    if current_lexeme == "void" and current_kind == "Identifier" and prev_kind != "Arrow":
+    if current_lexeme == "void":
+        if current_kind == "Identifier" and prev_kind != "Arrow":
         return CommonMistake.JavaVoid
 
     # Java: this
-    if current_lexeme == "this" and current_kind == "Identifier":
+    if current_lexeme == "this":
+        if current_kind == "Identifier":
         return CommonMistake.JavaThis
 
     # TS: `function name`; `function` remains a valid Simple binder/field name.
-    if current_lexeme == "function" and current_kind == "Identifier":
+    if current_lexeme == "function":
+        if current_kind == "Identifier":
         if (next_kind ?? "") == "Identifier":
             return CommonMistake.TsFunction
 
     # TS: const
-    if current_lexeme == "const" and current_kind == "Identifier":
+    if current_lexeme == "const":
+        if current_kind == "Identifier":
         return CommonMistake.TsConst
 
     # TS: interface (not as a dotted module-path segment,
     # e.g. `use std.common.torch.interface.{...}`)
-    if current_lexeme == "interface" and current_kind == "Identifier":
+    if current_lexeme == "interface":
+        if current_kind == "Identifier":
         if prev_kind != "Dot" and (next_lexeme ?? "") != ".":
             return CommonMistake.TsInterface
 
     # C++: namespace
-    if current_lexeme == "namespace" and current_kind == "Identifier":
+    if current_lexeme == "namespace":
+        if current_kind == "Identifier":
         return CommonMistake.CppNamespace
 
     # C++: template (only when followed by '<', i.e. template<T>;
     # a bare identifier named `template` is valid Simple code)
-    if current_lexeme == "template" and current_kind == "Identifier":
+    if current_lexeme == "template":
+        if current_kind == "Identifier":
         if (next_lexeme ?? "") == "<":
             return CommonMistake.CppTemplate
 

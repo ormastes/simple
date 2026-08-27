@@ -1,0 +1,392 @@
+# Generic monotone dataflow framework + incremental red/green solver (C5).
+#
+# Substrate for block-level incremental reuse (semantic incremental build v2,
+# plan §2b). States are CANONICAL TEXT encodings: a problem defines bottom,
+# boundary, a monotone join, and a per-block transfer over that encoding. The
+# state text doubles as its own fingerprint, so out-state equality is exactly
+# the "outgoing-state contract unchanged" green test.
+#
+# Full solve: SCCs (iterative Tarjan) of the reachable CFG, processed in
+# topological order (reverse for backward problems); each SCC is iterated by
+# worklist to its local fixed point.
+#
+# Incremental solve: results are keyed by BlockKey DIGEST (never BlockId — a
+# transient in-run handle, LOCAL_STATE per the frozen schema). An SCC is RED
+# when it contains a changed block, a block with no old row, a block whose
+# successor-contract (succ key digests) changed, or when any upstream out-state
+# feeding it differs from the old value. Red SCCs are reset to bottom and
+# re-iterated; green SCCs restore old in/out verbatim and stop propagation.
+# If the BlockKeyMap is ambiguous, ALL blocks are red (whole-function
+# fallback) — a false miss is acceptable, a false hit is a miscompile.
+
+use compiler.mir.mir_instructions.{BlockId, MirTerminator, MirBlock}
+use compiler.mir.incremental.block_key.{
+    BlockKeyMap, compute_block_keys, block_key_digest_for, block_successor_ids
+}
+
+struct DataflowProblem:
+    """A monotone dataflow problem over canonical-text states."""
+    name: text
+    forward: bool
+    bottom: text                       # least element encoding
+    boundary: text                     # entry (forward) / exit (backward) state
+    join: fn(text, text) -> text       # monotone, commutative, associative
+    transfer: fn(MirBlock, text) -> text  # monotone in the state argument
+
+struct DataflowResult:
+    """Fixed-point states, keyed by stable BlockKey digest (parallel arrays)."""
+    key_digests: [text]
+    in_states: [text]
+    out_states: [text]
+    succ_contracts: [text]   # canonical sorted succ-key-digest list per block
+    pred_contracts: [text]   # canonical sorted analysis-pred key-digest list
+
+struct _Cfg:
+    ids: [i64]               # reachable block ids in discovery order
+    block_idx: [i64]         # index into `blocks` per id
+    succs: [[i64]]           # positions into ids
+    preds: [[i64]]           # positions into ids
+    scc_of: [i64]            # SCC index per position
+    scc_order: [[i64]]       # SCCs in topological order (analysis direction)
+
+fn _pos_of(ids: [i64], id: i64) -> i64:
+    var i = 0
+    while i < ids.len():
+        if ids[i] == id:
+            return i
+        i = i + 1
+    -1
+
+fn _build_cfg(blocks: [MirBlock], entry: BlockId, forward: bool) -> _Cfg:
+    # reachable ids via DFS in canonical successor order
+    var ids: [i64] = []
+    var block_idx: [i64] = []
+    var stack: [i64] = [entry.id]
+    while stack.len() > 0:
+        val bid = stack[stack.len() - 1]
+        stack.pop()
+        if _pos_of(ids, bid) >= 0:
+            continue
+        var bi = -1
+        var i = 0
+        while i < blocks.len():
+            if blocks[i].id.id == bid:
+                bi = i
+            i = i + 1
+        if bi < 0:
+            continue
+        ids.push(bid)
+        block_idx.push(bi)
+        val ss = block_successor_ids(blocks[bi].terminator)
+        var si = ss.len() - 1
+        while si >= 0:
+            if _pos_of(ids, ss[si]) < 0:
+                stack.push(ss[si])
+            si = si - 1
+
+    val n = ids.len()
+    # arrays are value types: build each row locally, then push (no nested
+    # index-mutation writeback assumptions)
+    var succs: [[i64]] = []
+    var p = 0
+    while p < n:
+        val ss = block_successor_ids(blocks[block_idx[p]].terminator)
+        var row: [i64] = []
+        for s in ss:
+            val sp = _pos_of(ids, s)
+            if sp >= 0:
+                row.push(sp)
+        succs.push(row)
+        p = p + 1
+    var preds: [[i64]] = []
+    p = 0
+    while p < n:
+        var row: [i64] = []
+        var q = 0
+        while q < n:
+            if succs[q].contains(p):
+                row.push(q)
+            q = q + 1
+        preds.push(row)
+        p = p + 1
+
+    # analysis-direction edges
+    var fsuccs = succs
+    var fpreds = preds
+    if not forward:
+        fsuccs = preds
+        fpreds = succs
+
+    # iterative Tarjan SCC over analysis-direction edges
+    var index_of: [i64] = []
+    var lowlink: [i64] = []
+    var on_stack: [bool] = []
+    var scc_of: [i64] = []
+    p = 0
+    while p < n:
+        index_of.push(-1)
+        lowlink.push(0)
+        on_stack.push(false)
+        scc_of.push(-1)
+        p = p + 1
+    var next_index = 0
+    var scc_count = 0
+    var tstack: [i64] = []
+    var sccs: [[i64]] = []
+
+    var root = 0
+    while root < n:
+        if index_of[root] >= 0:
+            root = root + 1
+            continue
+        # explicit DFS: frames of (node, child cursor)
+        var fnodes: [i64] = [root]
+        var fcursor: [i64] = [0]
+        index_of[root] = next_index
+        lowlink[root] = next_index
+        next_index = next_index + 1
+        tstack.push(root)
+        on_stack[root] = true
+        while fnodes.len() > 0:
+            val fi = fnodes.len() - 1
+            val v = fnodes[fi]
+            if fcursor[fi] < fsuccs[v].len():
+                val w = fsuccs[v][fcursor[fi]]
+                fcursor[fi] = fcursor[fi] + 1
+                if index_of[w] < 0:
+                    index_of[w] = next_index
+                    lowlink[w] = next_index
+                    next_index = next_index + 1
+                    tstack.push(w)
+                    on_stack[w] = true
+                    fnodes.push(w)
+                    fcursor.push(0)
+                elif on_stack[w]:
+                    if index_of[w] < lowlink[v]:
+                        lowlink[v] = index_of[w]
+            else:
+                if lowlink[v] == index_of[v]:
+                    var comp: [i64] = []
+                    var going = true
+                    while going:
+                        val w = tstack[tstack.len() - 1]
+                        tstack.pop()
+                        on_stack[w] = false
+                        scc_of[w] = scc_count
+                        comp.push(w)
+                        if w == v:
+                            going = false
+                    sccs.push(comp)
+                    scc_count = scc_count + 1
+                fnodes.pop()
+                fcursor.pop()
+                if fnodes.len() > 0:
+                    val parent = fnodes[fnodes.len() - 1]
+                    if lowlink[v] < lowlink[parent]:
+                        lowlink[parent] = lowlink[v]
+        root = root + 1
+
+    # Tarjan emits SCCs in reverse topological order (analysis direction):
+    # reverse to get topological order.
+    var scc_order: [[i64]] = []
+    var k = sccs.len() - 1
+    while k >= 0:
+        scc_order.push(sccs[k])
+        k = k - 1
+
+    _Cfg(ids: ids, block_idx: block_idx, succs: fsuccs, preds: fpreds,
+         scc_of: scc_of, scc_order: scc_order)
+
+fn _succ_contract(key_map: BlockKeyMap, t: MirTerminator) -> text:
+    """Canonical successor contract: sorted succ BlockKey digests."""
+    val ss = block_successor_ids(t)
+    var digs: [text] = []
+    for s in ss:
+        digs.push(block_key_digest_for(key_map, s))
+    digs.sort()
+    var out = ""
+    for d in digs:
+        out = "{out}>{d}"
+    out
+
+fn _old_row(old: DataflowResult, digest: text) -> i64:
+    var i = 0
+    while i < old.key_digests.len():
+        if old.key_digests[i] == digest:
+            return i
+        i = i + 1
+    -1
+
+fn _solve(blocks: [MirBlock], entry: BlockId, problem: DataflowProblem,
+          key_map: BlockKeyMap, old: DataflowResult, use_old: bool) -> DataflowResult:
+    val jf = problem.join
+    val tf = problem.transfer
+    val cfg = _build_cfg(blocks, entry, problem.forward)
+    val n = cfg.ids.len()
+
+    var digests: [text] = []
+    var contracts: [text] = []
+    var pcontracts: [text] = []
+    var olds: [i64] = []        # old row per position, -1 = none
+    var changed: [bool] = []    # position-level red seed
+    var p = 0
+    while p < n:
+        val d = block_key_digest_for(key_map, cfg.ids[p])
+        digests.push(d)
+        val c = _succ_contract(key_map, blocks[cfg.block_idx[p]].terminator)
+        contracts.push(c)
+        pcontracts.push("")
+        var orow = -1
+        if use_old and (not key_map.ambiguous) and d != "":
+            orow = _old_row(old, d)
+        olds.push(orow)
+        var red = orow < 0
+        if orow >= 0 and old.succ_contracts[orow] != c:
+            red = true
+        changed.push(red)
+        p = p + 1
+    # analysis-direction predecessor contract: sorted pred key digests
+    p = 0
+    while p < n:
+        var pd: [text] = []
+        for q in cfg.preds[p]:
+            pd.push(digests[q])
+        pd.sort()
+        var pc = ""
+        for x in pd:
+            pc = "{pc}<{x}"
+        if cfg.preds[p].len() == 0:
+            pc = "{pc}<^boundary"
+        pcontracts[p] = pc
+        # in-edge SET change (added/removed pred) forces recompute
+        val orow2 = olds[p]
+        if orow2 >= 0 and old.pred_contracts[orow2] != pc:
+            changed[p] = true
+        p = p + 1
+
+    var ins: [text] = []
+    var outs: [text] = []
+    p = 0
+    while p < n:
+        ins.push(problem.bottom)
+        outs.push(problem.bottom)
+        p = p + 1
+
+    # process SCCs in topological order (analysis direction)
+    for comp in cfg.scc_order:
+        # in-state contribution for a position: joined outs of analysis-preds,
+        # plus boundary when it has none (entry / exit blocks)
+        var scc_red = false
+        for v in comp:
+            if changed[v]:
+                scc_red = true
+        # GREEN test (exact): no member changed (content, succ contract, or
+        # in-edge set), and every EXTERNAL analysis-pred's settled out-state is
+        # bit-identical to its old value. Then the SCC's equation system is
+        # identical to the old one, so its least fixed point is identical.
+        if not scc_red:
+            for v in comp:
+                for q in cfg.preds[v]:
+                    if cfg.scc_of[q] != cfg.scc_of[v]:
+                        val qrow = olds[q]
+                        if qrow < 0:
+                            scc_red = true
+                        elif outs[q] != old.out_states[qrow]:
+                            scc_red = true
+        if scc_red:
+            # reset members to bottom and iterate to local fixed point
+            for v in comp:
+                ins[v] = problem.bottom
+                outs[v] = problem.bottom
+            var work: [i64] = []
+            for v in comp:
+                work.push(v)
+            while work.len() > 0:
+                val v = work[work.len() - 1]
+                work.pop()
+                var newin = problem.bottom
+                for q in cfg.preds[v]:
+                    newin = jf(newin, outs[q])
+                if cfg.preds[v].len() == 0:
+                    newin = jf(newin, problem.boundary)
+                ins[v] = newin
+                val newout = tf(blocks[cfg.block_idx[v]], newin)
+                if newout != outs[v]:
+                    outs[v] = newout
+                    for s in cfg.succs[v]:
+                        if cfg.scc_of[s] == cfg.scc_of[v]:
+                            if not work.contains(s):
+                                work.push(s)
+                        # cross-SCC propagation: handled by red check below
+            # mark downstream red where the out contract actually changed
+            for v in comp:
+                val orow = olds[v]
+                var out_changed = true
+                if orow >= 0 and old.out_states[orow] == outs[v]:
+                    out_changed = false
+                if out_changed:
+                    for s in cfg.succs[v]:
+                        if cfg.scc_of[s] != cfg.scc_of[v]:
+                            changed[s] = true
+        else:
+            # GREEN: restore the old fixed point verbatim
+            for v in comp:
+                val orow = olds[v]
+                ins[v] = old.in_states[orow]
+                outs[v] = old.out_states[orow]
+
+    DataflowResult(key_digests: digests, in_states: ins, out_states: outs,
+                   succ_contracts: contracts, pred_contracts: pcontracts)
+
+fn dataflow_solve(blocks: [MirBlock], entry: BlockId, func_name: text,
+                  problem: DataflowProblem) -> DataflowResult:
+    """Full from-scratch fixed point."""
+    val km = compute_block_keys(func_name, blocks, entry)
+    val empty = DataflowResult(key_digests: [], in_states: [], out_states: [],
+                               succ_contracts: [], pred_contracts: [])
+    _solve(blocks, entry, problem, km, empty, false)
+
+fn dataflow_solve_incremental(blocks: [MirBlock], entry: BlockId, func_name: text,
+                              problem: DataflowProblem, old: DataflowResult,
+                              changed_key_digests: [text]) -> DataflowResult:
+    """Red/green incremental fixed point.
+
+    `changed_key_digests` are BlockKey digests of content-changed blocks. Any
+    block absent from `old`, with a changed successor contract, or downstream
+    of a changed out-state is recomputed; everything else restores old states.
+    Equals `dataflow_solve` on every input (see dataflow_incremental_spec.spl).
+    """
+    val km = compute_block_keys(func_name, blocks, entry)
+    if km.ambiguous:
+        # whole-function fallback: correspondence unknown
+        return _solve(blocks, entry, problem, km, old, false)
+    # translate content-changed digests into an old-result mask by shrinking
+    # the usable old rows: drop rows whose digest is listed as changed.
+    var kd: [text] = []
+    var is_: [text] = []
+    var os: [text] = []
+    var sc: [text] = []
+    var pc: [text] = []
+    var i = 0
+    while i < old.key_digests.len():
+        if not changed_key_digests.contains(old.key_digests[i]):
+            kd.push(old.key_digests[i])
+            is_.push(old.in_states[i])
+            os.push(old.out_states[i])
+            sc.push(old.succ_contracts[i])
+            pc.push(old.pred_contracts[i])
+        i = i + 1
+    val masked = DataflowResult(key_digests: kd, in_states: is_, out_states: os,
+                                succ_contracts: sc, pred_contracts: pc)
+    _solve(blocks, entry, problem, km, masked, true)
+
+fn dataflow_lookup_out(res: DataflowResult, digest: text) -> text?:
+    var i = 0
+    while i < res.key_digests.len():
+        if res.key_digests[i] == digest:
+            return res.out_states[i]
+        i = i + 1
+    nil
+
+export DataflowProblem, DataflowResult
+export dataflow_solve, dataflow_solve_incremental, dataflow_lookup_out

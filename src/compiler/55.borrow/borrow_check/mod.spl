@@ -20,6 +20,7 @@ use compiler.borrow.borrow_check.lifetime.*
 use compiler.borrow.borrow_check.borrow_graph.*
 use compiler.borrow.borrow_check.nll.*
 use compiler.mir.mir_data.*
+use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
 
 # ============================================================================
 # Borrow Check Result
@@ -68,16 +69,14 @@ class BorrowChecker:
         self.analyze_mir_borrows(func, nll)
 
         # Run the checker
-        # Direct field read + explicit returns: stage4-lane workarounds
-        # (bug doc 2026-07-23).
         if nll.check():
             self.checked_functions = self.checked_functions.push(func.name)
-            return BorrowCheckResult.Ok
+            BorrowCheckResult.Ok
         else:
-            val errors = nll.errors
+            val errors = nll.get_errors()
             for err in errors:
                 self.errors = self.errors.push(err)
-            return BorrowCheckResult.Errors(errors)
+            BorrowCheckResult.Errors(errors)
 
     me build_cfg(func: MirBody) -> ControlFlowGraph:
         """Build CFG from MIR function."""
@@ -134,12 +133,8 @@ class BorrowChecker:
 
     fn convert_terminator(mir_term: MirTerminator, block_id: i64) -> Terminator:
         """Convert MIR terminator to CFG terminator."""
-        # `Return` is not a MirTerminator variant — the return terminator
-        # is `Ret(value)`. As `Return(_)` the arm never matched, so a MIR
-        # return was never converted to `Terminator.Return` in the CFG.
-        # See doc/08_tracking/bug/case_bare_ident_is_irrefutable_binding_2026-08-01.md
         match mir_term:
-            case Ret(_):
+            case Return(_):
                 Terminator.Return
             case Goto(target):
                 val typed_target: BlockId = target
@@ -156,7 +151,7 @@ class BorrowChecker:
                 val typed_then: BlockId = then_br
                 val typed_else: BlockId = else_br
                 Terminator.SwitchInt([typed_then.id], typed_else.id)
-            case CallTerminator(_, _, _, normal, unwind, _, _):
+            case CallTerminator(_, _, _, normal, unwind):
                 val typed_normal: BlockId = normal
                 val target = typed_normal.id
                 val unwind_id: i64? = if unwind.?:
@@ -203,26 +198,17 @@ class BorrowChecker:
                     BorrowKind.Shared
                 else:
                     BorrowKind.Mutable
-                # `dest` is the reference temp this borrow lands in. It used
-                # to be dropped here, which left the Return check with no way
-                # to distinguish an escaping borrow from one that dies in the
-                # body.
-                val ref_dest: LocalId = dest
-                nll.record_borrow(point, mir_place, kind, ref_dest.id)
+                nll.record_borrow(point, mir_place, kind)
 
             case Copy(dest, src):
-                # Copy uses the source and (re)initializes the destination
+                # Copy uses the source
                 val src_local: LocalId = src
                 nll.record_use(point, Place.local(src_local.id))
-                val dest_local: LocalId = dest
-                nll.record_assign(point, Place.local(dest_local.id))
 
             case Move(dest, src):
-                # Move consumes the source and (re)initializes the destination
+                # Move consumes the source
                 val src_local: LocalId = src
                 nll.record_move(point, Place.local(src_local.id))
-                val dest_local: LocalId = dest
-                nll.record_assign(point, Place.local(dest_local.id))
 
             case TransferOut(dest, source, _, mode, _, _):
                 if mir_transfer_mode_consumes_source(mode):

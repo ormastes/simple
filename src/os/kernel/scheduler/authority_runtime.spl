@@ -1,0 +1,805 @@
+# Scheduler authority runtime — isolation, revocation, and child accounting.
+#
+# These operations work exclusively on live TCB CSpaces and task isolation
+# fields.  They intentionally do not consult IpcManager's legacy capability
+# model, which is not authoritative for scheduled workloads.
+
+use os.kernel.types.task_types.{TaskId, TaskState, TaskScheduleConfig, TaskIsolationProfile}
+use os.kernel.types.capability_types.{CapabilitySet, CapabilityToken}
+use os.kernel.scheduler.scheduler_types.{TaskControlBlock, TaskSecurity, TaskSecurityBinding}
+use os.kernel.memory.task_memory_budget.{task_memory_budget_pages}
+
+fn _authority_slot(tasks: [TaskControlBlock?], id: TaskId) -> i64:
+    var index = 0
+    while index < tasks.len():
+        val entry = tasks[index]
+        if entry != nil:
+            val task = entry
+            if task.id.id == id.id:
+                return index
+        index = index + 1
+    -1
+
+fn _authority_contains(ids: [u64], id: u64) -> bool:
+    var index = 0
+    while index < ids.len():
+        if ids[index] == id:
+            return true
+        index = index + 1
+    false
+
+fn _authority_has_syscall(filter: [u64], syscall_number: u64) -> bool:
+    var index = 0
+    while index < filter.len():
+        if filter[index] == syscall_number:
+            return true
+        index = index + 1
+    false
+
+fn _authority_has_live_task(tasks: [TaskControlBlock?], id: u64) -> bool:
+    if id == 0u64:
+        return true
+    val slot = _authority_slot(tasks, TaskId(id: id))
+    if slot < 0:
+        return false
+    val entry = tasks[slot]
+    if entry == nil:
+        return false
+    entry.unwrap().state != TaskState.Zombie
+
+fn _authority_security_rebuild(
+    security: TaskSecurity,
+    principal_id: u64,
+    job_id: u64,
+    parent_job_id: u64,
+    cspace_id: u64,
+    resource_domain_id: u64,
+    parent_resource_domain_id: u64,
+    audit_context_id: u64,
+    policy_bound: bool,
+    resource_limits_bound: bool,
+    process_limit: u64,
+    memory_limit_pages: u64,
+    cpu_weight_bound: bool,
+    syscall_filter_bound: bool,
+    syscall_filter: [u64],
+    root_mint_authority: bool,
+    reaper_authority: bool
+) -> TaskSecurity:
+    TaskSecurity(
+        principal_id: principal_id,
+        job_id: job_id,
+        parent_job_id: parent_job_id,
+        cspace_id: cspace_id,
+        resource_domain_id: resource_domain_id,
+        parent_resource_domain_id: parent_resource_domain_id,
+        audit_context_id: audit_context_id,
+        policy_bound: policy_bound,
+        resource_limits_bound: resource_limits_bound,
+        process_limit: process_limit,
+        memory_limit_pages: memory_limit_pages,
+        cpu_weight_bound: cpu_weight_bound,
+        syscall_filter_bound: syscall_filter_bound,
+        syscall_filter: syscall_filter,
+        root_mint_authority: root_mint_authority,
+        reaper_authority: reaper_authority,
+        bootstrap_kernel_policy: security.bootstrap_kernel_policy
+    )
+
+fn _authority_security_with_cspace_generation(security: TaskSecurity) -> TaskSecurity:
+    _authority_security_rebuild(
+        security,
+        security.principal_id, security.job_id, security.parent_job_id,
+        security.cspace_id + 1u64,
+        security.resource_domain_id, security.parent_resource_domain_id,
+        security.audit_context_id, security.policy_bound,
+        security.resource_limits_bound, security.process_limit,
+        security.memory_limit_pages, security.cpu_weight_bound,
+        security.syscall_filter_bound, security.syscall_filter,
+        security.root_mint_authority, security.reaper_authority
+    )
+
+fn _authority_security_without_exit_authority(security: TaskSecurity) -> TaskSecurity:
+    _authority_security_rebuild(
+        security,
+        security.principal_id, security.job_id, security.parent_job_id,
+        security.cspace_id + 1u64,
+        security.resource_domain_id, security.parent_resource_domain_id,
+        security.audit_context_id, security.policy_bound,
+        security.resource_limits_bound, security.process_limit,
+        security.memory_limit_pages, security.cpu_weight_bound,
+        security.syscall_filter_bound, security.syscall_filter, false, false
+    )
+
+fn _authority_schedule_with_weight(schedule: TaskScheduleConfig, weight: i64) -> TaskScheduleConfig:
+    TaskScheduleConfig(
+        policy: schedule.policy, weight: weight, priority: schedule.priority,
+        requested_slice_ns: schedule.requested_slice_ns,
+        vruntime: schedule.vruntime, lag: schedule.lag,
+        virtual_deadline: schedule.virtual_deadline,
+        runtime_ns: schedule.runtime_ns, period_ns: schedule.period_ns,
+        deadline_ns: schedule.deadline_ns, affinity_mask: schedule.affinity_mask,
+        home_cpu: schedule.home_cpu
+    )
+
+fn _authority_isolation_with_limits(
+    profile: TaskIsolationProfile,
+    max_threads: u32,
+    max_memory_pages: u64
+) -> TaskIsolationProfile:
+    TaskIsolationProfile(
+        profile_id: profile.profile_id,
+        address_space_id: profile.address_space_id,
+        capability_generation: profile.capability_generation,
+        sandboxed: profile.sandboxed,
+        allow_network: profile.allow_network,
+        max_memory_pages: max_memory_pages,
+        max_threads: max_threads
+    )
+
+fn _authority_isolation_with_domain(
+    profile: TaskIsolationProfile,
+    domain_id: u64
+) -> TaskIsolationProfile:
+    TaskIsolationProfile(
+        profile_id: domain_id,
+        address_space_id: profile.address_space_id,
+        capability_generation: profile.capability_generation + 1u64,
+        sandboxed: true,
+        allow_network: profile.allow_network,
+        max_memory_pages: profile.max_memory_pages,
+        max_threads: profile.max_threads
+    )
+
+fn _authority_isolation_with_filesystem_view(
+    profile: TaskIsolationProfile,
+    filesystem_root: text,
+    filesystem_denied: bool
+) -> TaskIsolationProfile:
+    TaskIsolationProfile(
+        profile_id: profile.profile_id,
+        address_space_id: profile.address_space_id,
+        capability_generation: profile.capability_generation + 1u64,
+        sandboxed: profile.sandboxed,
+        allow_network: profile.allow_network,
+        max_memory_pages: profile.max_memory_pages,
+        max_threads: profile.max_threads,
+        filesystem_root: filesystem_root,
+        filesystem_denied: filesystem_denied,
+        filesystem_view_bound: true
+    )
+
+pub fn sched_bind_managed_child_security(
+    tasks: [TaskControlBlock?],
+    id: TaskId,
+    binding: TaskSecurityBinding
+) -> ([TaskControlBlock?], bool):
+    """Bind a freshly created managed workload exactly once.
+
+    This is a launch-time operation, not a mutable role assignment.  It gives
+    the child fresh process/CSpace/audit identities and records the trusted
+    resource-parent domain needed for hierarchical accounting.
+    """
+    if id.id == 0u64 or binding.child_task_id.id != id.id:
+        return (tasks, false)
+    if not _authority_has_live_task(tasks, binding.parent_task_id):
+        return (tasks, false)
+    val slot = _authority_slot(tasks, id)
+    if slot < 0:
+        return (tasks, false)
+    val entry = tasks[slot]
+    if entry == nil:
+        return (tasks, false)
+    var revised_task = entry
+    if revised_task.state == TaskState.Zombie or revised_task.security.policy_bound:
+        return (tasks, false)
+    val security = _authority_security_rebuild(
+        revised_task.security,
+        id.id, id.id, binding.parent_task_id, id.id, id.id,
+        binding.parent_resource_domain_id, id.id, true, false, 0u64, 0u64,
+        false, false, [], false, false
+    )
+    revised_task.security = security
+    var updated = tasks
+    updated[slot] = revised_task
+    (updated, true)
+
+pub fn sched_bind_managed_child_syscall_filter(
+    tasks: [TaskControlBlock?],
+    id: TaskId,
+    allowed: [u64]
+) -> ([TaskControlBlock?], bool):
+    """Install one nonempty syscall allowlist on one policy-bound child."""
+    if allowed.len() == 0 or allowed.len() > 256:
+        return (tasks, false)
+    val slot = _authority_slot(tasks, id)
+    if slot < 0:
+        return (tasks, false)
+    val entry = tasks[slot]
+    if entry == nil:
+        return (tasks, false)
+    var revised_task = entry
+    val security = revised_task.security
+    if revised_task.state == TaskState.Zombie or not security.policy_bound or security.syscall_filter_bound:
+        return (tasks, false)
+    var index = 0
+    while index < allowed.len():
+        val syscall_number = allowed[index]
+        if syscall_number == 0u64:
+            return (tasks, false)
+        var prior = 0
+        while prior < index:
+            if allowed[prior] == syscall_number:
+                return (tasks, false)
+            prior = prior + 1
+        index = index + 1
+    revised_task.security = _authority_security_rebuild(
+        security,
+        security.principal_id, security.job_id, security.parent_job_id,
+        security.cspace_id, security.resource_domain_id,
+        security.parent_resource_domain_id, security.audit_context_id,
+        security.policy_bound, security.resource_limits_bound,
+        security.process_limit, security.memory_limit_pages,
+        security.cpu_weight_bound, true, allowed,
+        security.root_mint_authority, security.reaper_authority
+    )
+    var updated = tasks
+    updated[slot] = revised_task
+    (updated, true)
+
+pub fn sched_syscall_allowed(
+    tasks: [TaskControlBlock?],
+    id: TaskId,
+    syscall_number: u64
+) -> bool:
+    """Fail closed unless an exact task-local allowlist grants this syscall."""
+    if syscall_number == 0u64:
+        return false
+    val slot = _authority_slot(tasks, id)
+    if slot < 0:
+        return false
+    val entry = tasks[slot]
+    if entry == nil:
+        return false
+    val task = entry
+    if task.state == TaskState.Zombie:
+        return false
+    val security = task.security
+    if security.bootstrap_kernel_policy:
+        return true
+    if not security.policy_bound or not security.syscall_filter_bound:
+        return false
+    _authority_has_syscall(security.syscall_filter, syscall_number)
+
+pub fn sched_bind_managed_child_resource_limits(
+    tasks: [TaskControlBlock?],
+    id: TaskId,
+    process_limit: u64,
+    memory_limit_pages: u64
+) -> ([TaskControlBlock?], bool):
+    """Bind bounded process and memory limits once, clamped by the parent."""
+    if process_limit == 0u64 or memory_limit_pages == 0u64:
+        return (tasks, false)
+    val slot = _authority_slot(tasks, id)
+    if slot < 0:
+        return (tasks, false)
+    val entry = tasks[slot]
+    if entry == nil:
+        return (tasks, false)
+    var task = entry
+    val security = task.security
+    if task.state == TaskState.Zombie or not security.policy_bound or security.resource_limits_bound:
+        return (tasks, false)
+    var bounded_memory = memory_limit_pages
+    val parent_memory = _resource_domain_memory_limit(tasks, security.parent_resource_domain_id)
+    if parent_memory > 0u64 and parent_memory < bounded_memory:
+        bounded_memory = parent_memory
+    task.security = _authority_security_rebuild(
+        security,
+        security.principal_id, security.job_id, security.parent_job_id,
+        security.cspace_id, security.resource_domain_id,
+        security.parent_resource_domain_id, security.audit_context_id,
+        security.policy_bound, true, process_limit, bounded_memory,
+        security.cpu_weight_bound, security.syscall_filter_bound,
+        security.syscall_filter, security.root_mint_authority,
+        security.reaper_authority
+    )
+    task.isolation = _authority_isolation_with_limits(
+        task.isolation, process_limit as u32, bounded_memory)
+    var updated = tasks
+    updated[slot] = task
+    (updated, true)
+
+fn _resource_domain_cpu_weight(tasks: [TaskControlBlock?], domain_id: u64) -> u64:
+    var index = 0
+    while index < tasks.len():
+        val entry = tasks[index]
+        if entry != nil:
+            val task = entry
+            if task.security.resource_domain_id == domain_id and task.security.cpu_weight_bound:
+                if task.schedule.weight > 0:
+                    return task.schedule.weight as u64
+        index = index + 1
+    0u64
+
+pub fn sched_bind_managed_child_cpu_weight(
+    tasks: [TaskControlBlock?],
+    id: TaskId,
+    requested_weight: u64
+) -> ([TaskControlBlock?], bool):
+    """Bind a positive fair-share weight once, never exceeding its parent."""
+    if requested_weight == 0u64 or requested_weight > 4096u64:
+        return (tasks, false)
+    val slot = _authority_slot(tasks, id)
+    if slot < 0:
+        return (tasks, false)
+    val entry = tasks[slot]
+    if entry == nil:
+        return (tasks, false)
+    var task = entry
+    val security = task.security
+    if task.state == TaskState.Zombie or not security.policy_bound or security.cpu_weight_bound:
+        return (tasks, false)
+    var bounded_weight = requested_weight
+    val parent_weight = _resource_domain_cpu_weight(tasks, security.parent_resource_domain_id)
+    if parent_weight > 0u64 and parent_weight < bounded_weight:
+        bounded_weight = parent_weight
+    task.schedule = _authority_schedule_with_weight(task.schedule, bounded_weight as i64)
+    task.security = _authority_security_rebuild(
+        security,
+        security.principal_id, security.job_id, security.parent_job_id,
+        security.cspace_id, security.resource_domain_id,
+        security.parent_resource_domain_id, security.audit_context_id,
+        security.policy_bound, security.resource_limits_bound,
+        security.process_limit, security.memory_limit_pages, true,
+        security.syscall_filter_bound, security.syscall_filter,
+        security.root_mint_authority, security.reaper_authority
+    )
+    var updated = tasks
+    updated[slot] = task
+    (updated, true)
+
+pub fn sched_grant_root_mint_authority(
+    tasks: [TaskControlBlock?],
+    id: TaskId
+) -> ([TaskControlBlock?], bool):
+    """Grant the one non-transferable root mint object to prepared PID1."""
+    val slot = _authority_slot(tasks, id)
+    if slot < 0:
+        return (tasks, false)
+    val entry = tasks[slot]
+    if entry == nil:
+        return (tasks, false)
+    var task = entry
+    if task.state == TaskState.Zombie or not task.is_user or not task.security.policy_bound:
+        return (tasks, false)
+    if task.parent != nil and task.parent.unwrap().id != 0u64:
+        return (tasks, false)
+    var index = 0
+    while index < tasks.len():
+        val candidate = tasks[index]
+        if candidate != nil and candidate.unwrap().security.root_mint_authority:
+            return (tasks, false)
+        index = index + 1
+    val security = task.security
+    task.security = _authority_security_rebuild(
+        security,
+        security.principal_id, security.job_id, security.parent_job_id,
+        security.cspace_id, security.resource_domain_id,
+        security.parent_resource_domain_id, security.audit_context_id,
+        security.policy_bound, security.resource_limits_bound,
+        security.process_limit, security.memory_limit_pages,
+        security.cpu_weight_bound, security.syscall_filter_bound,
+        security.syscall_filter, true, security.reaper_authority
+    )
+    var updated = tasks
+    updated[slot] = task
+    (updated, true)
+
+pub fn sched_set_reaper_task(
+    tasks: [TaskControlBlock?],
+    id: TaskId
+) -> ([TaskControlBlock?], bool):
+    """Mark the prepared root child as the single job reaper."""
+    val slot = _authority_slot(tasks, id)
+    if slot < 0:
+        return (tasks, false)
+    val entry = tasks[slot]
+    if entry == nil:
+        return (tasks, false)
+    var task = entry
+    if task.state == TaskState.Zombie or not task.is_user or not task.security.policy_bound:
+        return (tasks, false)
+    if task.parent != nil and task.parent.unwrap().id != 0u64:
+        return (tasks, false)
+    var index = 0
+    while index < tasks.len():
+        val candidate = tasks[index]
+        if candidate != nil and candidate.unwrap().security.reaper_authority:
+            return (tasks, false)
+        index = index + 1
+    val security = task.security
+    task.security = _authority_security_rebuild(
+        security,
+        security.principal_id, security.job_id, security.parent_job_id,
+        security.cspace_id, security.resource_domain_id,
+        security.parent_resource_domain_id, security.audit_context_id,
+        security.policy_bound, security.resource_limits_bound,
+        security.process_limit, security.memory_limit_pages,
+        security.cpu_weight_bound, security.syscall_filter_bound,
+        security.syscall_filter, security.root_mint_authority, true
+    )
+    var updated = tasks
+    updated[slot] = task
+    (updated, true)
+
+pub fn sched_has_root_mint_authority(tasks: [TaskControlBlock?], id: TaskId) -> bool:
+    val slot = _authority_slot(tasks, id)
+    if slot < 0:
+        return false
+    val entry = tasks[slot]
+    if entry == nil:
+        return false
+    val task = entry
+    task.state != TaskState.Zombie and task.security.root_mint_authority and task.security.reaper_authority
+
+pub fn sched_bind_isolation_domain(
+    tasks: [TaskControlBlock?],
+    id: TaskId,
+    domain_id: u64
+) -> ([TaskControlBlock?], bool):
+    """Bind a task exactly once to a nonzero process-view domain."""
+    if domain_id == 0u64:
+        return (tasks, false)
+    val slot = _authority_slot(tasks, id)
+    if slot < 0:
+        return (tasks, false)
+    val entry = tasks[slot]
+    if entry == nil:
+        return (tasks, false)
+    var revised_task = entry
+    val profile = revised_task.isolation
+    if profile.profile_id != 0u64:
+        if profile.profile_id != domain_id:
+            return (tasks, false)
+    revised_task.isolation = _authority_isolation_with_domain(profile, domain_id)
+    var updated = tasks
+    updated[slot] = revised_task
+    (updated, true)
+
+fn _filesystem_view_is_valid(view_root: text) -> bool:
+    if view_root == "none":
+        return true
+    if view_root == "":
+        return false
+    if view_root.starts_with("/") == false:
+        return false
+    if view_root.contains("//"):
+        return false
+    if view_root.contains("/../"):
+        return false
+    if view_root.ends_with("/.."):
+        return false
+    true
+
+pub fn sched_bind_filesystem_view(
+    tasks: [TaskControlBlock?],
+    id: TaskId,
+    view_root: text
+) -> ([TaskControlBlock?], bool):
+    """Bind a concrete immutable filesystem root or the `none` deny view."""
+    if _filesystem_view_is_valid(view_root) == false:
+        return (tasks, false)
+    val slot = _authority_slot(tasks, id)
+    if slot < 0:
+        return (tasks, false)
+    val entry = tasks[slot]
+    if entry == nil:
+        return (tasks, false)
+    var revised_task = entry
+    var profile = revised_task.isolation
+    if profile.filesystem_view_bound:
+        return (tasks, false)
+    val filesystem_root = if view_root == "none": "" else: view_root
+    val filesystem_denied = view_root == "none"
+    revised_task.isolation = _authority_isolation_with_filesystem_view(
+        profile, filesystem_root, filesystem_denied)
+    var updated = tasks
+    updated[slot] = revised_task
+    (updated, true)
+
+pub fn sched_revoke_cspace_lineage(
+    tasks: [TaskControlBlock?],
+    root_token_id: u64
+) -> ([TaskControlBlock?], i64):
+    """Revoke one token and all currently live provenance descendants."""
+    if root_token_id == 0u64:
+        return (tasks, 0i64)
+    var revoked: [u64] = [root_token_id]
+    var expanded = true
+    while expanded:
+        expanded = false
+        var task_index = 0
+        while task_index < tasks.len():
+            val entry = tasks[task_index]
+            if entry != nil:
+                val task = entry
+                val cspace = task.capabilities
+                var cap_index = 0
+                while cap_index < cspace.caps.len():
+                    val token = cspace.caps[cap_index]
+                    val token_parent_id = token.parent_token_id
+                    val token_id = token.token_id
+                    if token_parent_id != 0u64:
+                        if _authority_contains(revoked, token_parent_id):
+                            if _authority_contains(revoked, token_id) == false:
+                                revoked.push(token_id)
+                                expanded = true
+                    cap_index = cap_index + 1
+            task_index = task_index + 1
+    var updated = tasks
+    var removed = 0i64
+    var update_index = 0
+    while update_index < updated.len():
+        val entry = updated[update_index]
+        if entry != nil:
+            val task = entry
+            val cspace = task.capabilities
+            var live_tokens: [CapabilityToken] = []
+            var cspace_changed = false
+            var cap_index = 0
+            while cap_index < cspace.caps.len():
+                val token = cspace.caps[cap_index]
+                val token_id = token.token_id
+                if _authority_contains(revoked, token_id):
+                    removed = removed + 1i64
+                    cspace_changed = true
+                else:
+                    live_tokens.push(token)
+                cap_index = cap_index + 1
+            if cspace_changed:
+                var revised_task = entry
+                revised_task.capabilities = CapabilitySet(
+                    caps: live_tokens, is_pledged: cspace.is_pledged)
+                revised_task.security = _authority_security_with_cspace_generation(
+                    revised_task.security)
+                updated[update_index] = revised_task
+        update_index = update_index + 1
+    (updated, removed)
+
+pub fn sched_terminate_direct_child_job(
+    tasks: [TaskControlBlock?],
+    caller: TaskId,
+    target: TaskId,
+    exit_code: i32
+) -> ([TaskControlBlock?], [TaskId]):
+    """Terminate one live PID1-owned child job without reaping it.
+
+    This is deliberately narrower than a general signal or job-control API.
+    The caller must be the live holder of both root-mint and reaper authority,
+    and `target` must be its live direct child.  Fork children retain the
+    managed service's job id, so they are terminated as the same lifetime
+    boundary and adopted by PID1 for ordinary waitpid reaping.
+
+    CSpace revocation happens before zombie publication.  The concrete
+    per-PID token allocation used by fs-exec makes each service job's root
+    tokens disjoint; recursive lineage revocation therefore also invalidates
+    capability delegations made by that job before its death is observable.
+    """
+    if target.id == 0u64 or target.id == caller.id:
+        return (tasks, [])
+    if not sched_has_root_mint_authority(tasks, caller):
+        return (tasks, [])
+    val target_slot = _authority_slot(tasks, target)
+    if target_slot < 0:
+        return (tasks, [])
+    val target_entry = tasks[target_slot]
+    if target_entry == nil:
+        return (tasks, [])
+    val target_task = target_entry
+    if target_task.state == TaskState.Zombie or target_task.parent == nil or
+        target_task.parent.unwrap().id != caller.id:
+        return (tasks, [])
+    if not target_task.security.policy_bound or target_task.security.job_id == 0u64:
+        return (tasks, [])
+
+    val job_id = target_task.security.job_id
+    var members: [TaskId] = []
+    var token_roots: [u64] = []
+    var index = 0
+    while index < tasks.len():
+        val entry = tasks[index]
+        if entry != nil:
+            val task = entry
+            if task.security.job_id == job_id:
+                members.push(task.id)
+                var cap_index = 0
+                while cap_index < task.capabilities.caps.len():
+                    val token_id = task.capabilities.caps[cap_index].token_id
+                    if token_id != 0u64 and not _authority_contains(token_roots, token_id):
+                        token_roots.push(token_id)
+                    cap_index = cap_index + 1
+        index = index + 1
+    if members.len() == 0:
+        return (tasks, [])
+
+    # Revoke all owned roots through the normal lineage operation, rather than
+    # merely dropping the visible CSpace records.  A delegated descendant in a
+    # live sibling task cannot retain authority after this boundary closes.
+    var updated = tasks
+    var root_index = 0
+    while root_index < token_roots.len():
+        val (revised, _) = sched_revoke_cspace_lineage(updated, token_roots[root_index])
+        updated = revised
+        root_index = root_index + 1
+
+    # Publish an exit only after authority is gone.  Existing zombies retain
+    # their original status for waitpid, but are still adopted and stripped of
+    # stale capabilities.  Live job members receive the supervisor's code.
+    var member_index = 0
+    while member_index < members.len():
+        val member_id = members[member_index]
+        val slot = _authority_slot(updated, member_id)
+        if slot >= 0:
+            val entry = updated[slot]
+            if entry != nil:
+                var task = entry
+                task.capabilities = CapabilitySet(
+                    caps: [], is_pledged: task.capabilities.is_pledged)
+                task.security = _authority_security_without_exit_authority(task.security)
+                if member_id.id != target.id:
+                    task.parent = Some(caller)
+                if task.state != TaskState.Zombie:
+                    task.state = TaskState.Zombie
+                    task.exit_code = exit_code
+                updated[slot] = task
+        member_index = member_index + 1
+    (updated, members)
+
+pub fn sched_direct_child_count(tasks: [TaskControlBlock?], parent: TaskId) -> u64:
+    """Count unreaped direct children for hierarchical process admission."""
+    var count = 0u64
+    var index = 0
+    while index < tasks.len():
+        val entry = tasks[index]
+        if entry != nil:
+            val task = entry
+            if task.parent != nil:
+                val task_parent = task.parent.unwrap()
+                if task_parent.id == parent.id:
+                    count = count + 1u64
+        index = index + 1
+    count
+
+fn _resource_domain_parent(
+    tasks: [TaskControlBlock?],
+    domain_id: u64
+) -> u64:
+    var index = 0
+    while index < tasks.len():
+        val entry = tasks[index]
+        if entry != nil:
+            val task = entry
+            if task.security.resource_domain_id == domain_id:
+                return task.security.parent_resource_domain_id
+        index = index + 1
+    0u64
+
+fn _resource_domain_descends_from(
+    tasks: [TaskControlBlock?],
+    candidate_domain_id: u64,
+    ancestor_domain_id: u64
+) -> bool:
+    if candidate_domain_id == 0u64 or ancestor_domain_id == 0u64:
+        return false
+    var current = candidate_domain_id
+    var steps = 0
+    while steps <= tasks.len():
+        if current == ancestor_domain_id:
+            return true
+        current = _resource_domain_parent(tasks, current)
+        if current == 0u64:
+            return false
+        steps = steps + 1
+    false
+
+pub fn sched_resource_descendant_count(
+    tasks: [TaskControlBlock?],
+    parent: TaskId
+) -> u64:
+    """Count live descendants in the caller's full resource-domain subtree.
+
+    A managed child receives a fresh domain linked to the parent's domain;
+    fork/clone retains that domain. Counting the entire lineage, rather than
+    direct parent pointers only, makes a process limit a true hierarchical
+    budget and prevents grandchildren from bypassing their ancestor's limit.
+    """
+    val parent_slot = _authority_slot(tasks, parent)
+    if parent_slot < 0:
+        return 0u64
+    val parent_entry = tasks[parent_slot]
+    if parent_entry == nil:
+        return 0u64
+    val parent_domain = parent_entry.security.resource_domain_id
+    var count = 0u64
+    var index = 0
+    while index < tasks.len():
+        val entry = tasks[index]
+        if entry != nil:
+            val task = entry
+            if task.id.id != parent.id and task.state != TaskState.Zombie and
+                _resource_domain_descends_from(
+                    tasks, task.security.resource_domain_id, parent_domain):
+                count = count + 1u64
+        index = index + 1
+    count
+
+fn _resource_domain_memory_limit(
+    tasks: [TaskControlBlock?],
+    domain_id: u64
+) -> u64:
+    var index = 0
+    while index < tasks.len():
+        val entry = tasks[index]
+        if entry != nil:
+            val task = entry
+            if task.security.resource_domain_id == domain_id:
+                return task.isolation.max_memory_pages
+        index = index + 1
+    0u64
+
+fn _resource_domain_mapped_pages(
+    tasks: [TaskControlBlock?],
+    domain_id: u64
+) -> u64:
+    var total = 0u64
+    var index = 0
+    while index < tasks.len():
+        val entry = tasks[index]
+        if entry != nil:
+            val task = entry
+            if task.state != TaskState.Zombie and
+                _resource_domain_descends_from(
+                    tasks, task.security.resource_domain_id, domain_id):
+                val pages = task_memory_budget_pages(task.id)
+                if total > 0xFFFFFFFFFFFFFFFFu64 - pages:
+                    return 0xFFFFFFFFFFFFFFFFu64
+                total = total + pages
+        index = index + 1
+    total
+
+pub fn sched_resource_memory_admits(
+    tasks: [TaskControlBlock?],
+    owner: TaskId,
+    pages: u64
+) -> bool:
+    """Require a new mmap charge to fit every ancestor resource domain.
+
+    Task-local admission limits one process. This walk charges every ancestor
+    domain too, so child fan-out cannot bypass a parent's memory policy.
+    Syscall handling reserves the owner ledger immediately after this check.
+    """
+    if pages == 0u64:
+        return false
+    val slot = _authority_slot(tasks, owner)
+    if slot < 0:
+        return false
+    val entry = tasks[slot]
+    if entry == nil:
+        return false
+    val owner_task = entry
+    var domain_id = owner_task.security.resource_domain_id
+    if domain_id == 0u64:
+        return false
+    var steps = 0
+    while steps <= tasks.len():
+        val limit = _resource_domain_memory_limit(tasks, domain_id)
+        if limit > 0u64:
+            val used = _resource_domain_mapped_pages(tasks, domain_id)
+            if used > limit or pages > limit - used:
+                return false
+        domain_id = _resource_domain_parent(tasks, domain_id)
+        if domain_id == 0u64:
+            return true
+        steps = steps + 1
+    false

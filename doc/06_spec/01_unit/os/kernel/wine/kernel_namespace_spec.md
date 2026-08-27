@@ -203,7 +203,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("AC-4: consecutive namespace_create calls return distinct ids")
 val a = namespace_create(NsFlags.pid)
 val b = namespace_create(NsFlags.pid)
-expect(a).to_not_equal(b)
+expect(a == b).to_equal(false)
 ```
 
 </details>
@@ -227,7 +227,7 @@ step("AC-4: namespace_clone returns a distinct id from the source")
 val parent = namespace_create(NsFlags.pid)
 val child  = namespace_clone(parent, NsFlags.pid)
 expect(child).to_be_greater_than(0)
-expect(child).to_not_equal(parent)
+expect(child == parent).to_equal(false)
 ```
 
 </details>
@@ -298,7 +298,7 @@ step("AC-4: namespace_unshare for capability creates a new restricted namespace"
 val original = namespace_create(NsFlags.capability)
 val restricted = namespace_unshare(original, NsFlags.capability)
 expect(restricted).to_be_greater_than(0)
-expect(restricted).to_not_equal(original)
+expect(restricted == original).to_equal(false)
 ```
 
 </details>
@@ -339,7 +339,7 @@ expect(entry.value.flags).to_equal(NsFlags.capability)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -402,10 +402,10 @@ expect(ipc_ns).to_be_greater_than(0)
 expect(net_ns).to_be_greater_than(0)
 expect(cap_ns).to_be_greater_than(0)
 # All must be distinct
-expect(pid_ns).to_not_equal(fs_ns)
-expect(fs_ns).to_not_equal(ipc_ns)
-expect(ipc_ns).to_not_equal(net_ns)
-expect(net_ns).to_not_equal(cap_ns)
+expect(pid_ns == fs_ns).to_equal(false)
+expect(fs_ns == ipc_ns).to_equal(false)
+expect(ipc_ns == net_ns).to_equal(false)
+expect(net_ns == cap_ns).to_equal(false)
 ```
 
 </details>

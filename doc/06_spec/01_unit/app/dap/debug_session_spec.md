@@ -1,6 +1,29 @@
 # Debug Session Specification
 
-> Tests covering DebugSession, Creation, start, continue_execution, step_over, step_into, step_out, pause, stop, evaluate, Breakpoint, Creation, set_condition, set, enable, disable, toggle.
+> <details>
+
+<!-- sdn-diagram:id=debug_session_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=debug_session_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+debug_session_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=debug_session_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,18 +42,16 @@
 
 #### creates new session
 
-- creates new session
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates new session")
 # Branch: DebugSession.new()
 val session_created = true
 assert_true(session_created)
@@ -40,18 +61,16 @@ assert_true(session_created)
 
 #### initializes session_id to 0
 
-- initializes session_id to 0
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("initializes session_id to 0")
 # Branch: session_id: 0
 val session_id = 0
 assert_true(session_id == 0)
@@ -61,18 +80,16 @@ assert_true(session_id == 0)
 
 #### sets configuration
 
-- sets configuration
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sets configuration")
 # Branch: configuration: config
 val config_set = true
 assert_true(config_set)
@@ -82,18 +99,16 @@ assert_true(config_set)
 
 #### initializes state to Stopped
 
-- initializes state to Stopped
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("initializes state to Stopped")
 # Branch: state: DebugState.Stopped
 val state = "stopped"
 assert_true(state == "stopped")
@@ -105,18 +120,16 @@ assert_true(state == "stopped")
 
 #### starts debug session
 
-- starts debug session
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("starts debug session")
 # Branch: start() method
 val session_started = true
 assert_true(session_started)
@@ -126,18 +139,16 @@ assert_true(session_started)
 
 #### converts config to JSON
 
-- converts config to JSON
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("converts config to JSON")
 # Branch: val config_json = self.configuration.to_json()
 val json_created = true
 assert_true(json_created)
@@ -147,18 +158,16 @@ assert_true(json_created)
 
 #### calls vscode_debug_start_session
 
-- calls vscode_debug_start_session
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("calls vscode_debug_start_session")
 # Branch: vscode_debug_start_session(config_json)
 val ffi_called = true
 assert_true(ffi_called)
@@ -168,18 +177,16 @@ assert_true(ffi_called)
 
 #### updates session_id
 
-- updates session_id
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("updates session_id")
 # Branch: self.session_id = ...
 val id_updated = true
 assert_true(id_updated)
@@ -189,18 +196,16 @@ assert_true(id_updated)
 
 #### sets state to Running
 
-- sets state to Running
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sets state to Running")
 # Branch: self.state = DebugState.Running
 val state = "running"
 assert_true(state == "running")
@@ -212,18 +217,16 @@ assert_true(state == "running")
 
 #### continues execution
 
-- continues execution
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("continues execution")
 # Branch: continue_execution() method
 val continued = true
 assert_true(continued)
@@ -233,18 +236,16 @@ assert_true(continued)
 
 #### calls vscode_debug_continue
 
-- calls vscode_debug_continue
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("calls vscode_debug_continue")
 # Branch: vscode_debug_continue(self.session_id)
 val ffi_called = true
 assert_true(ffi_called)
@@ -254,18 +255,16 @@ assert_true(ffi_called)
 
 #### sets state to Running
 
-- sets state to Running
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sets state to Running")
 # Branch: self.state = DebugState.Running
 val state = "running"
 assert_true(state == "running")
@@ -277,18 +276,16 @@ assert_true(state == "running")
 
 #### steps over current line
 
-- steps over current line
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("steps over current line")
 # Branch: step_over() method
 val stepped = true
 assert_true(stepped)
@@ -298,18 +295,16 @@ assert_true(stepped)
 
 #### calls vscode_debug_step_over
 
-- calls vscode_debug_step_over
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("calls vscode_debug_step_over")
 # Branch: vscode_debug_step_over(self.session_id)
 val ffi_called = true
 assert_true(ffi_called)
@@ -321,18 +316,16 @@ assert_true(ffi_called)
 
 #### steps into function
 
-- steps into function
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("steps into function")
 # Branch: step_into() method
 val stepped = true
 assert_true(stepped)
@@ -342,18 +335,16 @@ assert_true(stepped)
 
 #### calls vscode_debug_step_into
 
-- calls vscode_debug_step_into
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("calls vscode_debug_step_into")
 # Branch: vscode_debug_step_into(self.session_id)
 val ffi_called = true
 assert_true(ffi_called)
@@ -365,18 +356,16 @@ assert_true(ffi_called)
 
 #### steps out of function
 
-- steps out of function
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("steps out of function")
 # Branch: step_out() method
 val stepped = true
 assert_true(stepped)
@@ -386,18 +375,16 @@ assert_true(stepped)
 
 #### calls vscode_debug_step_out
 
-- calls vscode_debug_step_out
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("calls vscode_debug_step_out")
 # Branch: vscode_debug_step_out(self.session_id)
 val ffi_called = true
 assert_true(ffi_called)
@@ -409,18 +396,16 @@ assert_true(ffi_called)
 
 #### pauses execution
 
-- pauses execution
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("pauses execution")
 # Branch: pause() method
 val paused = true
 assert_true(paused)
@@ -430,18 +415,16 @@ assert_true(paused)
 
 #### calls vscode_debug_pause
 
-- calls vscode_debug_pause
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("calls vscode_debug_pause")
 # Branch: vscode_debug_pause(self.session_id)
 val ffi_called = true
 assert_true(ffi_called)
@@ -451,18 +434,16 @@ assert_true(ffi_called)
 
 #### sets state to Paused
 
-- sets state to Paused
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sets state to Paused")
 # Branch: self.state = DebugState.Paused
 val state = "paused"
 assert_true(state == "paused")
@@ -474,18 +455,16 @@ assert_true(state == "paused")
 
 #### stops debug session
 
-- stops debug session
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("stops debug session")
 # Branch: stop() method
 val stopped = true
 assert_true(stopped)
@@ -495,18 +474,16 @@ assert_true(stopped)
 
 #### calls vscode_debug_stop
 
-- calls vscode_debug_stop
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("calls vscode_debug_stop")
 # Branch: vscode_debug_stop(self.session_id)
 val ffi_called = true
 assert_true(ffi_called)
@@ -516,18 +493,16 @@ assert_true(ffi_called)
 
 #### sets state to Stopped
 
-- sets state to Stopped
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sets state to Stopped")
 # Branch: self.state = DebugState.Stopped
 val state = "stopped"
 assert_true(state == "stopped")
@@ -539,18 +514,16 @@ assert_true(state == "stopped")
 
 #### evaluates expression
 
-- evaluates expression
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("evaluates expression")
 # Branch: evaluate() method
 val evaluated = true
 assert_true(evaluated)
@@ -560,18 +533,16 @@ assert_true(evaluated)
 
 #### calls vscode_debug_evaluate
 
-- calls vscode_debug_evaluate
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("calls vscode_debug_evaluate")
 # Branch: vscode_debug_evaluate(self.session_id, expression)
 val ffi_called = true
 assert_true(ffi_called)
@@ -581,18 +552,16 @@ assert_true(ffi_called)
 
 #### returns evaluation result
 
-- returns evaluation result
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns evaluation result")
 # Branch: return value from FFI
 val result_returned = true
 assert_true(result_returned)
@@ -606,18 +575,16 @@ assert_true(result_returned)
 
 #### creates breakpoint
 
-- creates breakpoint
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates breakpoint")
 # Branch: Breakpoint.new()
 val bp_created = true
 assert_true(bp_created)
@@ -627,18 +594,16 @@ assert_true(bp_created)
 
 #### sets file field
 
-- sets file field
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sets file field")
 # Branch: file: file
 val file_set = true
 assert_true(file_set)
@@ -648,18 +613,16 @@ assert_true(file_set)
 
 #### sets line field
 
-- sets line field
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sets line field")
 # Branch: line: line
 val line_set = true
 assert_true(line_set)
@@ -669,18 +632,16 @@ assert_true(line_set)
 
 #### initializes empty condition
 
-- initializes empty condition
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("initializes empty condition")
 # Branch: condition: ""
 val condition = ""
 assert_true(condition == "")
@@ -690,18 +651,16 @@ assert_true(condition == "")
 
 #### initializes hit_count to 0
 
-- initializes hit_count to 0
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("initializes hit_count to 0")
 # Branch: hit_count: 0
 val hit_count = 0
 assert_true(hit_count == 0)
@@ -711,18 +670,16 @@ assert_true(hit_count == 0)
 
 #### initializes enabled to true
 
-- initializes enabled to true
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("initializes enabled to true")
 # Branch: enabled: true
 val enabled = true
 assert_true(enabled)
@@ -732,18 +689,16 @@ assert_true(enabled)
 
 #### initializes breakpoint_id to 0
 
-- initializes breakpoint_id to 0
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("initializes breakpoint_id to 0")
 # Branch: breakpoint_id: 0
 val id = 0
 assert_true(id == 0)
@@ -755,18 +710,16 @@ assert_true(id == 0)
 
 #### sets breakpoint condition
 
-- sets breakpoint condition
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sets breakpoint condition")
 # Branch: self.condition = condition
 val condition_set = true
 assert_true(condition_set)
@@ -778,18 +731,16 @@ assert_true(condition_set)
 
 #### sets breakpoint
 
-- sets breakpoint
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sets breakpoint")
 # Branch: set() method
 val bp_set = true
 assert_true(bp_set)
@@ -799,18 +750,16 @@ assert_true(bp_set)
 
 #### calls vscode_debug_set_breakpoint
 
-- calls vscode_debug_set_breakpoint
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("calls vscode_debug_set_breakpoint")
 # Branch: vscode_debug_set_breakpoint(self.file, self.line)
 val ffi_called = true
 assert_true(ffi_called)
@@ -820,18 +769,16 @@ assert_true(ffi_called)
 
 #### updates breakpoint_id
 
-- updates breakpoint_id
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("updates breakpoint_id")
 # Branch: self.breakpoint_id = ...
 val id_updated = true
 assert_true(id_updated)
@@ -843,18 +790,16 @@ assert_true(id_updated)
 
 #### enables breakpoint
 
-- enables breakpoint
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("enables breakpoint")
 # Branch: self.enabled = true
 val enabled = true
 assert_true(enabled)
@@ -866,18 +811,16 @@ assert_true(enabled)
 
 #### disables breakpoint
 
-- disables breakpoint
+- assert false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("disables breakpoint")
 # Branch: self.enabled = false
 val disabled = false
 assert_false(disabled)
@@ -889,18 +832,16 @@ assert_false(disabled)
 
 #### toggles enabled state
 
-- toggles enabled state
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("toggles enabled state")
 # Branch: self.enabled = not self.enabled
 val toggled = true
 assert_true(toggled)
@@ -915,12 +856,12 @@ assert_true(toggled)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/dap/debug_session_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering DebugSession, Creation, start, continue_execution, step_over, step_into, step_out, pause, stop, evaluate, Breakpoint, Creation, set_condition, set, enable, disable, toggle.
+Tests covering:
 - DebugSession
 - Creation
 - start
@@ -951,51 +892,3 @@ Tests covering DebugSession, Creation, start, continue_execution, step_over, ste
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `48e975ad609eadcce28ec2e6f321c1cef22fb4eab083abfb6ff7cba288fcfefb`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `48e975ad609eadcce28ec2e6f321c1cef22fb4eab083abfb6ff7cba288fcfefb`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `48e975ad609eadcce28ec2e6f321c1cef22fb4eab083abfb6ff7cba288fcfefb`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/dap/debug_session_spec.spl
-mirror: doc/06_spec/01_unit/app/dap/debug_session_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/dap/debug_session_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/dap/debug_session_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/dap/debug_session_spec.spl:16:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates new session' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/dap/debug_session_spec.spl:23:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'initializes session_id to 0' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/dap/debug_session_spec.spl:30:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'sets configuration' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

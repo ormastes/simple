@@ -18,22 +18,20 @@ fn _snappy_encode_varint(value: i64) -> [u8]:
     result.push(last)
     result
 
-fn _snappy_decode_varint(data: [u8], pos: i64) -> Result<[i64], CompressionError>:
-    if pos < 0 or pos >= data.len():
-        return Err(CompressionError.TruncatedInput("snappy varint length"))
+fn _snappy_decode_varint(data: [u8], pos: i64) -> [i64]:
     var result: i64 = 0
     var shift = 0
     var idx = pos
     while idx < data.len():
-        if shift >= 35:
-            return Err(CompressionError.CorruptStream("snappy varint length"))
         val byte = data[idx].to_i64()
         result = result | ((byte & 0x7F) << shift)
         idx = idx + 1
         if (byte & 0x80) == 0:
-            return Ok([result, idx])
+            break
         shift = shift + 7
-    Err(CompressionError.TruncatedInput("snappy varint length"))
+        if shift > 35:
+            break
+    [result, idx]
 
 fn _snappy_hash4(data: [u8], pos: i64) -> i64:
     val b0 = data[pos].to_i64()
@@ -202,18 +200,9 @@ pub fn try_snappy_decompress(data: [u8]) -> Result<[u8], CompressionError>:
     if data.len() == 0:
         return Err(CompressionError.TruncatedInput("snappy empty input"))
     val varint_result = _snappy_decode_varint(data, 0)
-    if varint_result.is_err():
-        return Err(varint_result.unwrap_err())
-    val decoded_varint = varint_result.unwrap()
-    val uncompressed_len = decoded_varint[0]
-    var pos = decoded_varint[1]
-    if pos > 5:
-        return Err(CompressionError.CorruptStream("snappy varint length"))
-    if pos > 1 and uncompressed_len < (1 << ((pos - 1) * 7)):
-        return Err(CompressionError.CorruptStream("snappy varint length"))
+    val uncompressed_len = varint_result[0]
+    var pos = varint_result[1]
     if uncompressed_len == 0:
-        if pos != data.len():
-            return Err(CompressionError.CorruptStream("snappy trailing data after empty block"))
         var empty: [u8] = []
         return Ok(empty)
     if uncompressed_len > 134217728:
@@ -254,8 +243,6 @@ pub fn try_snappy_decompress(data: [u8]) -> Result<[u8], CompressionError>:
                 pos = pos + 4
             if pos + literal_len > data.len():
                 return Err(CompressionError.TruncatedInput("snappy literal body"))
-            if dst.len() + literal_len > uncompressed_len:
-                return Err(CompressionError.CorruptStream("snappy decoded length overrun"))
             dst = append_bytes(dst, data.slice(pos, pos + literal_len))
             pos = pos + literal_len
         elif element_type == 1:
@@ -268,12 +255,10 @@ pub fn try_snappy_decompress(data: [u8]) -> Result<[u8], CompressionError>:
             pos = pos + 1
             if offset == 0 or offset > dst.len():
                 return Err(CompressionError.CorruptStream("snappy invalid copy-1 offset"))
-            if dst.len() + copy_len > uncompressed_len:
-                return Err(CompressionError.CorruptStream("snappy decoded length overrun"))
             val copy_res = append_self_overlap_copy(dst, offset, copy_len)
-            dst = match copy_res:
-                case Ok(decoded): decoded
-                case Err(reason): return Err(reason)
+            if copy_res.is_err():
+                return Err(copy_res.unwrap_err())
+            dst = copy_res.unwrap()
         elif element_type == 2:
             val copy_len = ((tag >> 2) & 0x3F) + 1
             pos = pos + 1
@@ -283,12 +268,10 @@ pub fn try_snappy_decompress(data: [u8]) -> Result<[u8], CompressionError>:
             pos = pos + 2
             if offset == 0 or offset > dst.len():
                 return Err(CompressionError.CorruptStream("snappy invalid copy-2 offset"))
-            if dst.len() + copy_len > uncompressed_len:
-                return Err(CompressionError.CorruptStream("snappy decoded length overrun"))
             val copy_res = append_self_overlap_copy(dst, offset, copy_len)
-            dst = match copy_res:
-                case Ok(decoded): decoded
-                case Err(reason): return Err(reason)
+            if copy_res.is_err():
+                return Err(copy_res.unwrap_err())
+            dst = copy_res.unwrap()
         else:
             val copy_len = ((tag >> 2) & 0x3F) + 1
             pos = pos + 1
@@ -298,18 +281,14 @@ pub fn try_snappy_decompress(data: [u8]) -> Result<[u8], CompressionError>:
             pos = pos + 4
             if offset == 0 or offset > dst.len():
                 return Err(CompressionError.CorruptStream("snappy invalid copy-4 offset"))
-            if dst.len() + copy_len > uncompressed_len:
-                return Err(CompressionError.CorruptStream("snappy decoded length overrun"))
             val copy_res = append_self_overlap_copy(dst, offset, copy_len)
-            dst = match copy_res:
-                case Ok(decoded): decoded
-                case Err(reason): return Err(reason)
+            if copy_res.is_err():
+                return Err(copy_res.unwrap_err())
+            dst = copy_res.unwrap()
     if dst.len() != uncompressed_len:
         return Err(CompressionError.CorruptStream("snappy decoded length mismatch"))
     Ok(dst)
 
 pub fn snappy_decompress(data: [u8]) -> [u8]:
     val result = try_snappy_decompress(data)
-    match result:
-        case Ok(bytes): bytes
-        case _: []
+    result.unwrap()

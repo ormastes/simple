@@ -1,15 +1,19 @@
 # Simple CLI - verify command
 #
-# Lightweight public entrypoint. Keep full verification imports in
-# src/app/verify/worker.spl so help/status/list do not load the verification
-# gate graph.
+# Production-readiness verification focused on current changes. For MCP/LSP and
+# tool-server changes, this command requires wrapper audit, request-path audit,
+# and performance evidence artifacts before returning PASS.
 
 use std.cli.cli_util.{get_cli_args}
-use app.io.process_ops.{process_run_timeout}
-use app.verify.options.{verify_option_error}
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
+use app.verify.full_verify.{run_full_verify}
+use verification.state.{VerificationState}
+use verification.proof_unit.{ProofUnit, ProofUnitSet}
+use verification.report.{VerificationReport, ReportLevel}
 
 fn print_help():
-    print "Usage: simple verify [command|options] [file ...]"
+    print "Usage: simple verify [options] [file ...]"
     print ""
     print "Commands:"
     print "  status        Show generated Lean artifact status"
@@ -24,25 +28,36 @@ fn print_help():
     print "  --files=a,b,c         Override changed-file discovery with an explicit file list"
     print "  --no-write-report     Do not write doc/09_report/verify output"
     print "  --lean-status         Show Lean verification status report"
+    print "  --detail              With --lean-status: show theorem-level detail"
+    print "  --format=sdn          With --lean-status: output machine-readable SDN"
+    for line in log_options_help():
+        print "  {line}"
     print "  -h, --help            Show this help"
     print ""
     print "Release usage:"
     print "  simple verify release BUNDLE.sdn"
     print "  signer policy: config/formal/verified_release_signers.sdn"
 
-fn strip_command_token(args: [text]) -> [text]:
-    if args.len() > 0 and args[0] == "verify":
-        args[1:]
-    else:
-        args
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
 
-fn run_process(args: [text]) -> i64:
-    val (stdout, stderr, code) = process_run_timeout("bin/simple", args, 120000)
-    if stdout.len() > 0:
-        print stdout
-    if stderr.len() > 0:
-        eprint stderr
-    code as i64
+fn clean_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if _is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned
 
 fn lean_files() -> [text]:
     val script = "if [ -d build/verification/generated ]; then find build/verification/generated -name '*.lean' -type f | sort; fi"
@@ -77,8 +92,9 @@ fn verify_list() -> i64:
 fn run_worker(args: [text]) -> i64:
     var worker_args = ["run", "src/app/verify/worker.spl"]
     for arg in args:
-        worker_args.push(arg)
-    run_process(worker_args)
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
 
 fn run_release_gate(args: [text]) -> i64:
     var gate_args = ["run", "src/app/verify/release_gate_cli.spl"]
@@ -86,15 +102,41 @@ fn run_release_gate(args: [text]) -> i64:
     run_process(gate_args)
 
 fn main() -> i64:
-    val args = strip_command_token(get_cli_args())
+    val raw_args = get_cli_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("verify", log_opts.error)
+        return 1
 
-    if args.len() == 0:
-        return run_worker(args)
+    val args = clean_args(raw_args)
 
-    val option_error = verify_option_error(args)
-    if option_error != "":
-        eprint "error: {option_error}"
-        return 2
+    if args.len() == 0 and raw_args.len() > 0:
+        if log_opts.log_mode == "json":
+            print "{\"command\":\"verify\",\"status\":\"usage\"}"
+            return 0
+        val progress = render_progress(log_opts.progress, 0, 1, "usage")
+        if progress != "":
+            print progress
+        print_help()
+        return 0
+
+    val sub = args[0]
+    if sub == "status":
+        return verify_status()
+    elif sub == "list":
+        return verify_list()
+    elif sub == "check":
+        return run_process(["gen-lean", "verify"])
+    elif sub == "regenerate":
+        var forwarded = ["gen-lean", "write", "--force"]
+        if args.len() > 1:
+            for arg in args[1:]:
+                forwarded.push(arg)
+        return run_process(forwarded)
+    elif sub == "quality":
+        return run_worker(args[1:])
+    elif sub == "release":
+        return run_release_gate(args[1:])
 
     if args.len() == 1 and (args[0] == "-h" or args[0] == "--help"):
         print_help()
@@ -108,10 +150,71 @@ fn main() -> i64:
     elif sub == "check":
         return run_process(["gen-lean", "verify"])
     elif sub == "regenerate":
-        return run_process(["gen-lean", "write", "--force"])
+        var forwarded = ["gen-lean", "write", "--force"]
+        if args.len() > 1:
+            for arg in args[1:]:
+                forwarded.push(arg)
+        return run_process(forwarded)
     elif sub == "quality":
         return run_worker(args[1:])
     elif sub == "release":
         return run_release_gate(args[1:])
 
-    run_worker(args)
+# --lean-status: Lean verification status report
+fn run_lean_status(args: [text]) -> i64:
+    val units = discover_proof_units()
+
+    # Determine detail level
+    var level = ReportLevel.File
+    for arg in args:
+        if arg == "--detail":
+            level = ReportLevel.Theorem
+
+    # Determine output format
+    var use_sdn = false
+    for arg in args:
+        if arg == "--format=sdn":
+            use_sdn = true
+
+    val timestamp = "2026-04-04T00:00:00Z"  # Stable report timestamp until std.time is available here.
+    val report = VerificationReport.from_units(
+        "Lean Verification Status", "project", units, timestamp
+    )
+
+    if use_sdn:
+        print report.render_sdn()
+    else:
+        print report.render(level)
+
+    # Return non-zero if any unit has failed state
+    val counts = units.state_counts()
+    if counts.failed > 0:
+        1
+    else:
+        0
+
+# Discover transient generated proof units from build/verification/generated/.
+# Checked-in Lean proof/model sources live under src/verification/.
+fn discover_proof_units() -> ProofUnitSet:
+    use std.io_runtime.{file_exists, read_dir, read_file}
+
+    var units = ProofUnitSet.empty()
+    val gen_dir = "build/verification/generated"
+
+    if not file_exists(gen_dir):
+        return units
+
+    val entries = read_dir(gen_dir)
+    for entry in entries:
+        if entry.ends_with(".lean"):
+            val lean_path = "{gen_dir}/{entry}"
+            val module_name = entry.replace(".lean", "")
+            val unit = ProofUnit.create(
+                source_file="(discovered)",
+                source_symbol="*",
+                lean_module="Verification.{module_name}",
+                lean_file=lean_path
+            ).with_state(VerificationState.NotChecked)
+            units = units.add(unit)
+
+    units

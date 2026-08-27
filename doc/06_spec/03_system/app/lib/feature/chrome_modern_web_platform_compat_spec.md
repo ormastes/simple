@@ -252,8 +252,6 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should require SPipe or external suite mapping for supported features")
 val plan = _read(PLAN_PATH)
 expect(plan).to_contain("Every supported feature has SPipe coverage or an explicit external-suite mapping")
 ```
@@ -265,15 +263,16 @@ expect(plan).to_contain("Every supported feature has SPipe coverage or an explic
 - should cover universal selectors in the WPT selector subset
 
 
+- Verify: should cover modern not selector behavior in renderer SPipe
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should cover universal selectors in the WPT selector subset")
 expect(_read(WPT_SELECTOR_COLOR_SPEC_PATH)).to_contain("covers universal selector matching")
 ```
 
@@ -281,8 +280,33 @@ expect(_read(WPT_SELECTOR_COLOR_SPEC_PATH)).to_contain("covers universal selecto
 
 #### should cover modern is selector behavior in renderer SPipe
 
-- should cover modern is selector behavior in renderer SPipe
+<details>
+<summary>Executable SSpec</summary>
 
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_read(RENDERER_SPEC_PATH)).to_contain("applies :is selector lists in fallback pixels")
+```
+
+</details>
+
+#### should cover modern where selector behavior in renderer SPipe
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(_read(RENDERER_SPEC_PATH)).to_contain("applies :where selector lists in fallback pixels")
+```
+
+</details>
+
+#### should cover modern not selector behavior in renderer SPipe
 
 <details>
 <summary>Executable SSpec</summary>
@@ -744,10 +768,13 @@ expect(plan).to_contain("STATUS: FAIL")
 - should require the broad library check command
 
 
+- Verify: should reject manual visual inspection as the only signal
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple

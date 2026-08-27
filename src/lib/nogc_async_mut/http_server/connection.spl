@@ -25,7 +25,7 @@ use std.http_server.types.{
     ServerConfig
 }
 use std.http_server.parser.{HttpRequestParser}
-use std.http_server.response.{serialize_response, serialize_response_bytes, add_keepalive_headers}
+use std.http_server.response.{serialize_response_for_method, serialize_response_bytes_for_method, add_keepalive_headers}
 use std.http_server.error.{HttpServerError}
 use std.http.headers.{get_header}
 # ============================================================================
@@ -136,7 +136,10 @@ class Connection:
         self.keepalive = self.should_keepalive()
 
         val final_resp = add_keepalive_headers(resp, self.keepalive, keepalive_timeout_s)
-        self.response_bytes = serialize_response(final_resp)
+        var request_method = "GET"
+        if val current_request = self.request:
+            request_method = current_request.method
+        self.response_bytes = serialize_response_for_method(final_resp, request_method)
         self.write_offset = 0
         self.state = ConnectionState.SendingResponse
 
@@ -155,7 +158,10 @@ class Connection:
         """
         self.keepalive = self.should_keepalive()
         val final_resp = add_keepalive_headers(resp, self.keepalive, keepalive_timeout_s)
-        self.response_bytes_buf = serialize_response_bytes(final_resp)
+        var request_method = "GET"
+        if val current_request = self.request:
+            request_method = current_request.method
+        self.response_bytes_buf = serialize_response_bytes_for_method(final_resp, request_method)
         self.response_bytes = ""
         self.write_offset = 0
         self.state = ConnectionState.SendingResponse
@@ -163,6 +169,13 @@ class Connection:
     fn get_response_bytes_buf() -> [u8]:
         """Get the serialized binary response to send."""
         self.response_bytes_buf
+
+    fn response_transfers_body(status: i64) -> bool:
+        var request_method = "GET"
+        if val current_request = self.request:
+            request_method = current_request.method
+        response_body_framing_decision(
+            request_method, status, false).transfer_body
 
     me set_draining():
         """Mark connection as draining — will close after current response."""

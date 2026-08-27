@@ -1,6 +1,30 @@
 # Net Connect Completion Specification
 
-> Tests covering FR-NET-0001 TCP connect completion.
+> 1. var table = SocketTable new
+
+<!-- sdn-diagram:id=net_connect_completion_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=net_connect_completion_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+net_connect_completion_spec -> std
+net_connect_completion_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=net_connect_completion_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,24 +43,27 @@
 
 #### keeps a queued SYN non-writable until TCP reaches ESTABLISHED
 
-- keeps a queued SYN non-writable until TCP reaches ESTABLISHED
+1. var table = SocketTable new
+
+2. ok bool
+
+3. table attach connecting
    - Expected: table.connect_status(fd) equals `in-progress`
    - Expected: table.is_write_ready(fd) is false
    - Expected: socket_state_name(connecting.state) equals `CONNECTING`
+   - Expected: false is true
    - Expected: table.mark_connected_by_conn(101u64) is true
    - Expected: table.connect_status(fd) equals `established`
    - Expected: table.is_write_ready(fd) is true
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("keeps a queued SYN non-writable until TCP reaches ESTABLISHED")
 var table = SocketTable.new()
 val fd = table.create(SocketProtocol.Tcp)
 val remote = SockAddr(ip: Ipv4Address.from_u32(0x0A000202u32), port: 80u16)
@@ -51,7 +78,7 @@ val connecting = table.get_socket(fd)
 if connecting.?:
     expect(socket_state_name(connecting.state)).to_equal("CONNECTING")
 else:
-    fail("connecting socket disappeared after attach_connecting")
+    expect(false).to_equal(true)
 
 expect(table.mark_connected_by_conn(101u64)).to_equal(true)
 expect(table.connect_status(fd)).to_equal("established")
@@ -62,24 +89,30 @@ expect(table.is_write_ready(fd)).to_equal(true)
 
 #### surfaces refused and timeout completion separately
 
-- surfaces refused and timeout completion separately
+1. var table = SocketTable new
+
+2. ok bool
+
+3. table attach connecting
    - Expected: table.mark_connect_failed_by_conn(102u64, "refused") is true
    - Expected: table.connect_status(fd_refused) equals `refused`
    - Expected: table.is_write_ready(fd_refused) is false
+
+4. ok bool
+
+5. table attach connecting
    - Expected: table.mark_connect_failed_by_conn(103u64, "timeout") is true
    - Expected: table.connect_status(fd_timeout) equals `timeout`
    - Expected: table.is_write_ready(fd_timeout) is false
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("surfaces refused and timeout completion separately")
 var table = SocketTable.new()
 val remote = SockAddr(ip: Ipv4Address.from_u32(0x0A000202u32), port: 80u16)
 val local = SockAddr(ip: Ipv4Address.from_u32(0x0A00020Fu32), port: 49152u16)
@@ -105,7 +138,7 @@ expect(table.is_write_ready(fd_timeout)).to_equal(false)
 
 #### publishes completion only after a valid SYN ACK
 
-- publishes completion only after a valid SYN ACK
+1. var conn = TcpConnection new client
    - Expected: syn.len() equals `1u64`
    - Expected: tcp_state_name(conn.state) equals `SYN_SENT`
    - Expected: tcp_state_name(conn.state) equals `ESTABLISHED`
@@ -113,14 +146,12 @@ expect(table.is_write_ready(fd_timeout)).to_equal(false)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("publishes completion only after a valid SYN ACK")
 val local_ip = Ipv4Address.from_u32(0x0A00020Fu32)
 val remote_ip = Ipv4Address.from_u32(0x0A000202u32)
 var conn = TcpConnection.new_client(local_ip, 49152u16, remote_ip, 80u16)
@@ -152,7 +183,7 @@ expect(replies.len()).to_equal(1u64)
 
 #### treats a reset during active open as connection reset
 
-- treats a reset during active open as connection reset
+1. var conn = TcpConnection new client
    - Expected: syn.len() equals `1u64`
    - Expected: replies.len() equals `0u64`
    - Expected: tcp_state_name(conn.state) equals `CLOSED`
@@ -160,14 +191,12 @@ expect(replies.len()).to_equal(1u64)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("treats a reset during active open as connection reset")
 val local_ip = Ipv4Address.from_u32(0x0A00020Fu32)
 val remote_ip = Ipv4Address.from_u32(0x0A000202u32)
 var conn = TcpConnection.new_client(local_ip, 49152u16, remote_ip, 80u16)
@@ -203,12 +232,12 @@ expect(conn.recv_status()).to_equal("connection-reset")
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/03_system/os/net_connect_completion_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering FR-NET-0001 TCP connect completion.
+Tests covering:
 - FR-NET-0001 TCP connect completion
 
 ## Scenario Summary
@@ -223,51 +252,3 @@ Tests covering FR-NET-0001 TCP connect completion.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `635a7ae62e7cef692ba523705554bc5c194c011694dfbd1a599ab81b7a031cd8`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `635a7ae62e7cef692ba523705554bc5c194c011694dfbd1a599ab81b7a031cd8`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `635a7ae62e7cef692ba523705554bc5c194c011694dfbd1a599ab81b7a031cd8`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/os/net_connect_completion_spec.spl
-mirror: doc/06_spec/03_system/os/net_connect_completion_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/os/net_connect_completion_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/os/net_connect_completion_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/os/net_connect_completion_spec.spl:37:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps a queued SYN non-writable until TCP reaches ESTABLISHED' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/os/net_connect_completion_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'surfaces refused and timeout completion separately' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/os/net_connect_completion_spec.spl:83:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'publishes completion only after a valid SYN ACK' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

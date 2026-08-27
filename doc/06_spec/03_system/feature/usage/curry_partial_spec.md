@@ -2,6 +2,29 @@
 
 > Curry and Partial Application
 
+<!-- sdn-diagram:id=curry_partial_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=curry_partial_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+curry_partial_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=curry_partial_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 10 | 10 | 0 | 0 |
@@ -21,7 +44,7 @@ Curry and Partial Application
 | Category | Functional Programming |
 | Status | Active |
 | Source | `test/03_system/feature/usage/curry_partial_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Curry and Partial Application
@@ -38,18 +61,16 @@ Standard library functions for currying and partial application.
 
 #### curries a two-argument function
 
-- curries a two-argument function
+1. expect add5
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("curries a two-argument function")
 val curried = curry2(add)
 val add5 = curried(5)
 expect add5(3) == 8
@@ -59,18 +80,16 @@ expect add5(3) == 8
 
 #### curries multiply
 
-- curries multiply
+1. expect double
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("curries multiply")
 val curried = curry2(mul)
 val double = curried(2)
 expect double(7) == 14
@@ -80,18 +99,16 @@ expect double(7) == 14
 
 #### applies both arguments
 
-- applies both arguments
+1. expect curried
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("applies both arguments")
 val curried = curry2(add)
 expect curried(10)(20) == 30
 ```
@@ -102,7 +119,25 @@ expect curried(10)(20) == 30
 
 #### curries a three-argument function
 
-- curries a three-argument function
+1. expect curried
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val curried = curry3(triple_add)
+expect curried(1)(2)(3) == 6
+```
+
+</details>
+
+#### partial application of curry3
+
+1. expect add1 2
 
 
 <details>
@@ -112,28 +147,6 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("curries a three-argument function")
-val curried = curry3(triple_add)
-expect curried(1)(2)(3) == 6
-```
-
-</details>
-
-#### partial application of curry3
-
-- partial application of curry3
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-SYSTEM
-step("partial application of curry3")
 val curried = curry3(triple_add)
 val add1 = curried(1)
 val add1_2 = add1(2)
@@ -146,18 +159,16 @@ expect add1_2(10) == 13
 
 #### fixes first argument
 
-- fixes first argument
+1. expect add10
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("fixes first argument")
 val add10 = partial1(add, 10)
 expect add10(5) == 15
 ```
@@ -166,18 +177,16 @@ expect add10(5) == 15
 
 #### creates increment function
 
-- creates increment function
+1. expect inc
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates increment function")
 val inc = partial1(add, 1)
 expect inc(99) == 100
 ```
@@ -186,18 +195,13 @@ expect inc(99) == 100
 
 #### works with map
 
-- works with map
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("works with map")
 val add100 = partial1(add, 100)
 val data = [1, 2, 3]
 val result = data.map(add100)
@@ -210,18 +214,16 @@ expect result == [101, 102, 103]
 
 #### fixes first two arguments
 
-- fixes first two arguments
+1. expect add1 2
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("fixes first two arguments")
 val add1_2 = partial2(triple_add, 1, 2)
 expect add1_2(3) == 6
 ```
@@ -230,18 +232,16 @@ expect add1_2(3) == 6
 
 #### fixes different values
 
-- fixes different values
+1. expect add10 20
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("fixes different values")
 val add10_20 = partial2(triple_add, 10, 20)
 expect add10_20(30) == 60
 ```
@@ -260,51 +260,3 @@ expect add10_20(30) == 60
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `8b4f4dc55e7964b656e5316efa0cf309caa84cd92c15de6fc4749a5bd0dd2629`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `8b4f4dc55e7964b656e5316efa0cf309caa84cd92c15de6fc4749a5bd0dd2629`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `8b4f4dc55e7964b656e5316efa0cf309caa84cd92c15de6fc4749a5bd0dd2629`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/curry_partial_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/curry_partial_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/curry_partial_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/curry_partial_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/curry_partial_spec.spl:34:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'curries a two-argument function' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/curry_partial_spec.spl:41:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'curries multiply' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/curry_partial_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'applies both arguments' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

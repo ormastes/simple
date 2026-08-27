@@ -1,0 +1,61 @@
+"""Backend routing, simulated parity, and separately gated device initiation."""
+
+use common.compute.placement_contracts.storage.{ArtifactId}
+use common.compute.placement_contracts.residency.{ResidencyTier}
+use common.compute.placement_contracts.semantic.{BackendId, DeviceMask}
+use common.compute.placement_contracts.backend.{TransferReceipt, PlacementCapabilities}
+use std.gpu.placement_backends.staged.{StagedPlacementBackend}
+use std.gpu.placement_backends.direct.{DirectPlacementBackend}
+use std.nogc_sync_mut.cuda.mod.{cuda_mem_alloc, cuda_mem_free}
+
+class PlacementParity:
+    staged_receipt: TransferReceipt
+    direct_receipt: TransferReceipt
+    byte_identical: bool
+    status: text
+    reason: text
+
+class DeviceInitiatedPlacementGate:
+    hardware_capability: bool
+    experimental_enabled: bool
+    available: bool
+    reason: text
+
+fn _bytes_equal(left: [u8], right: [u8]) -> bool:
+    if left.len() != right.len(): return false
+    var index: i64 = 0
+    while index < left.len():
+        if left[index] != right[index]: return false
+        index = index + 1
+    true
+
+fn device_initiated_placement_gate(hardware_capability: bool, experimental_enabled: bool) -> DeviceInitiatedPlacementGate:
+    val available = hardware_capability and experimental_enabled
+    val reason = if available: "" elif not experimental_enabled: "experimental-gate-disabled" else: "device-initiated-capability-unavailable"
+    DeviceInitiatedPlacementGate(hardware_capability: hardware_capability, experimental_enabled: experimental_enabled, available: available, reason: reason)
+
+fn placement_backend_route(requested: text, direct_available: bool, device_initiated_capability: bool, experimental_enabled: bool) -> PlacementCapabilities:
+    if requested == "direct":
+        return DirectPlacementBackend.create(direct_available, "direct-hardware-unavailable").backend_probe()
+    if requested == "device_initiated":
+        val gate = device_initiated_placement_gate(device_initiated_capability, experimental_enabled)
+        return PlacementCapabilities(backend: BackendId(value: "device_initiated"), available: gate.available, production: false, supported_tiers: [], device_mask: DeviceMask(bits: 0u64), reason: gate.reason)
+    StagedPlacementBackend.create(2, 4096, 8192).backend_probe()
+
+fn placement_backend_parity(artifact: ArtifactId, payload: [u8], requested_device_address: i64, direct_available: bool) -> PlacementParity:
+    val slot_bytes = if payload.len() == 0: 1 else: payload.len()
+    var staged = StagedPlacementBackend.create(2, slot_bytes, slot_bytes * 2)
+    var direct = DirectPlacementBackend.create(direct_available, "direct-hardware-unavailable")
+    val staged_capability = staged.backend_probe()
+    val owned_device_address = if staged_capability.production: cuda_mem_alloc(slot_bytes) else: 0
+    val transfer_address = if staged_capability.production: owned_device_address else: requested_device_address
+    val staged_receipt = staged.stage_transfer(artifact, payload, transfer_address)
+    val direct_receipt = direct.stage_transfer(artifact, payload, requested_device_address)
+    if owned_device_address > 0: cuda_mem_free(owned_device_address)
+    if not direct_receipt.completed:
+        return PlacementParity(staged_receipt: staged_receipt, direct_receipt: direct_receipt, byte_identical: false, status: "unsupported", reason: direct_receipt.error)
+    val identical = _bytes_equal(staged.readback_bytes(staged_receipt), direct.readback_bytes(direct_receipt))
+    PlacementParity(staged_receipt: staged_receipt, direct_receipt: direct_receipt, byte_identical: identical, status: "simulated", reason: "cpu-payload-parity-only")
+
+export PlacementParity, DeviceInitiatedPlacementGate
+export device_initiated_placement_gate, placement_backend_route, placement_backend_parity

@@ -1,0 +1,52 @@
+# Canonical PMM/VMM/memory-leveling transaction for DMA syscalls.
+
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags, VM_PRESENT, VM_WRITABLE, VM_USER, VM_CACHE_DISABLE, VM_NO_EXECUTE}
+use os.kernel.memory.pmm.{pmm_alloc_pages}
+use os.kernel.memory.vmm.{vmm_map_page, PAGE_SIZE}
+use os.kernel.memory.memory_dma_pages.{memory_dma_free_partial_pages}
+use os.kernel.memory.memory_leveling_runtime.{memory_leveling_runtime_register_dma, memory_leveling_runtime_unregister_dma}
+
+struct MemoryDmaOwnedResult:
+    ok: bool
+    reason: text
+    virt_addr: u64
+    phys_addr: u64
+    byte_length: u64
+    page_count: u64
+    allocation_id: u64
+
+fn _memory_dma_owned_result(ok: bool, reason: text, virt_addr: u64, phys_addr: u64, byte_length: u64, page_count: u64, allocation_id: u64) -> MemoryDmaOwnedResult:
+    MemoryDmaOwnedResult(ok: ok, reason: reason, virt_addr: virt_addr, phys_addr: phys_addr, byte_length: byte_length, page_count: page_count, allocation_id: allocation_id)
+
+fn memory_dma_owned_allocate(owner_id: u64, virt_addr: u64, byte_length: u64) -> MemoryDmaOwnedResult:
+    if owner_id == 0 or virt_addr == 0 or (virt_addr % PAGE_SIZE) != 0 or byte_length == 0:
+        return _memory_dma_owned_result(false, "invalid-request", virt_addr, 0, byte_length, 0, 0)
+    val page_count = (byte_length + PAGE_SIZE - 1) / PAGE_SIZE
+    val opt_phys = pmm_alloc_pages(page_count)
+    if not opt_phys.?:
+        return _memory_dma_owned_result(false, "no-memory", virt_addr, 0, byte_length, page_count, 0)
+    val base_phys = opt_phys.unwrap().addr
+    val flags = VmFlags(bits: VM_PRESENT | VM_WRITABLE | VM_USER | VM_CACHE_DISABLE | VM_NO_EXECUTE)
+    var mapped: u64 = 0
+    while mapped < page_count:
+        val page_virt = VirtAddr(addr: virt_addr + mapped * PAGE_SIZE)
+        val page_phys = PhysAddr(addr: base_phys + mapped * PAGE_SIZE)
+        if not vmm_map_page(page_virt, page_phys, flags):
+            memory_dma_free_partial_pages(virt_addr, base_phys, mapped, page_count, PAGE_SIZE)
+            return _memory_dma_owned_result(false, "map-failed", virt_addr, 0, byte_length, page_count, 0)
+        mapped = mapped + 1
+
+    val registered = memory_leveling_runtime_register_dma(0, owner_id, virt_addr, base_phys, page_count * PAGE_SIZE, true)
+    if not registered.ok or registered.allocation_ids.len() != 1:
+        memory_dma_free_partial_pages(virt_addr, base_phys, page_count, page_count, PAGE_SIZE)
+        return _memory_dma_owned_result(false, registered.reason, virt_addr, 0, byte_length, page_count, 0)
+    _memory_dma_owned_result(true, "ok", virt_addr, base_phys, page_count * PAGE_SIZE, page_count, registered.allocation_ids[0])
+
+fn memory_dma_owned_release(allocation_id: u64, owner_id: u64, virt_addr: u64, phys_addr: u64, page_count: u64) -> MemoryDmaOwnedResult:
+    if allocation_id == 0 or owner_id == 0 or virt_addr == 0 or phys_addr == 0 or page_count == 0:
+        return _memory_dma_owned_result(false, "invalid-request", virt_addr, phys_addr, page_count * PAGE_SIZE, page_count, allocation_id)
+    val unregistered = memory_leveling_runtime_unregister_dma(allocation_id, owner_id)
+    if not unregistered.ok:
+        return _memory_dma_owned_result(false, unregistered.reason, virt_addr, phys_addr, page_count * PAGE_SIZE, page_count, allocation_id)
+    memory_dma_free_partial_pages(virt_addr, phys_addr, page_count, page_count, PAGE_SIZE)
+    _memory_dma_owned_result(true, "ok", virt_addr, phys_addr, page_count * PAGE_SIZE, page_count, allocation_id)

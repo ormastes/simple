@@ -29,10 +29,10 @@ use common.window_protocol.geometry.{Size}
 use os.compositor.host_compositor_entry.{HostBackendKind, HostWmConfig, HostWmHandle, init_host_wm}
 
 extern fn rt_file_read_text(path: text) -> text
-use std.io_runtime.{file_exists}
-use std.io_runtime.{platform_name}
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_platform_name() -> text
 extern fn rt_term_enable_ansi() -> bool
-use std.io_runtime.{get_args}
+extern fn rt_cli_get_args() -> [text]
 
 fn shared_wm_requested_tui(args: [text], env_val: text) -> bool:
     for a in args:
@@ -57,16 +57,12 @@ fn run_shared_wm_tui(title: text) -> i64:
     if handle == nil:
         print "Error: failed to initialise shared WM (TUI backend)"
         return 1
-    # Destructure: a `me` method called through an OPTION-typed binding mutates
-    # a discarded temporary. See doc/08_tracking/bug/
-    # me_method_mutation_through_optional_binding_discarded_2026-08-04.md
-    if val Some(wm) = handle:
-        wm.tick_forever()
+    handle.tick_forever()
     return 0
 
 fn ensure_ansi_support():
     """Enable ANSI virtual terminal processing on Windows."""
-    if platform_name() == "windows":
+    if rt_platform_name() == "windows":
         rt_term_enable_ansi()
 
 # =========================================================================
@@ -88,7 +84,7 @@ fn start_file_watcher_task(channel: Channel, file_path: text, initial_content: t
         if channel.is_closed():
             return
 
-        if not file_exists(file_path):
+        if not rt_file_exists(file_path):
             pass_do_nothing
         else:
             val current_content = rt_file_read_text(file_path)
@@ -116,7 +112,7 @@ class AsyncTuiApp:
             Ok(tree):
                 var session = UISession.new(tree)
                 session.set_active_backend("tui")
-                val content = if file_exists(file_path):
+                val content = if rt_file_exists(file_path):
                     rt_file_read_text(file_path)
                 else:
                     ""
@@ -235,7 +231,7 @@ class AsyncTuiApp:
 
     me reload_file():
         """Reload the .ui.sdn file and update the tree."""
-        if not file_exists(self.file_path):
+        if not rt_file_exists(self.file_path):
             return
 
         val current_content = rt_file_read_text(self.file_path)
@@ -255,10 +251,10 @@ class AsyncTuiApp:
 
 fn run_async_tui(file_path: text) -> i64:
     """Start async TUI mode for a .ui.sdn file."""
-    val args = get_args()
+    val args = rt_cli_get_args()
     if _shared_wm_requested(args):
         return run_shared_wm_tui("simple tui")
-    if not file_exists(file_path):
+    if not rt_file_exists(file_path):
         print "Error: File not found: {file_path}"
         return 1
 

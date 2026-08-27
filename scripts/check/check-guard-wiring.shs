@@ -33,17 +33,13 @@
 # and RISC-V hardware gates. They genuinely cannot run on a general-purpose CI
 # runner. That is a legitimate opt-out. "I forgot" is not.
 #
-# HOOKS MUST RESOLVE TO TRACKED, CURRENT SOURCES
-# ----------------------------------------------
+# HOOKS MUST BE SYMLINKS, NEVER COPIES
+# ------------------------------------
 # Also checked here. On 2026-08-01 the shared repo's installed .git/hooks/pre-push
 # was a 2,668-byte COPY, two revisions behind the tracked script -- it predated
 # 5f1b96ad9a8, the commit that fixed three fail-opens in the conflict guards. So
 # every hardening landed that session was absent from the hook that actually ran.
-# The canonical installer now uses one deliberate exception to the symlink rule:
-# an exact copy of scripts/hooks/pre-push-worktree-launcher. The launcher must be
-# a copy because a symlink anchored in the shared Git directory cannot select the
-# linked worktree that initiated a push. Exact content equality keeps that copy
-# fail-closed: any stale or foreign copy is still rejected.
+# A copy is a snapshot; it goes stale silently. A symlink cannot.
 #
 # OUTPUT CONTRACT
 # ---------------
@@ -184,73 +180,6 @@ scan_wiring() {
 }
 
 # ---------------------------------------------------------------------------
-# scan_installed_hooks <root> <hookdir> <workdir>
-#
-# Classify repository-managed hook installation state. Symlinks must resolve to
-# tracked files in this worktree. The only accepted regular-file hook is the
-# exact canonical pre-push worktree launcher installed by
-# install-must-check-hooks.shs; a one-byte drift makes it invalid.
-# ---------------------------------------------------------------------------
-scan_installed_hooks() {
-    _root=$1
-    _hookdir=$2
-    _wd=$3
-
-    : > "$_wd/allhooks"
-    : > "$_wd/badhooks"
-    [ -d "$_hookdir" ] || return 0
-
-    _root_phys=$(CDPATH= cd -- "$_root" 2>/dev/null && pwd -P) || return 1
-    _launcher="$_root_phys/scripts/hooks/pre-push-worktree-launcher"
-    _launcher_tracked=0
-    git -C "$_root_phys" ls-files --error-unmatch \
-        scripts/hooks/pre-push-worktree-launcher >/dev/null 2>&1 &&
-        _launcher_tracked=1
-
-    find "$_hookdir" -maxdepth 1 ! -name '*.sample' ! -name '*.local' \
-        ! -name hooks -print > "$_wd/allhooks" 2>/dev/null || :
-    while IFS= read -r _h; do
-        [ -n "$_h" ] || continue
-        _b=${_h##*/}
-        if [ -L "$_h" ]; then
-            _target=$(readlink -f "$_h" 2>/dev/null || printf '')
-            case "$_target" in
-                "$_root_phys"/*)
-                    _rel=${_target#"$_root_phys"/}
-                    git -C "$_root_phys" ls-files --error-unmatch "$_rel" \
-                        >/dev/null 2>&1 || echo "$_h" >> "$_wd/badhooks"
-                    ;;
-                *) echo "$_h" >> "$_wd/badhooks" ;;
-            esac
-            continue
-        fi
-
-        # The canonical worktree-resolving launcher is intentionally copied.
-        # Content identity, tracked provenance, basename, and executability are
-        # all load-bearing; no other copied hook is grandfathered.
-        if [ "$_b" = pre-push ] && [ -x "$_h" ] &&
-           [ "$_launcher_tracked" -eq 1 ] && [ -f "$_launcher" ] &&
-           cmp -s "$_launcher" "$_h"; then
-            continue
-        fi
-
-        if [ -x "$_h" ]; then
-            echo "$_h" >> "$_wd/badhooks"
-        else
-            case "$_b" in
-                applypatch-msg|pre-applypatch|post-applypatch|pre-commit|\
-                pre-merge-commit|prepare-commit-msg|commit-msg|post-commit|\
-                pre-rebase|post-checkout|post-merge|pre-push|pre-receive|\
-                update|post-receive|post-update|push-to-checkout|\
-                pre-auto-gc|post-rewrite|sendemail-validate|fsmonitor-watchman)
-                    echo "$_h" >> "$_wd/badhooks" ;;
-            esac
-        fi
-    done < "$_wd/allhooks"
-    sort -u "$_wd/badhooks" -o "$_wd/badhooks"
-}
-
-# ---------------------------------------------------------------------------
 # SELFTEST. Fixtures exercise every verdict this script can reach. A sabotage
 # matrix is only as good as its fixture coverage: on 2026-08-01 one of eight
 # neutered-check sabotages of check-tree-size-push.shs initially passed green
@@ -305,65 +234,13 @@ selftest() {
     _assert "reasonless opt-out detected" yes \
         "$($GREP -qx 'st-orphan.shs' "$_w2/optout_noreason" && echo yes || echo no)"
 
-    # RATCHET fixtures. The set arithmetic that decides "new unwired" vs "known
-    # debt" vs "stale baseline" lives outside scan_wiring, so it is exercised
-    # here on explicit sets rather than inferred from the real tree.
-    printf 'st-orphan.shs\n' | sort -u > "$_w/fx_base"
-    printf 'st-orphan.shs\nst-brandnew.shs\n' | sort -u > "$_w/fx_unjust"
-    _assert "baselined orphan is not NEW debt" "st-brandnew.shs" \
-        "$(comm -23 "$_w/fx_unjust" "$_w/fx_base" | tr '\n' ' ' | sed 's/ *$//')"
-    printf 'st-direct.shs\n' | sort -u > "$_w/fx_base2"
-    _assert "baselined guard that became wired is stale" "st-direct.shs" \
-        "$(comm -12 "$_w/fx_base2" "$_w/reached" | tr '\n' ' ' | sed 's/ *$//')"
-    _assert "baselined guard that no longer exists is stale" "st-gone.shs" \
-        "$(printf 'st-gone.shs\n' | comm -23 - "$_w/guards" | tr '\n' ' ' | sed 's/ *$//')"
-
-    # Hook-shape fixtures exercise the exact canonical-copy exception. This is
-    # intentionally inside the gate's selftest so future broad exemptions or a
-    # basename-only check cannot silently accept a stale launcher again.
-    git -C "$_t" init -q
-    mkdir -p "$_t/scripts/hooks" "$_t/hooks"
-    printf '#!/bin/sh\necho canonical\n' > "$_t/scripts/hooks/pre-push-worktree-launcher"
-    git -C "$_t" add scripts/hooks/pre-push-worktree-launcher
-    cp "$_t/scripts/hooks/pre-push-worktree-launcher" "$_t/hooks/pre-push"
-    chmod +x "$_t/hooks/pre-push"
-    _hw=$(mktemp -d) || return 1
-    scan_installed_hooks "$_t" "$_t/hooks" "$_hw"
-    _assert "exact canonical launcher copy accepted" 0 \
-        "$(wc -l < "$_hw/badhooks" | tr -d ' ')"
-
-    printf '# stale\n' >> "$_t/hooks/pre-push"
-    scan_installed_hooks "$_t" "$_t/hooks" "$_hw"
-    _assert "stale canonical launcher copy rejected" 1 \
-        "$(wc -l < "$_hw/badhooks" | tr -d ' ')"
-
-    rm -f "$_t/hooks/pre-push"
-    ln -s ../scripts/hooks/pre-push-worktree-launcher "$_t/hooks/pre-push"
-    scan_installed_hooks "$_t" "$_t/hooks" "$_hw"
-    _assert "tracked in-tree hook symlink accepted" 0 \
-        "$(wc -l < "$_hw/badhooks" | tr -d ' ')"
-
-    rm -f "$_t/hooks/pre-push"
-    printf '#!/bin/sh\necho foreign\n' > "$_t/hooks/pre-push"
-    chmod +x "$_t/hooks/pre-push"
-    scan_installed_hooks "$_t" "$_t/hooks" "$_hw"
-    _assert "foreign executable hook copy rejected" 1 \
-        "$(wc -l < "$_hw/badhooks" | tr -d ' ')"
-
-    printf '#!/bin/sh\n' > "$_t/untracked-hook"
-    rm -f "$_t/hooks/pre-push"
-    ln -s ../untracked-hook "$_t/hooks/pre-push"
-    scan_installed_hooks "$_t" "$_t/hooks" "$_hw"
-    _assert "untracked hook symlink rejected" 1 \
-        "$(wc -l < "$_hw/badhooks" | tr -d ' ')"
-
-    rm -rf "$_t" "$_w" "$_w2" "$_hw"
+    rm -rf "$_t" "$_w" "$_w2"
     if [ "$_fail" -ne 0 ]; then
         echo "check-guard-wiring: SELFTEST FAILED -- the wiring scan is broken."
         echo "Fix the scan. Do NOT delete these fixtures."
         return 1
     fi
-    echo "check-guard-wiring: selftest 16/16 fixtures correct"
+    echo "check-guard-wiring: selftest 8/8 fixtures correct"
     return 0
 }
 
@@ -421,27 +298,6 @@ case "$HERE_PHYS" in
 esac
 
 OPTOUT="$ROOT/scripts/check/guard_wiring_optout.txt"
-# UNWIRED RATCHET (2026-08-23)
-# ----------------------------
-# This script sat permanently RED (414 unwired) for weeks, which is the worst of
-# both worlds: the debt was real but the verdict carried no information, so every
-# reader learned to ignore it -- and a genuinely NEW unwired guard was
-# indistinguishable from the standing backlog. That is exactly how
-# check-type-walk-constructor-parity.shs went unenforced for a day while its bug
-# record claimed it existed.
-#
-# The backlog is frozen here instead of being moved into the OPT-OUT file. The
-# distinction is deliberate and load-bearing: an opt-out line asserts "this guard
-# is deliberately not a gate"; a baseline line asserts only "this guard is not
-# wired YET, and that is known debt". Laundering 414 unwired guards through the
-# opt-out file would have made the debt permanent and honest-looking. Growth
-# fails; the count stays printed; shrinking is the follow-up program.
-#
-# Regeneration is DELETIONS-ONLY by construction: an entry that becomes wired is
-# reported as a stale baseline and fails, so the file cannot silently keep
-# describing a tree that has moved on. --generate-baseline exists for reviewed
-# updates only; do not reach for it to turn a FAIL green.
-BASELINE="$ROOT/scripts/check/guard_wiring_unwired_baseline.txt"
 
 WD=$(mktemp -d) || exit 2
 trap 'rm -rf "$WD"' EXIT
@@ -465,32 +321,6 @@ comm -23 "$WD/orphans" "$WD/optout" > "$WD/unjustified"
 comm -12 "$WD/optout" "$WD/reached" > "$WD/optout_now_wired"
 comm -23 "$WD/optout" "$WD/guards" > "$WD/optout_gone"
 
-: > "$WD/baseline"
-if [ -f "$BASELINE" ]; then
-    $GREP -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$BASELINE" 2>/dev/null |
-        awk '{print $1}' | sort -u > "$WD/baseline" || :
-fi
-if [ "${1:-}" = --generate-baseline ]; then
-    {
-        echo "# Frozen backlog of guards that nothing invokes yet (NOT an opt-out:"
-        echo "# an opt-out means 'deliberately not a gate'; a line here means"
-        echo "# 'unwired debt, known'). Regenerated $(date -u +%Y-%m-%d) for a"
-        echo "# REVIEWED update only. Growth fails; entries that become wired fail"
-        echo "# as stale. Shrinking this file is the follow-up program."
-        cat "$WD/unjustified"
-    } > "$BASELINE"
-    echo "check-guard-wiring: wrote $(wc -l < "$WD/unjustified" | tr -d ' ') baselined guard(s) to $BASELINE"
-    exit 0
-fi
-comm -23 "$WD/unjustified" "$WD/baseline" > "$WD/unjustified_new"
-# A baselined guard that is now wired (or gone) means the baseline is lying about
-# the tree -- the same staleness rule the opt-out file is held to.
-comm -12 "$WD/baseline" "$WD/reached" > "$WD/baseline_now_wired"
-comm -23 "$WD/baseline" "$WD/guards" > "$WD/baseline_gone"
-n_unjust_new=$(wc -l < "$WD/unjustified_new" | tr -d ' ')
-n_baselined=$(wc -l < "$WD/baseline" | tr -d ' ')
-n_base_wired=$(wc -l < "$WD/baseline_now_wired" | tr -d ' ')
-n_base_gone=$(wc -l < "$WD/baseline_gone" | tr -d ' ')
 n_unjust=$(wc -l < "$WD/unjustified" | tr -d ' ')
 n_wired_now=$(wc -l < "$WD/optout_now_wired" | tr -d ' ')
 n_gone=$(wc -l < "$WD/optout_gone" | tr -d ' ')
@@ -500,72 +330,72 @@ echo "guard_total=$n_guards"
 echo "guard_invoked=$n_reached"
 echo "guard_orphaned=$n_orphan"
 echo "guard_optout_listed=$(wc -l < "$WD/optout" | tr -d ' ')"
-echo "guard_unwired_baselined=$n_baselined"
-echo "guard_unwired_new=$n_unjust_new"
 
 # ---------------------------------------------------------------------------
-# Installed-hook shape. Repository hooks must resolve to tracked current source.
+# Installed-hook shape. A copy goes stale silently; a symlink cannot.
 # ---------------------------------------------------------------------------
 n_hooks=0
 n_badhooks=0
-# GitHub's checkout environment can carry ephemeral Git-LFS hooks in the fresh
-# clone. They are runner state, not an installation of this repository's hook
-# policy, and disappear with the job. Auditing those four files as though they
-# were developer hook wiring produced the PR36 false positive. CI still checks
-# the tracked installer/launcher sources and the full guard reachability graph;
-# local runs audit the actual hook directory that Git will execute.
-if [ "${GITHUB_ACTIONS:-}" = true ]; then
-    : > "$WD/allhooks"
-    : > "$WD/badhooks"
-    echo "installed_hooks_scan=skipped_ephemeral_github_actions"
-else
-    HOOKDIR=$(git rev-parse --git-path hooks 2>/dev/null) || HOOKDIR=""
-    case "$HOOKDIR" in
-        /*) : ;;
-        '') : ;;
-        *) HOOKDIR="$ROOT/$HOOKDIR" ;;
-    esac
-    scan_installed_hooks "$ROOT" "$HOOKDIR" "$WD" || {
-        echo "check-guard-wiring: ERROR — hook scan could not resolve tracked sources."
-        exit 2
-    }
+HOOKDIR="$ROOT/.git/hooks"
+if [ -d "$HOOKDIR" ]; then
+    # *.local is a pre-existing site-local hook that setup.shs deliberately
+    # preserved and chains; it is untracked by design, so it cannot be a symlink
+    # into the tree and is not a staleness hazard.
+    #
+    # 2026-08-21 precision fix: the scan used to flag EVERY non-symlink regular
+    # file in .git/hooks/, which caught two pattern DATA files (pw_patterns.txt,
+    # secrets.patterns) that have no tracked counterpart anywhere in the repo and
+    # that git never executes. Reporting them as "copied hooks" is a false
+    # positive that permanently pins the copied-hook count above zero and trains
+    # the reader to ignore the line -- the same "protection that isn't there"
+    # failure this script exists to prevent, inverted. This is NOT a weakening:
+    # git only ever runs a hook whose file is EXECUTABLE, and a file named after
+    # a real git hook is still flagged even when it is not executable, which is
+    # precisely the fourth-tree-wipe shape (hook present, non-executable,
+    # silently doing nothing). A non-executable file whose name is not a git
+    # hook name is neither run by git nor a stale copy of a tracked script.
+    : > "$WD/copyhooks"
+    find "$HOOKDIR" -maxdepth 1 -type f ! -name '*.sample' ! -name '*.local' \
+        -print 2>/dev/null | while IFS= read -r _h; do
+        _b=${_h##*/}
+        if [ -x "$_h" ]; then
+            echo "$_h"
+        else
+            case "$_b" in
+                applypatch-msg|pre-applypatch|post-applypatch|pre-commit|\
+                pre-merge-commit|prepare-commit-msg|commit-msg|post-commit|\
+                pre-rebase|post-checkout|post-merge|pre-push|pre-receive|\
+                update|post-receive|post-update|push-to-checkout|\
+                pre-auto-gc|post-rewrite|sendemail-validate|fsmonitor-watchman)
+                    echo "$_h" ;;
+            esac
+        fi
+    done >> "$WD/copyhooks"
+    find "$HOOKDIR" -maxdepth 1 ! -name '*.sample' ! -name '*.local' ! -name hooks \
+        -print > "$WD/allhooks" 2>/dev/null || :
     n_hooks=$(wc -l < "$WD/allhooks" | tr -d ' ')
-    n_badhooks=$(wc -l < "$WD/badhooks" | tr -d ' ')
+    n_badhooks=$(wc -l < "$WD/copyhooks" | tr -d ' ')
 fi
 echo "installed_hooks=$n_hooks"
-echo "installed_hooks_not_canonical=$n_badhooks"
+echo "installed_hooks_not_symlink=$n_badhooks"
 if [ "$n_hooks" -eq 0 ]; then
-    echo "NOTE: no repository-local hook installation was evaluated here."
+    echo "NOTE: no local hooks installed (normal on a CI runner) -- the hook-shape"
+    echo "check did not evaluate anything here. It is not a pass."
 fi
 
 status=0
 
-if [ "$n_unjust_new" -gt 0 ]; then
+if [ "$n_unjust" -gt 0 ]; then
     echo "guard_wiring_ok=false"
-    echo "== guards invoked by nothing, not opted out, and NOT in the frozen baseline =="
+    echo "== guards invoked by nothing and not listed in the opt-out =="
     while IFS= read -r b; do
         [ -n "$b" ] && echo "unwired_guard=$b"
-    done < "$WD/unjustified_new"
+    done < "$WD/unjustified"
     echo ""
     echo "A guard that no hook and no CI job runs is decoration. Wire it into"
     echo ".github/workflows/ or scripts/hooks/, or add it to"
     echo "scripts/check/guard_wiring_optout.txt WITH A REASON. Do not weaken the"
     echo "guard, and do not add an opt-out line merely to make this pass."
-    status=1
-fi
-
-if [ "$n_base_wired" -gt 0 ] || [ "$n_base_gone" -gt 0 ]; then
-    echo "guard_wiring_ok=false"
-    echo "== stale unwired-baseline entries (ratchet: remove them) =="
-    while IFS= read -r b; do
-        [ -n "$b" ] && echo "stale_baseline_now_wired=$b"
-    done < "$WD/baseline_now_wired"
-    while IFS= read -r b; do
-        [ -n "$b" ] && echo "stale_baseline_missing=$b"
-    done < "$WD/baseline_gone"
-    echo "Wiring a baselined guard is progress -- delete its line in the same"
-    echo "commit. A baseline that no longer describes the tree is how a ratchet"
-    echo "silently stops ratcheting."
     status=1
 fi
 
@@ -599,29 +429,26 @@ fi
 
 if [ "$n_badhooks" -gt 0 ]; then
     echo "guard_wiring_ok=false"
-    echo "== installed hooks that do not resolve to canonical tracked source =="
+    echo "== installed hooks that are COPIES, not symlinks =="
     while IFS= read -r h; do
-        [ -n "$h" ] && echo "hook_is_noncanonical=$h"
-    done < "$WD/badhooks"
+        [ -n "$h" ] && echo "hook_is_a_copy=$h"
+    done < "$WD/copyhooks"
     echo ""
-    echo "A stale or foreign hook copy can bypass the tracked dispatcher. On"
-    echo "2026-08-01 the installed pre-push hook was two revisions behind and"
-    echo "missed every fail-open fix landed that session. Re-run"
-    echo "scripts/setup/install-must-check-hooks.shs --install; its exact"
-    echo "worktree launcher copy is the only accepted non-symlink hook."
+    echo "A copied hook is a snapshot: it goes stale the moment the tracked"
+    echo "guard is improved, and nothing reports the drift. On 2026-08-01 the"
+    echo "installed pre-push hook was a copy two revisions behind and was"
+    echo "missing every fail-open fix landed that session. Re-run"
+    echo "scripts/setup/setup.shs, which installs hooks as symlinks."
     status=1
 fi
 
 if [ "$status" -ne 0 ]; then
-    echo "check-guard-wiring: FAIL — $n_guards guard(s) checked, $n_unjust_new NEW unwired" \
-         "($n_baselined baselined as known debt)," \
-         "$((n_wired_now + n_gone + n_noreason + n_base_wired + n_base_gone)) stale/bad baseline or opt-out line(s)," \
-         "$n_badhooks copied hook(s)"
+    echo "check-guard-wiring: FAIL — $n_guards guard(s) checked, $n_unjust unwired," \
+         "$((n_wired_now + n_gone + n_noreason)) bad opt-out(s), $n_badhooks copied hook(s)"
     exit 1
 fi
 
 echo "guard_wiring_ok=true"
 echo "check-guard-wiring: PASS — $n_guards guard(s) checked, $n_reached invoked," \
-     "$n_orphan orphaned ($n_baselined baselined as known unwired debt, rest justified)," \
-     "0 NEW unwired, $n_badhooks copied hook(s)"
+     "$n_orphan orphaned (all justified), $n_badhooks copied hook(s)"
 exit 0

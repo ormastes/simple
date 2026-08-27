@@ -1,13 +1,6 @@
-use std.gc_async_mut.gpu.browser_engine.dom.{
-    BeDomNode, BeDomEvent, StyleProps,
-    normalize_dom_event_type
-}
-use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
-    DomIdentityIndex, DomNodeRoute, DomRadioGroupKey
-}
-use common.web.html_escape.{html_escape_core}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, StyleProps}
 
-fn be_dom_add_child(mut parent: BeDomNode, child: BeDomNode):
+fn be_dom_add_child(parent: BeDomNode, child: BeDomNode):
     """Append a child node to parent.children and set child.parent_id."""
     var c = child
     c.parent_id = parent.node_id
@@ -17,7 +10,7 @@ fn be_dom_get_children(node: BeDomNode) -> [BeDomNode]:
     """Return the direct children of a node."""
     node.children
 
-fn be_dom_remove_child(mut parent: BeDomNode, child_id: i64):
+fn be_dom_remove_child(parent: BeDomNode, child_id: i64):
     """Remove the first child with the given node_id from parent.children."""
     val kept_count = be_dom_child_count_except(parent, child_id)
     if kept_count == 0:
@@ -45,7 +38,7 @@ fn be_dom_child_count_except(parent: BeDomNode, child_id: i64) -> i32:
         i = i + 1
     count
 
-fn be_dom_insert_before(mut parent: BeDomNode, new_child: BeDomNode, ref_id: i64):
+fn be_dom_insert_before(parent: BeDomNode, new_child: BeDomNode, ref_id: i64):
     """Insert new_child immediately before the child with ref_id."""
     val child_count = parent.children.len()
     val output_count = child_count + 1
@@ -67,362 +60,13 @@ fn be_dom_insert_before(mut parent: BeDomNode, new_child: BeDomNode, ref_id: i64
         new_children[out_idx] = nc
     parent.children = new_children
 
-fn be_dom_set_attr(mut node: BeDomNode, name: text, value: text):
+fn be_dom_set_attr(node: BeDomNode, name: text, value: text):
     """Set an attribute on a node."""
-    node.set_attr(name, value)
+    node.attributes[name] = value
 
 fn be_dom_get_attr(node: BeDomNode, name: text) -> text:
     """Get an attribute value, returning "" if absent."""
     node.attributes.get(name) ?? ""
-
-fn be_dom_event_identity(node: BeDomNode) -> text:
-    val author_id = be_dom_get_attr(node, "id")
-    if author_id != "":
-        return author_id
-    "node:{node.node_id}"
-
-fn be_dom_route_identity(node: BeDomNode) -> text:
-    "\u{0000}route-node:{node.node_id}"
-
-fn be_dom_route_node_id(target_id: text) -> i64:
-    val prefix = "\u{0000}route-node:"
-    if not target_id.starts_with(prefix):
-        return -1
-    target_id.substring(prefix.len(), target_id.len()).to_i64() ?? -1
-
-fn be_dom_matches_identity(node: BeDomNode, target_id: text) -> bool:
-    val route_node_id = be_dom_route_node_id(target_id)
-    if route_node_id >= 0:
-        return node.node_id == route_node_id
-    be_dom_event_identity(node) == target_id
-
-fn _be_dom_layout_element(node: BeDomNode) -> bool:
-    (
-        node.tag_name != "#text" and node.tag_name != "style" and
-        node.tag_name != "script" and node.tag_name != "title" and
-        node.tag_name != "head" and node.tag_name != "meta" and
-        node.tag_name != "link" and node.tag_name != "base"
-    )
-
-fn be_dom_event_identity_at_element_path(
-    root: BeDomNode, path: text
-) -> text:
-    val bodies = be_dom_find_by_tag(root, "body")
-    if bodies.len() == 0:
-        return ""
-    var current = bodies[0]
-    if path == "":
-        return be_dom_event_identity(current)
-    for part in path.split("/"):
-        val wanted = part.to_i64() ?? -1
-        if wanted < 0:
-            return ""
-        var ordinal: i64 = 0
-        var found: BeDomNode? = nil
-        for child in current.children:
-            if _be_dom_layout_element(child):
-                if ordinal == wanted:
-                    found = Some(child)
-                    break
-                ordinal = ordinal + 1
-        if found == nil:
-            return ""
-        current = found.unwrap()
-    be_dom_event_identity(current)
-
-fn _be_dom_layout_target_key_from(
-    node: BeDomNode, target_id: text, route_node_id: i64, path: text
-) -> text:
-    if route_node_id >= 0 and node.node_id == route_node_id:
-        return "path:{path}"
-    if route_node_id < 0 and be_dom_event_identity(node) == target_id:
-        val author_id = be_dom_get_attr(node, "id")
-        if author_id != "":
-            return "id:{author_id}"
-        return "path:{path}"
-    var ordinal: i64 = 0
-    for child in node.children:
-        if _be_dom_layout_element(child):
-            val child_path = if path == "":
-                ordinal.to_text()
-            else:
-                "{path}/{ordinal}"
-            val found = _be_dom_layout_target_key_from(
-                child, target_id, route_node_id, child_path
-            )
-            if found != "":
-                return found
-            ordinal = ordinal + 1
-    ""
-
-pub fn be_dom_layout_target_key(root: BeDomNode, target_id: text) -> text:
-    if target_id == "":
-        return ""
-    val bodies = be_dom_find_by_tag(root, "body")
-    if bodies.len() == 0:
-        return ""
-    _be_dom_layout_target_key_from(
-        bodies[0], target_id, be_dom_route_node_id(target_id), ""
-    )
-
-fn _be_dom_void_tag(tag: text) -> bool:
-    (
-        tag == "area" or tag == "base" or tag == "br" or tag == "col" or
-        tag == "embed" or tag == "hr" or tag == "img" or tag == "input" or
-        tag == "link" or tag == "meta" or tag == "param" or tag == "source" or
-        tag == "track" or tag == "wbr"
-    )
-
-val BE_DOM_HTML_SERIALIZE_MAX_DEPTH: i32 = 512
-val BE_DOM_HTML_SERIALIZE_MAX_FRAGMENTS: i64 = 262144
-val BE_DOM_HTML_SERIALIZE_MAX_OUTPUT_LENGTH: i64 = 50 * 1024 * 1024
-
-class _BeDomHtmlSerializationState:
-    parts: [text]
-    fragment_count: i64
-    output_length: i64
-    failed: bool
-
-    static fn create() -> _BeDomHtmlSerializationState:
-        _BeDomHtmlSerializationState(
-            parts: [], fragment_count: 0, output_length: 0, failed: false
-        )
-
-    me fail_closed():
-        self.parts = []
-        self.failed = true
-
-    me remaining_output_length() -> i64:
-        BE_DOM_HTML_SERIALIZE_MAX_OUTPUT_LENGTH - self.output_length
-
-    me can_push_length(length: i64) -> bool:
-        if self.failed:
-            return false
-        if (
-            length < 0 or
-            self.fragment_count >= BE_DOM_HTML_SERIALIZE_MAX_FRAGMENTS or
-            length > self.remaining_output_length()
-        ):
-            self.fail_closed()
-            return false
-        true
-
-    me push_known_length(fragment: text, length: i64):
-        if not self.can_push_length(length):
-            return
-        self.parts.push(fragment)
-        self.fragment_count = self.fragment_count + 1
-        self.output_length = self.output_length + length
-
-fn _be_dom_html_escaped_length_within(value: text, limit: i64) -> i64:
-    """Return escaped length, or -1 before allocation when over budget."""
-    if limit < 0:
-        return -1
-    var length: i64 = 0
-    for ch in value:
-        var added = ch.len().to_i64()
-        if ch == "&":
-            added = 5
-        elif ch == "<" or ch == ">":
-            added = 4
-        elif ch == "\"":
-            added = 6
-        elif ch == "'":
-            added = 5
-        if added > limit - length:
-            return -1
-        length = length + added
-    length
-
-fn _be_dom_push_escaped_html(
-    state: _BeDomHtmlSerializationState, value: text
-):
-    if not state.can_push_length(0):
-        return
-    val length = _be_dom_html_escaped_length_within(
-        value, state.remaining_output_length()
-    )
-    if length < 0:
-        state.fail_closed()
-        return
-    # Preflight happens before html_escape_core's expanding replacements.
-    state.push_known_length(html_escape_core(value), length)
-
-fn _be_dom_push_html_attribute(
-    state: _BeDomHtmlSerializationState, name: text, value: text
-):
-    val framing_length = name.len().to_i64() + 4
-    if not state.can_push_length(framing_length):
-        return
-    val escaped_length = _be_dom_html_escaped_length_within(
-        value, state.remaining_output_length() - framing_length
-    )
-    if escaped_length < 0:
-        state.fail_closed()
-        return
-    val length = framing_length + escaped_length
-    # Both escaped value and final attribute are bounded before construction.
-    state.push_known_length(
-        " " + name + "=\"" + html_escape_core(value) + "\"", length
-    )
-
-fn _be_dom_open_html_node(
-    node: BeDomNode, render_only: bool,
-    state: _BeDomHtmlSerializationState
-) -> bool:
-    """Emit a node's own opening markup.
-
-    Returns true when the caller must still walk `node.children` and then emit
-    the matching closing markup; false when the node is already complete (text
-    node, void element) or the state has failed closed.
-    """
-    if node.tag_name == "#text":
-        _be_dom_push_escaped_html(state, node.data)
-        return false
-    if node.tag_name == "#document":
-        return true
-    val open_tag_length = node.tag_name.len().to_i64() + 1
-    if not state.can_push_length(open_tag_length):
-        return false
-    state.push_known_length("<" + node.tag_name, open_tag_length)
-    for name in node.attributes.keys():
-        if not name.starts_with("\u0000"):
-            val authored_value = be_dom_get_attr(node, name)
-            val render_value = if render_only and name == "src":
-                node.attributes.get(
-                    "\u0000simple-render-image-src"
-                ) ?? authored_value
-            elif render_only and name == "poster":
-                node.attributes.get(
-                    "\u0000simple-render-image-poster"
-                ) ?? authored_value
-            elif render_only and name == "style":
-                node.attributes.get(
-                    "\u0000simple-render-image-style"
-                ) ?? authored_value
-            else:
-                authored_value
-            _be_dom_push_html_attribute(state, name, render_value)
-            if state.failed:
-                return false
-    state.push_known_length(">", 1)
-    if _be_dom_void_tag(node.tag_name):
-        return false
-    return not state.failed
-
-fn _be_dom_close_html_node(
-    node: BeDomNode, state: _BeDomHtmlSerializationState
-):
-    """Emit a node's closing markup. A `#document` node has none."""
-    if node.tag_name == "#document":
-        return
-    val close_tag_length = node.tag_name.len().to_i64() + 3
-    if not state.can_push_length(close_tag_length):
-        return
-    state.push_known_length("</" + node.tag_name + ">", close_tag_length)
-
-fn _be_dom_collect_html(
-    node: BeDomNode, render_only: bool,
-    state: _BeDomHtmlSerializationState, depth: i32
-):
-    """Serialize `node` and its subtree using an explicit work stack.
-
-    This walk used to recurse once per DOM level, so a document nested deeper
-    than the native stack allows aborted the entire process ("has overflowed
-    its stack") before `BE_DOM_HTML_SERIALIZE_MAX_DEPTH` could fail closed —
-    a renderer denial of service, since the HTML tree builder admits documents
-    right up to that cap. Depth is now bounded by the heap, and the depth cap
-    is what actually stops the walk.
-
-    Per-node work stays O(1) amortized: the frame stacks are grown with `push`
-    only while descending past the deepest level reached so far (at most
-    `BE_DOM_HTML_SERIALIZE_MAX_DEPTH` pushes for an entire document) and are
-    reused in place by index assignment afterwards, so a wide sibling list can
-    never turn the walk into repeated whole-array copies.
-    """
-    if state.failed:
-        return
-    if depth > BE_DOM_HTML_SERIALIZE_MAX_DEPTH:
-        state.fail_closed()
-        return
-    if not _be_dom_open_html_node(node, render_only, state):
-        return
-    # Frame `k` holds an already-opened node at DOM depth `depth + k`;
-    # `frame_next` is the index of its next unvisited child.
-    var frame_nodes: [BeDomNode] = [node]
-    var frame_next: [i32] = [0]
-    var frame_count: [i32] = [node.children.len()]
-    var top: i32 = 0
-    while top >= 0:
-        val cursor = frame_nodes[top]
-        val next_child = frame_next[top]
-        if next_child >= frame_count[top]:
-            _be_dom_close_html_node(cursor, state)
-            if state.failed:
-                return
-            top = top - 1
-        else:
-            frame_next[top] = next_child + 1
-            if depth + top + 1 > BE_DOM_HTML_SERIALIZE_MAX_DEPTH:
-                state.fail_closed()
-                return
-            val child = cursor.children[next_child]
-            val descend = _be_dom_open_html_node(child, render_only, state)
-            if state.failed:
-                return
-            if descend:
-                top = top + 1
-                if top < frame_nodes.len():
-                    frame_nodes[top] = child
-                    frame_next[top] = 0
-                    frame_count[top] = child.children.len()
-                else:
-                    frame_nodes.push(child)
-                    frame_next.push(0)
-                    frame_count.push(child.children.len())
-
-fn _be_dom_serialize_html(node: BeDomNode, render_only: bool) -> text:
-    val state = _BeDomHtmlSerializationState.create()
-    _be_dom_collect_html(node, render_only, state, 1)
-    if state.failed:
-        return ""
-    state.parts.join("")
-
-class _BeDomHtmlSerializationMetrics:
-    html: text
-    fragment_count: i64
-    output_length: i64
-    work_units: i64
-    failed: bool
-
-fn _be_dom_measure_html_serialization(
-    node: BeDomNode
-) -> _BeDomHtmlSerializationMetrics:
-    """Test diagnostic: actual fragment appends plus final-join output copies."""
-    val state = _BeDomHtmlSerializationState.create()
-    _be_dom_collect_html(node, false, state, 1)
-    val html = if state.failed: "" else: state.parts.join("")
-    _BeDomHtmlSerializationMetrics(
-        html: html,
-        fragment_count: state.fragment_count,
-        output_length: state.output_length,
-        work_units: state.fragment_count + state.output_length,
-        failed: state.failed
-    )
-
-fn be_dom_serialize_html(node: BeDomNode) -> text:
-    _be_dom_serialize_html(node, false)
-
-fn be_dom_serialize_html_for_render(node: BeDomNode) -> text:
-    _be_dom_serialize_html(node, true)
-
-fn be_dom_serialize_children(node: BeDomNode) -> text:
-    val state = _BeDomHtmlSerializationState.create()
-    for child in node.children:
-        _be_dom_collect_html(child, false, state, 1)
-        if state.failed:
-            return ""
-    state.parts.join("")
 
 fn be_dom_set_style(mut node: BeDomNode, style: StyleProps):
     """Replace the node's inline style."""
@@ -432,7 +76,7 @@ fn be_dom_get_style(node: BeDomNode) -> StyleProps:
     """Return the node's current inline style."""
     node.style
 
-fn be_dom_set_text_content(mut node: BeDomNode, text_content: text):
+fn be_dom_set_text_content(node: BeDomNode, text_content: text):
     """Set the text content of a node (clears children, sets data)."""
     node.children = []
     node.data = text_content
@@ -587,11 +231,8 @@ fn be_dom_query_selector(node: BeDomNode, selector: text) -> BeDomNode?:
     nil
 
 fn be_dom_dispatch_event_actions(node: BeDomNode, event_type: text) -> [text]:
-    val normalized = normalize_dom_event_type(event_type)
+    val normalized = event_type.trim().lower()
     var actions: [text] = []
-    val inline_action = be_dom_get_attr(node, "on" + normalized)
-    if inline_action != "":
-        actions.push(inline_action)
     var i = 0
     while i < node.event_listener_types.len():
         if node.event_listener_types[i] == normalized:
@@ -2165,17 +1806,6 @@ fn be_dom_apply_default_action_to_route_without_focus(
 
 export be_dom_add_child, be_dom_get_children, be_dom_remove_child, be_dom_insert_before
 export be_dom_set_attr, be_dom_get_attr, be_dom_set_style, be_dom_get_style
-export be_dom_event_identity, be_dom_route_identity, be_dom_route_node_id
-export be_dom_matches_identity
-export be_dom_event_identity_at_element_path
-export be_dom_layout_target_key
-export be_dom_serialize_html, be_dom_serialize_children
-export be_dom_serialize_html_for_render
-export _BeDomHtmlSerializationMetrics, _be_dom_measure_html_serialization
-export _be_dom_html_escaped_length_within
-export BE_DOM_HTML_SERIALIZE_MAX_DEPTH
-export BE_DOM_HTML_SERIALIZE_MAX_FRAGMENTS
-export BE_DOM_HTML_SERIALIZE_MAX_OUTPUT_LENGTH
 export be_dom_set_text_content, be_dom_get_text_content
 export be_dom_find_by_id, be_dom_find_by_tag
 export be_dom_get_tag, be_dom_get_is_text, be_dom_get_text, be_dom_set_children

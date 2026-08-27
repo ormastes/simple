@@ -17,17 +17,15 @@
 
 use std.gc_async_mut.gpu.browser_engine.browser_file_ops.{browser_file_read_bytes, browser_file_read_text, browser_file_write_text}
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_draw_ir, simple_web_layout_render_html_software_pixels}
-use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.gc_async_mut.io.mod_stub.{env_get as web_backend_env_get}
 use std.process.{process_run}
-use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU, DrawIrComposition, draw_ir_composition}
 
 # Platform-portable tmp dir: SIMPLE_WEB_RENDER_TMP env var overrides the
 # default so callers can redirect to a writable partition (e.g. D:/simple_work
 # on Windows when C: is full). Default: build/tmp/web_render_backend relative
 # to cwd (project root), replacing the former Linux-only /tmp/ path.
 fn _chromium_tmp_dir() -> text:
-    val v = env_get("SIMPLE_WEB_RENDER_TMP") ?? ""
+    val v = web_backend_env_get("SIMPLE_WEB_RENDER_TMP") ?? ""
     if v == "":
         return "build/tmp/web_render_backend"
     v
@@ -42,7 +40,7 @@ fn _normalize_web_backend(name: text) -> text:
     "pure_simple"
 
 fn _env_or(key: text, fallback: text) -> text:
-    val v = env_get(key) ?? ""
+    val v = web_backend_env_get(key) ?? ""
     if v == "":
         return fallback
     v
@@ -51,7 +49,7 @@ fn _repo_root() -> text:
     """Resolve the repo root from SIMPLE_LIB (set to <root>/src by the runtime and
     the macOS .app launcher) so the chromium helper paths work even when cwd is /
     (LaunchServices runs .app bundles from /)."""
-    val lib = env_get("SIMPLE_LIB") ?? ""
+    val lib = web_backend_env_get("SIMPLE_LIB") ?? ""
     if lib.ends_with("/src"):
         return lib[0 : lib.len() - 4]
     if lib == "" or lib == "src":
@@ -100,13 +98,13 @@ fn _render_html_via_chromium(html: text, width: i32, height: i32) -> [u32]:
                 "SET CRB_OUT=" + win_out + "&&" +
                 "SET CRB_W=" + w_str + "&&" +
                 "SET CRB_H=" + h_str + "&&" +
-                electron + " " + win_helper
+                electron + " --no-sandbox " + win_helper
             process_run("cmd.exe", ["/c", cmd_str])
         else:
             val cmd = "CRB_HTML=" + _shell_quote(html_path) +
                 " CRB_OUT=" + _shell_quote(out_path) +
                 " CRB_W=" + w_str + " CRB_H=" + h_str +
-                " " + _shell_quote(electron) + " " + _shell_quote(helper)
+                " " + _shell_quote(electron) + " --no-sandbox " + _shell_quote(helper)
             process_run("/bin/sh", ["-c", cmd])
     if result.2 != 0:
         print "web_render_backend: chromium helper exited {result.2}: {result.1}"
@@ -163,49 +161,18 @@ impl WebRenderBackend:
     fn name(self) -> text:
         self.backend
 
-    fn render_html_to_pixels(self, html: text, engine2d_backend: text = "auto") -> [u32]:
-        """Render `html` to a pixel buffer. `engine2d_backend` selects the
-        Simple2D backend for the `pure_simple` engine only ("auto", "metal",
-        "cpu_simd", ...); it is ignored for the `chromium` engine, which has
-        its own (Electron/Chromium) rendering pipeline. Default "auto" uses
-        the canonical HTML-to-DrawIR Engine2D route (Gap C:
-        doc/03_plan/ui/rendering/backend_isolation_plan.md § P3 Gap C)."""
+    fn render_html_to_pixels(self, html: text) -> [u32]:
         if self.backend == "chromium":
             return _render_html_via_chromium(html, self.width, self.height)
-        return simple_web_render_html_to_pixels_with_engine2d_backend(html, self.width, self.height, engine2d_backend)
+        return simple_web_render_html_to_pixels_with_engine2d_backend(html, self.width, self.height, "auto")
 
-    fn render_html_file_to_pixels(self, path: text, engine2d_backend: text = "auto") -> [u32]:
+    fn render_html_file_to_pixels(self, path: text) -> [u32]:
         """Render an HTML file from disk through the selected backend."""
         val html = browser_file_read_text(path) ?? ""
         if html == "":
             print "web_render_backend: html file empty or missing: {path}"
             return []
-        self.render_html_to_pixels(html, engine2d_backend)
-
-    fn render_html_to_draw_ir(self, html: text) -> DrawIrComposition:
-        """Render `html` to a backend-agnostic Draw IR composition — the
-        layout/paint command list, not final pixels (P3 Gap E:
-        doc/03_plan/ui/rendering/backend_isolation_plan.md § P3 Gap E). Lets
-        probes assert against structured draw ops instead of only pixels,
-        without declaring their own `rt_*`/backend-engine call.
-
-        Only the `pure_simple` engine has a Draw IR representation; `chromium`
-        is a captured real-Chromium render with no IR to report, so it returns
-        an empty composition rather than substituting pure_simple's output."""
-        if self.backend == "chromium":
-            return draw_ir_composition("html-layout", "simple-web-html-layout", DRAW_IR_BACKEND_CPU, [])
-        simple_web_layout_render_html_draw_ir(html, self.width, self.height)
-
-    fn render_html_software_pixels(self, html: text) -> [u32]:
-        """Render `html` through the pure_simple engine's own CPU layout/paint
-        path (parse -> CSS cascade -> block layout -> paint), bypassing
-        Engine2D backend selection entirely — for parity probes that need a
-        backend-independent pixel ground truth (P3 Gap E). `chromium` has no
-        equivalent CPU-only mode of its own; falls back to its normal capture
-        so callers still get real pixels rather than a silent empty buffer."""
-        if self.backend == "chromium":
-            return _render_html_via_chromium(html, self.width, self.height)
-        simple_web_layout_render_html_software_pixels(html, self.width, self.height)
+        self.render_html_to_pixels(html)
 
     fn show_live_window(self, html_path: text, width: i32, height: i32, title: text) -> bool:
         """Open the backend's NATIVE LIVE window for this page (at width x height,
@@ -236,7 +203,7 @@ impl WebRenderBackend:
         # On POSIX, use /bin/sh + nohup for the same detach effect.
         if electron.ends_with(".cmd") or electron.ends_with(".exe"):
             val args: [text] = ["/c", "start", "", "/B",
-                electron, shell, "--url", url,
+                electron, "--no-sandbox", shell, "--url", url,
                 "--width", w_str, "--height", h_str, "--title", title]
             val res = process_run("cmd.exe", args)
             return res.2 == 0
@@ -244,7 +211,7 @@ impl WebRenderBackend:
             " SIMPLE_ELECTRON_HEIGHT=" + h_str +
             " SIMPLE_ELECTRON_TITLE=" + _shell_quote(title) +
             " SIMPLE_ELECTRON_ZOOM=" + zoom +
-            " nohup " + _shell_quote(electron) + " " + _shell_quote(shell) +
+            " nohup " + _shell_quote(electron) + " --no-sandbox " + _shell_quote(shell) +
             " --url " + _shell_quote(url) + " >/dev/null 2>&1 &"
         val result = process_run("/bin/sh", ["-c", cmd])
         result.2 == 0

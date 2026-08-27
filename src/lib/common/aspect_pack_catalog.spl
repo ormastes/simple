@@ -1,0 +1,547 @@
+# Canonical immutable aspect-catalog owner (design §9/§11.1).
+#
+# Owns logical catalog composition, profile slices, catalog wire records, and
+# direct route lookup. It never owns live loader or activation state.
+
+use std.common.string_core.{text_to_bytes}
+use std.common.aspect_pack_container.*
+
+val APK_CATALOG_MAGIC_V1: text = "SMFACAT1"
+val APK_CATALOG_HEADER_SIZE_V1: i64 = 24
+
+val APK_ENTRY_FACET: i64 = 0
+val APK_ENTRY_JOINPOINT: i64 = 1
+val APK_ENTRY_STARTUP: i64 = 2
+
+val APK_ACT_OFF: i64 = 0
+val APK_ACT_STATIC: i64 = 1
+val APK_ACT_STARTUP: i64 = 2
+val APK_ACT_LAZY_FACET: i64 = 3
+val APK_ACT_MANUAL: i64 = 4
+val APK_ACT_LAZY_PATCHABLE: i64 = 5
+val APK_ACT_HOT: i64 = 6
+
+# design §9.6 multi-profile deployments: a fat catalog carries several
+# PRE-RESOLVED profiles. A ProfileRecord names a contiguous slice of the
+# catalog's entry array; startup selects exactly one by profile id and routes
+# only inside that slice — it never evaluates the other profiles' entries.
+struct ApkProfileRecordV1:
+    profile_id: text
+    entry_start: i64
+    entry_count: i64
+
+struct ApkProfileSelectV1:
+    ok: bool
+    found: bool
+    error_code: text
+    error_message: text
+    profile_id: text
+    entry_start: i64
+    entry_count: i64
+    profiles_examined: i64
+
+struct ApkCatalogEntryV1:
+    facet_key: text
+    pack_path: text
+    module_id: text
+
+# design §11.1 FacetRoute/JoinpointRoute: routing plus the activation mode and
+# the facet contract ABI hash the route promises.
+struct ApkCatalogEntryV2:
+    facet_key: text
+    pack_path: text
+    module_id: text
+    entry_kind: i64
+    activation: i64
+    abi_hash: text
+
+# ---------------------------------------------------------------- dynamic-only logical composition contract
+#
+# These classes intentionally contain no wire offsets, dynamic handles, or
+# mutable loader state.  They are the immutable-by-convention composition
+# values shared by catalog producers and the OS admission boundary.  Wire
+# decoding remains owned by os.smf; live facet references remain owned by the
+# dynSMF session.
+
+class AspectFacetDescriptor:
+    facet_id: text
+    export_symbol: text
+    interface_abi_hash: text
+
+class AspectPackBinding:
+    facet_id: text
+    aspect_id: text
+    library_id: text
+    library_path: text
+    library_abi_version: text
+    module_id: text
+    module_abi_hash: text
+    pack_content_hash: text
+    placement: text
+
+class AspectCatalogEntry:
+    descriptor: AspectFacetDescriptor
+    binding: AspectPackBinding
+
+class AspectCatalog:
+    schema_version: i64
+    entries: [AspectCatalogEntry]
+
+class AspectCatalogBuild:
+    ok: bool
+    error_code: text
+    error_message: text
+    catalog: AspectCatalog
+
+fn _aspect_catalog_error(code: text, message: text) -> AspectCatalogBuild:
+    AspectCatalogBuild(
+        ok: false,
+        error_code: code,
+        error_message: message,
+        catalog: AspectCatalog(schema_version: 1, entries: [])
+    )
+
+fn aspect_catalog_build(entries: [AspectCatalogEntry]) -> AspectCatalogBuild:
+    """Build the dynamic-only logical catalog, rejecting ambiguous or
+    incomplete bindings.  No symbol name or ABI is inferred from a facet id.
+    """
+    if entries.len() == 0:
+        return _aspect_catalog_error("ASPECT_CATALOG_EMPTY", "an aspect catalog must contain at least one facet")
+    var seen: Dict<text, bool> = {}
+    var index = 0
+    while index < entries.len():
+        val entry = entries[index]
+        val descriptor = entry.descriptor
+        val binding = entry.binding
+        if descriptor.facet_id == "" or descriptor.export_symbol == "" or descriptor.interface_abi_hash == "":
+            return _aspect_catalog_error("ASPECT_DESCRIPTOR_INCOMPLETE", "facet id, export symbol, and interface ABI hash are required")
+        if binding.facet_id != descriptor.facet_id:
+            return _aspect_catalog_error("ASPECT_BINDING_FACET_MISMATCH", "binding facet id does not match its descriptor")
+        if binding.aspect_id == "" or binding.library_id == "" or binding.library_path == "" or binding.library_abi_version == "":
+            return _aspect_catalog_error("ASPECT_BINDING_INCOMPLETE", "aspect id and exact library identity are required")
+        if binding.module_id == "" or binding.module_abi_hash == "" or binding.pack_content_hash == "":
+            return _aspect_catalog_error("ASPECT_BINDING_MODULE_INCOMPLETE", "module id, module ABI hash, and pack content hash are required")
+        if binding.placement != "dynamic":
+            return _aspect_catalog_error("ASPECT_BINDING_NOT_DYNAMIC", "this catalog slice admits dynamic placement only")
+        if seen.get(descriptor.facet_id) != nil:
+            return _aspect_catalog_error("ASPECT_CATALOG_AMBIGUOUS_FACET", "duplicate facet id: " + descriptor.facet_id)
+        seen[descriptor.facet_id] = true
+        index = index + 1
+    AspectCatalogBuild(
+        ok: true,
+        error_code: "",
+        error_message: "",
+        catalog: AspectCatalog(schema_version: 1, entries: entries)
+    )
+
+struct ApkCatalogHandleV1:
+    ok: bool
+    error_code: text
+    error_message: text
+    schema_version: i64
+    entry_count: i64
+    total_size: i64
+    # design §9.6: number of ProfileRecords in this catalog (0 = single
+    # profile), and the byte offset at which the entry array begins (i.e.
+    # after the fixed header and the profile table).
+    profile_count: i64
+    body_off: i64
+
+struct ApkCatalogRouteV1:
+    ok: bool
+    found: bool
+    error_code: text
+    error_message: text
+    facet_key: text
+    pack_path: text
+    module_id: text
+    entry_kind: i64
+    activation: i64
+    abi_hash: text
+
+fn apk_build_catalog_v1(entries: [ApkCatalogEntryV1]) -> ApkBuildResultV1:
+    """Build a catalog of plain lazy_facet routes with no declared contract
+    ABI (design §9.4: lazy_facet is the default for typed facets)."""
+    var upgraded: [ApkCatalogEntryV2] = []
+    var i = 0
+    while i < entries.len():
+        upgraded.push(ApkCatalogEntryV2(facet_key: entries[i].facet_key,
+            pack_path: entries[i].pack_path, module_id: entries[i].module_id,
+            entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET, abi_hash: ""))
+        i = i + 1
+    apk_build_catalog_v2(upgraded)
+
+fn apk_build_catalog_v2(entries: [ApkCatalogEntryV2]) -> ApkBuildResultV1:
+    """Build a single-profile uncompressed Aspect Catalog section."""
+    var none: [ApkProfileRecordV1] = []
+    apk_build_catalog_v3(entries, none)
+
+fn apk_build_catalog_v3(entries: [ApkCatalogEntryV2], profiles: [ApkProfileRecordV1]) -> ApkBuildResultV1:
+    """Build the uncompressed application Aspect Catalog section, optionally
+    carrying several PRE-RESOLVED profiles (design §9.6). Each ProfileRecord
+    names a contiguous slice of the entry array, so startup selects one
+    profile by id and routes only inside its slice — it never evaluates the
+    other profiles\' entries and never scans packs. Duplicate (kind, key)
+    pairs fail closed (routing must be unambiguous); with several profiles a
+    key may legitimately repeat ACROSS profiles, so the duplicate check runs
+    per profile slice rather than globally.
+
+    NOTE the deliberate limit: the design speaks of a fat installation
+    carrying several CATALOGS. This carries several profiles inside one
+    catalog section, which is the same selection semantics without inventing a
+    multi-file installation layout that no deployment code in-tree produces."""
+    var empty: [u8] = []
+    val pn = profiles.len()
+    if pn > 65535:
+        return ApkBuildResultV1(ok: false, error_code: "APK_TOO_MANY_PROFILES",
+            error_message: "a catalog carries at most 65535 profiles", bytes: empty, module_count: 0)
+    var pi = 0
+    while pi < pn:
+        if profiles[pi].profile_id == "":
+            return ApkBuildResultV1(ok: false, error_code: "APK_PROFILE_EMPTY_ID",
+                error_message: "a profile record must carry a non-empty profile id", bytes: empty, module_count: 0)
+        if profiles[pi].entry_start < 0 or profiles[pi].entry_count < 0 or profiles[pi].entry_start + profiles[pi].entry_count > entries.len():
+            return ApkBuildResultV1(ok: false, error_code: "APK_PROFILE_RANGE",
+                error_message: "profile {profiles[pi].profile_id} names entries [{profiles[pi].entry_start}, {profiles[pi].entry_start + profiles[pi].entry_count}) outside the {entries.len()}-entry catalog", bytes: empty, module_count: 0)
+        var pj = pi + 1
+        while pj < pn:
+            if profiles[pi].profile_id == profiles[pj].profile_id:
+                return ApkBuildResultV1(ok: false, error_code: "APK_DUP_PROFILE",
+                    error_message: "duplicate profile id: {profiles[pi].profile_id}", bytes: empty, module_count: 0)
+            pj = pj + 1
+        pi = pi + 1
+    if pn > 0:
+        pi = 0
+        while pi < pn:
+            val dup = _apk_check_slice_unique(entries, profiles[pi].entry_start, profiles[pi].entry_count)
+            if not dup.ok:
+                return dup
+            pi = pi + 1
+    else:
+        val dup0 = _apk_check_slice_unique(entries, 0, entries.len())
+        if not dup0.ok:
+            return dup0
+    var ptab: [u8] = []
+    pi = 0
+    while pi < pn:
+        var pjoined: [u8] = []
+        _apk_push_text(pjoined, profiles[pi].profile_id)
+        _apk_push_u64(pjoined, profiles[pi].entry_start)
+        _apk_push_u64(pjoined, profiles[pi].entry_count)
+        _apk_push_bytes(ptab, pjoined)
+        _apk_push_u32(ptab, _apk_crc(pjoined))
+        pi = pi + 1
+    _apk_build_catalog_body(entries, ptab, pn)
+
+fn _apk_check_slice_unique(entries: [ApkCatalogEntryV2], start: i64, count: i64) -> ApkBuildResultV1:
+    var empty: [u8] = []
+    val n = start + count
+    var i = start
+    while i < n:
+        var j = i + 1
+        while j < n:
+            if entries[i].facet_key == entries[j].facet_key and entries[i].entry_kind == entries[j].entry_kind:
+                return ApkBuildResultV1(ok: false, error_code: "APK_DUP_FACET",
+                    error_message: "duplicate facet key: {entries[i].facet_key}", bytes: empty, module_count: 0)
+            # design §5.4-5.5 binding-level uniqueness: two routes of the same
+            # kind pointing at the SAME (pack_path, module_id) must not claim
+            # DIFFERENT non-empty contract ABI hashes for it — that would be
+            # two incompatible bindings for one module, not a duplicate route.
+            if (entries[i].entry_kind == entries[j].entry_kind and
+                entries[i].pack_path == entries[j].pack_path and
+                entries[i].module_id == entries[j].module_id and
+                entries[i].abi_hash != "" and entries[j].abi_hash != "" and
+                entries[i].abi_hash != entries[j].abi_hash):
+                return ApkBuildResultV1(ok: false, error_code: "APK_BINDING_ABI_CONFLICT",
+                    error_message: "module {entries[i].module_id} is bound with conflicting contract ABI hashes: {entries[i].abi_hash} vs {entries[j].abi_hash}",
+                    bytes: empty, module_count: 0)
+            j = j + 1
+        i = i + 1
+    ApkBuildResultV1(ok: true, error_code: "", error_message: "", bytes: empty, module_count: 0)
+
+fn _apk_build_catalog_body(entries: [ApkCatalogEntryV2], ptab: [u8], profile_count: i64) -> ApkBuildResultV1:
+    val n = entries.len()
+    var body: [u8] = []
+    var i = 0
+    while i < n:
+        val kb = text_to_bytes(entries[i].facet_key)
+        val pb = text_to_bytes(entries[i].pack_path)
+        val mb = text_to_bytes(entries[i].module_id)
+        val ab = text_to_bytes(entries[i].abi_hash)
+        var joined: [u8] = []
+        _apk_push_bytes(joined, kb)
+        _apk_push_bytes(joined, pb)
+        _apk_push_bytes(joined, mb)
+        _apk_push_u32(joined, entries[i].entry_kind)
+        _apk_push_u32(joined, entries[i].activation)
+        _apk_push_bytes(joined, ab)
+        _apk_push_u32(body, kb.len())
+        _apk_push_bytes(body, kb)
+        _apk_push_u32(body, pb.len())
+        _apk_push_bytes(body, pb)
+        _apk_push_u32(body, mb.len())
+        _apk_push_bytes(body, mb)
+        _apk_push_u32(body, entries[i].entry_kind)
+        _apk_push_u32(body, entries[i].activation)
+        _apk_push_u32(body, ab.len())
+        _apk_push_bytes(body, ab)
+        _apk_push_u32(body, _apk_crc(joined))
+        i = i + 1
+    var out: [u8] = []
+    _apk_push_bytes(out, text_to_bytes(APK_CATALOG_MAGIC_V1))
+    _apk_push_u16(out, APK_SCHEMA_V1)
+    # design §9.6: the previously-reserved u16 now carries the ProfileRecord
+    # count. 0 is exactly what every single-profile catalog wrote before.
+    _apk_push_u16(out, profile_count)
+    _apk_push_u32(out, n)
+    _apk_push_u64(out, APK_CATALOG_HEADER_SIZE_V1 + ptab.len() + body.len())
+    _apk_push_bytes(out, ptab)
+    _apk_push_bytes(out, body)
+    ApkBuildResultV1(ok: true, error_code: "", error_message: "", bytes: out, module_count: n)
+
+fn apk_build_catalog_v2_checked(entries: [ApkCatalogEntryV2], known_module_ids: [text]) -> ApkBuildResultV1:
+    """design §5.4 binding completeness: like apk_build_catalog_v2, but ALSO
+    verifies at build time that every route's module_id is one of the
+    modules the caller declares it is packing (`known_module_ids`) — a
+    dangling binding is rejected BEFORE it ships, rather than only being
+    discovered lazily as APK_ROUTE_DANGLING on first load."""
+    var empty: [u8] = []
+    var i = 0
+    while i < entries.len():
+        var found = false
+        var j = 0
+        while j < known_module_ids.len():
+            if known_module_ids[j] == entries[i].module_id:
+                found = true
+            j = j + 1
+        if not found:
+            return ApkBuildResultV1(ok: false, error_code: "APK_DANGLING_BINDING",
+                error_message: "facet {entries[i].facet_key} routes to module {entries[i].module_id}, which is not among the declared modules",
+                bytes: empty, module_count: 0)
+        i = i + 1
+    apk_build_catalog_v2(entries)
+
+fn _apk_cat_open_error(code: text, message: text) -> ApkCatalogHandleV1:
+    ApkCatalogHandleV1(ok: false, error_code: code, error_message: message,
+        schema_version: 0, entry_count: 0, total_size: 0, profile_count: 0,
+        body_off: APK_CATALOG_HEADER_SIZE_V1)
+
+fn apk_open_catalog_v1(data: [u8]) -> ApkCatalogHandleV1:
+    if data.len() < APK_CATALOG_HEADER_SIZE_V1:
+        return _apk_cat_open_error("APK_CATALOG_TRUNCATED", "catalog shorter than the fixed header")
+    val magic = text_to_bytes(APK_CATALOG_MAGIC_V1)
+    var i = 0
+    while i < 8:
+        if data[i] != magic[i]:
+            return _apk_cat_open_error("APK_CATALOG_BAD_MAGIC", "catalog magic is not SMFACAT1")
+        i = i + 1
+    val schema = _apk_read_u16(data, 8)
+    if schema != APK_SCHEMA_V1:
+        return _apk_cat_open_error("APK_CATALOG_BAD_VERSION", "unsupported catalog schema version")
+    val profile_count = _apk_read_u16(data, 10)
+    val entry_count = _apk_read_u32(data, 12)
+    val total_size = _apk_read_u64(data, 16)
+    if entry_count < 0 or entry_count > 1048576:
+        return _apk_cat_open_error("APK_CATALOG_BAD_GEOMETRY", "unreasonable entry_count")
+    if total_size != data.len():
+        return _apk_cat_open_error("APK_CATALOG_TRUNCATED", "declared total_size does not match available bytes")
+    # design §9.6: walk the (uncompressed) profile table so the entry array
+    # start is known. Its records are fixed-shape, so this is bounded.
+    var off = APK_CATALOG_HEADER_SIZE_V1
+    var p = 0
+    while p < profile_count:
+        if off + 4 > total_size:
+            return _apk_cat_open_error("APK_CATALOG_CORRUPT", "profile record extends past section end")
+        val id_len = _apk_read_u32(data, off)
+        if id_len < 0 or off + 4 + id_len + 20 > total_size:
+            return _apk_cat_open_error("APK_CATALOG_CORRUPT", "profile record escapes the section")
+        off = off + 4 + id_len + 20
+        p = p + 1
+    ApkCatalogHandleV1(ok: true, error_code: "", error_message: "",
+        schema_version: schema, entry_count: entry_count, total_size: total_size,
+        profile_count: profile_count, body_off: off)
+
+fn _apk_route_error(code: text, message: text) -> ApkCatalogRouteV1:
+    ApkCatalogRouteV1(ok: false, found: false, error_code: code, error_message: message,
+        facet_key: "", pack_path: "", module_id: "",
+        entry_kind: APK_ENTRY_FACET, activation: APK_ACT_OFF, abi_hash: "")
+
+fn apk_catalog_route_v1(data: [u8], handle: ApkCatalogHandleV1, facet_key: text) -> ApkCatalogRouteV1:
+    """Route a FacetRoute key DIRECTLY to (pack_path, module_id)."""
+    _apk_catalog_route_kind(data, handle, facet_key, APK_ENTRY_FACET)
+
+fn apk_catalog_route_joinpoint_v1(data: [u8], handle: ApkCatalogHandleV1, slot_key: text) -> ApkCatalogRouteV1:
+    """Route a JoinpointRoute slot key (design §11.1) to its owning pack and
+    module. Same table, different record kind — a facet key never satisfies a
+    join-point lookup and vice versa."""
+    _apk_catalog_route_kind(data, handle, slot_key, APK_ENTRY_JOINPOINT)
+
+fn apk_catalog_profile_ids_v1(data: [u8], handle: ApkCatalogHandleV1) -> [text]:
+    """design §9.6: the profile ids this catalog carries, in record order. An
+    empty result means the catalog is single-profile."""
+    var out: [text] = []
+    if not handle.ok:
+        return out
+    var off = APK_CATALOG_HEADER_SIZE_V1
+    var p = 0
+    while p < handle.profile_count:
+        val id_len = _apk_read_u32(data, off)
+        out.push(_apk_read_text(data, off + 4, id_len))
+        off = off + 4 + id_len + 20
+        p = p + 1
+    out
+
+fn _apk_profile_error(code: text, message: text, profile_id: text, examined: i64) -> ApkProfileSelectV1:
+    ApkProfileSelectV1(ok: false, found: false, error_code: code, error_message: message,
+        profile_id: profile_id, entry_start: 0, entry_count: 0, profiles_examined: examined)
+
+fn apk_catalog_select_profile_v1(data: [u8], handle: ApkCatalogHandleV1, profile_id: text) -> ApkProfileSelectV1:
+    """design §9.6: select ONE pre-resolved profile by id and return the
+    catalog-entry slice it owns. Stops at the first matching record — the
+    number of records it actually looked at is reported as
+    `profiles_examined`, which is what makes "must not evaluate every
+    profile" a checkable claim rather than a promise."""
+    if not handle.ok:
+        return _apk_profile_error("APK_CATALOG_BAD_HANDLE", "profile selection on an unopened catalog", profile_id, 0)
+    if profile_id == "":
+        return _apk_profile_error("APK_PROFILE_EMPTY_ID", "profile id must not be empty", profile_id, 0)
+    if handle.profile_count == 0:
+        return _apk_profile_error("APK_PROFILE_UNKNOWN", "catalog carries no profiles; {profile_id} cannot be selected", profile_id, 0)
+    var off = APK_CATALOG_HEADER_SIZE_V1
+    var p = 0
+    var examined = 0
+    while p < handle.profile_count:
+        if off + 4 > handle.body_off:
+            return _apk_profile_error("APK_CATALOG_CORRUPT", "profile record extends past the profile table", profile_id, examined)
+        val id_len = _apk_read_u32(data, off)
+        if off + 4 + id_len + 20 > handle.body_off:
+            return _apk_profile_error("APK_CATALOG_CORRUPT", "profile record escapes the profile table", profile_id, examined)
+        val pid = _apk_read_text(data, off + 4, id_len)
+        examined = examined + 1
+        if pid == profile_id:
+            val start = _apk_read_u64(data, off + 4 + id_len)
+            val count = _apk_read_u64(data, off + 4 + id_len + 8)
+            var joined: [u8] = []
+            _apk_push_text(joined, pid)
+            _apk_push_u64(joined, start)
+            _apk_push_u64(joined, count)
+            if _apk_crc(joined) != _apk_read_u32(data, off + 4 + id_len + 16):
+                return _apk_profile_error("APK_CATALOG_CORRUPT", "selected profile record failed its checksum", profile_id, examined)
+            if start < 0 or count < 0 or start + count > handle.entry_count:
+                return _apk_profile_error("APK_PROFILE_RANGE", "profile {profile_id} names entries outside the catalog", profile_id, examined)
+            return ApkProfileSelectV1(ok: true, found: true, error_code: "", error_message: "",
+                profile_id: pid, entry_start: start, entry_count: count, profiles_examined: examined)
+        off = off + 4 + id_len + 20
+        p = p + 1
+    ApkProfileSelectV1(ok: true, found: false, error_code: "", error_message: "",
+        profile_id: profile_id, entry_start: 0, entry_count: 0, profiles_examined: examined)
+
+fn apk_catalog_route_in_profile_v1(data: [u8], handle: ApkCatalogHandleV1, profile_id: text, facet_key: text) -> ApkCatalogRouteV1:
+    """design §9.6: route a FacetRoute key WITHIN one selected profile. A key
+    that lives only in another profile is a clean miss here — that is the
+    whole point of shipping several profiles in one image."""
+    val sel = apk_catalog_select_profile_v1(data, handle, profile_id)
+    if not sel.ok:
+        return _apk_route_error(sel.error_code, sel.error_message)
+    if not sel.found:
+        return _apk_route_error("APK_PROFILE_UNKNOWN", "no such profile in this catalog: {profile_id}")
+    _apk_catalog_route_slice(data, handle, facet_key, APK_ENTRY_FACET, sel.entry_start, sel.entry_count)
+
+fn _apk_catalog_route_kind(data: [u8], handle: ApkCatalogHandleV1, facet_key: text, want_kind: i64) -> ApkCatalogRouteV1:
+    """Exact (kind, key) match over the uncompressed catalog only — never opens
+    a pack, never scans a directory. A corrupt SELECTED entry is an explicit
+    APK_CATALOG_CORRUPT error, never a silent fallback."""
+    if not handle.ok:
+        return _apk_route_error("APK_CATALOG_BAD_HANDLE", "route on an unopened catalog")
+    if facet_key == "":
+        return _apk_route_error("APK_CATALOG_EMPTY_KEY", "facet key must not be empty")
+    _apk_catalog_route_slice(data, handle, facet_key, want_kind, 0, handle.entry_count)
+
+fn _apk_catalog_route_slice(data: [u8], handle: ApkCatalogHandleV1, facet_key: text, want_kind: i64, start: i64, count: i64) -> ApkCatalogRouteV1:
+    """Exact (kind, key) match over the entries [start, start+count) of the
+    uncompressed catalog only — never opens a pack, never scans a directory.
+    A corrupt SELECTED entry is an explicit APK_CATALOG_CORRUPT error, never a
+    silent fallback."""
+    if not handle.ok:
+        return _apk_route_error("APK_CATALOG_BAD_HANDLE", "route on an unopened catalog")
+    if facet_key == "":
+        return _apk_route_error("APK_CATALOG_EMPTY_KEY", "facet key must not be empty")
+    var off = handle.body_off
+    var slot = 0
+    while slot < start + count:
+        if off + 4 > handle.total_size:
+            return _apk_route_error("APK_CATALOG_CORRUPT", "catalog entry extends past section end")
+        val key_len = _apk_read_u32(data, off)
+        if off + 4 + key_len + 4 > handle.total_size:
+            return _apk_route_error("APK_CATALOG_CORRUPT", "facet key span escapes the section")
+        val key = _apk_read_text(data, off + 4, key_len)
+        val p_off = off + 4 + key_len
+        val pack_len = _apk_read_u32(data, p_off)
+        val m_off = p_off + 4 + pack_len
+        if m_off + 4 > handle.total_size:
+            return _apk_route_error("APK_CATALOG_CORRUPT", "pack path span escapes the section")
+        val mod_len = _apk_read_u32(data, m_off)
+        val k_off = m_off + 4 + mod_len
+        if k_off + 12 > handle.total_size:
+            return _apk_route_error("APK_CATALOG_CORRUPT", "module id span escapes the section")
+        val entry_kind = _apk_read_u32(data, k_off)
+        val activation = _apk_read_u32(data, k_off + 4)
+        val abi_len = _apk_read_u32(data, k_off + 8)
+        val crc_off = k_off + 12 + abi_len
+        if crc_off + 4 > handle.total_size:
+            return _apk_route_error("APK_CATALOG_CORRUPT", "contract abi span escapes the section")
+        if key == facet_key and entry_kind == want_kind and slot >= start:
+            val pack_path = _apk_read_text(data, p_off + 4, pack_len)
+            val module_id = _apk_read_text(data, m_off + 4, mod_len)
+            val abi_hash = _apk_read_text(data, k_off + 12, abi_len)
+            var joined: [u8] = []
+            _apk_push_bytes(joined, text_to_bytes(key))
+            _apk_push_bytes(joined, text_to_bytes(pack_path))
+            _apk_push_bytes(joined, text_to_bytes(module_id))
+            _apk_push_u32(joined, entry_kind)
+            _apk_push_u32(joined, activation)
+            _apk_push_bytes(joined, text_to_bytes(abi_hash))
+            if _apk_crc(joined) != _apk_read_u32(data, crc_off):
+                return _apk_route_error("APK_CATALOG_CORRUPT", "selected catalog entry failed its checksum")
+            return ApkCatalogRouteV1(ok: true, found: true, error_code: "", error_message: "",
+                facet_key: key, pack_path: pack_path, module_id: module_id,
+                entry_kind: entry_kind, activation: activation, abi_hash: abi_hash)
+        off = crc_off + 4
+        slot = slot + 1
+    ApkCatalogRouteV1(ok: true, found: false, error_code: "", error_message: "",
+        facet_key: facet_key, pack_path: "", module_id: "",
+        entry_kind: want_kind, activation: APK_ACT_OFF, abi_hash: "")
+
+fn apk_catalog_startup_keys_v1(data: [u8], handle: ApkCatalogHandleV1) -> [text]:
+    """List, in catalog order, the keys of every entry whose activation is
+    `startup` (design §9.4): the set an application must bind BEFORE it
+    publishes itself. Reads only the uncompressed catalog. A structurally
+    corrupt catalog yields the keys collected so far and stops — callers that
+    need a hard error route the individual key."""
+    var out: [text] = []
+    if not handle.ok:
+        return out
+    var off = handle.body_off
+    var slot = 0
+    while slot < handle.entry_count:
+        if off + 4 > handle.total_size:
+            return out
+        val key_len = _apk_read_u32(data, off)
+        val p_off = off + 4 + key_len
+        if p_off + 4 > handle.total_size:
+            return out
+        val pack_len = _apk_read_u32(data, p_off)
+        val m_off = p_off + 4 + pack_len
+        if m_off + 4 > handle.total_size:
+            return out
+        val mod_len = _apk_read_u32(data, m_off)
+        val k_off = m_off + 4 + mod_len
+        if k_off + 12 > handle.total_size:
+            return out
+        val activation = _apk_read_u32(data, k_off + 4)
+        val abi_len = _apk_read_u32(data, k_off + 8)
+        if activation == APK_ACT_STARTUP:
+            out.push(_apk_read_text(data, off + 4, key_len))
+        off = k_off + 12 + abi_len + 4
+        slot = slot + 1
+    out

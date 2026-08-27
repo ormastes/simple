@@ -1,0 +1,225 @@
+"""Bounded single-owner dispatch lifecycle for parallel pgwire front workers.
+
+Front workers may parse sockets concurrently, but only the database owner calls
+`start` and mutates PostgresMimicServer/PureDatabase. Cancellation is accepted
+only before execution starts; an executing mutation must reach a database
+terminal state before its completion can be discarded.
+"""
+
+use std.database.postgres_mimic.server.{PgResponse}
+
+enum PgDispatchState:
+    Submitted
+    Executing
+    Completed
+    Cancelled
+    TimedOut
+
+enum PgDispatchOperation:
+    Startup
+    Query
+    Terminate
+
+enum PgDispatchSubmitResult:
+    Accepted(i64)
+    Rejected
+
+struct PgDispatchCompletion:
+    session_id: i64
+    responses: [PgResponse]
+    close_connection: bool
+
+enum PgDispatchTakeResult:
+    Ready(PgDispatchCompletion)
+    NotReady
+    Gone
+
+class PgDispatchJob:
+    job_id: i64
+    connection_id: i64
+    session_id: i64
+    deadline_ms: i64
+    operation: PgDispatchOperation
+    payload: text
+    user: text
+    database: text
+    application_name: text
+    state: PgDispatchState
+    completion: PgDispatchCompletion
+
+enum PgDispatchClaimResult:
+    Claimed(PgDispatchJob)
+    Empty
+
+fn pg_dispatch_empty_completion() -> PgDispatchCompletion:
+    PgDispatchCompletion(session_id: 0, responses: [], close_connection: false)
+
+class PgDispatchLifecycle:
+    capacity: i64
+    next_job_id: i64
+    draining: bool
+    jobs: Dict<i64, PgDispatchJob>
+
+    static fn create(capacity: i64) -> PgDispatchLifecycle:
+        PgDispatchLifecycle(capacity: if capacity > 0: capacity else: 1,
+            next_job_id: 1, draining: false, jobs: {})
+
+    fn retained_count() -> i64: self.jobs.keys().len()
+
+    fn active_count() -> i64:
+        var count = 0
+        for job_id in self.jobs.keys():
+            val state = self.jobs[job_id].state
+            if state == PgDispatchState.Submitted or state == PgDispatchState.Executing:
+                count = count + 1
+        count
+
+    fn state_of(job_id: i64) -> PgDispatchState?:
+        if self.jobs.contains_key(job_id): return Some(self.jobs[job_id].state)
+        nil
+
+    me submit(connection_id: i64, session_id: i64,
+            operation: PgDispatchOperation, payload: text,
+            now_ms: i64, timeout_ms: i64) -> PgDispatchSubmitResult:
+        self.submit_full(connection_id, session_id, operation, payload,
+            "", "", "", now_ms, timeout_ms)
+
+    me submit_startup(connection_id: i64, user: text, database: text,
+            application_name: text, now_ms: i64,
+            timeout_ms: i64) -> PgDispatchSubmitResult:
+        self.submit_full(connection_id, 0, PgDispatchOperation.Startup, "",
+            user, database, application_name, now_ms, timeout_ms)
+
+    me submit_full(connection_id: i64, session_id: i64,
+            operation: PgDispatchOperation, payload: text, user: text,
+            database: text, application_name: text,
+            now_ms: i64, timeout_ms: i64) -> PgDispatchSubmitResult:
+        if self.draining or self.retained_count() >= self.capacity:
+            return PgDispatchSubmitResult.Rejected
+        val job_id = self.next_job_id
+        self.next_job_id = job_id + 1
+        self.jobs[job_id] = PgDispatchJob(job_id: job_id,
+            connection_id: connection_id, session_id: session_id,
+            deadline_ms: now_ms + (if timeout_ms > 0: timeout_ms else: 1),
+            operation: operation, payload: payload,
+            user: user, database: database, application_name: application_name,
+            state: PgDispatchState.Submitted,
+            completion: pg_dispatch_empty_completion())
+        PgDispatchSubmitResult.Accepted(job_id)
+
+    me start(job_id: i64, now_ms: i64) -> bool:
+        if not self.jobs.contains_key(job_id): return false
+        var job = self.jobs[job_id]
+        if job.state != PgDispatchState.Submitted: return false
+        if now_ms >= job.deadline_ms:
+            job.state = PgDispatchState.TimedOut
+            self.jobs[job_id] = job
+            return false
+        job.state = PgDispatchState.Executing
+        self.jobs[job_id] = job
+        true
+
+    me claim_next(now_ms: i64) -> PgDispatchClaimResult:
+        self.expire_queued(now_ms)
+        val ids = self.jobs.keys()
+        for job_id in ids:
+            if self.jobs[job_id].state == PgDispatchState.Submitted:
+                if self.start(job_id, now_ms):
+                    return PgDispatchClaimResult.Claimed(self.jobs[job_id])
+        PgDispatchClaimResult.Empty
+
+    me complete(job_id: i64, completion: PgDispatchCompletion) -> bool:
+        if not self.jobs.contains_key(job_id): return false
+        var job = self.jobs[job_id]
+        if job.state != PgDispatchState.Executing: return false
+        job.completion = completion
+        job.state = PgDispatchState.Completed
+        self.jobs[job_id] = job
+        true
+
+    me cancel_connection(connection_id: i64) -> i64:
+        var cancelled = 0
+        for job_id in self.jobs.keys():
+            var job = self.jobs[job_id]
+            # Never interrupt an executing database mutation.
+            if job.connection_id == connection_id and job.state == PgDispatchState.Submitted:
+                job.state = PgDispatchState.Cancelled
+                self.jobs[job_id] = job
+                cancelled = cancelled + 1
+        cancelled
+
+    me expire_queued(now_ms: i64) -> i64:
+        var expired = 0
+        for job_id in self.jobs.keys():
+            var job = self.jobs[job_id]
+            if job.state == PgDispatchState.Submitted and now_ms >= job.deadline_ms:
+                job.state = PgDispatchState.TimedOut
+                self.jobs[job_id] = job
+                expired = expired + 1
+        expired
+
+    me take(job_id: i64) -> PgDispatchTakeResult:
+        if not self.jobs.contains_key(job_id): return PgDispatchTakeResult.Gone
+        val job = self.jobs[job_id]
+        match job.state:
+            PgDispatchState.Completed:
+                self.jobs.remove(job_id)
+                PgDispatchTakeResult.Ready(job.completion)
+            PgDispatchState.Cancelled:
+                self.jobs.remove(job_id)
+                PgDispatchTakeResult.Gone
+            PgDispatchState.TimedOut:
+                self.jobs.remove(job_id)
+                PgDispatchTakeResult.Gone
+            _:
+                PgDispatchTakeResult.NotReady
+
+    me begin_drain() -> i64:
+        self.draining = true
+        self.active_count()
+
+    me cancel_queued() -> i64:
+        var cancelled = 0
+        for job_id in self.jobs.keys():
+            var job = self.jobs[job_id]
+            if job.state == PgDispatchState.Submitted:
+                job.state = PgDispatchState.Cancelled
+                self.jobs[job_id] = job
+                cancelled = cancelled + 1
+        cancelled
+
+    # Cancel and physically reclaim at most `limit` queued jobs.  The key
+    # snapshot makes removal safe while iterating and the bound keeps owner
+    # shutdown/cancellation work deterministic under a full queue.  Executing
+    # and completed jobs remain retained for their normal owner transitions.
+    me cancel_queued_and_remove(limit: i64) -> [i64]:
+        var removed: [i64] = []
+        if limit <= 0: return removed
+        for job_id in self.jobs.keys():
+            if removed.len() >= limit: break
+            val state = self.jobs[job_id].state
+            if (state == PgDispatchState.Submitted or
+                    state == PgDispatchState.Cancelled):
+                self.jobs.remove(job_id)
+                removed.push(job_id)
+        removed
+
+    # Connection cancellation is narrower than forced queue drain: reclaim
+    # only this connection's queued work, leaving every other connection's
+    # submission available to the database owner.
+    me cancel_connection_and_remove(connection_id: i64, limit: i64) -> [i64]:
+        var removed: [i64] = []
+        if limit <= 0: return removed
+        for job_id in self.jobs.keys():
+            if removed.len() >= limit: break
+            val job = self.jobs[job_id]
+            if (job.connection_id == connection_id and
+                    (job.state == PgDispatchState.Submitted or
+                     job.state == PgDispatchState.Cancelled)):
+                self.jobs.remove(job_id)
+                removed.push(job_id)
+        removed
+
+export PgDispatchState, PgDispatchOperation, PgDispatchSubmitResult
+export PgDispatchTakeResult, PgDispatchClaimResult, PgDispatchCompletion
+export PgDispatchJob, PgDispatchLifecycle

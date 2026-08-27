@@ -3,15 +3,8 @@
 > Proves that an authenticated HTTPS document cannot submit live form data past
 
 | Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
+|-------|--------|---------|---------|
 | 2 | 2 | 0 | 0 |
-
-<details>
-<summary>Full Scenario Manual</summary>
-
-# Browser Form-Action Authorization
-
-Proves that an authenticated HTTPS document cannot submit live form data past
 
 ## At a Glance
 
@@ -32,7 +25,58 @@ on WebIR -> DrawIrComposition -> Engine2D pixels.
 
 ### REQ-WEB-BROWSER-012: CSP form-action authorization
 
-#### should keep form data and rendering inside the authorized origin
+2. **Apply origin and sandbox policy**
+   - Confirm the response CSP permits form mechanics and same-origin state.
+   - Confirm `form-action 'none'` remains the destination authority.
+   - Require the WebIR-derived `DrawIrComposition` batch's complete source
+     metadata to identify the HTML AST owner and the stable `authorized`
+     command to occupy `(0,0,8,4)`.
+   - Require all 32 framebuffer pixels to equal the fixed blue ARGB oracle.
+
+3. **Reject invalid transport or capability state**
+   - Activate the cross-origin POST form through implicit Enter submission.
+   - Resolve the dispatched typed route back to the indexed `send` author ID.
+   - Require a CSP denial warning, zero queued requests, and no queued body.
+   - Separately resolve the `save` route and prove `form-action 'self'` queues
+     the authorized same-origin POST with its exact live body.
+
+4. **Render only the authorized document**
+   - Keep the HTTPS account URL and visible profile document committed.
+   - Recheck exact command geometry, source identity, color, and all 32 pixels
+     against fixed values rather than comparing the renderer to itself.
+
+## Pass/Fail Oracle
+
+PASS requires the denied destination and `token-123` body never to enter a
+pending request, the same-origin `/save` POST to remain functional, and the
+authorized document's canonical command and complete framebuffer to match the
+fixed oracle. Author IDs are evidence projections from generation-qualified
+dispatch routes, never dispatch authority. Any cross-origin queued request,
+document replacement, geometry or source mismatch, or pixel mismatch is FAIL.
+
+### should make hosted renderer document navigation inherit form-action
+
+1. **Bind the parent-owned policy to a renderer navigation**
+   - The hosted broker copies committed `form-action 'self'` and the source
+     document URL into its host-only permit.
+
+2. **Deny an untrusted renderer target before it becomes a permit**
+   - A renderer GET to a collector under `form-action 'none'` has no permit.
+     Untyped renderer documents intentionally constrain links with form-action
+     too, because a GET form cannot safely be distinguished from a forged link.
+
+The hosted policy companion additionally retains that host-only authority on
+an allowed redirect and rejects a denied redirect before cookies, HSTS, history,
+or a successor permit can change.
+
+## Companion Integration Controls
+
+The focused browser-session integration spec additionally fixes the CSP
+source-list boundary: scheme-less and wildcard hosts, default/explicit/wildcard
+ports, path matching, HTTP-to-HTTPS scheme upgrades, downgrade rejection, and
+malformed host sources. Its redirect chain also proves that a denied target is
+authorized before `Set-Cookie` or `Strict-Transport-Security` can change state,
+while the current URL, HTML, and pending-request queue remain unchanged.
 
 <details>
 <summary>Executable SSpec</summary>

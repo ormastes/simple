@@ -1,6 +1,29 @@
 # Ios Css Specification
 
-> Tests covering ios_css, ios_css_overrides.
+> <details>
+
+<!-- sdn-diagram:id=ios_css_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=ios_css_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+ios_css_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=ios_css_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,18 +42,13 @@
 
 #### AC-5: returns a non-empty CSS string
 
-- AC-5: returns a non-empty CSS string
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-5: returns a non-empty CSS string")
 val css = ios_css_overrides()
 expect(css.len()).to_be_greater_than(0)
 ```
@@ -39,18 +57,13 @@ expect(css.len()).to_be_greater_than(0)
 
 #### AC-5: contains -webkit-overflow-scrolling for touch scroll
 
-- AC-5: contains -webkit-overflow-scrolling for touch scroll
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-5: contains -webkit-overflow-scrolling for touch scroll")
 val css = ios_css_overrides()
 expect(css).to_contain("-webkit-overflow-scrolling")
 ```
@@ -59,18 +72,13 @@ expect(css).to_contain("-webkit-overflow-scrolling")
 
 #### AC-5: contains iOS accent color #007AFF
 
-- AC-5: contains iOS accent color #007AFF
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-5: contains iOS accent color #007AFF")
 val css = ios_css_overrides()
 expect(css).to_contain("#007AFF")
 ```
@@ -79,18 +87,13 @@ expect(css).to_contain("#007AFF")
 
 #### AC-5: contains 44px touch target min-height
 
-- AC-5: contains 44px touch target min-height
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("AC-5: contains 44px touch target min-height")
 val css = ios_css_overrides()
 expect(css).to_contain("min-height: 44px")
 ```
@@ -104,12 +107,12 @@ expect(css).to_contain("min-height: 44px")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/llm_dashboard/ios_css_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering ios_css, ios_css_overrides.
+Tests covering:
 - ios_css
 - ios_css_overrides
 
@@ -125,51 +128,3 @@ Tests covering ios_css, ios_css_overrides.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `d01b206b39ec6c266589dca48768986a2d527e3b3644c8c09926bb05c5554cb8`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `d01b206b39ec6c266589dca48768986a2d527e3b3644c8c09926bb05c5554cb8`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `d01b206b39ec6c266589dca48768986a2d527e3b3644c8c09926bb05c5554cb8`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/llm_dashboard/ios_css_spec.spl
-mirror: doc/06_spec/01_unit/app/llm_dashboard/ios_css_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/llm_dashboard/ios_css_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/llm_dashboard/ios_css_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/llm_dashboard/ios_css_spec.spl:14:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-5: returns a non-empty CSS string' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/llm_dashboard/ios_css_spec.spl:20:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-5: contains -webkit-overflow-scrolling for touch scroll' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/llm_dashboard/ios_css_spec.spl:26:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-5: contains iOS accent color #007AFF' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

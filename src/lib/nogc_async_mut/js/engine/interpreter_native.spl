@@ -371,15 +371,24 @@ impl JsInterpreter:
         if not _simple_fetch_marker(host_obj_id, self.object_store):
             return JsValue.Undefined
 
+        var raw_request_url = ""
         var request_url = _simple_fetch_base_url(host_obj_id, self.object_store)
         if arg_vals.len() > 0:
-            request_url = _resolve_fetch_url(request_url, js_to_string(arg_vals.get(0)))
+            raw_request_url = js_to_string(arg_vals.get(0))
+            request_url = _resolve_fetch_url(request_url, raw_request_url)
+        var script_document_url = ""
+        if self.host_location_id >= 0:
+            match self.get_object_property(self.host_location_id, "href"):
+                JsValue.String(v):
+                    if v.len() <= 8192:
+                        script_document_url = v
+                _:
+                    pass_dn
 
         var method = "GET"
         var headers_text = ""
         var body = ""
         var content_type = ""
-        var credentials = "same-origin"
         if arg_vals.len() > 1:
             match arg_vals.get(1):
                 JsValue.Object(opts_id):
@@ -400,14 +409,6 @@ impl JsInterpreter:
                         _: pass_dn
                     match self.get_object_property(opts_id, "contentType"):
                         JsValue.String(v): content_type = v
-                        _: pass_dn
-                    match self.get_object_property(opts_id, "credentials"):
-                        JsValue.String(v):
-                            val normalized = v.trim().lower()
-                            if (normalized == "omit" or
-                                normalized == "same-origin" or
-                                normalized == "include"):
-                                credentials = normalized
                         _: pass_dn
                 JsValue.String(v):
                     headers_text = v
@@ -432,20 +433,15 @@ impl JsInterpreter:
         self.set_object_property(request_obj_id, "request_id", JsValue.String(v: request_id))
         self.set_object_property(request_obj_id, "kind", JsValue.String(v: "fetch"))
         self.set_object_property(request_obj_id, "url", JsValue.String(v: request_url))
+        self.set_object_property(request_obj_id, "raw_url", JsValue.String(v: raw_request_url))
         self.set_object_property(request_obj_id, "method", JsValue.String(v: if method.trim() != "": method else: "GET"))
         self.set_object_property(request_obj_id, "headers", JsValue.String(v: headers_text))
         self.set_object_property(request_obj_id, "body", JsValue.String(v: body))
         self.set_object_property(request_obj_id, "content_type", JsValue.String(v: content_type))
-        self.set_object_property(request_obj_id, "credentials", JsValue.String(v: credentials))
         self.set_object_property(request_obj_id, "promise_id", JsValue.String(v: "{promise_id}"))
-        val request_record = PendingAsyncRequest.create(
-            request_obj_id, self.pending_host_document_cookie_writes
-        )
-        self.pending_host_document_cookie_writes = []
+        val request_record = PendingAsyncRequest.create(request_obj_id)
         self.pending_async_requests.push(request_record)
-        self.pending_async_request_registry.push(
-            PendingAsyncRequest.create(request_obj_id)
-        )
+        self.pending_async_request_registry.push(request_record)
         JsValue.Object(id: promise_id)
 
     me _native_promise_then(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:

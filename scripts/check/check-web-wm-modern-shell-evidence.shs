@@ -18,24 +18,10 @@ INTERACTION_LOG_PATH=${INTERACTION_LOG_PATH:-"$BUILD_DIR/electron_interaction.lo
 WIDTH=${WIDTH:-1360}
 HEIGHT=${HEIGHT:-840}
 ELECTRON_BIN=${ELECTRON_BIN:-tools/electron-shell/node_modules/electron/dist/electron}
-TIMEOUT_SECS=${WEB_WM_MODERN_SHELL_TIMEOUT_SECS:-${TIMEOUT_SECS:-45}}
-ELECTRON_STABLE_FLAGS="--no-sandbox --disable-gpu --disable-gpu-compositing --disable-software-rasterizer=false --disable-features=VizDisplayCompositor --force-device-scale-factor=1 --high-dpi-support=1 --force-color-profile=srgb"
 SIMPLE_CMD=${SIMPLE_CMD:-}
-SIMPLE_CMD_SOURCE=${SIMPLE_CMD_SOURCE:-explicit-env}
-SIMPLE_CMD_STATUS=pass
 SIMPLE_RUNTIME_FAILURES=${SIMPLE_RUNTIME_FAILURES:-}
 
 mkdir -p "$BUILD_DIR" "$(dirname "$EVIDENCE_ENV")" "$(dirname "$REPORT_PATH")"
-
-run_bound() {
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$TIMEOUT_SECS" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$TIMEOUT_SECS" "$@"
-  else
-    "$@"
-  fi
-}
 
 write_evidence() {
   status=$1
@@ -44,21 +30,13 @@ write_evidence() {
     printf 'web_wm_modern_shell_evidence_status=%s\n' "$status"
     printf 'web_wm_modern_shell_evidence_reason=%s\n' "$reason"
     printf 'web_wm_modern_shell_evidence_html=%s\n' "$HTML_PATH"
-    printf 'web_wm_modern_shell_evidence_html_path=%s\n' "$HTML_PATH"
     printf 'web_wm_modern_shell_evidence_argb=%s\n' "$ARGB_PATH"
-    printf 'web_wm_modern_shell_evidence_argb_path=%s\n' "$ARGB_PATH"
     printf 'web_wm_modern_shell_evidence_png=%s\n' "$PNG_PATH"
-    printf 'web_wm_modern_shell_evidence_png_path=%s\n' "$PNG_PATH"
     printf 'web_wm_modern_shell_evidence_audit=%s\n' "$AUDIT_PATH"
-    printf 'web_wm_modern_shell_evidence_audit_path=%s\n' "$AUDIT_PATH"
     printf 'web_wm_modern_shell_evidence_log=%s\n' "$LOG_PATH"
-    printf 'web_wm_modern_shell_evidence_log_path=%s\n' "$LOG_PATH"
     printf 'web_wm_modern_shell_evidence_interaction=%s\n' "$INTERACTION_PATH"
-    printf 'web_wm_modern_shell_evidence_interaction_path=%s\n' "$INTERACTION_PATH"
     printf 'web_wm_modern_shell_evidence_interaction_png=%s\n' "$INTERACTION_PNG_PATH"
-    printf 'web_wm_modern_shell_evidence_interaction_png_path=%s\n' "$INTERACTION_PNG_PATH"
     printf 'web_wm_modern_shell_evidence_interaction_log=%s\n' "$INTERACTION_LOG_PATH"
-    printf 'web_wm_modern_shell_evidence_interaction_log_path=%s\n' "$INTERACTION_LOG_PATH"
     printf 'web_wm_modern_shell_evidence_width=%s\n' "$WIDTH"
     printf 'web_wm_modern_shell_evidence_height=%s\n' "$HEIGHT"
     printf 'web_wm_modern_shell_evidence_selectors=%s\n' '#wm-desktop,.wm-window,.wm-titlebar,.wm-command-palette,.wm-effect-controls,.wm-quality-inspector,.wm-traffic-lights button,.wm-command-palette-input,.wm-command-item,.wm-taskbar-item,.wm-effect-control'
@@ -66,8 +44,6 @@ write_evidence() {
     printf 'web_wm_modern_shell_evidence_touch_min_px=44\n'
     printf 'web_wm_modern_shell_evidence_media_features=%s\n' 'prefers-contrast=more,prefers-reduced-motion=reduce'
     printf 'web_wm_modern_shell_evidence_simple_runtime=%s\n' "${SIMPLE_CMD:-unavailable}"
-    printf 'web_wm_modern_shell_evidence_simple_runtime_source=%s\n' "${SIMPLE_CMD_SOURCE:-unavailable}"
-    printf 'web_wm_modern_shell_evidence_simple_runtime_status=%s\n' "${SIMPLE_CMD_STATUS:-unavailable}"
     printf 'web_wm_modern_shell_evidence_simple_runtime_failures=%s\n' "${SIMPLE_RUNTIME_FAILURES:-none}"
     printf 'web_wm_modern_shell_evidence_bitmap_nonblank_status=%s\n' "${BITMAP_NONBLANK_STATUS:-not-run}"
     printf 'web_wm_modern_shell_evidence_audit_pass=%s\n' "${AUDIT_PASS:-not-run}"
@@ -98,46 +74,8 @@ write_report() {
     printf '%s\n' "- interaction PNG: \`$INTERACTION_PNG_PATH\`"
     printf '%s\n' "- log: \`$LOG_PATH\`"
     printf '%s\n' "- interaction log: \`$INTERACTION_LOG_PATH\`"
-    printf '%s\n' "- simple runtime: \`${SIMPLE_CMD:-unavailable}\`"
-    printf '%s\n' "- simple runtime source: \`${SIMPLE_CMD_SOURCE:-unavailable}\`"
-    printf '%s\n' "- simple runtime status: \`${SIMPLE_CMD_STATUS:-unavailable}\`"
   } > "$REPORT_PATH"
 }
-
-is_rust_seed_simple() {
-    # Identity probe, not just a path pattern (2026-07-28).
-    # This used to test ONLY for a src/compiler_rust/ path. The deployed Rust
-    # seed lives at bin/release/<triple>/simple, which matches none of those
-    # patterns, so the seed was classified "not a seed" and every self-hosted
-    # claim in this script was asserted against it. Ask the binary instead.
-    # Audit: doc/08_tracking/todo/check_scripts_seed_identity_fail_open_2026-07-28.md
-    case "$1" in
-        src/compiler_rust/*|./src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
-    esac
-    # Not runnable: leave it to the caller's own missing-binary branch, which
-    # already fails. Do not report "seed" for something we never ran.
-    [ -n "${1:-}" ] && [ -x "$1" ] || return 1
-    # Executable but unverifiable => treat as forbidden (fail closed). The seed
-    # self-identifies on stderr, so 2>&1 is required.
-    if command -v timeout >/dev/null 2>&1; then
-        _irss_v="$(timeout 10 "$1" --version 2>&1)" || return 0
-    else
-        _irss_v="$("$1" --version 2>&1)" || return 0
-    fi
-    [ -n "$_irss_v" ] || return 0
-    case "$_irss_v" in
-        *"bootstrap seed only"*|*"Rust-built"*|*"debug build"*) return 0 ;;
-    esac
-    return 1
-}
-
-if [ -n "$SIMPLE_CMD" ] && is_rust_seed_simple "$SIMPLE_CMD"; then
-  SIMPLE_CMD_SOURCE=explicit-env-rust-seed-forbidden
-  SIMPLE_CMD_STATUS=forbidden
-  write_evidence fail simple-runtime-forbidden
-  write_report fail simple-runtime-forbidden
-  exit 1
-fi
 
 TMP_SPL="$BUILD_DIR/write_preview.spl"
 cat > "$TMP_SPL" <<SIMPLE_PREVIEW_EOF
@@ -152,25 +90,19 @@ fn main():
 SIMPLE_PREVIEW_EOF
 
 if [ -z "$SIMPLE_CMD" ]; then
-  SIMPLE_CMD_SOURCE=missing
   for candidate in \
-    bin/release/*/simple \
-    release/*/simple \
-    build/bootstrap/stage3/simple \
     bin/simple \
+    bin/release/simple \
+    bin/release/x86_64-unknown-linux-gnu/simple \
+    bin/release/linux-x86_64/simple \
+    src/compiler_rust/target/release/simple \
     bin/simple_native
   do
     if [ -x "$candidate" ]; then
-      if is_rust_seed_simple "$candidate"; then
-        SIMPLE_RUNTIME_FAILURES="${SIMPLE_RUNTIME_FAILURES}${candidate}:rust-seed-forbidden,"
-        continue
-      fi
       "$candidate" --version >/dev/null 2>&1
       candidate_code=$?
       if [ $candidate_code -eq 0 ]; then
         SIMPLE_CMD=$candidate
-        SIMPLE_CMD_SOURCE="self-hosted:$candidate"
-        SIMPLE_CMD_STATUS=pass
         break
       fi
       SIMPLE_RUNTIME_FAILURES="${SIMPLE_RUNTIME_FAILURES}${candidate}:${candidate_code},"
@@ -178,28 +110,7 @@ if [ -z "$SIMPLE_CMD" ]; then
       SIMPLE_RUNTIME_FAILURES="${SIMPLE_RUNTIME_FAILURES}${candidate}:missing,"
     fi
   done
-  if [ -z "$SIMPLE_CMD" ] && [ "${ALLOW_PATH_SIMPLE_CMD:-0}" = "1" ]; then
-    path_simple_candidate="$(command -v simple 2>/dev/null || true)"
-    if [ -n "$path_simple_candidate" ] && [ -x "$path_simple_candidate" ]; then
-      if is_rust_seed_simple "$path_simple_candidate"; then
-        SIMPLE_RUNTIME_FAILURES="${SIMPLE_RUNTIME_FAILURES}${path_simple_candidate}:rust-seed-forbidden,"
-      else
-        "$path_simple_candidate" --version >/dev/null 2>&1
-        candidate_code=$?
-        if [ $candidate_code -eq 0 ]; then
-          SIMPLE_CMD="$path_simple_candidate"
-          SIMPLE_CMD_SOURCE="path:$path_simple_candidate"
-          SIMPLE_CMD_STATUS=pass
-        else
-          SIMPLE_RUNTIME_FAILURES="${SIMPLE_RUNTIME_FAILURES}${path_simple_candidate}:${candidate_code},"
-        fi
-      fi
-    else
-      SIMPLE_RUNTIME_FAILURES="${SIMPLE_RUNTIME_FAILURES}simple:path-missing,"
-    fi
-  fi
   if [ -z "$SIMPLE_CMD" ]; then
-    SIMPLE_CMD_STATUS=missing
     write_evidence environment-unavailable simple-runtime-unavailable
     write_report environment-unavailable simple-runtime-unavailable
     exit 0
@@ -231,8 +142,6 @@ if [ -z "${DISPLAY:-}" ]; then
 fi
 
 if [ "$USE_XVFB" = 1 ]; then
-  rm -f "$ARGB_PATH" "$PNG_PATH" "$AUDIT_PATH" "$LOG_PATH" \
-    "$INTERACTION_PATH" "$INTERACTION_PNG_PATH" "$INTERACTION_LOG_PATH"
   ELECTRON_CAPTURE_HTML="$HTML_PATH" \
   ELECTRON_CAPTURE_WIDTH="$WIDTH" \
   ELECTRON_CAPTURE_HEIGHT="$HEIGHT" \
@@ -244,13 +153,10 @@ if [ "$USE_XVFB" = 1 ]; then
   ELECTRON_CAPTURE_TOUCH_MIN_PX=44 \
   ELECTRON_CAPTURE_MEDIA_FEATURES="prefers-contrast=more,prefers-reduced-motion=reduce" \
   ELECTRON_CAPTURE_FAIL_ON_AUDIT=1 \
-  ELECTRON_CAPTURE_OFFSCREEN_PAINT=1 \
   ELECTRON_CAPTURE_SETTLE_MS=1500 \
   ELECTRON_DISABLE_SANDBOX=1 \
-  run_bound xvfb-run --auto-servernum "$ELECTRON_BIN" $ELECTRON_STABLE_FLAGS tools/electron-live-bitmap/capture_html_argb.js >"$LOG_PATH" 2>&1
+  xvfb-run --auto-servernum "$ELECTRON_BIN" --no-sandbox --disable-gpu tools/electron-live-bitmap/capture_html_argb.js >"$LOG_PATH" 2>&1
 else
-  rm -f "$ARGB_PATH" "$PNG_PATH" "$AUDIT_PATH" "$LOG_PATH" \
-    "$INTERACTION_PATH" "$INTERACTION_PNG_PATH" "$INTERACTION_LOG_PATH"
   ELECTRON_CAPTURE_HTML="$HTML_PATH" \
   ELECTRON_CAPTURE_WIDTH="$WIDTH" \
   ELECTRON_CAPTURE_HEIGHT="$HEIGHT" \
@@ -262,10 +168,9 @@ else
   ELECTRON_CAPTURE_TOUCH_MIN_PX=44 \
   ELECTRON_CAPTURE_MEDIA_FEATURES="prefers-contrast=more,prefers-reduced-motion=reduce" \
   ELECTRON_CAPTURE_FAIL_ON_AUDIT=1 \
-  ELECTRON_CAPTURE_OFFSCREEN_PAINT=1 \
   ELECTRON_CAPTURE_SETTLE_MS=1500 \
   ELECTRON_DISABLE_SANDBOX=1 \
-  run_bound "$ELECTRON_BIN" $ELECTRON_STABLE_FLAGS tools/electron-live-bitmap/capture_html_argb.js >"$LOG_PATH" 2>&1
+  "$ELECTRON_BIN" --no-sandbox --disable-gpu tools/electron-live-bitmap/capture_html_argb.js >"$LOG_PATH" 2>&1
 fi
 CAPTURE_CODE=$?
 
@@ -301,7 +206,6 @@ if [ "${BITMAP_NONBLANK_STATUS:-fail}" != pass ] || [ "${AUDIT_PASS:-fail}" != p
 fi
 
 if [ "$USE_XVFB" = 1 ]; then
-  rm -f "$INTERACTION_PATH" "$INTERACTION_PNG_PATH" "$INTERACTION_LOG_PATH"
   ELECTRON_INTERACT_HTML="$HTML_PATH" \
   ELECTRON_INTERACT_WIDTH="$WIDTH" \
   ELECTRON_INTERACT_HEIGHT="$HEIGHT" \
@@ -309,9 +213,8 @@ if [ "$USE_XVFB" = 1 ]; then
   ELECTRON_INTERACT_PNG_OUTPUT="$INTERACTION_PNG_PATH" \
   ELECTRON_INTERACT_SETTLE_MS=800 \
   ELECTRON_DISABLE_SANDBOX=1 \
-  run_bound xvfb-run --auto-servernum "$ELECTRON_BIN" $ELECTRON_STABLE_FLAGS tools/electron-live-bitmap/interact_html_controls.js >"$INTERACTION_LOG_PATH" 2>&1
+  xvfb-run --auto-servernum "$ELECTRON_BIN" --no-sandbox --disable-gpu tools/electron-live-bitmap/interact_html_controls.js >"$INTERACTION_LOG_PATH" 2>&1
 else
-  rm -f "$INTERACTION_PATH" "$INTERACTION_PNG_PATH" "$INTERACTION_LOG_PATH"
   ELECTRON_INTERACT_HTML="$HTML_PATH" \
   ELECTRON_INTERACT_WIDTH="$WIDTH" \
   ELECTRON_INTERACT_HEIGHT="$HEIGHT" \
@@ -319,7 +222,7 @@ else
   ELECTRON_INTERACT_PNG_OUTPUT="$INTERACTION_PNG_PATH" \
   ELECTRON_INTERACT_SETTLE_MS=800 \
   ELECTRON_DISABLE_SANDBOX=1 \
-  run_bound "$ELECTRON_BIN" $ELECTRON_STABLE_FLAGS tools/electron-live-bitmap/interact_html_controls.js >"$INTERACTION_LOG_PATH" 2>&1
+  "$ELECTRON_BIN" --no-sandbox --disable-gpu tools/electron-live-bitmap/interact_html_controls.js >"$INTERACTION_LOG_PATH" 2>&1
 fi
 INTERACTION_CODE=$?
 

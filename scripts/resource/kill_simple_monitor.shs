@@ -3,16 +3,12 @@
 #
 # Launched by ensure_kill_monitor_running() in system_monitor.spl.
 # Runs in background, writes PID to /tmp/kill_simple_monitor.pid.
-# Polls every $CHECK_INTERVAL secs for runaway processes (CPU spin or RSS balloon).
-# NEVER kills: simple_mcp_server, simple_lsp_mcp_server, tmux, claude, codex, node, npm.
+# Checks every 30s for simple processes using >95% CPU for >60s.
+# NEVER kills: simple_mcp_server, simple_lsp_mcp_server, tmux, claude, codex.
 
 set -e
 
-# Overridable so a guard TEST can run a real monitor without clobbering the live
-# daemon's pidfile/markers. Defaults are unchanged for production.
-PIDFILE="${KILL_SIMPLE_PIDFILE:-/tmp/kill_simple_monitor.pid}"
-# Directory holding per-pid "already warned" markers.
-MARKER_DIR="${KILL_SIMPLE_MARKER_DIR:-/tmp}"
+PIDFILE="/tmp/kill_simple_monitor.pid"
 LOGFILE="${KILL_SIMPLE_LOG:-/tmp/kill_simple_monitor.log}"
 CHECK_INTERVAL="${KILL_SIMPLE_INTERVAL:-10}"
 CPU_THRESHOLD="${KILL_SIMPLE_CPU_PCT:-95}"
@@ -30,16 +26,7 @@ CPU_THRESHOLD="${KILL_SIMPLE_CPU_PCT:-95}"
 #     already-running monitor. `SIMPLE_TIMEOUT_SECONDS=0` disables the CPU
 #     guard for that process; the RSS guard below still applies, so a runaway
 #     can never balloon the host.
-# Raised from 60 to 900 on 2026-08-17. 60s sat BELOW the runtime of an ordinary
-# unit spec (~115s measured), so the DEFAULT configuration killed valid runs —
-# the guard's floor has to be above realistic spec runtime or it is a
-# result-corrupting timer, not a runaway guard. A true runaway spins forever and
-# is still caught, just later.
-MIN_AGE_SECS="${KILL_SIMPLE_MIN_AGE_SECS:-900}"
-# Number of CONSECUTIVE polls a process must be measured above CPU_THRESHOLD
-# before the CPU guard will fire. One hot sample is noise; a runaway is hot on
-# every sample forever.
-SPIN_SAMPLES="${KILL_SIMPLE_SPIN_SAMPLES:-3}"
+MIN_AGE_SECS="${KILL_SIMPLE_MIN_AGE_SECS:-60}"
 # RSS guard: kill a bin/simple run/test proc this big regardless of CPU/age.
 # A no-GC simple balloon doesn't peg CPU, so the CPU guard alone misses the
 # host-OOM crash class (simple_runaway_oom_host_crash_2026-06-14). earlyoom is
@@ -70,15 +57,6 @@ case "${1:-}" in
     '') ;;
     *) echo "kill_simple_monitor.shs: unknown argument '$1' (try --help)" >&2 ; exit 2 ;;
 esac
-
-# The daemon outlives the test/CLI process that launches it. Close inherited
-# capture descriptors before doing any daemon work; otherwise an orphaned
-# monitor keeps the launcher's stdout/stderr pipe open and a completed test can
-# block forever waiting for EOF. Non-daemon modes intentionally remain attached
-# so --help/--limits/--explain still return their output to the caller.
-if [ "$MODE" = daemon ]; then
-    exec </dev/null >/dev/null 2>&1
-fi
 
 # Single-instance lock. Before 2026-08-17 the monitor unconditionally clobbered
 # $PIDFILE, so two worktrees each started a monitor and both policed the whole
@@ -114,14 +92,8 @@ acquire_lock() {
 }
 
 cleanup() {
-    _rc=$?
-    if [ "$OWNS_LOCK" -eq 1 ]; then
-        rm -f "$PIDFILE"
-        rm -rf "$LOCKDIR" 2>/dev/null || true
-    fi
-    # Preserve the status. Returning 0 unconditionally made a FATAL startup
-    # failure indistinguishable from a clean stop in `systemctl status`.
-    exit "$_rc"
+    rm -f "$PIDFILE"
+    exit 0
 }
 trap cleanup INT TERM HUP EXIT
 
@@ -162,10 +134,7 @@ selftest_state_dir() {
     log_line "START pid=$$ interval=${CHECK_INTERVAL}s cpu_pct=$CPU_THRESHOLD spin_samples=$SPIN_SAMPLES state=$CPU_STATE_DIR selftest=ok"
     return 0
 }
-[ "$MODE" = daemon ] || true
-if [ "$MODE" = daemon ]; then
-    selftest_state_dir || exit 1
-fi
+selftest_state_dir || exit 1
 
 # Heartbeat: prove the poll loop is ALIVE and that the CPU guard is actually
 # sampling. `samples=` is the count of live per-pid sample files; a heartbeat
@@ -219,23 +188,6 @@ is_simple_run_or_test() {
         case "$1:$2" in
             */simple:run|*/simple:test|simple:run|simple:test) return 0 ;;
         esac
-        shift
-    done
-    return 1
-}
-
-# Optional space-separated pid allowlist. When set, NOTHING outside it can be
-# killed. Unset (the default, and the only production setting) = no restriction.
-# This exists so guard tests can lower thresholds without endangering real work.
-ONLY_PIDS="${KILL_SIMPLE_ONLY_PIDS:-}"
-
-pid_allowed() {
-    [ -n "$ONLY_PIDS" ] || return 0
-    for _a in $ONLY_PIDS; do
-        [ "$_a" = "$1" ] && return 0
-    done
-    return 1
-}
 
 safe_kill() {
     _pid="$1"
@@ -252,7 +204,7 @@ safe_kill() {
 cpu_budget_secs() {
     _pid="$1"
     _env=$(tr '\0' '\n' < "/proc/$_pid/environ" 2>/dev/null |
-        sed -n 's/^SIMPLE_TIMEOUT_SECONDS=//p' | head -n 1) || true
+        sed -n 's/^SIMPLE_TIMEOUT_SECONDS=//p' | head -n 1)
     case "$_env" in
         ''|*[!0-9]*) echo "$MIN_AGE_SECS" ; return 0 ;;
     esac
@@ -266,137 +218,25 @@ cpu_budget_secs() {
     fi
 }
 
-# Instantaneous CPU percent for a pid, as the delta of utime+stime over the
-# interval since the PREVIOUS poll. This replaces `ps -o pcpu`, which reports a
-# LIFETIME AVERAGE: a spec that compiles near 100% and then falls to ~70% for
-# I/O drifts across a fixed threshold purely as a function of WHEN it happens to
-# be sampled, so byte-identical commands got opposite verdicts (measured
-# 2026-08-17: 75.1% survived, 97.2% killed, 69.2% survived).
-#
-# Echoes nothing when there is no usable prior sample (first sighting of the
-# pid, or the pid was reused). Callers MUST treat empty as "no evidence" and
-# skip the kill — never as 0 and never as "hot".
-instant_cpu_pct() {
-    _pid="$1"
-    _stat=$(cat "/proc/$_pid/stat" 2>/dev/null) || return 0
-    [ -n "$_stat" ] || return 0
-    # Field 2 (comm) is parenthesised and may contain spaces; strip through the
-    # LAST ") " so a comm like "sh (x) y" cannot shift every later field.
-    _rest=${_stat##*') '}
-    _had_noglob=0
-    case $- in *f*) _had_noglob=1 ;; esac
-    set -f
-    # After comm is stripped, positional $1 is field 3 (state), so field N is
-    # ${N-2}: utime(14)=${12}, stime(15)=${13}, starttime(22)=${20}.
-    set -- $_rest
-    [ "$_had_noglob" -eq 1 ] || set +f
-    [ "$#" -ge 20 ] || return 0
-    _ticks=$(( ${12} + ${13} ))
-    _start=${20}
-    _now=$(date +%s)
-
-    _f="$CPU_STATE_DIR/$_pid"
-    # MUST be `|| true`. Without it, `set -e` terminated the ENTIRE monitor the
-    # first time any pid was sampled (no state file yet => cat exits 1 => the
-    # assignment's status is 1 => shell dies) -- on the line BEFORE the printf
-    # below, so the state file was never written, so there was never a prior
-    # sample, so the CPU guard could not fire. systemd respawned the corpse
-    # every ~15s (restart counter 3735 when found). Bug:
-    # doc/08_tracking/bug/test_runner_spins_at_100pct_after_summary_2026-08-18.md
-    _prev=$(cat "$_f" 2>/dev/null) || true
-    printf '%s %s %s\n' "$_start" "$_ticks" "$_now" > "$_f" 2>/dev/null || true
-    [ -n "$_prev" ] || return 0
-
-    set -f
-    set -- $_prev
-    [ "$_had_noglob" -eq 1 ] || set +f
-    [ "$#" -eq 3 ] || return 0
-    # starttime mismatch means this pid was recycled; the old sample is not ours.
-    [ "$1" = "$_start" ] || return 0
-    _dticks=$(( _ticks - $2 ))
-    _dt=$(( _now - $3 ))
-    [ "$_dt" -ge 1 ] 2>/dev/null || return 0
-    [ "$_dticks" -ge 0 ] 2>/dev/null || return 0
-    echo $(( _dticks * 100 / (CLK_TCK * _dt) ))
-}
-
-# Consecutive-hot-sample counter, so one hot poll can never fire the guard.
-spin_streak() {
-    _pid="$1"; _hot="$2"
-    _f="$CPU_STATE_DIR/streak_$_pid"
-    if [ "$_hot" -eq 0 ]; then
-        rm -f "$_f" 2>/dev/null || true
-        echo 0
-        return 0
-    fi
-    _n=$(cat "$_f" 2>/dev/null) || true   # `|| true`: see instant_cpu_pct
-    case "$_n" in ''|*[!0-9]*) _n=0 ;; esac
-    _n=$(( _n + 1 ))
-    echo "$_n" > "$_f" 2>/dev/null || true
-    echo "$_n"
-}
-
 # Tell the victim why it is dying, in its own output stream. Without this the
 # kill is invisible to whoever is reading the run: the process just stops
 # mid-line and the truncated output reads like a real (partial) result.
 notify_victim() {
     _pid="$1"; _msg="$2"
-    # First writable fd only. Writing to both 2 and 1 duplicated the message
-    # whenever the victim had them pointed at the same file (the common case:
-    # `cmd > log 2>&1`), which reads like two separate kills.
     for _fd in 2 1; do
         [ -w "/proc/$_pid/fd/$_fd" ] 2>/dev/null || continue
         echo "$_msg" >> "/proc/$_pid/fd/$_fd" 2>/dev/null || true
-        return 0
     done
 }
 
-# Per-reason victim message.
-#
-# The single generic line this replaces said "error: TIMEOUT: killed by
-# kill_simple_monitor" for EVERY reason and always advised
-# SIMPLE_TIMEOUT_SECONDS. For an RSS kill both halves are wrong: nothing timed
-# out, and SIMPLE_TIMEOUT_SECONDS governs only the CPU guard, so following the
-# advice changes nothing and the victim is killed again identically. That cost
-# hours of misdiagnosis on 2026-08-17 when a Stage-3 bootstrap died at 93 GB
-# against a ceiling nobody knew existed. Each reason must name (a) which guard
-# fired, (b) the measured value, (c) the limit it was compared against, and
-# (d) the env var that moves THAT limit -- and, for the RSS reasons, say
-# explicitly that SIMPLE_TIMEOUT_SECONDS is not it.
-#
-# Args: KIND MEASURED LIMIT DETAIL
-# Echoes one line. Pure -- no side effects -- so it is directly testable via
-# the --explain subcommand below.
-kill_reason_message() {
-    _k="$1"; _measured="$2"; _limit="$3"; _detail="$4"
-    case "$_k" in
-        simple_rss)
-            echo "error: MEMORY LIMIT (RSS guard for bin/simple run/test): killed by kill_simple_monitor. measured rss=${_measured}MB >= limit=${_limit}MB. Raise this limit with KILL_SIMPLE_MEM_MB in the MONITOR daemon's environment, then restart the monitor. SIMPLE_TIMEOUT_SECONDS does NOT affect this limit. detail: ${_detail}"
-            ;;
-        generic_rss)
-            echo "error: MEMORY LIMIT (generic RSS cap for any owned process): killed by kill_simple_monitor. measured rss=${_measured}MB >= limit=${_limit}MB. Raise this limit with KILL_ANY_MEM_MB in the MONITOR daemon's environment, then restart the monitor. SIMPLE_TIMEOUT_SECONDS does NOT affect this limit. detail: ${_detail}"
-            ;;
-        cpu)
-            echo "error: CPU TIMEOUT (CPU-spin guard): killed by kill_simple_monitor. measured age=${_measured}s >= budget=${_limit}s while pegged above ${CPU_THRESHOLD}% CPU. Raise this limit with SIMPLE_TIMEOUT_SECONDS=<secs> in THIS process's own environment (0 disables the CPU guard for it); the daemon-wide default is KILL_SIMPLE_MIN_AGE_SECS. Memory limits are separate (KILL_SIMPLE_MEM_MB / KILL_ANY_MEM_MB). detail: ${_detail}"
-            ;;
-        *)
-            echo "error: killed by kill_simple_monitor (unclassified reason '${_k}'): measured=${_measured} limit=${_limit} detail: ${_detail}. This is a bug in kill_simple_monitor.shs -- every kill must name its own guard."
-            ;;
-    esac
-}
-
-# Args: PID KIND MEASURED LIMIT DETAIL
 kill_hard() {
     _pid="$1"
-    _kind="$2"
-    _measured="$3"
-    _limit="$4"
-    _why="$5"
+    _why="$2"
     pid_allowed "$_pid" || return 0
-    _line="[kill_monitor] Killing runaway process pid=$_pid reason=$_kind measured=$_measured limit=$_limit ($_why)"
+    _line="[kill_monitor] Killing runaway process pid=$_pid ($_why)"
     echo "$_line" >&2
     echo "$(date '+%Y-%m-%dT%H:%M:%S') KILL $_line" >> "$LOGFILE" 2>/dev/null || true
-    notify_victim "$_pid" "$(kill_reason_message "$_kind" "$_measured" "$_limit" "$_why")"
+    notify_victim "$_pid" "error: TIMEOUT: killed by kill_simple_monitor ($_why). Raise the limit with SIMPLE_TIMEOUT_SECONDS=<secs> (0 disables the CPU guard); see scripts/resource/kill_simple_monitor.shs."
     safe_kill "$_pid"
     sleep 1
     kill -0 "$_pid" 2>/dev/null && [ "$_pid" -gt 1 ] 2>/dev/null && kill -9 "$_pid" 2>/dev/null || true
@@ -406,7 +246,7 @@ kill_hard() {
 # after the PID dies. Throttled to once per pid per ramp via a /tmp marker.
 log_proc() {
     _pid="$1"; _rss_mb="$2"; _cmd="$3"
-    _marker="$MARKER_DIR/.kill_monitor_warned_${_pid}"
+    _marker="/tmp/.kill_monitor_warned_${_pid}"
     [ -e "$_marker" ] && return 0
     : > "$_marker" 2>/dev/null || true
     echo "$(date '+%Y-%m-%dT%H:%M:%S') WARN pid=$_pid rss=${_rss_mb}MB cmd=$_cmd" >> "$LOGFILE" 2>/dev/null || true
@@ -439,11 +279,10 @@ if [ "$MODE" = limits ]; then
     exit 0
 fi
 
-if [ "$MODE" = explain ]; then
-    shift
-    kill_reason_message "${1:-}" "${2:-}" "${3:-}" "${4:-}"
-    exit 0
-fi
+        cpu_int=$(printf '%.0f' "$cpu" 2>/dev/null || echo 0)
+        if [ "$cpu_int" -lt "$CPU_THRESHOLD" ] 2>/dev/null; then
+            continue
+        fi
 
 if [ "$MODE" = help ]; then
     echo "usage: kill_simple_monitor.shs [--limits | --explain KIND MEASURED LIMIT DETAIL | --help]"
@@ -455,24 +294,12 @@ fi
 
 while true; do
     sleep "$CHECK_INTERVAL"
-    POLL_COUNT=$(( POLL_COUNT + 1 ))
-    _poll_t0=$(date +%s) || _poll_t0=0
 
     # Drop warn-markers for dead pids so a reused pid warns again.
-    for _m in "$MARKER_DIR"/.kill_monitor_warned_*; do
+    for _m in /tmp/.kill_monitor_warned_*; do
         [ -e "$_m" ] || continue
         _mp="${_m##*_}"
         kill -0 "$_mp" 2>/dev/null || rm -f "$_m" 2>/dev/null || true
-    done
-
-    # Drop CPU-sample and spin-streak state for dead pids, so a recycled pid
-    # starts from no evidence rather than inheriting a stranger's hot streak.
-    for _s in "$CPU_STATE_DIR"/* ; do
-        [ -e "$_s" ] || continue
-        _sp="${_s##*/}"
-        _sp="${_sp#streak_}"
-        case "$_sp" in ''|*[!0-9]*) continue ;; esac
-        kill -0 "$_sp" 2>/dev/null || rm -f "$_s" 2>/dev/null || true
     done
 
     # uid filters to our own procs (can't/shouldn't kill root system procs);
@@ -491,10 +318,11 @@ while true; do
             log_proc "$pid" "$rss_mb" "$cmdline"
         fi
 
-        if is_simple_run_or_test "$cmdline"; then
+        case "$cmdline" in
+            *bin/simple*run*|*bin/simple*test*)
                 # bin/simple RSS guard — fires regardless of CPU/age (OOM balloon).
                 if [ "$rss_mb" -ge "$MEM_THRESHOLD_MB" ] 2>/dev/null; then
-                    kill_hard "$pid" simple_rss "$rss_mb" "$MEM_THRESHOLD_MB" "$cmdline"
+                    kill_hard "$pid" "rss=${rss_mb}MB>=${MEM_THRESHOLD_MB}MB: $cmdline"
                     continue
                 fi
 
@@ -514,8 +342,7 @@ while true; do
                 if [ -z "$cpu_int" ]; then
                     continue
                 fi
-                if [ "$cpu_int" -lt "$CPU_THRESHOLD" ] 2>/dev/null; then
-                    spin_streak "$pid" 0 >/dev/null
+                if [ "$etime" -lt "$MIN_AGE_SECS" ] 2>/dev/null; then
                     continue
                 fi
                 streak=$(spin_streak "$pid" 1)
@@ -528,22 +355,12 @@ while true; do
                 if [ "$etime" -lt "$budget" ] 2>/dev/null; then
                     continue
                 fi
-                kill_hard "$pid" cpu "$etime" "$budget" "cpu=${cpu_int}% instantaneous, ${streak} consecutive samples: $cmdline"
+                kill_hard "$pid" "cpu=${cpu}% age=${etime}s>=${budget}s: $cmdline"
         else
                 # Generic RSS cap for any other owned proc (rogue python/etc).
                 if [ "$rss_mb" -ge "$GENERIC_MEM_THRESHOLD_MB" ] 2>/dev/null; then
-                    kill_hard "$pid" generic_rss "$rss_mb" "$GENERIC_MEM_THRESHOLD_MB" "$cmdline"
+                    kill_hard "$pid" "generic rss=${rss_mb}MB>=${GENERIC_MEM_THRESHOLD_MB}MB: $cmdline"
                 fi
         fi
     done
-
-    _poll_t1=$(date +%s) || _poll_t1=$_poll_t0
-    LAST_POLL_SECS=$(( _poll_t1 - _poll_t0 ))
-    # A pass that takes longer than the interval means the guard is sampling at
-    # a coarser rate than it thinks, which silently stretches the spin-streak
-    # window. Record it rather than widening the interval to hide it.
-    if [ "$LAST_POLL_SECS" -gt "$CHECK_INTERVAL" ] 2>/dev/null; then
-        log_line "SLOWPOLL pid=$$ poll=$POLL_COUNT secs=$LAST_POLL_SECS interval=$CHECK_INTERVAL"
-    fi
-    heartbeat
 done

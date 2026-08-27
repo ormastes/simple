@@ -3,7 +3,6 @@
 # Provides CLI interface for documentation coverage analysis and SDoctest reporting.
 
 use app.io.mod (file_write, file_exists, cwd, shell)
-use app.io.mod (cli_get_args)
 use app.doc_coverage.scanner.mod.{scan_file_for_docs, discover_source_files, DocItem}
 use app.doc_coverage.scanner.file_scanner (filter_public_only)
 use app.doc_coverage.analysis.sdoctest_coverage.{load_sdoctest_blocks, suggest_missing_tags, compute_sdoctest_coverage}
@@ -11,7 +10,139 @@ use app.doc_coverage.analysis.init_parser.{parse_init_file, PublicApiGroup, Publ
 use app.doc_coverage.analysis.group_sdoctest.{check_group_sdoctest}
 use app.doc_coverage.reporting.mod (export_coverage_json, export_coverage_csv, generate_coverage_markdown, render_coverage_terminal)
 use app.doc_coverage.types.coverage_result.{CoverageReport, FileCoverage}
-use std.text.{NL}
+use std.string.{NL}
+use std.nogc_sync_mut.composition.cli_option_route.{
+    SimpleCliOptionRouteRecordV1, SimpleCliOptionRouteTableV1,
+    CLI_VALUE_MODE_FLAG, CLI_VALUE_MODE_REQUIRED,
+    CLI_ACTION_PLAN_PATCH, CLI_AVAILABILITY_REQUIRED, CLI_MISSING_ERROR,
+    CLI_SCOPE_COMMAND,
+}
+use std.nogc_sync_mut.composition.cli_help_gen.{
+    CliHelpRouteV1, cli_help_route_v1,
+}
+
+# =========================================================================
+# Option routes (Phase C migration 2026-08-18): the records below are the
+# single source for doc-coverage option spellings. The parser, the generated
+# help index, and shell completions all derive from this list — no literal
+# option spellings remain in the parse loop.
+# =========================================================================
+
+# Flat struct row (test-runner-safe; class-record field access is erased
+# under the test runner — see
+# doc/08_tracking/bug/class_field_access_erased_under_test_runner_2026-08-18.md).
+struct DocCoverageOptionRouteV1:
+    option_id: text
+    spelling: text
+    value_mode: i64
+    help_summary: text
+
+fn _dc_row(option_id: text, spelling: text, value_mode: i64, summary: text) -> DocCoverageOptionRouteV1:
+    DocCoverageOptionRouteV1(option_id: option_id, spelling: spelling, value_mode: value_mode, help_summary: summary)
+
+# THE single source for doc-coverage option spellings.
+pub fn doc_coverage_option_rows() -> [DocCoverageOptionRouteV1]:
+    [
+        _dc_row("doc_coverage.check_public_api", "--check-public-api", CLI_VALUE_MODE_FLAG, "Check public API SDoctest coverage"),
+        _dc_row("doc_coverage.sdoctest_report", "--sdoctest-report", CLI_VALUE_MODE_FLAG, "Generate SDoctest coverage report"),
+        _dc_row("doc_coverage.missing", "--missing", CLI_VALUE_MODE_FLAG, "Show only missing documentation"),
+        _dc_row("doc_coverage.tag_file", "--tag-file", CLI_VALUE_MODE_REQUIRED, "Export missing tags to file"),
+        _dc_row("doc_coverage.format", "--format", CLI_VALUE_MODE_REQUIRED, "Output format: text|json|csv|md|terminal"),
+        _dc_row("doc_coverage.tag", "--tag", CLI_VALUE_MODE_REQUIRED, "Filter by tag"),
+    ]
+
+# Run-mode class records, built FROM the rows (never a second spelling list).
+pub fn doc_coverage_route_records() -> [SimpleCliOptionRouteRecordV1]:
+    var out: [SimpleCliOptionRouteRecordV1] = []
+    val rows = doc_coverage_option_rows()
+    var i = 0
+    while i < rows.len():
+        out.push(SimpleCliOptionRouteRecordV1(
+            option_id: rows[i].option_id, spelling: rows[i].spelling, aliases: [],
+            scope_kind: CLI_SCOPE_COMMAND, value_mode: rows[i].value_mode,
+            action_kind: CLI_ACTION_PLAN_PATCH, provider_id: "", forward_name: "",
+            help_summary: rows[i].help_summary, semantic_class: "doc_coverage",
+            availability: CLI_AVAILABILITY_REQUIRED, missing_policy: CLI_MISSING_ERROR))
+        i = i + 1
+    out
+
+# Fail-closed registration into the shared route table type. Any diagnostic
+# failure returns an empty table so a bad record can never half-register.
+pub fn doc_coverage_route_table() -> SimpleCliOptionRouteTableV1:
+    var table = SimpleCliOptionRouteTableV1.create()
+    val records = doc_coverage_route_records()
+    var i = 0
+    while i < records.len():
+        val diag = table.register_route(records[i])
+        if not diag.ok:
+            return SimpleCliOptionRouteTableV1.create()
+        i = i + 1
+    table
+
+# Help/completion projection — the ONLY input the generator gets for this
+# command, so generated output can never drift from the parser's routes.
+pub fn doc_coverage_help_routes() -> [CliHelpRouteV1]:
+    var out: [CliHelpRouteV1] = []
+    val rows = doc_coverage_option_rows()
+    var i = 0
+    while i < rows.len():
+        out.push(cli_help_route_v1(rows[i].spelling, "", rows[i].value_mode, CLI_SCOPE_COMMAND, rows[i].help_summary))
+        i = i + 1
+    out
+
+# Parsed option set as a flat struct of primitives (test-runner-safe; see
+# doc/08_tracking/bug/class_field_access_erased_under_test_runner_2026-08-18.md).
+struct DocCoverageOptionsV1:
+    check_public_api: bool
+    sdoctest_report: bool
+    show_missing: bool
+    tag_file: text
+    format: text
+    tag_filter: text
+    root: text
+
+# Route-driven argument parser. Behaviour is identical to the former literal
+# chain: parsing starts at index 1, flags match exactly, value options accept
+# only the `--name=value` form, an unknown `-`-prefixed token is ignored, and
+# a non-option token sets the root (last one wins).
+pub fn doc_coverage_parse_options(args: [text], default_root: text) -> DocCoverageOptionsV1:
+    var opts = DocCoverageOptionsV1(
+        check_public_api: false, sdoctest_report: false, show_missing: false,
+        tag_file: "", format: "terminal", tag_filter: "", root: default_root)
+    val rows = doc_coverage_option_rows()
+    var i = 1
+    while i < args.len():
+        val arg = args[i]
+        var matched_id = ""
+        var matched_value = ""
+        var r = 0
+        while r < rows.len():
+            val rec = rows[r]
+            if rec.value_mode == CLI_VALUE_MODE_FLAG:
+                if arg == rec.spelling:
+                    matched_id = rec.option_id
+            elif rec.value_mode == CLI_VALUE_MODE_REQUIRED:
+                val prefix = rec.spelling + "="
+                if arg.starts_with(prefix):
+                    matched_id = rec.option_id
+                    matched_value = arg.slice(prefix.len(), arg.len())
+            r = r + 1
+        if matched_id == "doc_coverage.check_public_api":
+            opts.check_public_api = true
+        elif matched_id == "doc_coverage.sdoctest_report":
+            opts.sdoctest_report = true
+        elif matched_id == "doc_coverage.missing":
+            opts.show_missing = true
+        elif matched_id == "doc_coverage.tag_file":
+            opts.tag_file = matched_value
+        elif matched_id == "doc_coverage.format":
+            opts.format = matched_value
+        elif matched_id == "doc_coverage.tag":
+            opts.tag_filter = matched_value
+        elif not arg.starts_with("-"):
+            opts.root = arg
+        i = i + 1
+    opts
 
 # =========================================================================
 # CLI Entry Point
@@ -31,33 +162,16 @@ fn handle_doc_coverage_command(args: [text]) -> i64:
 
     Returns: Exit code (0 = success, 1 = error)
     """
-    var check_public_api = false
-    var sdoctest_report = false
-    var tag_file = ""
-    var format = "terminal"
-    var root = cwd()
-    var show_missing = false
-    var tag_filter = ""
-
-    # Parse arguments
-    var i = 1
-    while i < args.len():
-        val arg = args[i]
-        if arg == "--check-public-api":
-            check_public_api = true
-        elif arg == "--sdoctest-report":
-            sdoctest_report = true
-        elif arg == "--missing":
-            show_missing = true
-        elif arg.starts_with("--tag-file="):
-            tag_file = arg[11:]
-        elif arg.starts_with("--format="):
-            format = arg[9:]
-        elif arg.starts_with("--tag="):
-            tag_filter = arg[6:]
-        elif not arg.starts_with("-"):
-            root = arg
-        i = i + 1
+    # Parse arguments via the option-route records (single source of truth
+    # shared with generated help and completions).
+    val opts = doc_coverage_parse_options(args, cwd())
+    val check_public_api = opts.check_public_api
+    val sdoctest_report = opts.sdoctest_report
+    val tag_file = opts.tag_file
+    val format = opts.format
+    val root = opts.root
+    val show_missing = opts.show_missing
+    val tag_filter = opts.tag_filter
 
     # Handle public API checking
     if check_public_api:
@@ -422,29 +536,3 @@ fn item_in_blocks(name: text, blocks: [text]) -> bool:
 # =========================================================================
 
 export handle_doc_coverage_command
-
-# =========================================================================
-# Script Entry Point
-# =========================================================================
-#
-# The CLI dispatch table (`src/compiler_rust/driver/src/main.rs`, the
-# `doc-coverage` CommandEntry) routes `simple doc-coverage` here by RUNNING
-# this file as a script. Without a top-level `main` the file only declared
-# functions, so the run produced no report and exited without doing anything;
-# the driver then reported the tool as unavailable. See
-# doc/08_tracking/bug/host_toolchain_seed_pinned_lint_fmt_doccov_unrunnable_2026-07-17.md
-#
-# raw_args layout: [binary_path, script_path, "doc-coverage", ...flags...]
-# `handle_doc_coverage_command` starts parsing at index 1, so it receives
-# the slice beginning at the subcommand name.
-
-fn main() -> i64:
-    val raw_args = cli_get_args()
-    var cmd_args: [text] = []
-    var i = 2
-    while i < raw_args.len():
-        cmd_args = cmd_args.push(raw_args[i])
-        i = i + 1
-    if cmd_args.len() == 0:
-        cmd_args = cmd_args.push("doc-coverage")
-    handle_doc_coverage_command(cmd_args)

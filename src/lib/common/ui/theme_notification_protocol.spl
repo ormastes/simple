@@ -9,7 +9,7 @@
 #   | source_manifest_sha256:64 ASCII | material_sha256:64 ASCII
 #   | revision:u64-le
 
-use std.common.base_encoding.utilities.{base_encoding_bytes_to_text as bytes_to_text, base_encoding_text_to_bytes as text_to_bytes}
+use std.common.base_encoding.utilities.{bytes_to_text, text_to_bytes}
 
 pub val THEME_CHANGED_V1_METHOD: u32 = 4u32
 pub val THEME_CHANGED_V1_VERSION: u8 = 1u8
@@ -37,13 +37,13 @@ pub struct ThemeNotificationTransport:
     """Injected notification adapter.
 
     `send_payload_fn` receives source port, destination port, method, flags,
-    payload address, and payload byte length. It MUST synchronously copy every
-    payload byte before returning. Only that owned copy may be queued for
-    asynchronous delivery. The callback must not retain the caller address and
-    must not re-enter `theme_notification_send_all`.
+    payload bytes. It MUST synchronously copy the array before returning. Only
+    that owned copy may be queued for asynchronous delivery. The callback must
+    not retain the caller array and must not re-enter
+    `theme_notification_send_all`.
     """
     source_port: u64
-    send_payload_fn: fn(u64, u64, u32, u32, u64, u64) -> i64
+    send_payload_fn: fn(u64, u64, u32, u32, [u8]) -> i64
 
 pub struct ThemeNotificationDeliveryReport:
     attempted_ports: [u64]
@@ -219,22 +219,19 @@ pub fn theme_notification_unique_subscribers(subscribers: [u64]) -> [u64]:
 pub fn theme_notification_send_all(
     transport: ThemeNotificationTransport,
     subscribers: [u64],
-    payload_addr: u64,
-    payload_len: u64
+    payload: [u8]
 ) -> Result<ThemeNotificationDeliveryReport, text>:
     """Synchronously hand an immutable payload view to every unique subscriber.
 
-    This helper never stores `payload_addr`. The injected callback must copy
+    This helper never stores `payload`. The injected callback must copy
     before return and may enqueue only its owned copy. A failure for one
     subscriber never prevents later subscribers from being attempted.
     """
     if transport.source_port == 0u64:
         return Err("theme_notification: source_port must be nonzero")
-    if payload_addr == 0u64:
-        return Err("theme_notification: payload address must be nonzero")
-    if payload_len < THEME_CHANGED_V1_MIN_PAYLOAD_BYTES.to_u64():
+    if payload.len() < THEME_CHANGED_V1_MIN_PAYLOAD_BYTES:
         return Err("theme_notification: payload is shorter than the protocol minimum")
-    if payload_len > THEME_CHANGED_V1_MAX_PAYLOAD_BYTES.to_u64():
+    if payload.len() > THEME_CHANGED_V1_MAX_PAYLOAD_BYTES:
         return Err("theme_notification: payload exceeds protocol maximum")
 
     val unique = theme_notification_unique_subscribers(subscribers)
@@ -250,8 +247,7 @@ pub fn theme_notification_send_all(
             port,
             THEME_CHANGED_V1_METHOD,
             THEME_NOTIFICATION_SEND_ASYNC,
-            payload_addr,
-            payload_len
+            payload
         )
         statuses = statuses.push(status)
         if status == THEME_NOTIFICATION_STATUS_OK:

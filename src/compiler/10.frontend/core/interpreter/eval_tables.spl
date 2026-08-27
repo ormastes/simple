@@ -46,9 +46,11 @@ var frt_nexts: [i64] = []
 # decl_alloc in _Ast/decl_nodes.spl), so a direct-indexed array with
 # "" padding gives O(1) get/set without a hash map.
 var dof_files: [text] = []
+var dom_modules: [text] = []
 
 fn decl_owner_file_reset():
     dof_files = []
+    dom_modules = []
 
 fn decl_owner_file_set(decl_id: i64, file: text):
     if decl_id < 0: return
@@ -59,6 +61,16 @@ fn decl_owner_file_set(decl_id: i64, file: text):
 fn decl_owner_file_get(decl_id: i64) -> text:
     if decl_id < 0 or decl_id >= dof_files.len(): return ""
     dof_files[decl_id]
+
+fn decl_owner_module_set(decl_id: i64, module_name: text):
+    if decl_id < 0: return
+    while dom_modules.len() <= decl_id:
+        dom_modules.push("")
+    dom_modules[decl_id] = module_name
+
+fn decl_owner_module_get(decl_id: i64) -> text:
+    if decl_id < 0 or decl_id >= dom_modules.len(): return ""
+    dom_modules[decl_id]
 
 # ===== Must-Use Function Registry (Hash Map, R9) =====
 var mu_keys: [text] = []
@@ -152,24 +164,15 @@ fn func_table_reset():
     must_use_critical_mode = false
     decl_owner_file_reset()
 
-# Co-compiled signature-collision detection.
+# Co-compiled private-helper signature-collision detection.
 #
 # The interpreter func_table is a bare-name namespace, and the import loader
 # flattens all files into it, so two files that each define the same
-# helper with differing signatures silently mis-dispatch: the
+# `_`-prefixed helper with differing signatures silently mis-dispatch: the
 # second registration clobbers the first (last-write-wins), and a call to the
 # clobbered version dispatches to the wrong body — silent wrong-result or crash.
 # This is a non-breaking diagnostic only; the fix is to rename one helper.
 # See bug `compiler_cross_module_private_symbol_collision_2026-06-16`.
-#
-# Scope widened 2026-08-01: this used to skip every name not starting with `_`
-# and every method registration (`Type__method`). Both skips were blind spots,
-# not safety: a public free function lives in the SAME last-write-wins table as
-# a private one, and a `Type__method` key is unique per TYPE, not per MODULE —
-# two modules defining `impl Type` with the same method name clobber each other
-# identically. Because of those skips, "no collision warning was printed" was
-# routinely misread as "nothing collided". Do not reintroduce them. See
-# doc/08_tracking/bug/diag_stage_facet_cross_module_collision_under_test_2026-07-06.md
 var _ftr_collision_warned: [text] = []
 
 fn _ftr_sig_differs(a_did: i64, b_did: i64) -> bool:
@@ -186,61 +189,16 @@ fn _ftr_sig_differs(a_did: i64, b_did: i64) -> bool:
         i = i + 1
     false
 
-fn _ftr_collision_kind(name: text) -> text:
-    if name.contains("__"):
-        return "method"
-    if name.starts_with("_"):
-        return "private helper"
-    "public function"
-
-# Same-signature arm gate. Default OFF.
-#
-# Two co-compiled definitions with IDENTICAL signatures are not harmless. One
-# silently wins and the other is discarded, and because the signatures agree no
-# type error, no arity error and no ambiguity fallback can ever fire — the call
-# just runs a different module's body than the one the caller imported. It is
-# the only collision shape undetectable from the call site, and it was the one
-# shape this warning never reported.
-#
-# Measured 2026-08-01 on the Rust seed: 313 distinct same-signature collisions
-# are co-compiled into the import graph of even a 3-example spec, against 38
-# differing-signature ones. Reporting them unconditionally would bury the
-# existing warning, so this arm is opt-in via
-# SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1. Warn-only; deliberately not fatal.
-#
-# See doc/08_tracking/bug/vacuous_spec_census_2026-07-30.md
-# ("A FOURTH vacuity shape: name-collision hijack").
-extern fn rt_env_get_i64(key: text, default_value: i64) -> i64
-
-var _ftr_samesig_diag: i64 = -1
-
-fn _ftr_samesig_diag_enabled() -> bool:
-    # Memoised in a slot: func_table_register is a hot path and rt_env_get_i64 is
-    # itself a linear environ scan (see ast_env_var_quadratic_parse_2026-06-13),
-    # so this must not be re-read per registration.
-    if _ftr_samesig_diag == -1:
-        _ftr_samesig_diag = rt_env_get_i64("SIMPLE_DIAG_SAME_SIGNATURE_COLLISION", 0)
-    _ftr_samesig_diag == 1
-
 fn _ftr_warn_collision(name: text, existing_did: i64, new_did: i64):
-    # Private helpers, public free functions and `Type__method` registrations all
-    # share this one flat table, so all three are checked. See the note above the
-    # `_ftr_collision_warned` declaration before narrowing this again.
+    # Only the private (`_`-prefixed) free-function convention; skip method
+    # registrations (mangled as `Type__method`) which can't collide on a bare name.
+    if not name.starts_with("_"):
+        return
+    if name.contains("__"):
+        return
     if existing_did == new_did:
         return
     if not _ftr_sig_differs(existing_did, new_did):
-        # SAME-SIGNATURE COLLISION. This used to be an unconditional `return`.
-        # See `_ftr_samesig_diag` above for why that was backwards.
-        if not _ftr_samesig_diag_enabled():
-            return
-        var k = 0
-        while k < _ftr_collision_warned.len():
-            if _ftr_collision_warned[k] == "samesig:{name}":
-                return
-            k = k + 1
-        _ftr_collision_warned.push("samesig:{name}")
-        val same_kind = _ftr_collision_kind(name)
-        print "[WARN] {same_kind} '{name}' has co-compiled definitions with the SAME signature; one silently wins and the rest are discarded. No type/arity error can fire, so a call resolves to a different module's body than the one it imported — a silent wrong answer, and the shape that makes an importing spec vacuous. Rename one of the definitions. [compiler_cross_module_private_symbol_collision]"
         return
     var j = 0
     while j < _ftr_collision_warned.len():
@@ -248,8 +206,7 @@ fn _ftr_warn_collision(name: text, existing_did: i64, new_did: i64):
             return
         j = j + 1
     _ftr_collision_warned.push(name)
-    val kind = _ftr_collision_kind(name)
-    print "[WARN] {kind} '{name}' has co-compiled definitions with differing signatures; calls resolve by bare name (last-write-wins) and may dispatch to the wrong one — silent wrong-result or crash. Rename the conflicting helper(s). [compiler_cross_module_private_symbol_collision]"
+    print "[WARN] private helper '{name}' has co-compiled definitions with differing signatures; calls resolve by bare name (last-write-wins) and may dispatch to the wrong one — silent wrong-result or crash. Rename the conflicting helper(s). [compiler_cross_module_private_symbol_collision]"
 
 fn func_table_register(name: text, decl_id: i64):
     val bucket = hm_hash_text(name) % HM_SIZE
@@ -274,6 +231,80 @@ fn func_table_lookup(name: text) -> i64:
         if ft_keys[idx] == name:
             return ft_vals[idx]
         idx = ft_nexts[idx]
+    -1
+
+# ===== (module path, name)-keyed function resolution =====
+#
+# Pure-Simple mirror of the seed's cross-module duplicate-function policy
+# (module_loader.rs doc comment "key the registry on (module path, name)";
+# interpreter_call/mod.rs `filter_overloads_by_caller_binding`, 2026-08-25):
+# a bare-name call resolves through the CALLING module first — its own
+# definition, then its selective-import binding — and only then falls back to
+# the flat bare-name table's historical last-write-wins pick. This is what
+# stops two co-compiled modules that each define the same free function
+# (extract_json_string, char_from_code — the two 2026-08-25 llm_caret
+# incidents) from silently hijacking each other by load order.
+#
+# Composite keys embed "\u{01}", which no legal identifier or module path
+# contains, so they can never collide with real bare names in the shared
+# hash arrays.
+
+fn _owned_fn_key(owner: text, name: text) -> text:
+    owner + "\u{01}" + name
+
+fn func_table_register_owned(owner: text, name: text, decl_id: i64):
+    if owner == "":
+        return
+    val key = _owned_fn_key(owner, name)
+    val bucket = hm_hash_text(key) % HM_SIZE
+    var idx = ft_buckets[bucket]
+    while idx != -1:
+        if ft_keys[idx] == key:
+            ft_vals[idx] = decl_id
+            return
+        idx = ft_nexts[idx]
+    val new_idx = ft_keys.len()
+    ft_keys.push(key)
+    ft_vals.push(decl_id)
+    ft_nexts.push(ft_buckets[bucket])
+    ft_buckets[bucket] = new_idx
+
+fn func_table_lookup_owned(owner: text, name: text) -> i64:
+    if owner == "":
+        return -1
+    func_table_lookup(_owned_fn_key(owner, name))
+
+# Selective-import bindings: (importer file, local name) -> source module FILE
+# path, recorded when DECL_USE loads a selective import (eval_decls.spl).
+var _fn_import_binding = {}
+
+fn func_import_binding_register(importer: text, name: text, source_file: text):
+    if importer == "" or source_file == "":
+        return
+    _fn_import_binding[_owned_fn_key(importer, name)] = source_file
+
+fn func_import_binding_lookup(importer: text, name: text) -> text:
+    val key = _owned_fn_key(importer, name)
+    if _fn_import_binding.has(key):
+        return _fn_import_binding[key]
+    ""
+
+fn func_import_binding_reset():
+    _fn_import_binding = {}
+
+# Caller-aware resolution: the calling module's own definition wins, then its
+# selective-import binding; -1 means "no owned route — use the flat table".
+fn func_resolve_for_caller(caller_owner: text, name: text) -> i64:
+    if caller_owner == "" or caller_owner == "<entry>":
+        return -1
+    val own_decl = func_table_lookup_owned(caller_owner, name)
+    if own_decl >= 0:
+        return own_decl
+    val bound_src = func_import_binding_lookup(caller_owner, name)
+    if bound_src != "":
+        val bound_decl = func_table_lookup_owned(bound_src, name)
+        if bound_decl >= 0:
+            return bound_decl
     -1
 
 fn func_table_remove(name: text) -> bool:
@@ -309,40 +340,6 @@ fn func_remove_return_type(name: text) -> bool:
         prev = idx
         idx = frt_nexts[idx]
     false
-
-# ===== Owner-Guarded Removal (pure_interp_registry_2026-07-17) =====
-#
-# func_table/struct_table are bare-name (non-module-qualified) maps: two
-# modules registering the same name silently overwrite (last-write-wins).
-# If module A registers "helper" then module B (loaded later) also
-# registers "helper", the table now holds B's decl_id. If A is later
-# selectively unloaded (interp_unload_module), a blind
-# func_table_remove("helper") would delete the entry — even though it is
-# currently B's LIVE registration, not A's. That deletes an unrelated
-# module's function out from under it: a cross-module registry corruption
-# via unload, in the same failure class documented for the Rust seed
-# (see doc/08_tracking/bug/mcp_stdio_smoke_seed_flat_registry_len_i64_2026-07-17.md).
-#
-# These _owned variants are additive (existing func_table_remove /
-# func_remove_return_type / struct_table_remove are untouched for any
-# caller not yet migrated) and no-op when the current owner does not match
-# the expected decl_id, preserving whichever module's registration is
-# actually live.
-
-fn func_table_remove_owned(name: text, expected_decl_id: i64) -> bool:
-    val current = func_table_lookup(name)
-    if current != expected_decl_id:
-        return false
-    func_table_remove(name)
-
-fn func_remove_return_type_owned(name: text, expected_decl_id: i64) -> bool:
-    # If a DIFFERENT decl currently owns this bare name in func_table, its
-    # return-type entry belongs to that owner too — leave it alone. Safe to
-    # remove when nobody (-1) or our own decl currently owns the name.
-    val current = func_table_lookup(name)
-    if current >= 0 and current != expected_decl_id:
-        return false
-    func_remove_return_type(name)
 
 fn func_register_return_type(name: text, ret_type: i64):
     val bucket = hm_hash_text(name) % HM_SIZE
@@ -402,41 +399,64 @@ fn must_use_get_reason(name: text) -> text:
 fn must_use_is_critical() -> bool:
     must_use_critical_mode
 
-class MustUseSourceScanState:
-    pending_must_use: bool
-    pending_reason: text
-    pending_init: bool
-    pending_teardown: bool
-    pending_when: text
-
-    # This must remain a mutable method: returning this five-field state from a
-    # free helper would copy it at every line under Simple value semantics.
-    # `@always_inline` is established for free functions, but not for `me`
-    # methods, so the interpreter method dispatch is an intentional bounded
-    # tradeoff (once per source line) until method inlining is supported.
-    me scan_line(line: text):
-        # Preserve the scanner's historical leading trim exactly: spaces and
-        # tabs are ignored, while every other character (including CR) stays.
-        # Indexing avoids a second growable character array for every line.
-        var trim_start: i64 = 0
-        while trim_start < line.len() and (line[trim_start] == " " or line[trim_start] == "\t"):
-            trim_start = trim_start + 1
-        val trimmed = line[trim_start:]
+fn must_use_scan_source(source: text):
+    mu_keys = []
+    mu_reasons = []
+    mu_buckets = hm_make_global_buckets()
+    mu_nexts = []
+    must_use_critical_mode = false
+    # Split source into lines and scan for comment annotations
+    var lines: [text] = []
+    var line_chars: [text] = []
+    var ci: i64 = 0
+    for _unused in source:
+        if ci >= source.len(): break
+        val ch = source[ci]
+        if ch == "\n":
+            lines.push(line_chars.join(""))
+            line_chars = []
+        else:
+            line_chars.push(ch)
+        ci = ci + 1
+    if line_chars.len() > 0:
+        lines.push(line_chars.join(""))
+    # Scan for annotations
+    var pending_must_use: bool = false
+    var pending_reason: text = ""
+    var pending_init: bool = false
+    var pending_teardown: bool = false
+    var pending_when: text = ""
+    var li: i64 = 0
+    for line in lines:
+        # Trim leading spaces
+        var trimmed_chars: [text] = []
+        var started: bool = false
+        var ti: i64 = 0
+        for _c in line:
+            if ti >= line.len(): break
+            val lc = line[ti]
+            if started:
+                trimmed_chars.push(lc)
+            elif lc != " " and lc != "\t":
+                started = true
+                trimmed_chars.push(lc)
+            ti = ti + 1
+        val trimmed = trimmed_chars.join("")
         # Check for @profile(critical)
         if trimmed.starts_with("# @profile(critical)"):
             must_use_critical_mode = true
         # Check for @tailrec annotation — marks function for tail-call optimization
         if trimmed.starts_with("# @tailrec"):
-            self.pending_init = false  # @tailrec isn't @init
-            self.pending_teardown = false
+            pending_init = false  # @tailrec isn't @init
+            pending_teardown = false
             # Simply note the next fn as tailrec-annotated for warning purposes
 
         # Check for @init annotation
         if trimmed.starts_with("# @init"):
-            self.pending_init = true
+            pending_init = true
         # Check for @teardown annotation
         if trimmed.starts_with("# @teardown"):
-            self.pending_teardown = true
+            pending_teardown = true
         # Check for @when(condition) conditional compilation (comment form: backward compat)
         if trimmed.starts_with("# @when("):
             # Extract condition: "# @when(condition)"
@@ -449,7 +469,7 @@ class MustUseSourceScanState:
                 when_cond_chars.push(wch)
                 wci = wci + 1
             val when_cond = when_cond_chars.join("")
-            self.pending_when = when_cond
+            pending_when = when_cond
         # Check for @cfg(condition) — new proper syntax (no # prefix)
         if trimmed.starts_with("@cfg("):
             var cfg_chars: [text] = []
@@ -478,12 +498,12 @@ class MustUseSourceScanState:
                     if cfg_val.len() >= 2 and cfg_val.starts_with("\"") and cfg_val.ends_with("\""):
                         cfg_val = cfg_val[1:cfg_val.len() - 1]
                     cfg_cond = "{cfg_key}={cfg_val}"
-            self.pending_when = cfg_cond
+            pending_when = cfg_cond
         # Check for @must_use
         if trimmed.starts_with("# @must_use"):
-            self.pending_must_use = true
+            pending_must_use = true
             # Extract reason from @must_use("reason")
-            self.pending_reason = ""
+            pending_reason = ""
             if trimmed.contains("(\""):
                 # Find text between (" and ")
                 var in_reason: bool = false
@@ -504,9 +524,9 @@ class MustUseSourceScanState:
                             in_reason = true
                             ri = ri + 1
                     ri = ri + 1
-                self.pending_reason = reason_chars.join("")
+                pending_reason = reason_chars.join("")
         # Check if line declares a function (and we have a pending annotation)
-        if self.pending_must_use:
+        if pending_must_use:
             if trimmed.starts_with("fn "):
                 # Extract function name
                 var fname_chars: [text] = []
@@ -519,15 +539,15 @@ class MustUseSourceScanState:
                     fi = fi + 1
                 val fname = fname_chars.join("")
                 if fname != "":
-                    must_use_register(fname, self.pending_reason)
-                self.pending_must_use = false
-                self.pending_reason = ""
+                    must_use_register(fname, pending_reason)
+                pending_must_use = false
+                pending_reason = ""
             elif trimmed.starts_with("# ") == false and trimmed != "":
                 # Non-comment, non-empty line without fn => cancel pending
-                self.pending_must_use = false
-                self.pending_reason = ""
+                pending_must_use = false
+                pending_reason = ""
         # Handle @init and @teardown function registration
-        if self.pending_init or self.pending_teardown or self.pending_when != "":
+        if pending_init or pending_teardown or pending_when != "":
             if trimmed.starts_with("fn ") or trimmed.starts_with("val ") or trimmed.starts_with("var "):
                 # Extract declaration name
                 var anno_fname_chars: [text] = []
@@ -542,54 +562,22 @@ class MustUseSourceScanState:
                     anno_fi = anno_fi + 1
                 val anno_fname = anno_fname_chars.join("")
                 if anno_fname != "":
-                    if self.pending_init:
+                    if pending_init:
                         init_functions.push(anno_fname)
-                    if self.pending_teardown:
+                    if pending_teardown:
                         teardown_functions.push(anno_fname)
-                    if self.pending_when != "":
-                        val when_ok = when_check_condition(self.pending_when)
+                    if pending_when != "":
+                        val when_ok = when_check_condition(pending_when)
                         if when_ok == false:
                             when_disabled_decls.push(anno_fname)
-                self.pending_init = false
-                self.pending_teardown = false
-                self.pending_when = ""
+                pending_init = false
+                pending_teardown = false
+                pending_when = ""
             elif trimmed.starts_with("# ") == false and trimmed != "":
-                self.pending_init = false
-                self.pending_teardown = false
-                self.pending_when = ""
-
-fn must_use_scan_source(source: text):
-    mu_keys = []
-    mu_reasons = []
-    mu_buckets = hm_make_global_buckets()
-    mu_nexts = []
-    must_use_critical_mode = false
-
-    var state = MustUseSourceScanState(
-        pending_must_use: false,
-        pending_reason: "",
-        pending_init: false,
-        pending_teardown: false,
-        pending_when: ""
-    )
-
-    # Stream one line buffer into the state machine. The old implementation
-    # retained a [text] containing every line until the scan completed, then
-    # allocated another [text] of characters just to remove leading whitespace.
-    # This keeps peak scratch proportional to the longest line instead of the
-    # entire source while preserving blank-line and final-line behavior.
-    var line_chars: [text] = []
-    var ci: i64 = 0
-    while ci < source.len():
-        val ch = source[ci]
-        if ch == "\n":
-            state.scan_line(line_chars.join(""))
-            line_chars = []
-        else:
-            line_chars.push(ch)
-        ci = ci + 1
-    if line_chars.len() > 0:
-        state.scan_line(line_chars.join(""))
+                pending_init = false
+                pending_teardown = false
+                pending_when = ""
+        li = li + 1
 
 # ===== Struct Definition Table (Hash Map) =====
 # Maps struct name -> decl_id for constructor resolution
@@ -675,14 +663,6 @@ fn struct_table_remove(name: text) -> bool:
         idx = st_nexts[idx]
     false
 
-fn struct_table_remove_owned(name: text, expected_decl_id: i64) -> bool:
-    # pure_interp_registry_2026-07-17: see func_table_remove_owned above —
-    # same bare-name unload-corruption guard, for the struct table.
-    val current = struct_table_lookup(name)
-    if current != expected_decl_id:
-        return false
-    struct_table_remove(name)
-
 fn struct_table_get_module(name: text) -> text:
     val bucket = hm_hash_text(name) % HM_SIZE
     var idx = st_buckets[bucket]
@@ -701,60 +681,11 @@ var enum_reg_variants: [text] = []
 var enum_hm_buckets: [i64] = []
 var enum_hm_nexts: [i64] = []
 
-# Reverse variant index for the pattern-classification hot path. Counts, rather
-# than booleans, preserve a variant that is declared by more than one enum when
-# one owner is unloaded.
-var enum_variant_reg_names: [text] = []
-var enum_variant_reg_counts: [i64] = []
-var enum_variant_hm_buckets: [i64] = []
-var enum_variant_hm_nexts: [i64] = []
-
-fn _enum_variant_index_add(variant: text):
-    # enum_variant_is_declared has always rejected the empty spelling.
-    if variant == "": return
-    if enum_variant_hm_buckets.len() == 0:
-        enum_variant_hm_buckets = hm_make_global_buckets()
-    val bucket = hm_hash_text(variant) % HM_SIZE
-    var idx = enum_variant_hm_buckets[bucket]
-    while idx != -1:
-        if enum_variant_reg_names[idx] == variant:
-            enum_variant_reg_counts[idx] = enum_variant_reg_counts[idx] + 1
-            return
-        idx = enum_variant_hm_nexts[idx]
-    val new_idx = enum_variant_reg_names.len()
-    enum_variant_reg_names.push(variant)
-    enum_variant_reg_counts.push(1)
-    enum_variant_hm_nexts.push(enum_variant_hm_buckets[bucket])
-    enum_variant_hm_buckets[bucket] = new_idx
-
-fn _enum_variant_index_remove(variant: text):
-    if variant == "" or enum_variant_hm_buckets.len() == 0: return
-    val bucket = hm_hash_text(variant) % HM_SIZE
-    var idx = enum_variant_hm_buckets[bucket]
-    while idx != -1:
-        if enum_variant_reg_names[idx] == variant:
-            if enum_variant_reg_counts[idx] > 0:
-                enum_variant_reg_counts[idx] = enum_variant_reg_counts[idx] - 1
-            return
-        idx = enum_variant_hm_nexts[idx]
-
-fn _enum_variant_index_add_csv(variants_csv: text):
-    for variant in variants_csv.split(","):
-        _enum_variant_index_add(variant)
-
-fn _enum_variant_index_remove_csv(variants_csv: text):
-    for variant in variants_csv.split(","):
-        _enum_variant_index_remove(variant)
-
 fn enum_table_reset():
     enum_reg_names = []
     enum_reg_variants = []
     enum_hm_buckets = hm_make_global_buckets()
     enum_hm_nexts = []
-    enum_variant_reg_names = []
-    enum_variant_reg_counts = []
-    enum_variant_hm_buckets = hm_make_global_buckets()
-    enum_variant_hm_nexts = []
 
 # Bare enum names already warned about, so a repeatedly re-registered enum
 # reports once instead of once per module. Mirrors `_ftr_collision_warned`.
@@ -785,18 +716,13 @@ fn enum_table_register(name: text, variants: [text]):
     var idx = enum_hm_buckets[bucket]
     while idx != -1:
         if enum_reg_names[idx] == name:
-            _enum_warn_bare_name_collision(name, enum_reg_variants[idx], variants.join(","))
             return
         idx = enum_hm_nexts[idx]
-    val variants_csv = variants.join(",")
     val new_idx = enum_reg_names.len()
     enum_reg_names.push(name)
-    enum_reg_variants.push(variants_csv)
+    enum_reg_variants.push(variants.join(","))
     enum_hm_nexts.push(enum_hm_buckets[bucket])
     enum_hm_buckets[bucket] = new_idx
-    # The legacy scan ignored the empty enum-name sentinel entirely.
-    if name != "":
-        _enum_variant_index_add_csv(variants_csv)
 
 fn enum_table_lookup(name: text) -> text:
     if enum_hm_buckets.len() == 0: return ""
@@ -813,13 +739,12 @@ fn enum_variant_is_declared(variant: text) -> bool:
     enum_table_lookup — match_pattern needs it to tell a nullary variant
     pattern (`case Red:`) apart from a binding pattern (`case other:`)."""
     if variant == "": return false
-    if enum_variant_hm_buckets.len() == 0: return false
-    val bucket = hm_hash_text(variant) % HM_SIZE
-    var idx = enum_variant_hm_buckets[bucket]
-    while idx != -1:
-        if enum_variant_reg_names[idx] == variant:
-            return enum_variant_reg_counts[idx] > 0
-        idx = enum_variant_hm_nexts[idx]
+    var ei = 0
+    while ei < enum_reg_names.len():
+        if enum_reg_names[ei] != "":
+            for v in enum_reg_variants[ei].split(","):
+                if v == variant: return true
+        ei = ei + 1
     false
 
 fn enum_table_remove(name: text) -> bool:
@@ -829,8 +754,6 @@ fn enum_table_remove(name: text) -> bool:
     var idx = enum_hm_buckets[bucket]
     while idx != -1:
         if enum_reg_names[idx] == name:
-            if name != "":
-                _enum_variant_index_remove_csv(enum_reg_variants[idx])
             if prev == -1:
                 enum_hm_buckets[bucket] = enum_hm_nexts[idx]
             else:

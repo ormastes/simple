@@ -356,9 +356,14 @@ browser modules — that would violate its stated scope exclusion.
   (`interpreter_extern/net_tls_client.rs`, driver `runtime-tls` feature), so
   both `http://` and `https://` work live under the seed, with real cert
   verification (self-signed hosts are rejected). Without `runtime-tls` the
-  stub variant refuses honestly. Seed traps that bit this path:
-  `.? == false` dead guards and `var [u8]` `+`-accumulator — see
-  `doc/08_tracking/bug/seed_optional_query_comparison_divergence_2026-08-16.md`.
+  stub variant refuses honestly. Two traps bit this path, both since resolved
+  (see `doc/08_tracking/bug/seed_optional_query_comparison_divergence_2026-08-16.md`):
+  `.? == false` dead guards — NOT a seed quirk; `.?` returns T? under both
+  compilers, so the idiom is dead everywhere (converted tree-wide to
+  `.? == nil` / `.? != nil`, spec:
+  `test/03_system/feature/usage/exists_check_bool_comparison_trap_spec.spl`)
+  — and the seed's missing ByteArray `+` concat arm (fixed at root in
+  `interpreter/expr/ops.rs`).
 - Seed trap fixed: `.?` + `.unwrap()` on a module-level optional dies in the
   seed's semantic pass (`h1_client.spl` get_mock_registry). Use optional
   `match`. If you see "method `unwrap` not found on class X" under

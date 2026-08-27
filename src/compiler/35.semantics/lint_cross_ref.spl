@@ -2,9 +2,8 @@
 #
 # XREF001: System test file missing `# @req` tag                        WARNING
 # XREF002: Unit/integration test file missing `# @parent` tag           WARNING
-# XREF003: `# @req` references an unknown requirement ID                WARNING
+# XREF003: `# @req REQ-NNN` references unknown requirement ID           WARNING
 # XREF004: `# @parent path` references a file that does not exist       WARNING
-# XREF005: Cross-reference source/requirements could not be read         ERROR
 #
 # Scans test files for cross-reference tags:
 #   # @req REQ-042        — links test to requirement
@@ -46,17 +45,7 @@ fn check_cross_refs(source: text, file_path: text) -> [CrossRefWarning]:
     if not is_system and not is_unit and not is_integration:
         return warnings
 
-    val known_reqs = match xref_load_requirement_ids():
-        case Ok(value): value
-        case Err(error):
-            warnings.push(CrossRefWarning(
-                code: "XREF005",
-                severity: "ERROR",
-                message: error,
-                file_path: file_path,
-                line: 1
-            ))
-            return warnings
+    val known_reqs = xref_load_requirement_ids()
 
     # ---- Pass 1: Extract all cross-ref tags ----
     var req_tags: [text] = []
@@ -89,7 +78,7 @@ fn check_cross_refs(source: text, file_path: text) -> [CrossRefWarning]:
         warnings.push(CrossRefWarning(
             code: "XREF001",
             severity: "WARNING",
-            message: "system test file missing a '# @req' tag",
+            message: "system test file missing '# @req REQ-NNN' tag",
             file_path: file_path,
             line: 1
         ))
@@ -118,7 +107,7 @@ fn check_cross_refs(source: text, file_path: text) -> [CrossRefWarning]:
 
     var pi = 0
     while pi < parent_tags.len():
-        if not file_exists(parent_tags[pi]):
+        if not rt_file_exists(parent_tags[pi]):
             warnings.push(CrossRefWarning(
                 code: "XREF004",
                 severity: "WARNING",
@@ -138,19 +127,9 @@ fn check_cross_refs_batch(file_paths: [text]) -> [CrossRefWarning]:
     """Scan a list of test files for cross-reference tag issues."""
     var all_warnings: [CrossRefWarning] = []
     for fp in file_paths:
-        if not file_exists(fp):
+        if not rt_file_exists(fp):
             continue
-        val source = match read_file_text_result(fp):
-            case Ok(value): value
-            case Err(error):
-                all_warnings.push(CrossRefWarning(
-                    code: "XREF005",
-                    severity: "ERROR",
-                    message: "could not read cross-reference source {fp}: {error}",
-                    file_path: fp,
-                    line: 1
-                ))
-                continue
+        val source = rt_file_read_text(fp)
         val ws = check_cross_refs(source, fp)
         for w in ws:
             all_warnings.push(w)
@@ -160,7 +139,7 @@ fn check_cross_refs_batch(file_paths: [text]) -> [CrossRefWarning]:
 # Helpers
 # ============================================================================
 
-fn xref_load_requirement_ids() -> Result<[text], text>:
+fn xref_load_requirement_ids() -> [text]:
     """Load known requirement IDs from doc/requirement/ directory."""
     var ids: [text] = []
     val req_dir = "doc/requirement"
@@ -174,12 +153,10 @@ fn xref_load_requirement_ids() -> Result<[text], text>:
         val base = fname.slice(0, fname.len() - 3)
         if base.starts_with("REQ-"):
             ids.push(base)
-        # Scan first 20 lines for a requirement-id pattern
+        # Scan first 20 lines for REQ-NNN patterns
         val full_path = "{req_dir}/{fname}"
-        if file_exists(full_path):
-            val content = match read_file_text_result(full_path):
-                case Ok(value): value
-                case Err(error): return Err("could not read requirement file {full_path}: {error}")
+        if rt_file_exists(full_path):
+            val content = rt_file_read_text(full_path)
             val clines = content.split("\n")
             var ci = 0
             val scan_to = xref_min(20, clines.len())
@@ -188,10 +165,10 @@ fn xref_load_requirement_ids() -> Result<[text], text>:
                 if extracted != "":
                     ids.push(extracted)
                 ci = ci + 1
-    Ok(ids)
+    ids
 
 fn xref_extract_req_id(line: text) -> text:
-    """Extract a requirement id from a line like '# REQ-042' or 'REQ-042:'."""
+    """Extract a REQ-NNN id from a line like '# REQ-042' or 'REQ-042:'."""
     var s = line
     if s.starts_with("# "):
         s = s.slice(2)

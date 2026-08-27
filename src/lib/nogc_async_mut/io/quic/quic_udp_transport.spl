@@ -12,6 +12,11 @@
 # Reference: RFC 9000 §13
 
 use std.io.quic.quic_transport.{QuicTransport, TransportEvent}
+use std.io.quic.quic_connection.{QuicConnection, QuicConnectionState}
+use std.io.quic.quic_packet.{
+    QuicPacketHeader, QuicPacketType, QuicHeaderResult,
+    encode_quic_header, parse_quic_header, QUIC_VERSION_1
+}
 use std.io.quic.quic_udp_socket.{QuicUdpSocket, UdpResult}
 
 # ============================================================================
@@ -35,7 +40,7 @@ class QuicUdpTransport:
     transport: QuicTransport
     local_addr: text
 
-    pub static fn bind_server(addr: text) -> QuicUdpTransport?:
+    static fn bind_server(addr: text) -> QuicUdpTransport?:
         """Bind a server-mode UDP socket and create the transport layer.
 
         Returns nil if the socket cannot be bound.
@@ -50,7 +55,7 @@ class QuicUdpTransport:
             local_addr: addr
         )
 
-    pub static fn bind_client(addr: text) -> QuicUdpTransport?:
+    static fn bind_client(addr: text) -> QuicUdpTransport?:
         """Bind a client-mode UDP socket and create the transport layer.
 
         Returns nil if the socket cannot be bound.
@@ -65,19 +70,19 @@ class QuicUdpTransport:
             local_addr: addr
         )
 
-    pub me set_recv_timeout(ms: i64):
+    me set_recv_timeout(ms: i64):
         """Set receive timeout on the underlying UDP socket."""
         self.socket.set_read_timeout(ms)
 
-    pub me open_connection(peer_addr: text) -> text:
+    me open_connection(peer_addr: text) -> text:
         """Open a client connection to peer_addr. Returns the connection key."""
         return self.transport.open_connection(peer_addr)
 
-    pub me send_raw(data: [u8], peer_addr: text) -> i64:
+    me send_raw(data: [u8], peer_addr: text) -> i64:
         """Send a raw QUIC datagram to peer_addr. Returns bytes sent or -1."""
         return self.socket.send_to(data, peer_addr)
 
-    pub me send_initial_packet(_conn_key: text, _peer_addr: text) -> i64:
+    me send_initial_packet(conn_key: text, peer_addr: text) -> i64:
         """Build and send a QUIC Initial packet for the given connection.
 
         Constructs a long-header Initial packet with the connection's local/remote
@@ -86,13 +91,31 @@ class QuicUdpTransport:
 
         Returns bytes sent, or -1 on error.
         """
-        # A syntactically shaped long header plus zero padding is not a QUIC
-        # Initial packet: it lacks CRYPTO, payload length, packet protection,
-        # and header protection. Fail closed until the TLS/QUIC packet owner is
-        # wired; the provider capability remains unavailable meanwhile.
-        return -1
+        val conn = self.transport.get_connection(conn_key)
+        if conn == nil:
+            return -1
 
-    pub me poll_once() -> [TransportEvent]:
+        val header = QuicPacketHeader(
+            packet_type: QuicPacketType.Initial,
+            version: QUIC_VERSION_1,
+            dest_conn_id: conn.remote_conn_id,
+            src_conn_id: conn.local_conn_id,
+            packet_number: 0,
+            payload_offset: 0
+        )
+        var pkt = encode_quic_header(header)
+
+        # Pad to minimum 1200 bytes with PADDING frames (0x00 bytes)
+        # RFC 9000 §8.1: Initial UDP datagrams must be at least 1200 bytes
+        val min_size = 1200
+        loop:
+            if pkt.len() >= min_size:
+                break
+            pkt.push(0x00)
+
+        return self.socket.send_to(pkt, peer_addr)
+
+    me poll_once() -> [TransportEvent]:
         """Receive one UDP datagram and process through the QUIC transport.
 
         Returns any TransportEvents produced (NewConnection, StreamData, etc.).
@@ -105,7 +128,7 @@ class QuicUdpTransport:
             case _:
                 return []
 
-    pub me close():
+    me close():
         """Close the underlying UDP socket."""
         self.socket.close()
 

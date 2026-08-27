@@ -100,10 +100,3 @@ Rebuild the cross clang with assertions enabled to capture the failing
 backend assertion, or bisect the LLVM backend/target config for the
 `x86_64-unknown-simpleos` triple that diverges from the host build. Until
 then, all Phase 4 codegen must route through host clang.
-
-## Lane J re-verification 2026-08-17 (classified by CONTENT, not SHA ancestry)
-
-**Verdict: STILL-OPEN (ARCHITECTURAL).** Re-verified 2026-08-10 per the doc; a documented -O0
-workaround exists so this is not a blocker. Out of scope for this lane (toolchain-level, and
-`scripts/os/build_simpleos_llvm_image.shs` requires a cross clang-20 run that would contend
-with the live bootstrap).

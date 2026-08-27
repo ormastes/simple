@@ -1,0 +1,104 @@
+# UI action-step manual projection — typed-UI-interface plan phase 4 v1.
+#
+# Verifies the two evidence→manual projections Agent E owns: the guide-style
+# UI action step (Action / Target ID / Declared at / state-change table /
+# expected note) and the annotated terminal frame (fenced grid + per-region
+# caption lines with FOCUSED/SELECTED treatment). Rendering goes through the
+# existing manual_render.spl Markdown renderer, so this also pins that the new
+# blocks stay inside the shared ManualBlock vocabulary.
+#
+# @manual_section Typed UI interface manuals
+
+use std.spipe.*
+use common.spec.evidence.ui_step_render.{
+    UiActionStep, UiStateChange, UiFrameRegion,
+    ui_action_step_blocks, annotated_frame_blocks
+}
+use common.spec.evidence.model.{ManualBlockKind, EvidenceAudience}
+use common.spec.evidence.manual_render.{render_blocks}
+use common.spec.evidence.format.terminal_grid.{terminal_snapshot_from_rows}
+
+fn joined(lines: [text]) -> text:
+    var out = ""
+    for line in lines:
+        out = out + line + "\n"
+    out
+
+describe "UI action step projection":
+
+    it "projects an action record into Action/Target/Declared-at blocks with a state table":
+        step("Build one recorded click step with a before/after state pair")
+        val changes = [
+            UiStateChange(property: "display", before: "0", after: "7"),
+            UiStateChange(property: "focused", before: "false", after: "true")
+        ]
+        val action = UiActionStep(
+            action_kind: "click",
+            target_id: "calc#digit_7",
+            canonical_id: "office.calc/main/digit_7",
+            declared_at: "src/app/office/sheets/calc_manifest.spl:42",
+            changes: changes,
+            expected: "Display shows 7")
+
+        step("Project it into ManualBlocks")
+        val blocks = ui_action_step_blocks(action, 1, EvidenceAudience.user)
+        expect(blocks.len()).to_equal(3)
+        expect(blocks[0].title).to_equal("Step 1")
+        assert_true(blocks[1].kind == ManualBlockKind.table)
+        expect(blocks[2].lines[0]).to_equal("Expected: Display shows 7")
+
+        step("Render through the shared manual renderer")
+        val md = joined(render_blocks(blocks, EvidenceAudience.user))
+        expect(md).to_contain("**Action**: click")
+        expect(md).to_contain("**Target ID**: `calc#digit_7`")
+        expect(md).to_contain("**Canonical ID**: `office.calc/main/digit_7`")
+        expect(md).to_contain("**Declared at**: src/app/office/sheets/calc_manifest.spl:42")
+        expect(md).to_contain("| Property | Before | After |")
+        expect(md).to_contain("| display | 0 | 7 |")
+        expect(md).to_contain("Expected: Display shows 7")
+
+    it "omits the state table when nothing changed and flags missing fields":
+        step("Project a step with no state changes and no target id")
+        val empty_changes: [UiStateChange] = []
+        val action = UiActionStep(
+            action_kind: "focus",
+            target_id: "",
+            canonical_id: "",
+            declared_at: "",
+            changes: empty_changes,
+            expected: "")
+        val blocks = ui_action_step_blocks(action, 2, EvidenceAudience.qa)
+        expect(blocks.len()).to_equal(1)
+        val md = joined(render_blocks(blocks, EvidenceAudience.qa))
+        expect(md).to_contain("**Target ID**: `(not recorded)`")
+        expect(md).to_contain("**Declared at**: (not recorded)")
+
+describe "Annotated terminal frame projection":
+
+    it "renders a fenced frame plus per-region caption lines with treatment":
+        step("Capture a small TUI frame and annotate two semantic regions")
+        val rows = ["[ 7 ][ 8 ]", "display: 7"]
+        val snapshot = terminal_snapshot_from_rows(rows, 10)
+        val regions = [
+            UiFrameRegion(node_id: "calc#digit_7", row: 0, col: 0,
+                          width: 5, height: 1, focused: true, selected: false),
+            UiFrameRegion(node_id: "calc#display", row: 1, col: 0,
+                          width: 10, height: 1, focused: false, selected: true)
+        ]
+
+        step("Project into frame + caption blocks and render")
+        val blocks = annotated_frame_blocks("Calc frame", snapshot, regions, EvidenceAudience.user)
+        expect(blocks.len()).to_equal(2)
+        assert_true(blocks[0].kind == ManualBlockKind.terminal_grid)
+        val md = joined(render_blocks(blocks, EvidenceAudience.user))
+        expect(md).to_contain("```text")
+        expect(md).to_contain("[ 7 ][ 8 ]")
+        expect(md).to_contain("- `calc#digit_7` @ (0,0) 5x1 · FOCUSED")
+        expect(md).to_contain("- `calc#display` @ (1,0) 10x1 · SELECTED")
+
+    it "keeps the caption block honest when no regions are annotated":
+        val snapshot = terminal_snapshot_from_rows(["ok"], 2)
+        val no_regions: [UiFrameRegion] = []
+        val blocks = annotated_frame_blocks("Bare frame", snapshot, no_regions, EvidenceAudience.qa)
+        val md = joined(render_blocks(blocks, EvidenceAudience.qa))
+        expect(md).to_contain("(no semantic regions annotated)")

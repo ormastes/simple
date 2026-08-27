@@ -1,15 +1,30 @@
-<!-- generated-from: doc/00_llm_process/skill_command/command/release.md -->
-# Protected Software Release
+<!-- llm-process-gen: managed source=gemini_release_skill source_sha256=cba19ebd846a836863e557a9733f55fa347693bd2522e01a872056442e849c0e content_sha256=3685dfc0685f8af14d0267be5baa0fad7fe81e6c9673629e95b556c1e4b3d522 -->
+# release
 
 Release contract: isolated-session; reviewed-beta-backport; immutable-candidate; promote-without-rebuild; protected-ref-guard; non-destructive-release-identity.
 
-Use the canonical semantic source at `doc/00_llm_process/skill_command/command/release.md`.
+Version bump and release. Args: major/first, minor/second, patch/third (default), or exact X.Y.Z.
 
-Start one isolated release branch/worktree, read `release/version.sdn`, and require verified evidence. Beta maintenance accepts only explicit reviewed bug-fix backports with exact provenance and renewed post-application evidence. Create an immutable candidate, build once, and promote exact admitted artifacts through one signed annotated exact tag after approval.
+Perform a version bump and release.
 
-Never update protected refs directly, rebuild during promotion, select fixes automatically, push all tags, delete/move/reuse a published tag, or use fallback artifacts. Rollback redeploys a prior admitted release; corrections get a new version.
+Parse argument:
+- Empty or patch/third: bump patch (Z+1)
+- minor/second: bump minor (Y+1, reset Z)
+- major/first: bump major (X+1, reset Y and Z)
+- X.Y.Z pattern: set exact version
 
-## Normalized contract clauses
+Steps:
+1. Read current version from simple.sdn (project.version)
+2. Calculate new version
+3. Update all locations:
+   - simple.sdn (version: X.Y.Z)
+   - VERSION file
+   - src/app/cli/main.spl (hardcoded fallback in get_version())
+   - src/app/cli/bootstrap_main.spl (hardcoded in bootstrap_version())
+4. Update CHANGELOG.md with new section header
+5. Commit
+6. Tag: git tag -a vX.Y.Z
+7. Ask before push — do NOT push without user approval
 
 - One isolated release session owns one work branch and one non-main worktree.
 - `release/version.sdn` is the sole version authority and all other version locations are checked projections.

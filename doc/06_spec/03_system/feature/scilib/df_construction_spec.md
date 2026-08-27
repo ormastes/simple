@@ -2,6 +2,29 @@
 
 > Validates construction of `Series<T>` and `DataFrame` from typed sequences, named column maps, and row lists. Covers schema/dtypes/shape/columns accessors and critical error paths (empty frame, mismatched column lengths).
 
+<!-- sdn-diagram:id=df_construction_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=df_construction_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+df_construction_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=df_construction_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 18 | 18 | 0 | 0 |
@@ -24,7 +47,7 @@ Validates construction of `Series<T>` and `DataFrame` from typed sequences, name
 | Plan | doc/03_plan/agent_tasks/scilib_port_df.md |
 | Design | doc/05_design/scilib_port_architecture.md §8 |
 | Source | `test/03_system/feature/scilib/df_construction_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -64,19 +87,18 @@ All construction and accessor calls in this spec are plain Simple method calls.
 
 #### returns correct name
 
-- returns correct name
+1. name: Symbol from
+2. values: [Float64 new
    - Expected: s.name() equals `Symbol.from("price")`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns correct name")
 val s = Series.from_values(
     name: Symbol.from("price"),
     values: [Float64.new(1.5), Float64.new(2.5), Float64.new(3.5)]
@@ -88,19 +110,18 @@ expect(s.name()).to_equal(Symbol.from("price"))
 
 #### returns correct length
 
-- returns correct length
+1. name: Symbol from
+2. values: [Float64 new
    - Expected: s.len() equals `Index.new(3)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns correct length")
 val s = Series.from_values(
     name: Symbol.from("price"),
     values: [Float64.new(1.5), Float64.new(2.5), Float64.new(3.5)]
@@ -112,19 +133,18 @@ expect(s.len()).to_equal(Index.new(3))
 
 #### returns DType.F64 for Float64 series
 
-- returns DType.F64 for Float64 series
+1. name: Symbol from
+2. values: [Float64 new
    - Expected: s.dtype() equals `DType.F64`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns DType.F64 for Float64 series")
 val s = Series.from_values(
     name: Symbol.from("price"),
     values: [Float64.new(1.5), Float64.new(2.5), Float64.new(3.5)]
@@ -138,19 +158,18 @@ expect(s.dtype()).to_equal(DType.F64)
 
 #### returns DType.I64 for Int64 series
 
-- returns DType.I64 for Int64 series
+1. name: Symbol from
+2. values: [Int64 new
    - Expected: s.dtype() equals `DType.I64`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns DType.I64 for Int64 series")
 val s = Series.from_values(
     name: Symbol.from("count"),
     values: [Int64.new(10), Int64.new(20), Int64.new(30)]
@@ -162,19 +181,18 @@ expect(s.dtype()).to_equal(DType.I64)
 
 #### returns correct length for Int64 series
 
-- returns correct length for Int64 series
+1. name: Symbol from
+2. values: [Int64 new
    - Expected: s.len() equals `Index.new(2)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns correct length for Int64 series")
 val s = Series.from_values(
     name: Symbol.from("count"),
     values: [Int64.new(10), Int64.new(20)]
@@ -188,19 +206,17 @@ expect(s.len()).to_equal(Index.new(2))
 
 #### has zero length
 
-- has zero length
+1. name: Symbol from
    - Expected: s.len() equals `Index.new(0)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("has zero length")
 val empty_values: [Float64] = []
 val s = Series.from_values(
     name: Symbol.from("empty_col"),
@@ -213,19 +229,17 @@ expect(s.len()).to_equal(Index.new(0))
 
 #### preserves DType.F64 on empty series
 
-- preserves DType.F64 on empty series
+1. name: Symbol from
    - Expected: s.dtype() equals `DType.F64`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("preserves DType.F64 on empty series")
 val empty_values: [Float64] = []
 val s = Series.from_values(
     name: Symbol.from("empty_col"),
@@ -242,7 +256,10 @@ expect(s.dtype()).to_equal(DType.F64)
 
 #### schema matches column names in insertion order
 
-- schema matches column names in insertion order
+1. name: Symbol from
+2. values: [Float64 new
+3. name: Symbol from
+4. values: [Int64 new
    - Expected: schema.len() equals `2`
    - Expected: schema[0] equals `Symbol.from("price")`
    - Expected: schema[1] equals `Symbol.from("qty")`
@@ -251,12 +268,10 @@ expect(s.dtype()).to_equal(DType.F64)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("schema matches column names in insertion order")
 val price_col = SeriesErased.F64Series(Series.from_values(
     name: Symbol.from("price"),
     values: [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)]
@@ -276,19 +291,18 @@ expect(schema[1]).to_equal(Symbol.from("qty"))
 
 #### num_rows returns row count
 
-- num_rows returns row count
+1. name: Symbol from
+2. values: [Float64 new
    - Expected: df.num_rows() equals `Index.new(3)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("num_rows returns row count")
 val price_col = SeriesErased.F64Series(Series.from_values(
     name: Symbol.from("price"),
     values: [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)]
@@ -301,19 +315,20 @@ expect(df.num_rows()).to_equal(Index.new(3))
 
 #### num_cols returns column count
 
-- num_cols returns column count
+1. name: Symbol from
+2. values: [Float64 new
+3. name: Symbol from
+4. values: [Int64 new
    - Expected: df.num_cols() equals `Index.new(2)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("num_cols returns column count")
 val price_col = SeriesErased.F64Series(Series.from_values(
     name: Symbol.from("price"),
     values: [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)]
@@ -330,7 +345,10 @@ expect(df.num_cols()).to_equal(Index.new(2))
 
 #### shape returns (num_rows, num_cols) tuple
 
-- shape returns (num_rows, num_cols) tuple
+1. name: Symbol from
+2. values: [Float64 new
+3. name: Symbol from
+4. values: [Int64 new
    - Expected: s.rows equals `Index.new(3)`
    - Expected: s.cols equals `Index.new(2)`
 
@@ -338,12 +356,10 @@ expect(df.num_cols()).to_equal(Index.new(2))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("shape returns (num_rows, num_cols) tuple")
 val price_col = SeriesErased.F64Series(Series.from_values(
     name: Symbol.from("price"),
     values: [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)]
@@ -362,7 +378,10 @@ expect(s.cols).to_equal(Index.new(2))
 
 #### dtypes() returns per-column dtype Series
 
-- dtypes() returns per-column dtype Series
+1. name: Symbol from
+2. values: [Float64 new
+3. name: Symbol from
+4. values: [Int64 new
    - Expected: dtypes.len() equals `Index.new(2)`
    - Expected: dtypes.dtype_at(Index.new(0)) equals `DType.F64`
    - Expected: dtypes.dtype_at(Index.new(1)) equals `DType.I64`
@@ -371,12 +390,10 @@ expect(s.cols).to_equal(Index.new(2))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("dtypes() returns per-column dtype Series")
 val price_col = SeriesErased.F64Series(Series.from_values(
     name: Symbol.from("price"),
     values: [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)]
@@ -400,19 +417,20 @@ expect(dtypes.dtype_at(Index.new(1))).to_equal(DType.I64)
 
 #### produces correct column count from row maps
 
-- produces correct column count from row maps
+1. [RowEntry new
+2. RowEntry new
+3. [RowEntry new
+4. RowEntry new
    - Expected: df.num_cols() equals `Index.new(2)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("produces correct column count from row maps")
 val rows = [
     [RowEntry.new(Symbol.from("x"), DfValue.F64(Float64.new(1.0))),
      RowEntry.new(Symbol.from("y"), DfValue.I64(Int64.new(10)))],
@@ -427,19 +445,19 @@ expect(df.num_cols()).to_equal(Index.new(2))
 
 #### produces correct row count
 
-- produces correct row count
+1. [RowEntry new
+2. [RowEntry new
+3. [RowEntry new
    - Expected: df.num_rows() equals `Index.new(3)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("produces correct row count")
 val rows = [
     [RowEntry.new(Symbol.from("x"), DfValue.F64(Float64.new(1.0)))],
     [RowEntry.new(Symbol.from("x"), DfValue.F64(Float64.new(2.0)))],
@@ -455,20 +473,13 @@ expect(df.num_rows()).to_equal(Index.new(3))
 
 #### from_columns with empty list produces zero-column frame
 
-- from_columns with empty list produces zero-column frame
-   - Expected: df.num_cols() equals `Index.new(0)`
-   - Expected: df.num_rows() equals `Index.new(0)`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("from_columns with empty list produces zero-column frame")
 val columns: [SeriesErased] = []
 val df = DataFrame.from_columns(columns).unwrap()
 expect(df.num_cols()).to_equal(Index.new(0))
@@ -479,19 +490,13 @@ expect(df.num_rows()).to_equal(Index.new(0))
 
 #### dtypes() on empty frame returns zero-length Series
 
-- dtypes() on empty frame returns zero-length Series
-   - Expected: df.dtypes().len() equals `Index.new(0)`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("dtypes() on empty frame returns zero-length Series")
 val columns: [SeriesErased] = []
 val df = DataFrame.from_columns(columns).unwrap()
 expect(df.dtypes().len()).to_equal(Index.new(0))
@@ -503,19 +508,20 @@ expect(df.dtypes().len()).to_equal(Index.new(0))
 
 #### returns ShapeMismatch error for mismatched column lengths
 
-- returns ShapeMismatch error for mismatched column lengths
+1. name: Symbol from
+2. values: [Float64 new
+3. name: Symbol from
+4. values: [Int64 new
    - Expected: result.is_err() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns ShapeMismatch error for mismatched column lengths")
 val col_3 = SeriesErased.F64Series(Series.from_values(
     name: Symbol.from("a"),
     values: [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)]
@@ -532,19 +538,20 @@ expect(result.is_err()).to_equal(true)
 
 #### ShapeMismatch error variant is DfError.ShapeMismatch
 
-- ShapeMismatch error variant is DfError.ShapeMismatch
+1. name: Symbol from
+2. values: [Float64 new
+3. name: Symbol from
+4. values: [Int64 new
    - Expected: observed_error equals `DfError.ShapeMismatch`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("ShapeMismatch error variant is DfError.ShapeMismatch")
 val col_3 = SeriesErased.F64Series(Series.from_values(
     name: Symbol.from("a"),
     values: [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)]
@@ -578,59 +585,8 @@ expect(observed_error).to_equal(DfError.ShapeMismatch)
 
 ## Related Documentation
 
-- **Plan:** `doc/03_plan/agent_tasks/scilib_port_df.md`
-- **Design:** `doc/05_design/scilib_port_architecture.md §8`
+- **Plan:** [doc/03_plan/agent_tasks/scilib_port_df.md](doc/03_plan/agent_tasks/scilib_port_df.md)
+- **Design:** [doc/05_design/scilib_port_architecture.md §8](doc/05_design/scilib_port_architecture.md §8)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `144647cf329201cf03c87f9f6f63c7c3d8bdacd74a51749ec362c76e93fcedb2`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `144647cf329201cf03c87f9f6f63c7c3d8bdacd74a51749ec362c76e93fcedb2`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `144647cf329201cf03c87f9f6f63c7c3d8bdacd74a51749ec362c76e93fcedb2`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
-
-SSpec documentization score: 90/100
-source: test/03_system/feature/scilib/df_construction_spec.spl
-mirror: doc/06_spec/03_system/feature/scilib/df_construction_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=90
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/scilib/df_construction_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/scilib/df_construction_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/scilib/df_construction_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/feature/scilib/df_construction_spec.spl:78:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns correct name' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/scilib/df_construction_spec.spl:87:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns correct length' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/scilib/df_construction_spec.spl:96:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns DType.F64 for Float64 series' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

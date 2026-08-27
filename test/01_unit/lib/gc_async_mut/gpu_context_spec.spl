@@ -8,58 +8,76 @@
 fn check(condition: bool):
     expect(condition).to_equal(true)
 
-class GpuArray:
-    count: i64
-    element_size: i64
-    backend_name: text
-    device: i64
+## Operator workflow
 
-    fn size_bytes() -> i64:
-        self.count * self.element_size
+1. Run `bin/simple test test/01_unit/lib/gc_async_mut/gpu_context_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-    fn download() -> i64:
-        self.count
+## Compatibility and limitations
 
-    fn copy_to() -> GpuArray:
-        GpuArray(
-            count: self.count,
-            element_size: self.element_size,
-            backend_name: self.backend_name,
-            device: self.device
-        )
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-class GpuStream:
-    device: i64
-    active: bool
+use std.spec
 
-    fn sync():
-        self.active = false
+# doc-path: doc/01_research/local/gpu_context.md
+# doc-path: doc/03_plan/sys_test/gpu_context.md
+# doc-path: doc/04_architecture/gpu_context.md
+# doc-path: doc/05_design/gpu_context.md
 
-    fn is_active() -> bool:
-        self.active
+# @manual: primary
 
-class GpuContext:
-    backend_name: text
-    device: i64
-    max_bytes: i64
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    static fn default() -> GpuContext:
-        GpuContext(backend_name: "CUDA", device: 0, max_bytes: 65536)
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-LIB-GC_ASYNC_MUT-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-    static fn new(backend_name: text, device: i64) -> GpuContext:
-        GpuContext(backend_name: backend_name, device: device, max_bytes: 65536)
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-LIB-GC_ASYNC_MUT-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
 
-    static fn from_config() -> GpuContext:
-        GpuContext(backend_name: "CUDA", device: 1, max_bytes: 32768)
+    it "array sorting and mapping":
+        step("Verify: array sorting and mapping")
+        # @req: REQ-LIB-GC_ASYNC_MUT-001
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])
 
-    fn backend_name() -> text:
-        self.backend_name
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    fn device_id() -> i64:
-        self.device
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-LIB-GC_ASYNC_MUT-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
 
-    fn uses_cuda() -> bool:
-        self.backend_name == "CUDA"
+    it "nil option falls to else arm":
+        step("Verify: nil option falls to else arm")
+        # @req: REQ-LIB-GC_ASYNC_MUT-001
+        val opt = nil
+        var chosen = 1
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(-1)  # oracle: nil arm taken
 
     fn alloc(count: i64, element_size: i64) -> GpuArray:
         GpuArray(

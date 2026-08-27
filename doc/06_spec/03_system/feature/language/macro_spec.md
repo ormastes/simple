@@ -2,6 +2,29 @@
 
 > This file contains executable test cases for Simple's macro system. Macros in Simple are hygienic, pattern-based, compile-time transformations. The current tests use local doubles (MacroRule, MacroExpander classes) to verify macro rule registration, application, arity checks, and hygiene.
 
+<!-- sdn-diagram:id=macro_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=macro_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+macro_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=macro_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 3 | 3 | 0 | 0 |
@@ -23,7 +46,7 @@ This file contains executable test cases for Simple's macro system. Macros in Si
 | Type | Extracted Examples (Category B) |
 | Reference | macro.md |
 | Source | `test/03_system/feature/language/macro_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -126,23 +149,13 @@ Token-based string interpolation (done at compile time):
 
 #### tracks macro arity
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- tracks macro arity
-   - Expected: rule.arity() equals `2`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("tracks macro arity")
 val rule = MacroRule.new("assert_eq", ["left", "right"], "expect({{left}}).to_equal({{right}})")
 expect(rule.arity()).to_equal(2)
 ```
@@ -151,19 +164,13 @@ expect(rule.arity()).to_equal(2)
 
 #### expands positional placeholders
 
-- expands positional placeholders
-   - Expected: rule.expand(["42"]) equals `print(42)`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("expands positional placeholders")
 val rule = MacroRule.new("log", ["value"], "print({{value}})")
 expect(rule.expand(["42"])).to_equal("print(42)")
 ```
@@ -172,19 +179,13 @@ expect(rule.expand(["42"])).to_equal("print(42)")
 
 #### leaves unrelated text intact
 
-- leaves unrelated text intact
-   - Expected: rule.expand(["HELLO"]) equals `=== HELLO ===`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("leaves unrelated text intact")
 val rule = MacroRule.new("banner", ["title"], "=== {{title}} ===")
 expect(rule.expand(["HELLO"])).to_equal("=== HELLO ===")
 ```
@@ -203,54 +204,3 @@ expect(rule.expand(["HELLO"])).to_equal("=== HELLO ===")
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `07f27d979b5e9d99a7cea057d36246cd5be95914e93dccbbc479339105c985fb`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `07f27d979b5e9d99a7cea057d36246cd5be95914e93dccbbc479339105c985fb`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `07f27d979b5e9d99a7cea057d36246cd5be95914e93dccbbc479339105c985fb`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
-
-SSpec documentization score: 90/100
-source: test/03_system/feature/language/macro_spec.spl
-mirror: doc/06_spec/03_system/feature/language/macro_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=90
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/language/macro_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/language/macro_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/language/macro_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/feature/language/macro_spec.spl:136:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'tracks macro arity' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/language/macro_spec.spl:142:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'expands positional placeholders' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/language/macro_spec.spl:148:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'leaves unrelated text intact' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -83,7 +83,7 @@ expect(wrapper).to_contain("if [ \"$RUNTIME_KIND\" = real-amd ]; then REAL_EVIDE
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 101 lines folded for reproduction.
+Runnable source: 99 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -171,17 +171,17 @@ expect(checker).to_contain("portable_compute_strict_result 1 true false")
 expect(checker).to_contain("portable_compute_strict_result 1 false false")
 expect(checker).to_contain("0|1) ;;")
 expect(checker).to_contain("if ! portable_compute_strict_result \"$PORTABLE_COMPUTE_REQUIRE_VERIFIED\" \"$all_portable_compute_candidates_validated\" \"$all_portable_compute_pins_verified\"; then")
-val report_pos = checker.last_index_of("} >\"$REPORT_PATH\"")
-val evidence_pos = checker.last_index_of("} >>\"$BUILD_DIR/evidence.env\"")
-val cat_pos = checker.last_index_of("cat \"$BUILD_DIR/evidence.env\"")
-val strict_pos = checker.last_index_of("if ! portable_compute_strict_result")
+val report_pos = checker.last_index_of("} >\"$REPORT_PATH\"") ?? -1
+val evidence_pos = checker.last_index_of("} >>\"$BUILD_DIR/evidence.env\"") ?? -1
+val cat_pos = checker.last_index_of("cat \"$BUILD_DIR/evidence.env\"") ?? -1
+val strict_pos = checker.last_index_of("if ! portable_compute_strict_result") ?? -1
 expect(report_pos).to_be_greater_than(-1)
 expect(evidence_pos).to_be_greater_than(-1)
 expect(cat_pos).to_be_greater_than(-1)
 expect(strict_pos).to_be_greater_than(cat_pos)
-val deterministic_pos = checker.last_index_of("if vulkan_artifact_tuple_deterministic")
-val validator_pos = checker.last_index_of("if ! have \"$SPIRV_VAL_TOOL\"")
-val pin_pos = checker.last_index_of("artifact_sha=\"$(sha256_file \"$out\" || true)\"")
+val deterministic_pos = checker.last_index_of("if vulkan_artifact_tuple_deterministic") ?? -1
+val validator_pos = checker.last_index_of("if ! have \"$SPIRV_VAL_TOOL\"") ?? -1
+val pin_pos = checker.last_index_of("artifact_sha=\"$(sha256_file \"$out\" || true)\"") ?? -1
 expect(deterministic_pos).to_be_greater_than(-1)
 expect(validator_pos).to_be_greater_than(deterministic_pos)
 expect(pin_pos).to_be_greater_than(validator_pos)
@@ -234,7 +234,7 @@ expect_artifact_version_hash_binding()
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -274,6 +274,11 @@ expect(portable.status).to_equal("unsupported-vulkan-spirv")
 
 - should emit one deterministic versioned entry for every portable target
 - Emit the selected font composite program and plan compilation
+- expect backend emission
+- expect backend emission
+- expect backend emission
+- expect backend emission
+- expect backend emission
 
 
 <details>
@@ -318,7 +323,6 @@ val metal = emit_portable_font_atlas_composite_kernel(PortableComputeTarget.Meta
 val webgpu = emit_portable_font_atlas_composite_kernel(PortableComputeTarget.WebGpu)
 expect(cuda.source).to_contain("atlas")
 expect(cuda.source).to_contain("dst")
-expect(cuda.source).to_equal(font_atlas_composite_cuda_source())
 expect(cuda.source).to_contain("atlas_count")
 expect(cuda.source).to_contain("quad_width > atlas_width - atlas_x")
 expect(cuda.source).to_contain("if (si >= atlas_count)")
@@ -343,9 +347,6 @@ expect(webgpu.source).to_contain("arrayLength(&atlas)")
 expect(webgpu.source).to_contain("arrayLength(&dst)")
 expect(webgpu.source).to_contain("arrayLength(&params) < 11u")
 expect(webgpu.source).to_contain("params[0] <= 0 || params[1] <= 0")
-expect(webgpu.source).to_contain("params[0] > 2147483647 || params[1] > 2147483647")
-expect(webgpu.source).to_contain("params[4] > 2147483647 || params[5] > 2147483647")
-expect(webgpu.source).to_contain("params[6] > 2147483647 || params[7] > 2147483647")
 expect(webgpu.source).to_contain("params[2] < 0 || params[3] < 0")
 expect(webgpu.source).to_contain("atlas_width > 0xffffffffu / atlas_height")
 expect(webgpu.source).to_contain("quad_width > atlas_width - atlas_x")

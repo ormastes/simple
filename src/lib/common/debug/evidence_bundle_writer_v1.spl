@@ -1,0 +1,217 @@
+# Minimal, fail-closed Debug Evidence Bundle V1 materializer.
+#
+# This module deliberately uses the repository file facade.  It never shells
+# out and it validates the complete request before creating bundle state.
+
+use std.common.debug.contracts_v1.{DebugPolicyV1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use std.nogc_sync_mut.io_runtime.{
+    dir_create_all, file_copy, file_exists, file_hash_sha256, file_write,
+}
+
+pub struct DebugBundleArtifactInputV1:
+    source_path: text
+    bundle_path: text
+    digest: text
+    media_type: text
+    native: bool
+    privacy_label: text
+
+pub struct DebugEvidenceBundleWriteRequestV1:
+    bundle_root: text
+    session_id: text
+    build_id: text
+    captured_at_ns: i64
+    receipts_sdn: text
+    artifacts: [DebugBundleArtifactInputV1]
+    replay_inputs: [DebugReplayInputV1]
+
+pub struct DebugReplayInputV1:
+    kind: text
+    source_id: text
+    deterministic: bool
+    available: bool
+
+pub struct DebugEvidenceBundleWriteResultV1:
+    manifest_path: text
+    artifact_count: i64
+    raw_artifact_count: i64
+    replay_input_count: i64
+    bundle_id: text
+    manifest_digest: text
+
+fn _safe_relative_bundle_path(path: text) -> bool:
+    if path.len() == 0 or path.starts_with("/") or path.starts_with("\\"):
+        return false
+    if path.contains("\\") or path.contains("//"):
+        return false
+    val parts = path.split("/")
+    for part in parts:
+        if part.len() == 0 or part == "." or part == "..":
+            return false
+    true
+
+fn _safe_bundle_root(path: text) -> bool:
+    if path.len() == 0 or path == "/" or path.contains("\u0000") or path.contains("//"):
+        return false
+    for part in path.split("/"):
+        if part == "." or part == "..":
+            return false
+    true
+
+fn _exact_build_id(build_id: text) -> bool:
+    if not build_id.starts_with("sha256:"):
+        return false
+    sha256_lower_hex_valid(build_id.substring(7, build_id.len()))
+
+fn _privacy_allowed(policy: DebugPolicyV1, label: text) -> bool:
+    if label.len() == 0:
+        return false
+    if policy.redact_payloads:
+        return label == "public" or label == "redacted"
+    true
+
+fn _artifact_category_ok(artifact: DebugBundleArtifactInputV1) -> bool:
+    if artifact.native:
+        artifact.bundle_path.starts_with("raw/")
+    else:
+        artifact.bundle_path.starts_with("normalized/") or
+            artifact.bundle_path.starts_with("media/")
+
+fn _validate_request(request: DebugEvidenceBundleWriteRequestV1,
+                     policy: DebugPolicyV1) -> text:
+    if not policy.allow_evidence:
+        return "evidence denied by policy"
+    if not _safe_bundle_root(request.bundle_root):
+        return "invalid bundle root"
+    if request.session_id.trim().len() == 0:
+        return "missing session id"
+    if not _exact_build_id(request.build_id):
+        return "missing exact build id"
+    if request.captured_at_ns < 0:
+        return "invalid capture time"
+    for artifact in request.artifacts:
+        if artifact.source_path.len() == 0 or not file_exists(artifact.source_path):
+            return "artifact source unavailable"
+        if not _safe_relative_bundle_path(artifact.bundle_path):
+            return "invalid artifact bundle path"
+        if not _artifact_category_ok(artifact):
+            return "artifact bundle category mismatch"
+        if not sha256_lower_hex_valid(artifact.digest):
+            return "invalid artifact digest"
+        if file_hash_sha256(artifact.source_path) != artifact.digest:
+            return "artifact digest mismatch"
+        if artifact.media_type.len() == 0:
+            return "missing artifact media type"
+        if not _privacy_allowed(policy, artifact.privacy_label):
+            return "artifact violates redaction policy"
+    val artifacts = _normalized_artifacts(request.artifacts)
+    var artifact_idx: i64 = 1
+    while artifact_idx < artifacts.len():
+        if artifacts[artifact_idx - 1].bundle_path == artifacts[artifact_idx].bundle_path:
+            return "duplicate artifact bundle path"
+        artifact_idx = artifact_idx + 1
+    for input in request.replay_inputs:
+        if input.kind.trim().len() == 0 or input.source_id.trim().len() == 0:
+            return "replay input requires kind and source id"
+        if input.kind.contains("\n") or input.kind.contains("\"") or input.source_id.contains("\n") or input.source_id.contains("\""):
+            return "invalid replay input identity"
+    ""
+
+fn _normalized_artifacts(artifacts: [DebugBundleArtifactInputV1]) -> [DebugBundleArtifactInputV1]:
+    var out: [DebugBundleArtifactInputV1] = []
+    for artifact in artifacts:
+        var idx = 0
+        while idx < out.len() and (out[idx].bundle_path < artifact.bundle_path or (out[idx].bundle_path == artifact.bundle_path and out[idx].digest <= artifact.digest)):
+            idx = idx + 1
+        out.insert(idx, artifact)
+    out
+
+fn _normalized_replay_inputs(inputs: [DebugReplayInputV1]) -> [DebugReplayInputV1]:
+    var out: [DebugReplayInputV1] = []
+    for input in inputs:
+        var idx = 0
+        while idx < out.len() and (out[idx].kind < input.kind or (out[idx].kind == input.kind and out[idx].source_id <= input.source_id)):
+            idx = idx + 1
+        out.insert(idx, input)
+    out
+
+fn _artifact_sdn(artifact: DebugBundleArtifactInputV1) -> text:
+    "  - artifact_id: \"sha256:{sha256_text(artifact.bundle_path + ":" + artifact.digest)}\"\n" +
+        "    path: \"{artifact.bundle_path}\"\n" +
+        "    digest: \"sha256:{artifact.digest}\"\n" +
+        "    media_type: \"{artifact.media_type}\"\n" +
+        "    native: {artifact.native}\n" +
+        "    privacy: \"{artifact.privacy_label}\"\n"
+
+fn _replay_status(input: DebugReplayInputV1) -> text:
+    if not input.available: return "unavailable"
+    if not input.deterministic: return "nondeterministic"
+    "deterministic"
+
+fn _manifest_sdn(request: DebugEvidenceBundleWriteRequestV1) -> text:
+    var out = "schema: debug-evidence-bundle-v1\n"
+    out = out + "session_id: \"{request.session_id}\"\n"
+    out = out + "build_id: \"{request.build_id}\"\n"
+    out = out + "captured_at_ns: {request.captured_at_ns}\n"
+    out = out + "artifacts:\n"
+    for artifact in _normalized_artifacts(request.artifacts):
+        out = out + _artifact_sdn(artifact)
+    out = out + "replay_inputs:\n"
+    for input in _normalized_replay_inputs(request.replay_inputs):
+        val stable_id = sha256_text(input.kind + ":" + input.source_id)
+        out = out + "  - input_id: \"sha256:{stable_id}\"\n" +
+            "    kind: \"{input.kind}\"\n" +
+            "    source_id: \"{input.source_id}\"\n" +
+            "    status: {_replay_status(input)}\n"
+    out = out + "receipts_digest: \"sha256:{sha256_text(request.receipts_sdn)}\"\n"
+    out
+
+pub fn write_debug_evidence_bundle_v1(
+    request: DebugEvidenceBundleWriteRequestV1,
+    policy: DebugPolicyV1,
+) -> Result<DebugEvidenceBundleWriteResultV1, text>:
+    val invalid = _validate_request(request, policy)
+    if invalid.len() > 0:
+        return Err(invalid)
+
+    val root = request.bundle_root
+    for directory in [root, "{root}/normalized", "{root}/raw", "{root}/media"]:
+        if not dir_create_all(directory):
+            return Err("failed to create evidence bundle layout")
+
+    val normalized_artifacts = _normalized_artifacts(request.artifacts)
+    var raw_count = 0
+    for artifact in normalized_artifacts:
+        val destination = "{root}/{artifact.bundle_path}"
+        val slash = destination.rfind("/")
+        if slash > 0 and not dir_create_all(destination[0:slash]):
+            return Err("failed to create artifact directory")
+        if not file_copy(artifact.source_path, destination):
+            return Err("failed to retain evidence artifact")
+        if file_hash_sha256(destination) != artifact.digest:
+            return Err("retained artifact digest mismatch")
+        if artifact.native:
+            raw_count = raw_count + 1
+
+    val receipts_path = "{root}/receipts.sdn"
+    if not file_write(receipts_path, request.receipts_sdn):
+        return Err("failed to write evidence receipts")
+    val manifest_path = "{root}/manifest.sdn"
+    val manifest = _manifest_sdn(request)
+    val manifest_digest = sha256_text(manifest)
+    if not file_write(manifest_path, manifest):
+        return Err("failed to write evidence manifest")
+    Ok(DebugEvidenceBundleWriteResultV1(
+        manifest_path: manifest_path,
+        artifact_count: request.artifacts.len() as i64,
+        raw_artifact_count: raw_count,
+        replay_input_count: request.replay_inputs.len() as i64,
+        bundle_id: "debug-bundle-sha256:" + manifest_digest,
+        manifest_digest: "sha256:" + manifest_digest,
+    ))
+
+export DebugBundleArtifactInputV1, DebugEvidenceBundleWriteRequestV1
+export DebugReplayInputV1
+export DebugEvidenceBundleWriteResultV1, write_debug_evidence_bundle_v1

@@ -1,6 +1,29 @@
 # Engine2d Primitives Specification
 
-> Tests covering Engine2D Primitive Rendering.
+> 1. var engine = make engine
+
+<!-- sdn-diagram:id=engine2d_primitives_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=engine2d_primitives_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+engine2d_primitives_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=engine2d_primitives_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,23 +42,27 @@
 
 #### fills entire buffer with color
 
-- fills entire buffer with color
+1. var engine = make engine
+
+2. engine clear
+
+3. engine present
    - Expected: pixel_at(pixels, 0, 0, 100) equals `red`
    - Expected: pixel_at(pixels, 99, 0, 100) equals `red`
    - Expected: pixel_at(pixels, 0, 99, 100) equals `red`
    - Expected: pixel_at(pixels, 99, 99, 100) equals `red`
    - Expected: pixel_at(pixels, 50, 50, 100) equals `red`
 
+4. engine shutdown
+
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("fills entire buffer with color")
 var engine = make_engine()
 val red = rgb(255, 0, 0)
 engine.clear(red)
@@ -54,19 +81,25 @@ engine.shutdown()
 
 #### overwrites previous content
 
-- overwrites previous content
+1. var engine = make engine
+
+2. engine clear
+
+3. engine clear
+
+4. engine present
    - Expected: pixel_at(pixels, 50, 50, 100) equals `blue`
+
+5. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("overwrites previous content")
 var engine = make_engine()
 engine.clear(rgb(255, 0, 0))
 engine.clear(rgb(0, 0, 255))
@@ -83,21 +116,25 @@ engine.shutdown()
 
 #### produces colored region at target coordinates
 
-- produces colored region at target coordinates
+1. var engine = make engine
+
+2. engine draw rect filled
+
+3. engine present
    - Expected: pixel_at(pixels, 15, 15, 100) equals `green`
    - Expected: pixel_at(pixels, 10, 10, 100) equals `green`
    - Expected: pixel_at(pixels, 29, 29, 100) equals `green`
 
+4. engine shutdown
+
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("produces colored region at target coordinates")
 var engine = make_engine()
 val green = rgb(0, 255, 0)
 engine.draw_rect_filled(10, 10, 20, 20, green)
@@ -116,22 +153,26 @@ engine.shutdown()
 
 #### does not affect pixels outside the rectangle
 
-- does not affect pixels outside the rectangle
+1. var engine = make engine
+
+2. engine draw rect filled
+
+3. engine present
    - Expected: pixel_at(pixels, 5, 5, 100) equals `bg`
    - Expected: pixel_at(pixels, 50, 50, 100) equals `bg`
    - Expected: pixel_at(pixels, 9, 15, 100) equals `bg`
    - Expected: pixel_at(pixels, 15, 9, 100) equals `bg`
 
+4. engine shutdown
+
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("does not affect pixels outside the rectangle")
 var engine = make_engine()
 val bg = rgb(0, 0, 0)
 val green = rgb(0, 255, 0)
@@ -150,21 +191,25 @@ engine.shutdown()
 
 #### handles rectangle at origin
 
-- handles rectangle at origin
+1. var engine = make engine
+
+2. engine draw rect filled
+
+3. engine present
    - Expected: pixel_at(pixels, 0, 0, 100) equals `white`
    - Expected: pixel_at(pixels, 4, 4, 100) equals `white`
    - Expected: pixel_at(pixels, 5, 5, 100) equals `rgb(0, 0, 0)`
 
+4. engine shutdown
+
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("handles rectangle at origin")
 var engine = make_engine()
 val white = rgb(255, 255, 255)
 engine.draw_rect_filled(0, 0, 5, 5, white)
@@ -182,19 +227,23 @@ engine.shutdown()
 
 #### center pixel has the drawn color
 
-- center pixel has the drawn color
+1. var engine = make engine
+
+2. engine draw circle filled
+
+3. engine present
    - Expected: pixel_at(pixels, 50, 50, 100) equals `yellow`
+
+4. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("center pixel has the drawn color")
 var engine = make_engine()
 val yellow = rgb(255, 255, 0)
 engine.draw_circle_filled(50, 50, 10, yellow)
@@ -209,23 +258,27 @@ engine.shutdown()
 
 #### pixels near center are filled
 
-- pixels near center are filled
+1. var engine = make engine
+
+2. engine draw circle filled
+
+3. engine present
    - Expected: pixel_at(pixels, 50, 50, 100) equals `cyan`
    - Expected: pixel_at(pixels, 45, 50, 100) equals `cyan`
    - Expected: pixel_at(pixels, 55, 50, 100) equals `cyan`
    - Expected: pixel_at(pixels, 50, 45, 100) equals `cyan`
    - Expected: pixel_at(pixels, 50, 55, 100) equals `cyan`
 
+4. engine shutdown
+
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("pixels near center are filled")
 var engine = make_engine()
 val cyan = rgb(0, 255, 255)
 engine.draw_circle_filled(50, 50, 15, cyan)
@@ -244,20 +297,24 @@ engine.shutdown()
 
 #### pixels far outside circle are background
 
-- pixels far outside circle are background
+1. var engine = make engine
+
+2. engine draw circle filled
+
+3. engine present
    - Expected: pixel_at(pixels, 5, 5, 100) equals `bg`
    - Expected: pixel_at(pixels, 95, 95, 100) equals `bg`
 
+4. engine shutdown
+
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("pixels far outside circle are background")
 var engine = make_engine()
 val bg = rgb(0, 0, 0)
 engine.draw_circle_filled(50, 50, 10, rgb(255, 0, 0))
@@ -275,21 +332,25 @@ engine.shutdown()
 
 #### produces pixels along a horizontal path
 
-- produces pixels along a horizontal path
+1. var engine = make engine
+
+2. engine draw line
+
+3. engine present
    - Expected: pixel_at(pixels, 0, 0, 100) equals `white`
    - Expected: pixel_at(pixels, 50, 0, 100) equals `white`
    - Expected: pixel_at(pixels, 99, 0, 100) equals `white`
 
+4. engine shutdown
+
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("produces pixels along a horizontal path")
 var engine = make_engine()
 val white = rgb(255, 255, 255)
 engine.draw_line(0, 0, 99, 0, white, 1)
@@ -306,19 +367,23 @@ engine.shutdown()
 
 #### does not draw on unrelated rows
 
-- does not draw on unrelated rows
+1. var engine = make engine
+
+2. engine draw line
+
+3. engine present
    - Expected: pixel_at(pixels, 50, 1, 100) equals `bg`
+
+4. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("does not draw on unrelated rows")
 var engine = make_engine()
 val bg = rgb(0, 0, 0)
 engine.draw_line(0, 0, 99, 0, rgb(255, 255, 255), 1)
@@ -333,21 +398,25 @@ engine.shutdown()
 
 #### draws a vertical line
 
-- draws a vertical line
+1. var engine = make engine
+
+2. engine draw line
+
+3. engine present
    - Expected: pixel_at(pixels, 10, 0, 100) equals `magenta`
    - Expected: pixel_at(pixels, 10, 50, 100) equals `magenta`
    - Expected: pixel_at(pixels, 10, 99, 100) equals `magenta`
 
+4. engine shutdown
+
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("draws a vertical line")
 var engine = make_engine()
 val magenta = rgb(255, 0, 255)
 engine.draw_line(10, 0, 10, 99, magenta, 1)
@@ -365,20 +434,24 @@ engine.shutdown()
 
 #### top pixel differs from bottom pixel
 
-- top pixel differs from bottom pixel
+1. var engine = make engine
+
+2. engine draw gradient rect
+
+3. engine present
    - Expected: top_px equals `top_color`
    - Expected: bottom_px equals `bottom_color`
 
+4. engine shutdown
+
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("top pixel differs from bottom pixel")
 var engine = make_engine()
 val top_color = rgb(255, 0, 0)
 val bottom_color = rgb(0, 0, 255)
@@ -401,18 +474,22 @@ engine.shutdown()
 
 #### middle row is an interpolated color
 
-- middle row is an interpolated color
+1. var engine = make engine
+
+2. engine draw gradient rect
+
+3. engine present
+
+4. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("middle row is an interpolated color")
 var engine = make_engine()
 engine.draw_gradient_rect(0, 0, 100, 100, rgb(255, 0, 0), rgb(0, 0, 255))
 engine.present()
@@ -434,19 +511,23 @@ engine.shutdown()
 
 #### produces non-background pixels
 
-- produces non-background pixels
+1. var engine = make engine
+
+2. engine draw text
+
+3. engine present
    - Expected: found_text_pixel is true
+
+4. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("produces non-background pixels")
 var engine = make_engine()
 val bg = rgb(0, 0, 0)
 val text_color = rgb(255, 255, 255)
@@ -473,19 +554,23 @@ engine.shutdown()
 
 #### center region has the drawn color
 
-- center region has the drawn color
+1. var engine = make engine
+
+2. engine draw rounded rect
+
+3. engine present
    - Expected: pixel_at(pixels, 50, 10, 100) equals `color`
+
+4. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("center region has the drawn color")
 var engine = make_engine()
 val color = rgb(128, 64, 200)
 # draw_rounded_rect is outline-only, so check a point on the edge
@@ -504,19 +589,23 @@ engine.shutdown()
 
 #### interior pixel has the drawn color
 
-- interior pixel has the drawn color
+1. var engine = make engine
+
+2. engine draw triangle filled
+
+3. engine present
    - Expected: pixel_at(pixels, 50, 60, 100) equals `orange`
+
+4. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("interior pixel has the drawn color")
 var engine = make_engine()
 val orange = rgb(255, 128, 0)
 # Triangle covering a region around (50, 50)
@@ -534,19 +623,25 @@ engine.shutdown()
 
 #### clip limits drawing to clip region
 
-- clip limits drawing to clip region
+1. var engine = make engine
+
+2. engine set clip
+
+3. engine draw rect filled
+
+4. engine present
    - Expected: pixel_at(pixels, 70, 70, 100) equals `bg`
+
+5. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("clip limits drawing to clip region")
 var engine = make_engine()
 val bg = rgb(0, 0, 0)
 val red = rgb(255, 0, 0)
@@ -565,19 +660,25 @@ engine.shutdown()
 
 #### clip allows drawing inside clip region
 
-- clip allows drawing inside clip region
+1. var engine = make engine
+
+2. engine set clip
+
+3. engine draw rect filled
+
+4. engine present
    - Expected: pixel_at(pixels, 15, 15, 100) equals `blue`
+
+5. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("clip allows drawing inside clip region")
 var engine = make_engine()
 val blue = rgb(0, 0, 255)
 engine.set_clip(0, 0, 50, 50)
@@ -593,19 +694,27 @@ engine.shutdown()
 
 #### clear_clip allows full drawing
 
-- clear_clip allows full drawing
+1. var engine = make engine
+
+2. engine set clip
+
+3. engine clear clip
+
+4. engine draw rect filled
+
+5. engine present
    - Expected: pixel_at(pixels, 70, 70, 100) equals `green`
+
+6. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("clear_clip allows full drawing")
 var engine = make_engine()
 val bg = rgb(0, 0, 0)
 val green = rgb(0, 255, 0)
@@ -626,22 +735,26 @@ engine.shutdown()
 
 #### blits pixel data onto framebuffer
 
-- blits pixel data onto framebuffer
+1. var engine = make engine
+
+2. engine draw image
+
+3. engine present
    - Expected: pixel_at(pixels, 10, 10, 100) equals `red`
    - Expected: pixel_at(pixels, 11, 10, 100) equals `green`
    - Expected: pixel_at(pixels, 10, 11, 100) equals `green`
    - Expected: pixel_at(pixels, 11, 11, 100) equals `red`
 
+4. engine shutdown
+
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("blits pixel data onto framebuffer")
 var engine = make_engine()
 val red = rgb(255, 0, 0)
 val green = rgb(0, 255, 0)
@@ -661,22 +774,26 @@ engine.shutdown()
 
 #### does not affect pixels outside image bounds
 
-- does not affect pixels outside image bounds
+1. var engine = make engine
+
+2. engine draw image
+
+3. engine present
    - Expected: pixel_at(pixels, 19, 20, 100) equals `bg`
    - Expected: pixel_at(pixels, 22, 20, 100) equals `bg`
    - Expected: pixel_at(pixels, 20, 19, 100) equals `bg`
    - Expected: pixel_at(pixels, 20, 22, 100) equals `bg`
 
+4. engine shutdown
+
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("does not affect pixels outside image bounds")
 var engine = make_engine()
 val bg = rgb(0, 0, 0)
 val white = rgb(255, 255, 255)
@@ -698,19 +815,19 @@ engine.shutdown()
 
 #### returns correct buffer size
 
-- returns correct buffer size
+1. var engine = make engine
    - Expected: pixels.len() equals `10000`
+
+2. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("returns correct buffer size")
 var engine = make_engine()
 val pixels = engine.read_pixels()
 expect(pixels.len()).to_equal(10000)
@@ -721,20 +838,28 @@ engine.shutdown()
 
 #### returns a copy that does not change after further drawing
 
-- returns a copy that does not change after further drawing
+1. var engine = make engine
+
+2. engine clear
+
+3. engine present
    - Expected: pixel_at(snapshot, 0, 0, 100) equals `red`
+
+4. engine clear
+
+5. engine present
    - Expected: pixel_at(snapshot, 0, 0, 100) equals `red`
+
+6. engine shutdown
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("returns a copy that does not change after further drawing")
 var engine = make_engine()
 engine.clear(rgb(255, 0, 0))
 engine.present()
@@ -755,19 +880,13 @@ engine.shutdown()
 
 #### renders the core primitive scene bit-exactly
 
-- renders the core primitive scene bit-exactly
-   - Expected: pixels_equal(software, cpu) is true
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("renders the core primitive scene bit-exactly")
 val software = render_parity_scene("software")
 val cpu = render_parity_scene("cpu")
 expect(pixels_equal(software, cpu)).to_equal(true)
@@ -782,12 +901,12 @@ expect(pixels_equal(software, cpu)).to_equal(true)
 | Category | Other |
 | Status | Active |
 | Source | `test/02_integration/rendering/engine2d_primitives_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Engine2D Primitive Rendering.
+Tests covering:
 - Engine2D Primitive Rendering
 
 ## Scenario Summary
@@ -802,54 +921,3 @@ Tests covering Engine2D Primitive Rendering.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-INTEGRATION`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `47dc9cc9f89a0c9940d036033de25c3b3d9d659a95e19d4a6c1093f9dc59078f`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `47dc9cc9f89a0c9940d036033de25c3b3d9d659a95e19d4a6c1093f9dc59078f`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `47dc9cc9f89a0c9940d036033de25c3b3d9d659a95e19d4a6c1093f9dc59078f`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
-
-SSpec documentization score: 90/100
-source: test/02_integration/rendering/engine2d_primitives_spec.spl
-mirror: doc/06_spec/02_integration/rendering/engine2d_primitives_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=90
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/rendering/engine2d_primitives_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/rendering/engine2d_primitives_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/02_integration/rendering/engine2d_primitives_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/02_integration/rendering/engine2d_primitives_spec.spl:78:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fills entire buffer with color' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/rendering/engine2d_primitives_spec.spl:94:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'overwrites previous content' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/rendering/engine2d_primitives_spec.spl:108:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'produces colored region at target coordinates' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

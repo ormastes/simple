@@ -1,0 +1,343 @@
+# Pure component implementation resolver.
+#
+# This module owns loader-neutral data and policy only.  It performs no file,
+# environment, process, network, or dynamic-loader I/O.  In particular,
+# DynamicComponentLocator.source_kind is an opaque producer tag here; the OS
+# adapter decides which source kinds it can safely admit.
+
+struct StaticComponentCandidate:
+    component_id: text
+    interface_name: text
+    implementation_id: text
+    version: text
+    impl_digest: text
+    capability_bits: i64
+    targets: [text]
+    profiles: [text]
+
+struct DynamicComponentLocator:
+    component_id: text
+    interface_name: text
+    implementation_id: text
+    version: text
+    impl_digest: text
+    capability_bits: i64
+    targets: [text]
+    profiles: [text]
+    source_kind: text
+    locator: text
+
+struct ComponentResolverCatalog:
+    static_candidates: [StaticComponentCandidate]
+    dynamic_locators: [DynamicComponentLocator]
+
+struct ComponentResolverParseOutcome:
+    ok: bool
+    reason: text
+    catalog: ComponentResolverCatalog
+
+struct ComponentResolverValidation:
+    ok: bool
+    errors: [text]
+
+struct ComponentResolveRequest:
+    component_id: text
+    interface_name: text
+    required_capability_bits: i64
+    target: text
+    profile: text
+
+struct ComponentResolution:
+    component_id: text
+    interface_name: text
+    implementation_id: text
+    version: text
+    impl_digest: text
+    capability_bits: i64
+    mode: text
+    source_kind: text
+    locator: text
+
+struct ComponentResolverError:
+    code: text
+    detail: text
+
+struct _ComponentCandidateDraft:
+    kind: text
+    component_id: text
+    interface_name: text
+    implementation_id: text
+    version: text
+    impl_digest: text
+    capability_bits: i64
+    targets: [text]
+    profiles: [text]
+    source_kind: text
+    locator: text
+
+fn component_resolver_catalog_default() -> ComponentResolverCatalog:
+    val statics: [StaticComponentCandidate] = []
+    val dynamics: [DynamicComponentLocator] = []
+    ComponentResolverCatalog(static_candidates: statics, dynamic_locators: dynamics)
+
+fn static_component_candidate(component_id: text, interface_name: text, implementation_id: text, version: text, impl_digest: text, capability_bits: i64, targets: [text], profiles: [text]) -> StaticComponentCandidate:
+    StaticComponentCandidate(component_id: component_id, interface_name: interface_name, implementation_id: implementation_id, version: version, impl_digest: impl_digest, capability_bits: capability_bits, targets: targets, profiles: profiles)
+
+fn dynamic_component_locator(component_id: text, interface_name: text, implementation_id: text, version: text, impl_digest: text, capability_bits: i64, targets: [text], profiles: [text], source_kind: text, locator: text) -> DynamicComponentLocator:
+    DynamicComponentLocator(component_id: component_id, interface_name: interface_name, implementation_id: implementation_id, version: version, impl_digest: impl_digest, capability_bits: capability_bits, targets: targets, profiles: profiles, source_kind: source_kind, locator: locator)
+
+fn component_resolve_request(component_id: text, interface_name: text, required_capability_bits: i64, target: text, profile: text) -> ComponentResolveRequest:
+    ComponentResolveRequest(component_id: component_id, interface_name: interface_name, required_capability_bits: required_capability_bits, target: target, profile: profile)
+
+fn _component_text_list(value: text) -> [text]:
+    var out: [text] = []
+    val parts = value.split(",")
+    var idx = 0
+    while idx < parts.len():
+        val item = parts[idx].trim()
+        if item != "":
+            out.push(item)
+        idx = idx + 1
+    out
+
+fn _component_unsigned_decimal(value: text) -> bool:
+    if value == "":
+        return false
+    var idx = 0
+    while idx < value.len():
+        val ch = value.substring(idx, idx + 1)
+        if ch < "0" or ch > "9":
+            return false
+        idx = idx + 1
+    true
+
+fn _component_candidate_draft(kind: text) -> _ComponentCandidateDraft:
+    val none: [text] = []
+    val none2: [text] = []
+    _ComponentCandidateDraft(kind: kind, component_id: "", interface_name: "", implementation_id: "", version: "", impl_digest: "", capability_bits: -1, targets: none, profiles: none2, source_kind: "", locator: "")
+
+fn _component_catalog_append(catalog: ComponentResolverCatalog, draft: _ComponentCandidateDraft) -> ComponentResolverCatalog:
+    var out = catalog
+    if draft.kind == "static_candidate":
+        out.static_candidates.push(static_component_candidate(draft.component_id, draft.interface_name, draft.implementation_id, draft.version, draft.impl_digest, draft.capability_bits, draft.targets, draft.profiles))
+    else:
+        out.dynamic_locators.push(dynamic_component_locator(draft.component_id, draft.interface_name, draft.implementation_id, draft.version, draft.impl_digest, draft.capability_bits, draft.targets, draft.profiles, draft.source_kind, draft.locator))
+    out
+
+# Fail-closed SDN subset.  Repeated blocks begin with `static_candidate:` or
+# `dynamic_locator:`.  All fields are scalar except comma-separated targets
+# and profiles.  Validation of required fields is deliberately separate so a
+# caller can collect every catalog error in one pass.
+fn component_resolver_catalog_parse_sdn(source: text) -> ComponentResolverParseOutcome:
+    var catalog = component_resolver_catalog_default()
+    var in_block = false
+    var draft = _component_candidate_draft("")
+    val lines = source.split("\n")
+    var idx = 0
+    while idx < lines.len():
+        val line = lines[idx].trim()
+        idx = idx + 1
+        if line == "" or line.starts_with("#"):
+            continue
+        if line == "static_candidate:" or line == "dynamic_locator:":
+            if in_block:
+                catalog = _component_catalog_append(catalog, draft)
+            draft = _component_candidate_draft(line.substring(0, line.len() - 1))
+            in_block = true
+            continue
+        if not in_block:
+            return ComponentResolverParseOutcome(ok: false, reason: "key_outside_candidate_block:" + line, catalog: catalog)
+        val sep = line.index_of(":")
+        if sep < 0:
+            return ComponentResolverParseOutcome(ok: false, reason: "malformed_line:" + line, catalog: catalog)
+        val key = line.substring(0, sep).trim()
+        val value = line.substring(sep + 1, line.len()).trim()
+        if key == "component_id":
+            draft.component_id = value
+        elif key == "interface_name":
+            draft.interface_name = value
+        elif key == "implementation_id":
+            draft.implementation_id = value
+        elif key == "version":
+            draft.version = value
+        elif key == "impl_digest":
+            draft.impl_digest = value
+        elif key == "capability_bits":
+            if not _component_unsigned_decimal(value):
+                return ComponentResolverParseOutcome(ok: false, reason: "invalid_capability_bits:" + value, catalog: catalog)
+            draft.capability_bits = value.to_i64()
+        elif key == "targets":
+            draft.targets = _component_text_list(value)
+        elif key == "profiles":
+            draft.profiles = _component_text_list(value)
+        elif key == "source_kind":
+            if draft.kind != "dynamic_locator":
+                return ComponentResolverParseOutcome(ok: false, reason: "dynamic_key_on_static_candidate:source_kind", catalog: catalog)
+            draft.source_kind = value
+        elif key == "locator":
+            if draft.kind != "dynamic_locator":
+                return ComponentResolverParseOutcome(ok: false, reason: "dynamic_key_on_static_candidate:locator", catalog: catalog)
+            draft.locator = value
+        else:
+            return ComponentResolverParseOutcome(ok: false, reason: "unknown_key:" + key, catalog: catalog)
+    if in_block:
+        catalog = _component_catalog_append(catalog, draft)
+    ComponentResolverParseOutcome(ok: true, reason: "parsed", catalog: catalog)
+
+fn _component_list_contains(values: [text], wanted: text) -> bool:
+    var idx = 0
+    while idx < values.len():
+        if values[idx] == wanted:
+            return true
+        idx = idx + 1
+    false
+
+fn _component_scope_matches(values: [text], wanted: text) -> bool:
+    _component_list_contains(values, "*") or _component_list_contains(values, wanted)
+
+fn _component_list_has_empty(values: [text]) -> bool:
+    var idx = 0
+    while idx < values.len():
+        if values[idx] == "":
+            return true
+        idx = idx + 1
+    false
+
+fn _component_candidate_key(component_id: text, interface_name: text, implementation_id: text) -> text:
+    component_id + "|" + interface_name + "|" + implementation_id
+
+fn component_resolver_catalog_validate(catalog: ComponentResolverCatalog) -> ComponentResolverValidation:
+    var errors: [text] = []
+    var seen_static: [text] = []
+    var seen_dynamic: [text] = []
+    var idx = 0
+    while idx < catalog.static_candidates.len():
+        val c = catalog.static_candidates[idx]
+        val key = _component_candidate_key(c.component_id, c.interface_name, c.implementation_id)
+        if c.component_id == "" or c.interface_name == "" or c.implementation_id == "" or c.version == "" or c.impl_digest == "":
+            errors.push("incomplete_static_candidate:" + key)
+        if c.capability_bits < 0:
+            errors.push("missing_static_capability_bits:" + key)
+        if c.targets.len() == 0 or _component_list_has_empty(c.targets):
+            errors.push("invalid_static_targets:" + key)
+        if c.profiles.len() == 0 or _component_list_has_empty(c.profiles):
+            errors.push("invalid_static_profiles:" + key)
+        if _component_list_contains(seen_static, key):
+            errors.push("duplicate_static_candidate:" + key)
+        else:
+            seen_static.push(key)
+        idx = idx + 1
+    idx = 0
+    while idx < catalog.dynamic_locators.len():
+        val c = catalog.dynamic_locators[idx]
+        val key = _component_candidate_key(c.component_id, c.interface_name, c.implementation_id)
+        if c.component_id == "" or c.interface_name == "" or c.implementation_id == "" or c.version == "" or c.impl_digest == "":
+            errors.push("incomplete_dynamic_locator:" + key)
+        if c.capability_bits < 0:
+            errors.push("missing_dynamic_capability_bits:" + key)
+        if c.targets.len() == 0 or _component_list_has_empty(c.targets):
+            errors.push("invalid_dynamic_targets:" + key)
+        if c.profiles.len() == 0 or _component_list_has_empty(c.profiles):
+            errors.push("invalid_dynamic_profiles:" + key)
+        if c.source_kind == "" or c.locator == "":
+            errors.push("incomplete_dynamic_source:" + key)
+        if _component_list_contains(seen_dynamic, key):
+            errors.push("duplicate_dynamic_locator:" + key)
+        else:
+            seen_dynamic.push(key)
+        idx = idx + 1
+    ComponentResolverValidation(ok: errors.len() == 0, errors: errors)
+
+fn _component_identity_matches(component_id: text, interface_name: text, req: ComponentResolveRequest) -> bool:
+    component_id == req.component_id and interface_name == req.interface_name
+
+fn _component_capabilities_match(candidate_bits: i64, required_bits: i64) -> bool:
+    required_bits >= 0 and (candidate_bits & required_bits) == required_bits
+
+fn _component_static_resolution(c: StaticComponentCandidate) -> ComponentResolution:
+    ComponentResolution(component_id: c.component_id, interface_name: c.interface_name, implementation_id: c.implementation_id, version: c.version, impl_digest: c.impl_digest, capability_bits: c.capability_bits, mode: "static", source_kind: "static_candidate", locator: "")
+
+fn _component_dynamic_resolution(c: DynamicComponentLocator) -> ComponentResolution:
+    ComponentResolution(component_id: c.component_id, interface_name: c.interface_name, implementation_id: c.implementation_id, version: c.version, impl_digest: c.impl_digest, capability_bits: c.capability_bits, mode: "dynamic", source_kind: c.source_kind, locator: c.locator)
+
+# Resolve deterministically.  A compatible static candidate wins over a
+# dynamic locator.  More than one compatible candidate in either selected
+# tier is an ambiguity error.  Gating failures are discriminated in the order
+# identity -> target -> profile -> capability.
+fn component_resolve(catalog: ComponentResolverCatalog, req: ComponentResolveRequest) -> Result<ComponentResolution, ComponentResolverError>:
+    val validation = component_resolver_catalog_validate(catalog)
+    if not validation.ok:
+        return Err(ComponentResolverError(code: "malformed_catalog", detail: validation.errors[0]))
+    if req.component_id == "" or req.interface_name == "" or req.target == "" or req.profile == "" or req.required_capability_bits < 0:
+        return Err(ComponentResolverError(code: "invalid_request", detail: req.component_id + ":" + req.interface_name))
+    var identity_count = 0
+    var target_count = 0
+    var profile_count = 0
+    var capability_count = 0
+    var static_matches: [i64] = []
+    var dynamic_matches: [i64] = []
+    var idx = 0
+    while idx < catalog.static_candidates.len():
+        val c = catalog.static_candidates[idx]
+        if _component_identity_matches(c.component_id, c.interface_name, req):
+            identity_count = identity_count + 1
+            if _component_scope_matches(c.targets, req.target):
+                target_count = target_count + 1
+                if _component_scope_matches(c.profiles, req.profile):
+                    profile_count = profile_count + 1
+                    if _component_capabilities_match(c.capability_bits, req.required_capability_bits):
+                        capability_count = capability_count + 1
+                        static_matches.push(idx)
+        idx = idx + 1
+    idx = 0
+    while idx < catalog.dynamic_locators.len():
+        val c = catalog.dynamic_locators[idx]
+        if _component_identity_matches(c.component_id, c.interface_name, req):
+            identity_count = identity_count + 1
+            if _component_scope_matches(c.targets, req.target):
+                target_count = target_count + 1
+                if _component_scope_matches(c.profiles, req.profile):
+                    profile_count = profile_count + 1
+                    if _component_capabilities_match(c.capability_bits, req.required_capability_bits):
+                        capability_count = capability_count + 1
+                        dynamic_matches.push(idx)
+        idx = idx + 1
+    if static_matches.len() > 1:
+        return Err(ComponentResolverError(code: "ambiguous_static_candidate", detail: req.component_id + ":" + req.interface_name))
+    if static_matches.len() == 1:
+        return Ok(_component_static_resolution(catalog.static_candidates[static_matches[0]]))
+    if dynamic_matches.len() > 1:
+        return Err(ComponentResolverError(code: "ambiguous_dynamic_locator", detail: req.component_id + ":" + req.interface_name))
+    if dynamic_matches.len() == 1:
+        return Ok(_component_dynamic_resolution(catalog.dynamic_locators[dynamic_matches[0]]))
+    if identity_count == 0:
+        return Err(ComponentResolverError(code: "component_interface_not_found", detail: req.component_id + ":" + req.interface_name))
+    if target_count == 0:
+        return Err(ComponentResolverError(code: "target_denied", detail: req.target))
+    if profile_count == 0:
+        return Err(ComponentResolverError(code: "profile_denied", detail: req.profile))
+    if capability_count == 0:
+        return Err(ComponentResolverError(code: "capability_denied", detail: req.required_capability_bits.to_text()))
+    Err(ComponentResolverError(code: "unresolved", detail: req.component_id))
+
+fn component_resolver_parse_status(source: text) -> text:
+    val parsed = component_resolver_catalog_parse_sdn(source)
+    if not parsed.ok:
+        return "err:" + parsed.reason
+    val validation = component_resolver_catalog_validate(parsed.catalog)
+    if not validation.ok:
+        return "err:" + validation.errors[0]
+    "ok:" + parsed.catalog.static_candidates.len().to_text() + ":" + parsed.catalog.dynamic_locators.len().to_text()
+
+fn component_resolve_verdict(catalog: ComponentResolverCatalog, req: ComponentResolveRequest) -> text:
+    match component_resolve(catalog, req):
+        Ok(value) -> "ok:" + value.mode + ":" + value.implementation_id + ":" + value.source_kind + ":" + value.locator
+        Err(error) -> "err:" + error.code
+
+export StaticComponentCandidate, DynamicComponentLocator
+export ComponentResolverCatalog, ComponentResolverParseOutcome, ComponentResolverValidation
+export ComponentResolveRequest, ComponentResolution, ComponentResolverError
+export component_resolver_catalog_default, static_component_candidate, dynamic_component_locator
+export component_resolve_request, component_resolver_catalog_parse_sdn
+export component_resolver_catalog_validate, component_resolve
+export component_resolver_parse_status, component_resolve_verdict

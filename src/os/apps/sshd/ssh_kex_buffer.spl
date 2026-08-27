@@ -1,0 +1,86 @@
+# SSH KEX bounded byte-buffer helpers.
+#
+# This module deliberately contains no runtime hooks. KEX wire encoders use a
+# fixed upper bound and fail closed without returning a partial packet.
+
+val SSH_KEX_BUFFER_MAX_BYTES: u64 = 32768
+
+struct SshKexByteBuffer:
+    bytes: [u8]
+    limit: u64
+    failure: text
+
+impl SshKexByteBuffer:
+    static fn bounded(limit: u64) -> SshKexByteBuffer:
+        if limit > SSH_KEX_BUFFER_MAX_BYTES:
+            return SshKexByteBuffer(bytes: [], limit: 0, failure: "KEX byte-buffer limit exceeds protocol maximum")
+        SshKexByteBuffer(bytes: [], limit: limit, failure: "")
+
+    fn ok() -> bool:
+        self.failure.len() == 0
+
+    me _fail(reason: text):
+        self.bytes = []
+        self.failure = reason
+
+    me push_u8(value: u8):
+        if not self.ok():
+            return
+        if self.bytes.len() >= self.limit:
+            self._fail("KEX byte-buffer capacity exceeded")
+            return
+        self.bytes.push(value)
+
+    me push_u32_be(value: u64):
+        if not self.ok():
+            return
+        if value > 0xFFFFFFFF:
+            self._fail("SSH uint32 value out of range")
+            return
+        if self.bytes.len() > self.limit or 4 > self.limit - self.bytes.len():
+            self._fail("KEX byte-buffer capacity exceeded")
+            return
+        self.bytes.push(((value >> 24) & 0xFF) as u8)
+        self.bytes.push(((value >> 16) & 0xFF) as u8)
+        self.bytes.push(((value >> 8) & 0xFF) as u8)
+        self.bytes.push((value & 0xFF) as u8)
+
+    me push_bytes(data: [u8]):
+        if not self.ok():
+            return
+        if self.bytes.len() > self.limit or data.len() > self.limit - self.bytes.len():
+            self._fail("KEX byte-buffer capacity exceeded")
+            return
+        var i: u64 = 0
+        while i < data.len():
+            self.bytes.push(data[i])
+            i = i + 1
+
+    me push_ssh_string(data: [u8]):
+        if not self.ok():
+            return
+        if data.len() > 0xFFFFFFFF or data.len() > self.limit:
+            self._fail("SSH string length out of range")
+            return
+        val remaining = self.limit - data.len()
+        if self.bytes.len() > remaining or 4 > remaining - self.bytes.len():
+            self._fail("KEX byte-buffer capacity exceeded")
+            return
+        self.push_u32_be(data.len())
+        self.push_bytes(data)
+
+    fn finish() -> Result<[u8], text>:
+        if not self.ok():
+            return Err(self.failure)
+        Ok(self.bytes)
+
+fn ssh_kex_build_ed25519_signature_blob(signature: [u8]) -> Result<[u8], text>:
+    if signature.len() != 64:
+        return Err("Ed25519 signature must be 64 bytes")
+    var out = SshKexByteBuffer.bounded(83)
+    out.push_ssh_string([0x73, 0x73, 0x68, 0x2D, 0x65, 0x64, 0x32, 0x35, 0x35, 0x31, 0x39])
+    out.push_ssh_string(signature)
+    out.finish()
+
+export SshKexByteBuffer, SSH_KEX_BUFFER_MAX_BYTES
+export ssh_kex_build_ed25519_signature_blob

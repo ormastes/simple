@@ -1,0 +1,141 @@
+# Frozen descriptor for the runtime decoder-to-dispatch-owner boundary.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.mir.hwir.types.{CoreConfig, HwModuleDef}
+use compiler.mir.hwir.riscv_scalar_decoder.{strict_riscv_scalar_decoder_hwir}
+use lib.hardware.riscv_common.isa.scalar_database.{RiscvScalarDecoderPlan}
+
+pub class HwScalarDecodedUopField:
+    name: text
+    direction: text
+    bit_width: i32
+    semantic: text
+
+fn decoded_uop_row_width(row_count: i32) -> i32:
+    var width = 1
+    var capacity = 2
+    while capacity <= row_count:
+        width = width + 1
+        capacity = capacity * 2
+    width
+
+fn decoded_uop_fields(xlen: i32, row_width: i32) -> [HwScalarDecodedUopField]:
+    [HwScalarDecodedUopField(name: "uop_valid", direction: "out", bit_width: 1,
+            semantic: "transaction-valid"),
+        HwScalarDecodedUopField(name: "uop_ready", direction: "in", bit_width: 1,
+            semantic: "atomic-accept"),
+        HwScalarDecodedUopField(name: "decode_legal", direction: "out", bit_width: 1,
+            semantic: "decoder-legality"),
+        HwScalarDecodedUopField(name: "decoded_row_index", direction: "out",
+            bit_width: row_width, semantic: "plan-lineage-only"),
+        HwScalarDecodedUopField(name: "decoded_execution_class", direction: "out", bit_width: 3,
+            semantic: "provider-family"),
+        HwScalarDecodedUopField(name: "decoded_memory_effect", direction: "out", bit_width: 3,
+            semantic: "architectural-effect-class"),
+        HwScalarDecodedUopField(name: "decoded_semantic_opcode", direction: "out", bit_width: 6,
+            semantic: "stable-execution-semantics"),
+        HwScalarDecodedUopField(name: "decoded_declared_operand_width_is_32", direction: "out", bit_width: 1,
+            semantic: "declarative-entry-operand-width"),
+        HwScalarDecodedUopField(name: "canonical_instruction", direction: "out", bit_width: 32,
+            semantic: "decoded-instruction"),
+        HwScalarDecodedUopField(name: "original_instruction", direction: "out", bit_width: 32,
+            semantic: "fault-lineage"),
+        HwScalarDecodedUopField(name: "instruction_length_bytes", direction: "out", bit_width: 3,
+            semantic: "architectural-length"),
+        HwScalarDecodedUopField(name: "instruction_rd_field", direction: "out", bit_width: 5,
+            semantic: "raw-instruction-bits-11-7"),
+        HwScalarDecodedUopField(name: "instruction_rs1_field", direction: "out", bit_width: 5,
+            semantic: "raw-instruction-bits-19-15"),
+        HwScalarDecodedUopField(name: "instruction_rs2_field", direction: "out", bit_width: 5,
+            semantic: "raw-instruction-bits-24-20"),
+        HwScalarDecodedUopField(name: "rs1_value", direction: "out", bit_width: xlen,
+            semantic: "bound-register-value"),
+        HwScalarDecodedUopField(name: "rs2_value", direction: "out", bit_width: xlen,
+            semantic: "bound-register-value"),
+        HwScalarDecodedUopField(name: "pc_before", direction: "out", bit_width: xlen,
+            semantic: "architectural-pc"),
+        HwScalarDecodedUopField(name: "fallthrough_pc", direction: "out", bit_width: xlen,
+            semantic: "architectural-sequential-next-pc"),
+        HwScalarDecodedUopField(name: "privilege", direction: "out", bit_width: 2,
+            semantic: "architectural-privilege"),
+        HwScalarDecodedUopField(name: "provider_event_id", direction: "out", bit_width: 64,
+            semantic: "provider-lineage"),
+        HwScalarDecodedUopField(name: "decode_event_id", direction: "out", bit_width: 64,
+            semantic: "decode-lineage"),
+        HwScalarDecodedUopField(name: "lineage_valid", direction: "out", bit_width: 1,
+            semantic: "derived-event-identity-equality")]
+
+pub class HwScalarDecodedUopInterface:
+    version: text
+    config: CoreConfig
+    plan_sha256: text
+    decoder_graph_sha256: text
+    row_count: i32
+    row_width: i32
+    fields: [HwScalarDecodedUopField]
+
+    me diagnostic_for_decoder(decoder: HwModuleDef,
+        plan: RiscvScalarDecoderPlan) -> text:
+        if self.version != "hwir-scalar-decoded-uop/v1":
+            return "HWIR-E-SCALAR-DECODED-UOP-VERSION: decoded-uop interface requires frozen v1"
+        val config_error = self.config.diagnostic(); if config_error != "": return config_error
+        val plan_error = plan.diagnostic(); if plan_error != "": return plan_error
+        if (self.plan_sha256 != plan.structural_sha256() or
+            self.row_count != plan.entries.len() or
+            self.row_width != decoded_uop_row_width(plan.entries.len()) or
+            self.config.xlen as u32 != plan.xlen or
+            self.config.isa_profile != plan.isa_profile):
+            return "HWIR-E-SCALAR-DECODED-UOP-PLAN: interface requires its exact decoder plan"
+        val decoder_error = decoder.shape_diagnostic(); if decoder_error != "": return decoder_error
+        val rebuilt = strict_riscv_scalar_decoder_hwir(decoder.summary.name, self.config, plan)
+        if (rebuilt.is_err() or
+            rebuilt.ok().unwrap().structural_sha256() != decoder.structural_sha256()):
+            return "HWIR-E-SCALAR-DECODED-UOP-DECODER: interface requires the compiler-owned canonical decoder graph"
+        if (self.decoder_graph_sha256 != decoder.structural_sha256() or
+            decoder.config.profile != self.config.profile or
+            decoder.config.isa_profile != self.config.isa_profile or
+            decoder.config.compressed_decode_profile != self.config.compressed_decode_profile or
+            decoder.config.xlen != self.config.xlen or
+            decoder.config.physical_address_bits != self.config.physical_address_bits or
+            decoder.config.register_count != self.config.register_count):
+            return "HWIR-E-SCALAR-DECODED-UOP-DECODER: interface requires its exact decoder graph"
+        for required in [("decoded_valid", 1), ("decoded_row_index", self.row_width),
+                ("decoded_execution_class", 3), ("decoded_memory_effect", 3),
+                ("decoded_semantic_opcode", 6), ("decoded_operand_width_32", 1),
+                ("canonical_instruction", 32), ("instruction_rd_field", 5),
+                ("instruction_rs1_field", 5), ("instruction_rs2_field", 5)]:
+            if (decoder.port_direction(required[0]) != "out" or
+                decoder.port_width(required[0]) != required[1]):
+                return "HWIR-E-SCALAR-DECODED-UOP-PORT: decoder requires the frozen output schema"
+        val expected = decoded_uop_fields(self.config.xlen, self.row_width)
+        if self.fields.len() != expected.len():
+            return "HWIR-E-SCALAR-DECODED-UOP-FIELD: interface requires exact ordered fields"
+        var index = 0
+        while index < expected.len():
+            val field = self.fields[index]; val required = expected[index]
+            if (field.name != required.name or field.direction != required.direction or
+                field.bit_width != required.bit_width or field.semantic != required.semantic):
+                return "HWIR-E-SCALAR-DECODED-UOP-FIELD: interface requires exact ordered fields"
+            index = index + 1
+        ""
+
+    me structural_sha256() -> text:
+        var rows = [self.version, self.config.profile, self.config.isa_profile,
+            self.config.compressed_decode_profile, self.config.xlen.to_text(),
+            self.config.physical_address_bits.to_text(), self.config.register_count.to_text(),
+            self.plan_sha256, self.decoder_graph_sha256, self.row_count.to_text(),
+            self.row_width.to_text()]
+        for field in self.fields:
+            rows.push([field.name, field.direction, field.bit_width.to_text(), field.semantic].join("|"))
+        sha256_text(rows.join("\n"))
+
+pub fn strict_hw_scalar_decoded_uop_interface(config: CoreConfig,
+    plan: RiscvScalarDecoderPlan, decoder: HwModuleDef) -> Result<HwScalarDecodedUopInterface, text>:
+    val descriptor = HwScalarDecodedUopInterface(version: "hwir-scalar-decoded-uop/v1",
+        config: config, plan_sha256: plan.structural_sha256(),
+        decoder_graph_sha256: decoder.structural_sha256(), row_count: plan.entries.len(),
+        row_width: decoded_uop_row_width(plan.entries.len()),
+        fields: decoded_uop_fields(config.xlen, decoded_uop_row_width(plan.entries.len())))
+    val diagnostic = descriptor.diagnostic_for_decoder(decoder, plan)
+    if diagnostic != "": return Err(diagnostic)
+    Ok(descriptor)

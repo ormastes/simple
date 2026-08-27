@@ -12,10 +12,6 @@ class CpioEntry:
     mode: u32
     data: [u8]
 
-val CPIO_MAX_ARCHIVE_BYTES: i64 = 536870912
-val CPIO_MAX_ENTRIES: i64 = 131072
-val CPIO_MAX_PATH_BYTES: i64 = 4096
-
 fn _hex_char_val(c: u8) -> i64:
     val n = c.to_i64()
     if n >= 0x30 and n <= 0x39:
@@ -24,48 +20,36 @@ fn _hex_char_val(c: u8) -> i64:
         return n - 0x41 + 10
     if n >= 0x61 and n <= 0x66:
         return n - 0x61 + 10
-    -1
+    0
 
-fn _hex8_checked(raw: [u8], offset: i64) -> i64:
-    if offset < 0 or offset + 8 > raw.len():
-        return -1
+fn _hex8_to_i64(raw: [u8], offset: i64) -> i64:
     var v: i64 = 0
     var i = 0
     while i < 8:
-        val nibble = _hex_char_val(raw[offset + i])
-        if nibble < 0:
-            return -1
-        v = (v << 4) | nibble
+        v = (v << 4) | _hex_char_val(raw[offset + i])
         i = i + 1
     v
 
-fn _align4(current: i64) -> i64:
-    (current + 3) & (0 - 4)
+fn _align4_from(base: i64, current: i64) -> i64:
+    val offset = current - base
+    val rem = offset & 3
+    if rem == 0:
+        current
+    else:
+        current + (4 - rem)
 
-fn _read_name_checked(raw: [u8], start: i64, namesize: i64) -> Result<text, text>:
-    if namesize < 2 or start < 0 or start + namesize > raw.len():
-        return Err("cpio-name-bounds-invalid")
-    if raw[start + namesize - 1].to_i64() != 0:
-        return Err("cpio-name-not-terminated")
+fn _read_text(raw: [u8], start: i64, length: i64) -> text:
     var chars: [text] = []
     var i = 0
-    while i < namesize - 1:
+    while i < length:
         val b = raw[start + i].to_i64()
-        if b < 32 or b > 126:
-            return Err("cpio-name-byte-invalid")
-        chars.push(b.to_char())
+        if b == 0:
+            # stop at null terminator
+            i = length  # break
+        else:
+            chars.push(b.to_char())
         i = i + 1
-    Ok(chars.join(""))
-
-fn _canonical_newc_path(path: text) -> bool:
-    if path == ".":
-        return true
-    path != "" and path != ".." and not path.starts_with("/") and
-        not path.starts_with("./") and not path.starts_with("../") and
-        not path.ends_with("/") and not path.ends_with("/.") and
-        not path.ends_with("/..") and not path.contains("//") and
-        not path.contains("/./") and not path.contains("/../") and
-        not path.contains("\\") and not path.contains("\0")
+    chars.join("")
 
 fn _padding_zero(raw: [u8], start: i64, stop: i64) -> bool:
     var i = start
@@ -88,7 +72,6 @@ fn cpio_parse_bounded(
     if raw.len() < 110:
         return Err("cpio-header-truncated")
     var entries: [CpioEntry] = []
-    var seen: Dict<text, bool> = {}
     var pos: i64 = 0
     while true:
         if pos + 110 > raw.len():
@@ -102,7 +85,6 @@ fn cpio_parse_bounded(
             if _hex8_checked(raw, pos + offset) < 0:
                 return Err("cpio-header-hex-invalid")
         val mode = _hex8_checked(raw, pos + 14)
-        val nlink = _hex8_checked(raw, pos + 38)
         val filesize = _hex8_checked(raw, pos + 54)
         val namesize = _hex8_checked(raw, pos + 94)
         if namesize < 2 or namesize > max_path_bytes:
@@ -111,8 +93,6 @@ fn cpio_parse_bounded(
         val path = match _read_name_checked(raw, name_start, namesize):
             case Ok(value): value
             case Err(message): return Err(message)
-        if path != "TRAILER!!!" and not _canonical_newc_path(path):
-            return Err("cpio-path-not-canonical")
         val data_start = _align4(name_start + namesize)
         if data_start < name_start or data_start > raw.len() or
            not _padding_zero(raw, name_start + namesize, data_start):
@@ -132,28 +112,29 @@ fn cpio_parse_bounded(
                     return Err("cpio-trailing-data-invalid")
                 tail = tail + 1
             return Ok(entries)
-        if seen.has(path):
-            return Err("cpio-path-duplicate")
-        seen[path] = true
-        val kind = mode & 0xF000
-        if kind != 0x8000 and kind != 0x4000:
-            return Err("cpio-entry-type-unsafe")
-        if kind == 0x8000 and nlink != 1:
-            return Err("cpio-regular-hardlink-ambiguous")
-        if kind == 0x4000 and filesize != 0:
-            return Err("cpio-directory-payload-ambiguous")
         if entries.len() >= max_entries:
             return Err("cpio-entry-limit-exceeded")
         var data: [u8] = []
         var i = 0
         while i < filesize:
-            data.push(raw[data_start + i])
+            data.push(raw[pos + i])
             i = i + 1
+
         entries.push(CpioEntry(
             path: path,
-            mode: mode.to_u32(),
+            mode: mode_val.to_u32(),
             data: data,
         ))
-        pos = next
 
-export CpioEntry, cpio_parse_bounded
+        # Advance past data, aligned to 4 bytes from hdr_start
+        pos = pos + filesize
+        pos = _align4_from(hdr_start, pos)
+
+    entries
+
+fn cpio_lookup(entries: [CpioEntry], path: text) -> [u8]?:
+    """Find entry by path, return its data bytes or nil."""
+    for entry in entries:
+        if entry.path == path:
+            return entry.data
+    nil

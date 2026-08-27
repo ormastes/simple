@@ -1,6 +1,30 @@
 # Simple Browser Launcher Lifecycle Specification
 
-> Tests covering Simple Browser launcher lifecycle.
+> 1. launcher init
+
+<!-- sdn-diagram:id=simple_browser_launcher_lifecycle_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=simple_browser_launcher_lifecycle_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+simple_browser_launcher_lifecycle_spec -> std
+simple_browser_launcher_lifecycle_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=simple_browser_launcher_lifecycle_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,11 +41,7 @@
 
 #### exposes the built-in simple_browser manifest identity
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- exposes the built-in simple_browser manifest identity
+1. launcher init
    - Expected: launcher_get_app_path(7) equals `/sys/apps/simple_browser.smf`
    - Expected: launcher_get_app_identity(7) equals `/sys/apps/simple_browser`
 
@@ -29,12 +49,10 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("exposes the built-in simple_browser manifest identity")
 launcher_init()
 expect(launcher_get_app_path(7)).to_equal("/sys/apps/simple_browser.smf")
 expect(launcher_get_app_identity(7)).to_equal("/sys/apps/simple_browser")
@@ -44,7 +62,9 @@ expect(launcher_get_app_identity(7)).to_equal("/sys/apps/simple_browser")
 
 #### joins launcher pid, shell WM ownership, and compositor on one browser window
 
-- joins launcher pid, shell WM ownership, and compositor on one browser window
+1. launcher init
+2. var shell =  make test shell
+3. shell apply wm action
    - Expected: shell.compositor.window_count() equals `1`
    - Expected: ids.len() equals `1`
    - Expected: shell.compositor.window_process_id(wid) equals `pid`
@@ -60,12 +80,10 @@ expect(launcher_get_app_identity(7)).to_equal("/sys/apps/simple_browser")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("joins launcher pid, shell WM ownership, and compositor on one browser window")
 launcher_init()
 val pid: u64 = 9105
 expect(launcher_record_process(pid, 7, "running", 0, 0, true)).to_be(true)
@@ -91,18 +109,13 @@ expect(launcher_get_app_window_count(7)).to_equal(1)
 
 #### emits deterministic startup and render markers for about:network
 
-- emits deterministic startup and render markers for about:network
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("emits deterministic startup and render markers for about:network")
 val pid: u64 = 9106
 val wid: u64 = 77
 expect(simple_browser_ready_marker(pid)).to_contain("app_id=/sys/apps/simple_browser")
@@ -121,12 +134,12 @@ expect(simple_browser_render_marker(pid, wid)).to_contain("renderer=simple_web")
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/apps/simple_browser_launcher_lifecycle_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Simple Browser launcher lifecycle.
+Tests covering:
 - Simple Browser launcher lifecycle
 
 ## Scenario Summary
@@ -141,54 +154,3 @@ Tests covering Simple Browser launcher lifecycle.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-OS`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `1f86250e9ff585d4cdd2034b7c577bb5b0ff7bbf9793ecb73a94dbca5b2a7024`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `1f86250e9ff585d4cdd2034b7c577bb5b0ff7bbf9793ecb73a94dbca5b2a7024`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `1f86250e9ff585d4cdd2034b7c577bb5b0ff7bbf9793ecb73a94dbca5b2a7024`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/01_unit/os/apps/simple_browser_launcher_lifecycle_spec.spl
-mirror: doc/06_spec/01_unit/os/apps/simple_browser_launcher_lifecycle_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/os/apps/simple_browser_launcher_lifecycle_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/apps/simple_browser_launcher_lifecycle_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/os/apps/simple_browser_launcher_lifecycle_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 4 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/os/apps/simple_browser_launcher_lifecycle_spec.spl:83:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'exposes the built-in simple_browser manifest identity' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/os/apps/simple_browser_launcher_lifecycle_spec.spl:90:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'joins launcher pid, shell WM ownership, and compositor on one browser window' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/os/apps/simple_browser_launcher_lifecycle_spec.spl:113:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'emits deterministic startup and render markers for about:network' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

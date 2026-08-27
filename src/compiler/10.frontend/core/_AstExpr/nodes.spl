@@ -8,10 +8,8 @@ use compiler.frontend.core.ast_expr.*
 # See ast.spl for the full AST module documentation.
 
 use std.string_core.{char_code}
-use compiler.frontend.trace_policy.{frontend_trace_suppressed}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.core.types.{int_to_str}
-use compiler.frontend.core.flat_pool_codec.*
 
 # ===== Expression Kind Tags =====
 const EXPR_INT_LIT = 1
@@ -56,6 +54,7 @@ const EXPR_SUFFIXED_LIT = 36
 const EXPR_AWAIT = 37       # await future_expr
 const EXPR_YIELD = 38       # yield value
 const EXPR_SPAWN = 39       # spawn fn_call
+const EXPR_ASYNC_BLOCK = 42 # async { ... }
 const EXPR_DO_BLOCK = 44   # do: block expression (returns last value)
 const EXPR_ATOM = 45       # `symbol atom literal (interned text, identity comparison)
 const EXPR_SPREAD = 46     # ..expr spread in struct update syntax
@@ -63,13 +62,10 @@ const EXPR_ASM = 47        # asm text block/string (lowered by backend)
 const EXPR_ASM_MATCH = 48  # asm match: multi-target dispatch
 const EXPR_EXISTS_CHECK = 49  # .? existence check (returns T? — value if present, nil if absent)
 const EXPR_FORCE_UNWRAP = 53  # expr! force-unwrap (panic on nil); distinct from EXPR_EXISTS_CHECK .?
-const EXPR_TRY = 54           # expr? try/propagate: unwrap Ok/Some or early-return Err/None/nil
 const EXPR_NEW = 50            # new allocation: new expr, new() expr, new(alloc) expr
 const EXPR_LIST_COMP = 51      # [for x in items if cond: expr]
 const EXPR_DICT_COMP = 52      # {for k in items if cond: (k_expr, v_expr)}
 const EXPR_ARRAY_REPEAT = 55  # [value; count] array-repeat literal (count may be non-literal)
-const EXPR_UNSAFE_BLOCK = 56  # unsafe: / danger: block expression
-const EXPR_CUSTOM_BLOCK = 57  # kind{raw payload}, canonical CustomBlock bridge
 
 # ===== Expression Arena Pools =====
 # Each expression has:
@@ -93,7 +89,6 @@ var expr_left: [i64] = []
 var expr_right: [i64] = []
 var expr_extra: [i64] = []
 var expr_args: [[i64]] = []
-var expr_arg_names: [[text]] = []
 var expr_stmts: [[i64]] = []
 var expr_asm_kinds: [[text]] = []
 var expr_asm_locations: [[text]] = []
@@ -118,14 +113,6 @@ var ast_gen_last_report_slot: [i64] = [-1]
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
-extern fn rt_env_remove(key: text) -> bool
-
-# High-water mark of the largest expr index ever mirrored into the environment
-# since the last expr_reset().  expr_count_set(0) inside expr_reset() would
-# otherwise erase the only record of how far the mirror reaches, and a SMALLER
-# file parsed after a bigger one would leave the big file's tail entries alive.
-# See expr_env_mirror_clear below.
-var expr_env_mirror_high_slot: [i64] = [0]
 
 fn expr_parse_i64(raw: text) -> i64:
     if raw == "":
@@ -180,6 +167,9 @@ fn expr_i64_list_split(raw: text) -> [i64]:
             result.push(expr_parse_i64(part))
     result
 
+fn expr_native_arena_enabled() -> bool:
+    (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") == "1"
+
 fn expr_env_mirror_enabled() -> bool:
     if expr_mode_slots_ready:
         return expr_env_mirror_cached
@@ -189,11 +179,8 @@ fn expr_env_mirror_enabled() -> bool:
 
 fn expr_trace_tags_enabled() -> bool:
     if expr_mode_slots_ready:
-        if not expr_trace_tags_cached:
-            return false
-        return not frontend_trace_suppressed()
-    ((rt_env_get("SIMPLE_TRACE_EXPR_TAGS") ?? "") != "" and
-     not frontend_trace_suppressed())
+        return expr_trace_tags_cached
+    (rt_env_get("SIMPLE_TRACE_EXPR_TAGS") ?? "") != ""
 
 fn expr_env_read(idx: i64, field: text) -> text:
     if not expr_env_mirror_enabled():
@@ -201,6 +188,8 @@ fn expr_env_read(idx: i64, field: text) -> text:
     rt_env_get(expr_key(idx, field)) ?? ""
 
 fn expr_mode_slots_refresh():
+    if expr_env_mirror_slot == nil or expr_env_mirror_slot.len() == 0:
+        expr_env_mirror_slot = [false]
     val native_arena = (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") == "1"
     expr_env_mirror_cached = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not native_arena
     expr_trace_tags_cached = (rt_env_get("SIMPLE_TRACE_EXPR_TAGS") ?? "") != ""
@@ -212,67 +201,18 @@ fn expr_count_slot_ensure():
 
 fn expr_count_env() -> i64:
     expr_count_slot_ensure()
-    if not expr_env_mirror_enabled():
+    if expr_native_arena_enabled():
         return expr_count_slot[0]
     val env_count = expr_parse_i64(rt_env_get("SIMPLE_BOOTSTRAP_EXPR_COUNT") ?? "")
     if env_count > 0:
         return env_count
     expr_count_slot[0]
 
-fn expr_env_mirror_high_ensure():
-    if expr_env_mirror_high_slot == nil or expr_env_mirror_high_slot.len() == 0:
-        expr_env_mirror_high_slot = [0]
-
 fn expr_count_set(value: i64):
     expr_count_slot_ensure()
     expr_count_slot[0] = value
     if expr_env_mirror_enabled():
-        expr_env_mirror_high_ensure()
-        if value > expr_env_mirror_high_slot[0]:
-            expr_env_mirror_high_slot[0] = value
         rt_env_set("SIMPLE_BOOTSTRAP_EXPR_COUNT", int_to_str(value))
-
-# Fields mirrored per expr index. Keep in sync with the expr_*_set writers
-# below; a field missing here leaks its entry and can be read back stale.
-#
-# Built per call rather than held in a module-level `val`: module-level globals
-# are zero/nil-initialized in native builds and are order-dependent at module
-# init, so a global list here could read back nil and silently clear NOTHING --
-# a fix that is present but inert.
-fn expr_mirror_fields() -> [text]:
-    ["TAG", "SPAN", "I", "F", "S", "LEFT", "RIGHT", "EXTRA", "ARGS", "ARG_NAMES", "STMTS"]
-
-fn expr_env_mirror_clear():
-    """Unset every per-index expr env-mirror entry minted since the last reset.
-
-    Reset-under-live-state defect (family member: "expr_reset never unsets the
-    env mirror"). expr_reset() clears the backing arrays but the mirror is read
-    ENV-FIRST (expr_env_read), so an entry written while parsing file A is
-    returned for an index file B never allocated: the verdict then depends on
-    the order the files were parsed. It also BYPASSES the arena generation guard
-    -- ast_gen_check_index only sees indices that carry a minted generation, and
-    an env read carries none -- so the guard matches and binds while the stale
-    value flows through unchecked. Finally the entries never die, so environ
-    grows by ~11 entries per expr node for the whole run (the 8.9 GB RSS at
-    4,363 files).
-
-    Cost is the same O(nodes x fields) order the writes already pay, and because
-    environ now stays bounded by ONE file instead of the cumulative run, each
-    libc setenv/getenv linear scan gets cheaper rather than more expensive.
-    """
-    if not expr_env_mirror_enabled():
-        return
-    expr_env_mirror_high_ensure()
-    val upto = expr_env_mirror_high_slot[0]
-    if upto <= 0:
-        return
-    val fields = expr_mirror_fields()
-    var i: i64 = 0
-    while i < upto:
-        for field in fields:
-            rt_env_remove(expr_key(i, field))
-        i = i + 1
-    expr_env_mirror_high_slot[0] = 0
 
 fn expr_key(idx: i64, field: text) -> text:
     "SIMPLE_BOOTSTRAP_EXPR_" + int_to_str(idx) + "_" + field
@@ -285,48 +225,29 @@ fn expr_key(idx: i64, field: text) -> text:
 # the env write makes them fall back to the (correct) arrays. See bug
 # ast_env_var_quadratic_parse_2026-06-13.
 fn expr_i64_set(idx: i64, field: text, value: i64):
-    if expr_env_mirror_enabled():
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         rt_env_set(expr_key(idx, field), int_to_str(value))
 
 fn expr_i64_get(idx: i64, field: text) -> i64:
     expr_parse_i64(expr_env_read(idx, field))
 
-# True if `value` holds no embedded NUL byte. rt_env_set (Rust env::set_var)
-# panics on an interior NUL (CString::new failure); this is the load-bearing
-# store, so a poisoned value must SKIP the env write rather than abort — the
-# expr_* module-var arrays are the real store (see bug
-# ast_env_var_quadratic_parse_2026-06-13 comment above), so skipping is
-# semantics-preserving. Char-by-char via char_code(), not `.contains()`: a
-# NUL-bearing haystack breaks `.contains()` (C-string truncation) — proven by
-# rt_env_set panics on "\033" files (see lexer_struct.spl scan_string).
-fn env_value_nul_free(value: text) -> bool:
-    var i: i64 = 0
-    val n: i64 = value.len()
-    while i < n:
-        if char_code(value[i:i + 1]) == 0:
-            return false
-        i = i + 1
-    true
-
 fn expr_text_set(idx: i64, field: text, value: text):
-    if expr_env_mirror_enabled() and env_value_nul_free(value):
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         rt_env_set(expr_key(idx, field), value)
 
 fn expr_text_get(idx: i64, field: text) -> text:
-    expr_env_read(idx, field)
+    expr_env_read(expr_key(idx, field))
 
 fn expr_list_set(idx: i64, field: text, values: [i64]):
-    if expr_env_mirror_enabled():
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         rt_env_set(expr_key(idx, field), expr_i64_list_join(values))
 
 fn expr_list_get(idx: i64, field: text) -> [i64]:
-    expr_i64_list_split(expr_env_read(idx, field))
+    expr_i64_list_split(expr_env_read(expr_key(idx, field)))
 
 fn expr_text_list_set(idx: i64, field: text, values: [text]):
     if expr_env_mirror_enabled():
-        val joined: text = values.join("\n")
-        if env_value_nul_free(joined):
-            rt_env_set(expr_key(idx, field), joined)
+        rt_env_set(expr_key(idx, field), values.join("\n"))
 
 fn expr_call_args_set(idx: i64, call_args: [i64], arg_names: [text]):
     expr_args[idx] = call_args
@@ -361,8 +282,6 @@ fn expr_owner_asm_clobbers(idx: i64) -> [text]: expr_asm_clobbers[idx]
 fn expr_owner_asm_outputs(idx: i64) -> [i64]: expr_asm_outputs[idx]
 fn expr_owner_asm_locations(idx: i64) -> [text]: expr_asm_locations[idx]
 fn expr_owner_stmts(idx: i64) -> [i64]: expr_stmts[idx]
-fn expr_owner_tag_set(idx: i64, value: i64):
-    expr_tag[idx] = value
 fn expr_owner_args_set(idx: i64, value: [i64]):
     expr_args[idx] = value
 fn expr_owner_int_set(idx: i64, value: i64):
@@ -415,11 +334,7 @@ fn ast_gen_check_index(kind: text, idx: i64, minted_gen: i64) -> bool:
         return false
     if ast_gen_last_report_slot[0] != ast_gen_slot[0]:
         ast_gen_last_report_slot[0] = ast_gen_slot[0]
-        val message = ast_gen_stale_message(kind, idx, minted_gen)
-        if frontend_trace_suppressed():
-            eprint(message)
-        else:
-            print message
+        print ast_gen_stale_message(kind, idx, minted_gen)
     true
 
 fn expr_reset():
@@ -447,8 +362,6 @@ fn expr_reset():
         expr_extra = []
     if expr_args == nil:
         expr_args = []
-    if expr_arg_names == nil:
-        expr_arg_names = []
     if expr_stmts == nil:
         expr_stmts = []
     if expr_asm_kinds == nil:
@@ -483,6 +396,8 @@ fn expr_reset():
         asm_arm_error_msg = []
     if asm_arm_is_wildcard == nil:
         asm_arm_is_wildcard = []
+    expr_env_mirror_enabled = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+    expr_trace_tags_enabled = (rt_env_get("SIMPLE_TRACE_EXPR_TAGS") ?? "") != ""
     expr_tag.clear()
     expr_span.clear()
     expr_i_val.clear()
@@ -492,7 +407,6 @@ fn expr_reset():
     expr_right.clear()
     expr_extra.clear()
     expr_args.clear()
-    expr_arg_names.clear()
     expr_stmts.clear()
     expr_asm_kinds.clear()
     expr_asm_clobbers.clear()
@@ -512,7 +426,7 @@ fn expr_reset():
 
 # Allocate a new expression node, returns its index
 fn expr_alloc(tag: i64, span_id: i64) -> i64:
-    val idx = expr_count_env()
+    val idx = if expr_env_mirror_enabled: expr_count_env() else: expr_tag.len()
     expr_count_set(idx + 1)
     expr_tag.push(tag)
     expr_span.push(span_id)
@@ -538,11 +452,16 @@ fn expr_alloc(tag: i64, span_id: i64) -> i64:
     expr_i64_set(idx, "RIGHT", -1)
     expr_i64_set(idx, "EXTRA", -1)
     expr_list_set(idx, "ARGS", [])
-    expr_text_list_set(idx, "ARG_NAMES", [])
     expr_list_set(idx, "STMTS", [])
     if expr_trace_tags_enabled() and (idx < 8 or tag <= 0):
         print "[expr_alloc] idx={idx} tag={tag} span={span_id}"
     idx
+
+fn expr_span_set(idx: i64, span_id: i64):
+    if idx < 0 or idx >= expr_span.len():
+        return
+    expr_span[idx] = span_id
+    expr_i64_set(idx, "SPAN", span_id)
 
 # ===== Expression Constructors =====
 
@@ -564,13 +483,6 @@ fn expr_string_lit(value: text, span_id: i64) -> i64:
     expr_text_set(idx, "S", value)
     idx
 
-fn expr_raw_string_lit(value: text, span_id: i64) -> i64:
-    # EXPR_STRING_LIT reserves I=1 for source forms that never interpolate.
-    val idx = expr_string_lit(value, span_id)
-    expr_i_val[idx] = 1
-    expr_i64_set(idx, "I", 1)
-    idx
-
 fn expr_bool_lit(value: i64, span_id: i64) -> i64:
     val idx = expr_alloc(4, span_id)
     expr_i_val[idx] = value
@@ -582,9 +494,15 @@ fn expr_nil_lit(span_id: i64) -> i64:
 
 fn expr_ident(name: text, span_id: i64) -> i64:
     val idx = expr_alloc(6, span_id)
-    expr_s_val[idx] = name
+    # This constructor is reached through re-exported parser modules.  A
+    # direct write to the imported arena alias can update only the caller's
+    # snapshot under the bootstrap interpreter, leaving the defining owner
+    # with an empty string.  Always commit through the canonical owner so
+    # rejected-pattern recovery (for example `var Some(value) = ...`) keeps
+    # the identifier payload that the following diagnostic inspects.
+    expr_owner_str_set(idx, name)
     expr_text_set(idx, "S", name)
-    expr_i_val[idx] = -1
+    expr_owner_int_set(idx, -1)
     expr_i64_set(idx, "I", -1)
     idx
 
@@ -610,25 +528,21 @@ fn expr_call(callee: i64, call_args: [i64], span_id: i64) -> i64:
     expr_call_named(callee, call_args, [], span_id)
 
 fn expr_call_named(callee: i64, call_args: [i64], arg_names: [text], span_id: i64) -> i64:
-    # One policy/env decision per call allocation. The former six identical
-    # environment probes sat directly on a common expression hot path.
-    val trace_calls = ((rt_env_get("SIMPLE_TRACE_AST_EXPR_CALLS") ?? "") == "1" and
-        not frontend_trace_suppressed())
-    if trace_calls:
+    if (rt_env_get("SIMPLE_TRACE_AST_EXPR_CALLS") ?? "") == "1":
         eprint("[ast-expr] call-alloc:start callee={callee} argc={call_args.len()}")
     val idx = expr_alloc(9, span_id)
-    if trace_calls:
+    if (rt_env_get("SIMPLE_TRACE_AST_EXPR_CALLS") ?? "") == "1":
         eprint("[ast-expr] call-alloc:allocated idx={idx}")
     expr_left[idx] = callee
     expr_i64_set(idx, "LEFT", callee)
-    if trace_calls:
+    if (rt_env_get("SIMPLE_TRACE_AST_EXPR_CALLS") ?? "") == "1":
         eprint("[ast-expr] call-alloc:left idx={idx}")
     expr_call_args_set(idx, call_args, arg_names)
-    if trace_calls:
+    if (rt_env_get("SIMPLE_TRACE_AST_EXPR_CALLS") ?? "") == "1":
         eprint("[ast-expr] call-alloc:args-memory idx={idx}")
-    if trace_calls:
+    if (rt_env_get("SIMPLE_TRACE_AST_EXPR_CALLS") ?? "") == "1":
         eprint("[ast-expr] call-alloc:args-env idx={idx}")
-    if trace_calls:
+    if (rt_env_get("SIMPLE_TRACE_AST_EXPR_CALLS") ?? "") == "1":
         eprint("[ast-expr] call-alloc:done idx={idx}")
     idx
 
@@ -651,29 +565,28 @@ fn expr_field_access(base: i64, field_name: text, span_id: i64) -> i64:
     idx
 
 fn expr_method_call(receiver: i64, method_name: text, call_args: [i64], span_id: i64) -> i64:
-    expr_method_call_named(receiver, method_name, call_args, [], span_id)
-
-fn expr_method_call_named(receiver: i64, method_name: text, call_args: [i64], arg_names: [text], span_id: i64) -> i64:
     val idx = expr_alloc(12, span_id)
     expr_left[idx] = receiver
     expr_i64_set(idx, "LEFT", receiver)
     expr_s_val[idx] = method_name
     expr_text_set(idx, "S", method_name)
-    expr_call_args_set(idx, call_args, arg_names)
+    expr_args[idx] = call_args
+    expr_list_set(idx, "ARGS", call_args)
     idx
+
+fn expr_set_type_args(idx: i64, type_args: [i64]):
+    if idx >= 0 and idx < expr_type_args.len():
+        expr_type_args[idx] = type_args
+
+fn expr_get_type_args(idx: i64) -> [i64]:
+    if idx < 0 or idx >= expr_type_args.len():
+        return []
+    expr_type_args[idx]
 
 fn expr_array_lit(elements: [i64], span_id: i64) -> i64:
     val idx = expr_alloc(13, span_id)
     expr_args[idx] = elements
     expr_list_set(idx, "ARGS", elements)
-    idx
-
-fn expr_array_repeat(value_expr: i64, count_expr: i64, span_id: i64) -> i64:
-    val idx = expr_alloc(EXPR_ARRAY_REPEAT, span_id)
-    expr_left[idx] = value_expr
-    expr_i64_set(idx, "LEFT", value_expr)
-    expr_right[idx] = count_expr
-    expr_i64_set(idx, "RIGHT", count_expr)
     idx
 
 fn expr_if_expr(cond: i64, then_branch: i64, else_branch: i64, span_id: i64) -> i64:
@@ -684,6 +597,12 @@ fn expr_if_expr(cond: i64, then_branch: i64, else_branch: i64, span_id: i64) -> 
     expr_i64_set(idx, "RIGHT", then_branch)
     expr_extra[idx] = else_branch
     expr_i64_set(idx, "EXTRA", else_branch)
+    idx
+
+fn expr_if_chain_expr(chain_id: i64, span_id: i64) -> i64:
+    val idx = expr_alloc(EXPR_IF_CHAIN, span_id)
+    expr_extra[idx] = chain_id
+    expr_i64_set(idx, "EXTRA", chain_id)
     idx
 
 fn expr_match_expr(scrutinee: i64, arms: [i64], span_id: i64) -> i64:
@@ -757,16 +676,9 @@ fn expr_do_block(body_stmts: [i64], span_id: i64) -> i64:
     idx
 
 fn expr_unsafe_block(body_stmts: [i64], span_id: i64) -> i64:
-    expr_unsafe_block_with_caps(body_stmts, [], span_id)
-
-fn expr_unsafe_block_with_caps(body_stmts: [i64], caps: [text], span_id: i64) -> i64:
-    # `unsafe(reason: "...", capabilities: [a, b]):` — the capability names
-    # ride in the S slot as a comma-joined list (empty for a bare `unsafe:`).
     val idx = expr_alloc(EXPR_UNSAFE_BLOCK, span_id)
     expr_stmts[idx] = body_stmts
     expr_list_set(idx, "STMTS", body_stmts)
-    expr_s_val[idx] = caps.join(",")
-    expr_text_set(idx, "S", caps.join(","))
     idx
 
 fn expr_custom_block(kind: text, payload: text, span_id: i64) -> i64:
@@ -951,12 +863,6 @@ fn expr_force_unwrap(base: i64, span_id: i64) -> i64:
     expr_i64_set(idx, "LEFT", base)
     idx
 
-fn expr_try(base: i64, span_id: i64) -> i64:
-    val idx = expr_alloc(EXPR_TRY, span_id)
-    expr_left[idx] = base
-    expr_i64_set(idx, "LEFT", base)
-    idx
-
 fn expr_new_alloc(alloc_kind: i64, alloc_expr: i64, inner_expr: i64, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_NEW, span_id)
     expr_i_val[idx] = alloc_kind
@@ -1008,93 +914,3 @@ fn expr_cast(value: i64, type_tag: i64, span_id: i64) -> i64:
     expr_i_val[idx] = type_tag
     expr_i64_set(idx, "I", type_tag)
     idx
-
-# --- flat-AST pool codec: flat_expr ------------------------------
-#
-# Dump/restore for this file's 31 pools, in a FIXED SORTED ORDER that
-# dump and restore share. Order is the whole contract: the blob carries no
-# pool names, so a reordering on one side silently pairs each pool with its
-# neighbour's data. Sorting by name keeps the two sides in step without
-# anyone having to maintain a hand-written order.
-#
-# Completeness is enforced by scripts/check/check-flat-ast-codec-complete.shs,
-# which derives the pool list from this file and fails when one is not both
-# encoded and decoded. Do not add a pool here by hand without running it.
-
-pub fn flat_expr_pools_dump() -> text:
-    # Sub-blobs are collected and joined once. `out = out + <sub-blob>` across
-    # ~165 pools re-copied the whole growing multi-megabyte blob on every pool,
-    # which is quadratic in the pool count and paid on every cache-MISS store.
-    # The bytes emitted are unchanged: the same pieces, in the same order.
-    # doc/08_tracking/bug/frontend_shard_and_cache_hit_cost_2026-08-21.md
-    var parts: [text] = []
-    parts = parts.push(flat_pool_enc_text(asm_arm_abi))
-    parts = parts.push(flat_pool_enc_text_list(asm_arm_archs))
-    parts = parts.push(flat_pool_enc_text(asm_arm_asm_text))
-    parts = parts.push(flat_pool_enc_text(asm_arm_backend))
-    parts = parts.push(flat_pool_enc_text(asm_arm_error_msg))
-    parts = parts.push(flat_pool_enc_bool(asm_arm_is_compile_error))
-    parts = parts.push(flat_pool_enc_bool(asm_arm_is_wildcard))
-    parts = parts.push(flat_pool_enc_text(asm_arm_os))
-    parts = parts.push(flat_pool_enc_text_list(asm_arm_ver_ops))
-    parts = parts.push(flat_pool_enc_i64_list(asm_arm_ver_vals))
-    parts = parts.push(flat_pool_enc_i64(ast_gen_last_report_slot))
-    parts = parts.push(flat_pool_enc_i64(ast_gen_slot))
-    parts = parts.push(flat_pool_enc_text_list(expr_arg_names))
-    parts = parts.push(flat_pool_enc_i64_list(expr_args))
-    parts = parts.push(flat_pool_enc_text_list(expr_asm_clobbers))
-    parts = parts.push(flat_pool_enc_text_list(expr_asm_kinds))
-    parts = parts.push(flat_pool_enc_text_list(expr_asm_locations))
-    parts = parts.push(flat_pool_enc_i64_list(expr_asm_outputs))
-    parts = parts.push(flat_pool_enc_i64(expr_count_slot))
-    parts = parts.push(flat_pool_enc_i64(expr_empty_i64))
-    parts = parts.push(flat_pool_enc_text(expr_empty_text))
-    parts = parts.push(flat_pool_enc_i64(expr_env_mirror_high_slot))
-    parts = parts.push(flat_pool_enc_i64(expr_extra))
-    parts = parts.push(flat_pool_enc_text(expr_f_val))
-    parts = parts.push(flat_pool_enc_i64(expr_i_val))
-    parts = parts.push(flat_pool_enc_i64(expr_left))
-    parts = parts.push(flat_pool_enc_i64(expr_right))
-    parts = parts.push(flat_pool_enc_text(expr_s_val))
-    parts = parts.push(flat_pool_enc_i64(expr_span))
-    parts = parts.push(flat_pool_enc_i64_list(expr_stmts))
-    parts = parts.push(flat_pool_enc_i64(expr_tag))
-    parts.join("")
-
-# Returns false when the blob ran short or was malformed; the caller must
-# treat that as a cache MISS and reparse, never as an empty parse.
-pub fn flat_expr_pools_restore(r: FlatPoolReader) -> bool:
-    asm_arm_abi = flat_pool_dec_text(r)
-    asm_arm_archs = flat_pool_dec_text_list(r)
-    asm_arm_asm_text = flat_pool_dec_text(r)
-    asm_arm_backend = flat_pool_dec_text(r)
-    asm_arm_error_msg = flat_pool_dec_text(r)
-    asm_arm_is_compile_error = flat_pool_dec_bool(r)
-    asm_arm_is_wildcard = flat_pool_dec_bool(r)
-    asm_arm_os = flat_pool_dec_text(r)
-    asm_arm_ver_ops = flat_pool_dec_text_list(r)
-    asm_arm_ver_vals = flat_pool_dec_i64_list(r)
-    ast_gen_last_report_slot = flat_pool_dec_i64(r)
-    ast_gen_slot = flat_pool_dec_i64(r)
-    expr_arg_names = flat_pool_dec_text_list(r)
-    expr_args = flat_pool_dec_i64_list(r)
-    expr_asm_clobbers = flat_pool_dec_text_list(r)
-    expr_asm_kinds = flat_pool_dec_text_list(r)
-    expr_asm_locations = flat_pool_dec_text_list(r)
-    expr_asm_outputs = flat_pool_dec_i64_list(r)
-    expr_count_slot = flat_pool_dec_i64(r)
-    expr_empty_i64 = flat_pool_dec_i64(r)
-    expr_empty_text = flat_pool_dec_text(r)
-    expr_env_mirror_high_slot = flat_pool_dec_i64(r)
-    expr_extra = flat_pool_dec_i64(r)
-    expr_f_val = flat_pool_dec_text(r)
-    expr_i_val = flat_pool_dec_i64(r)
-    expr_left = flat_pool_dec_i64(r)
-    expr_right = flat_pool_dec_i64(r)
-    expr_s_val = flat_pool_dec_text(r)
-    expr_span = flat_pool_dec_i64(r)
-    expr_stmts = flat_pool_dec_i64_list(r)
-    expr_tag = flat_pool_dec_i64(r)
-    r.ok
-
-export flat_expr_pools_dump, flat_expr_pools_restore

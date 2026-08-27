@@ -1,6 +1,30 @@
 # vhdl_backend_e2e_spec
 
-> Tests that MIR functions compiled through VhdlBackend produce
+> @cover src/compiler/70.backend/backend/vhdl_backend.spl 80%
+
+<!-- sdn-diagram:id=vhdl_backend_e2e_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=vhdl_backend_e2e_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+vhdl_backend_e2e_spec -> compiler
+vhdl_backend_e2e_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=vhdl_backend_e2e_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,22 +35,28 @@
 
 # vhdl_backend_e2e_spec
 
-Tests that MIR functions compiled through VhdlBackend produce
+@cover src/compiler/70.backend/backend/vhdl_backend.spl 80%
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
-| Category | Compiler |
+| Feature IDs | #vhdl-backend, #ghdl-validation |
+| Category | Integration |
+| Difficulty | 4/5 |
 | Status | Active |
 | Source | `test/02_integration/compiler/vhdl_backend_e2e_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Backend-Generated Entity/Architecture Validation
+@cover src/compiler/70.backend/backend/vhdl_backend.spl 80%
+VHDL Backend End-to-End Integration Tests
 
-    Tests that MIR functions compiled through VhdlBackend produce
-    structurally valid VHDL entities accepted by GHDL.
+Tests the complete VHDL backend pipeline: MIR construction → VhdlBackend.compile()
+→ VHDL output → GHDL analysis/elaboration validation.
+
+These tests verify that backend-generated VHDL is accepted by a real
+VHDL-2008 toolchain (GHDL), not just structurally plausible text.
 
 ## Scenarios
 
@@ -34,18 +64,34 @@ Tests that MIR functions compiled through VhdlBackend produce
 
 #### compiles simple adder to valid VHDL entity
 
-- compiles simple adder to valid VHDL entity
+1. make arg local
+2. make arg local
+3. make return local
+4. make temp local
+5. LocalId
+6. MirOperand
+7. MirOperand
+8. span: empty span
+9. kind: MirInstKind Copy
+10. span: empty span
+11. id: BlockId
+12. check msg
+13. check
+14. check
+15. check
+16. check
+17. check
+18. check
+19. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 50 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("compiles simple adder to valid VHDL entity")
 val backend = make_backend()
 
 # Build a simple add function: fn add(a: i32, b: i32) -> i32
@@ -100,18 +146,26 @@ check(vhdl.contains("sum <= a + b;"))
 
 #### compiles boolean comparison to valid VHDL
 
-- compiles boolean comparison to valid VHDL
+1. make arg local
+2. make arg local
+3. make return local
+4. LocalId
+5. MirOperand
+6. MirOperand
+7. span: empty span
+8. id: BlockId
+9. check msg
+10. check
+11. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("compiles boolean comparison to valid VHDL")
 val backend = make_backend()
 
 # fn compare(a: i32, b: i32) -> bool
@@ -152,18 +206,32 @@ check(compiled.vhdl.contains("result_out : out bit"))
 
 #### compiles local copies to signal assignments
 
-- compiles local copies to signal assignments
+1. make arg local
+2. make return local
+3. make temp local
+4. MirLocal
+5. LocalId
+6. MirOperand
+7. MirOperand
+8. span: empty span
+9. kind: MirInstKind Copy
+10. span: empty span
+11. kind: MirInstKind Copy
+12. span: empty span
+13. check msg
+14. check
+15. check
+16. check
+17. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("compiles local copies to signal assignments")
 val backend = make_backend()
 
 # MIR shape for: tmp = a + 1; x = tmp; return x
@@ -210,18 +278,21 @@ check(vhdl.contains("result_out <= x;"))
 
 #### compiles return terminator to result assignment
 
-- compiles return terminator to result assignment
+1. make arg local
+2. make return local
+3. id: BlockId
+4. terminator: MirTerminator Return
+5. check msg
+6. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("compiles return terminator to result assignment")
 val backend = make_backend()
 
 val locals = [
@@ -232,7 +303,7 @@ val locals = [
 val block = MirBlock(
     id: BlockId(id: 0),
     instructions: [],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))))
 )
 val func = make_function("return_arg", [make_i32()], make_i32(), locals, [block])
 val module = make_module("return_arg_mod", func)
@@ -248,18 +319,30 @@ check(vhdl.contains("result_out <= a;"))
 
 #### compiles if terminator return arms to result mux
 
-- compiles if terminator return arms to result mux
+1. make arg local
+2. make arg local
+3. make arg local
+4. make return local
+5. id: BlockId
+6. MirOperand
+7. BlockId
+8. BlockId
+9. id: BlockId
+10. terminator: MirTerminator Return
+11. id: BlockId
+12. terminator: MirTerminator Return
+13. check msg
+14. check
+15. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("compiles if terminator return arms to result mux")
 val backend = make_resolved_backend()
 
 val locals = [
@@ -281,12 +364,12 @@ val entry = MirBlock(
 val then_block = MirBlock(
     id: BlockId(id: 1),
     instructions: [],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
 )
 val else_block = MirBlock(
     id: BlockId(id: 2),
     instructions: [],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))))
 )
 
 val func = make_function("select_i32", [make_bool(), make_i32(), make_i32()], make_i32(), locals, [entry, then_block, else_block])
@@ -304,18 +387,45 @@ check(vhdl.contains("result_out <= a when flag = '1' else b;"))
 
 #### compiles branch-local computations inside combinational process
 
-- compiles branch-local computations inside combinational process
+1. make arg local
+2. make arg local
+3. make arg local
+4. make return local
+5. make temp local
+6. make temp local
+7. id: BlockId
+8. MirOperand
+9. BlockId
+10. BlockId
+11. LocalId
+12. MirOperand
+13. MirOperand
+14. span: empty span
+15. id: BlockId
+16. terminator: MirTerminator Return
+17. LocalId
+18. MirOperand
+19. MirOperand
+20. span: empty span
+21. id: BlockId
+22. terminator: MirTerminator Return
+23. check msg
+24. check
+25. check
+26. check
+27. check
+28. check
+29. check
+30. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 65 lines folded for reproduction.
+Runnable source: 63 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("compiles branch-local computations inside combinational process")
 val backend = make_resolved_backend()
 
 val locals = [
@@ -348,7 +458,7 @@ val then_add = MirInst(
 val then_block = MirBlock(
     id: BlockId(id: 1),
     instructions: [then_add],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
 )
 val else_sub = MirInst(
     kind: MirInstKind.BinOp(
@@ -362,7 +472,7 @@ val else_sub = MirInst(
 val else_block = MirBlock(
     id: BlockId(id: 2),
     instructions: [else_sub],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5)))))
 )
 
 val func = make_function("select_computed_i32", [make_bool(), make_i32(), make_i32()], make_i32(), locals, [entry, then_block, else_block])
@@ -385,18 +495,54 @@ check(vhdl.contains("result_out <= v_else_tmp;"))
 
 #### compiles branch-local VHDL resize slice and concat inside combinational process
 
-- compiles branch-local VHDL resize slice and concat inside combinational process
+1. make arg local
+2. make arg local
+3. make arg local
+4. make return local
+5. make temp local
+6. make temp local
+7. make temp local
+8. make temp local
+9. id: BlockId
+10. MirOperand
+11. BlockId
+12. BlockId
+13. LocalId
+14. MirOperand
+15. span: empty span
+16. id: BlockId
+17. terminator: MirTerminator Return
+18. LocalId
+19. MirOperand
+20. MirOperand
+21. MirOperand
+22. MirOperand
+23. span: empty span
+24. LocalId
+25. MirOperand
+26. span: empty span
+27. LocalId
+28. MirOperand
+29. span: empty span
+30. id: BlockId
+31. terminator: MirTerminator Return
+32. check msg
+33. check
+34. check
+35. check
+36. check
+37. check
+38. check
+39. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 89 lines folded for reproduction.
+Runnable source: 87 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("compiles branch-local VHDL resize slice and concat inside combinational process")
 val backend = make_resolved_backend()
 val u32 = MirType(kind: MirTypeKind.U32)
 
@@ -432,7 +578,7 @@ val then_resize = MirInst(
 val then_block = MirBlock(
     id: BlockId(id: 1),
     instructions: [then_resize],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
 )
 val else_concat = MirInst(
     kind: MirInstKind.VhdlConcat(
@@ -467,7 +613,7 @@ val else_resize = MirInst(
 val else_block = MirBlock(
     id: BlockId(id: 2),
     instructions: [else_concat, else_slice, else_resize],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 7)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 7)))))
 )
 
 val func = make_function("select_vhdl_width_ops", [make_bool(), make_u8(), make_u8()], u32, locals, [entry, then_block, else_block])
@@ -490,18 +636,39 @@ check(vhdl.contains("result_out <= v_else_wide;"))
 
 #### compiles branch-local VHDL signal and variable assignments inside combinational process
 
-- compiles branch-local VHDL signal and variable assignments inside combinational process
+1. make arg local
+2. make arg local
+3. make arg local
+4. make return local
+5. make temp local
+6. id: BlockId
+7. MirOperand
+8. BlockId
+9. BlockId
+10. MirOperand
+11. MirOperand
+12. span: empty span
+13. id: BlockId
+14. terminator: MirTerminator Return
+15. MirOperand
+16. MirOperand
+17. span: empty span
+18. id: BlockId
+19. terminator: MirTerminator Return
+20. check msg
+21. check
+22. check
+23. check
+24. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 58 lines folded for reproduction.
+Runnable source: 56 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("compiles branch-local VHDL signal and variable assignments inside combinational process")
 val backend = make_resolved_backend()
 
 val locals = [
@@ -531,7 +698,7 @@ val then_assign = MirInst(
 val then_block = MirBlock(
     id: BlockId(id: 1),
     instructions: [then_assign],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
 )
 val else_assign = MirInst(
     kind: MirInstKind.VhdlSignalAssign(
@@ -544,7 +711,7 @@ val else_assign = MirInst(
 val else_block = MirBlock(
     id: BlockId(id: 2),
     instructions: [else_assign],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))))
 )
 
 val func = make_function("select_vhdl_assigns", [make_bool(), make_i32(), make_i32()], make_i32(), locals, [entry, then_block, else_block])
@@ -564,18 +731,40 @@ check(vhdl.contains("result_out <= b;"))
 
 #### compiles checked binary op and integer casts
 
-- compiles checked binary op and integer casts
+1. make arg local
+2. make arg local
+3. make return local
+4. make temp local
+5. make temp local
+6. make temp local
+7. LocalId
+8. MirOperand
+9. MirOperand
+10. span: empty span
+11. LocalId
+12. MirOperand
+13. MirType
+14. span: empty span
+15. LocalId
+16. MirOperand
+17. make i32
+18. span: empty span
+19. id: BlockId
+20. terminator: MirTerminator Return
+21. check msg
+22. check
+23. check
+24. check
+25. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 55 lines folded for reproduction.
+Runnable source: 53 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("compiles checked binary op and integer casts")
 val backend = make_backend()
 
 val locals = [
@@ -616,7 +805,7 @@ val narrow = MirInst(
 val block = MirBlock(
     id: BlockId(id: 0),
     instructions: [checked_add, widen, narrow],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5)))))
 )
 val func = make_function("cast_checked", [make_i32(), make_i32()], make_i32(), locals, [block])
 val module = make_module("cast_checked_mod", func)
@@ -635,18 +824,52 @@ check(vhdl.contains("result_out <= narrow;"))
 
 #### compiles typed bool casts and shift counts
 
-- compiles typed bool casts and shift counts
+1. make arg local
+2. make arg local
+3. make arg local
+4. make arg local
+5. make return local
+6. make temp local
+7. make temp local
+8. make temp local
+9. make temp local
+10. make temp local
+11. LocalId
+12. MirOperand
+13. make bool
+14. span: empty span
+15. LocalId
+16. MirOperand
+17. span: empty span
+18. LocalId
+19. MirOperand
+20. MirOperand
+21. span: empty span
+22. LocalId
+23. MirOperand
+24. MirOperand
+25. span: empty span
+26. LocalId
+27. MirOperand
+28. MirOperand
+29. span: empty span
+30. id: BlockId
+31. terminator: MirTerminator Return
+32. check msg
+33. check
+34. check
+35. check
+36. check
+37. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 80 lines folded for reproduction.
+Runnable source: 78 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("compiles typed bool casts and shift counts")
 val backend = make_backend()
 val u32 = MirType(kind: MirTypeKind.U32)
 val u8 = MirType(kind: MirTypeKind.U8)
@@ -711,7 +934,7 @@ val shr_signed = MirInst(
 val block = MirBlock(
     id: BlockId(id: 0),
     instructions: [int_to_bool, bool_to_unsigned, shl_const, shl_signal, shr_signed],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 9)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 9)))))
 )
 val func = make_function("typed_ops", [u32, u8, make_i32(), make_bool()], u32, locals, [block])
 val module = make_module("typed_ops_mod", func)
@@ -731,18 +954,33 @@ check(vhdl.contains("shr_signed <= shift_right(data, to_integer(unsigned(shamt_s
 
 #### compiles remainder and bitwise not operations
 
-- compiles remainder and bitwise not operations
+1. make arg local
+2. make arg local
+3. make return local
+4. make temp local
+5. make temp local
+6. LocalId
+7. MirOperand
+8. MirOperand
+9. span: empty span
+10. LocalId
+11. MirOperand
+12. span: empty span
+13. id: BlockId
+14. terminator: MirTerminator Return
+15. check msg
+16. check
+17. check
+18. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 44 lines folded for reproduction.
+Runnable source: 42 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("compiles remainder and bitwise not operations")
 val backend = make_backend()
 
 val locals = [
@@ -773,7 +1011,7 @@ val bitnot_inst = MirInst(
 val block = MirBlock(
     id: BlockId(id: 0),
     instructions: [rem_inst, bitnot_inst],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
 )
 val func = make_function("rem_not", [make_i32(), make_i32()], make_i32(), locals, [block])
 val module = make_module("rem_not_mod", func)
@@ -791,18 +1029,23 @@ check(vhdl.contains("result_out <= inverted;"))
 
 #### compiles goto terminator to return block
 
-- compiles goto terminator to return block
+1. make arg local
+2. make return local
+3. id: BlockId
+4. terminator: MirTerminator Goto
+5. id: BlockId
+6. terminator: MirTerminator Return
+7. check msg
+8. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("compiles goto terminator to return block")
 val backend = make_backend()
 
 val locals = [
@@ -818,7 +1061,7 @@ val entry = MirBlock(
 val ret = MirBlock(
     id: BlockId(id: 1),
     instructions: [],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))))
 )
 val func = make_function("goto_return", [make_i32()], make_i32(), locals, [entry, ret])
 val module = make_module("goto_return_mod", func)
@@ -834,18 +1077,29 @@ check(vhdl.contains("result_out <= a;"))
 
 #### compiles goto chains and if arms that jump to returns
 
-- compiles goto chains and if arms that jump to returns
+1. make arg local
+2. make arg local
+3. make arg local
+4. make return local
+5. id: BlockId
+6. MirOperand
+7. BlockId
+8. BlockId
+9. id: BlockId
+10. terminator: MirTerminator Return
+11. id: BlockId
+12. terminator: MirTerminator Return
+13. check msg
+14. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("compiles goto chains and if arms that jump to returns")
 val backend = make_backend()
 val locals = [
     make_arg_local(0, 0, "flag", make_bool()),
@@ -867,12 +1121,12 @@ val else_jump = MirBlock(id: BlockId(id: 2), instructions: [], terminator: MirTe
 val then_ret = MirBlock(
     id: BlockId(id: 3),
     instructions: [],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
 )
 val else_ret = MirBlock(
     id: BlockId(id: 4),
     instructions: [],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))))
 )
 
 val func = make_function("select_jump", [make_bool(), make_i32(), make_i32()], make_i32(), locals, [entry, then_jump, else_jump, then_ret, else_ret])
@@ -889,18 +1143,33 @@ check(vhdl.contains("result_out <= a when flag = '1' else b;"))
 
 #### compiles switch terminator return targets to conditional result
 
-- compiles switch terminator return targets to conditional result
+1. make arg local
+2. make arg local
+3. make arg local
+4. make arg local
+5. make return local
+6. id: BlockId
+7. MirOperand
+8. SwitchCase
+9. SwitchCase
+10. BlockId
+11. id: BlockId
+12. terminator: MirTerminator Return
+13. id: BlockId
+14. terminator: MirTerminator Return
+15. id: BlockId
+16. terminator: MirTerminator Return
+17. check msg
+18. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 46 lines folded for reproduction.
+Runnable source: 44 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("compiles switch terminator return targets to conditional result")
 val backend = make_backend()
 val u8 = MirType(kind: MirTypeKind.U8)
 val locals = [
@@ -925,17 +1194,17 @@ val entry = MirBlock(
 val case_zero = MirBlock(
     id: BlockId(id: 1),
     instructions: [],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
 )
 val case_one = MirBlock(
     id: BlockId(id: 2),
     instructions: [],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))))
 )
 val default_case = MirBlock(
     id: BlockId(id: 3),
     instructions: [],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))))
 )
 val func = make_function("select_switch", [u8, make_i32(), make_i32(), make_i32()], make_i32(), locals, [entry, case_zero, case_one, default_case])
 val module = make_module("switch_mod", func)
@@ -951,18 +1220,54 @@ check(vhdl.contains("result_out <= a when sel = to_unsigned(0, 8) else b when se
 
 #### compiles switch targets with computations inside combinational process
 
-- compiles switch targets with computations inside combinational process
+1. make arg local
+2. make arg local
+3. make arg local
+4. make arg local
+5. make return local
+6. make temp local
+7. make temp local
+8. make temp local
+9. id: BlockId
+10. MirOperand
+11. SwitchCase
+12. SwitchCase
+13. BlockId
+14. LocalId
+15. MirOperand
+16. MirOperand
+17. span: empty span
+18. id: BlockId
+19. terminator: MirTerminator Return
+20. LocalId
+21. MirOperand
+22. MirOperand
+23. span: empty span
+24. id: BlockId
+25. terminator: MirTerminator Return
+26. LocalId
+27. MirOperand
+28. MirOperand
+29. span: empty span
+30. id: BlockId
+31. terminator: MirTerminator Return
+32. check msg
+33. check
+34. check
+35. check
+36. check
+37. check
+38. check
+39. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 82 lines folded for reproduction.
+Runnable source: 80 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("compiles switch targets with computations inside combinational process")
 val backend = make_resolved_backend()
 val u8 = make_u8()
 val locals = [
@@ -999,7 +1304,7 @@ val case_zero_add = MirInst(
 val case_zero = MirBlock(
     id: BlockId(id: 1),
     instructions: [case_zero_add],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5)))))
 )
 val case_one_sub = MirInst(
     kind: MirInstKind.BinOp(
@@ -1013,7 +1318,7 @@ val case_one_sub = MirInst(
 val case_one = MirBlock(
     id: BlockId(id: 2),
     instructions: [case_one_sub],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 6)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 6)))))
 )
 val default_add = MirInst(
     kind: MirInstKind.BinOp(
@@ -1027,7 +1332,7 @@ val default_add = MirInst(
 val default_case = MirBlock(
     id: BlockId(id: 3),
     instructions: [default_add],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 7)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 7)))))
 )
 val func = make_function("select_switch_computed", [u8, make_i32(), make_i32(), make_i32()], make_i32(), locals, [entry, case_zero, case_one, default_case])
 val module = make_module("switch_computed_mod", func)
@@ -1049,18 +1354,36 @@ check(vhdl.contains("result_out <= v_default_tmp;"))
 
 #### compiles struct aggregate to named record assignment
 
-- compiles struct aggregate to named record assignment
+1. make field
+2. make field
+3. types[point symbol] = make type def
+4. make arg local
+5. make arg local
+6. make return local
+7. make temp local
+8. LocalId
+9. AggregateKind Struct
+10. MirOperand
+11. MirOperand
+12. span: empty span
+13. id: BlockId
+14. terminator: MirTerminator Return
+15. check msg
+16. check
+17. check
+18. check
+19. check
+20. check
+21. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 50 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("compiles struct aggregate to named record assignment")
 val backend = make_backend()
 val point_symbol = SymbolId(id: 42)
 val point_type = MirType(kind: MirTypeKind.Struct(point_symbol))
@@ -1091,7 +1414,7 @@ val aggregate = MirInst(
 val block = MirBlock(
     id: BlockId(id: 0),
     instructions: [aggregate],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))))
 )
 val func = make_function("make_point", [make_i32(), make_i32()], point_type, locals, [block])
 var functions: Dict<SymbolId, MirFunction> = {}
@@ -1115,18 +1438,51 @@ check(vhdl.contains("result_out <= point_sig;"))
 
 #### compiles branch-local struct aggregates inside combinational process
 
-- compiles branch-local struct aggregates inside combinational process
+1. make field
+2. make field
+3. types[point symbol] = make type def
+4. make arg local
+5. make arg local
+6. make arg local
+7. make return local
+8. make temp local
+9. make temp local
+10. id: BlockId
+11. MirOperand
+12. BlockId
+13. BlockId
+14. LocalId
+15. AggregateKind Struct
+16. MirOperand
+17. MirOperand
+18. span: empty span
+19. id: BlockId
+20. terminator: MirTerminator Return
+21. LocalId
+22. AggregateKind Struct
+23. MirOperand
+24. MirOperand
+25. span: empty span
+26. id: BlockId
+27. terminator: MirTerminator Return
+28. check msg
+29. check
+30. check
+31. check
+32. check
+33. check
+34. check
+35. check
+36. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 80 lines folded for reproduction.
+Runnable source: 78 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("compiles branch-local struct aggregates inside combinational process")
 val backend = make_resolved_backend()
 val point_symbol = SymbolId(id: 44)
 val point_type = MirType(kind: MirTypeKind.Struct(point_symbol))
@@ -1168,7 +1524,7 @@ val then_aggregate = MirInst(
 val then_block = MirBlock(
     id: BlockId(id: 1),
     instructions: [then_aggregate],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
 )
 val else_aggregate = MirInst(
     kind: MirInstKind.Aggregate(
@@ -1184,7 +1540,7 @@ val else_aggregate = MirInst(
 val else_block = MirBlock(
     id: BlockId(id: 2),
     instructions: [else_aggregate],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5)))))
 )
 
 val func = make_function("select_point", [make_bool(), make_i32(), make_i32()], point_type, locals, [entry, then_block, else_block])
@@ -1211,18 +1567,35 @@ check(vhdl.contains("result_out <= v_else_point;"))
 
 #### compiles struct field get and set
 
-- compiles struct field get and set
+1. make field
+2. make field
+3. types[point symbol] = make type def
+4. make arg local
+5. make return local
+6. make temp local
+7. make temp local
+8. MirOperand
+9. MirOperand
+10. span: empty span
+11. LocalId
+12. MirOperand
+13. span: empty span
+14. id: BlockId
+15. terminator: MirTerminator Return
+16. check msg
+17. check
+18. check
+19. check
+20. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 52 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("compiles struct field get and set")
 val backend = make_backend()
 val point_symbol = SymbolId(id: 43)
 val point_type = MirType(kind: MirTypeKind.Struct(point_symbol))
@@ -1258,7 +1631,7 @@ val get_x = MirInst(
 val block = MirBlock(
     id: BlockId(id: 0),
     instructions: [set_y, get_x],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))))
 )
 val func = make_function("point_fields", [make_i32()], make_i32(), locals, [block])
 var functions: Dict<SymbolId, MirFunction> = {}
@@ -1279,18 +1652,27 @@ check(vhdl.contains("result_out <= x_out;"))
 
 #### compiles array aggregate assignment
 
-- compiles array aggregate assignment
+1. make arg local
+2. make arg local
+3. make temp local
+4. LocalId
+5. AggregateKind Array
+6. MirOperand
+7. MirOperand
+8. span: empty span
+9. id: BlockId
+10. check msg
+11. check
+12. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("compiles array aggregate assignment")
 val backend = make_backend()
 val array_type = MirType(kind: MirTypeKind.Array(make_i32(), 2))
 val locals = [
@@ -1329,18 +1711,32 @@ check(vhdl.contains("arr_sig <= (0 => a, 1 => b);"))
 
 #### compiles explicit VHDL port map component instantiation
 
-- compiles explicit VHDL port map component instantiation
+1. make arg local
+2. make arg local
+3. make return local
+4. make temp local
+5.
+6.
+7.
+8. span: empty span
+9. id: BlockId
+10. terminator: MirTerminator Return
+11. check msg
+12. check
+13. check
+14. check
+15. check
+16. check
+17. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("compiles explicit VHDL port map component instantiation")
 val backend = make_backend()
 val locals = [
     make_arg_local(0, 0, "lhs", make_i32()),
@@ -1363,7 +1759,7 @@ val port_map = MirInst(
 val block = MirBlock(
     id: BlockId(id: 0),
     instructions: [port_map],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))))
 )
 val func = make_function("uses_adder", [make_i32(), make_i32()], make_i32(), locals, [block])
 val module = make_module("port_map_mod", func)
@@ -1384,18 +1780,23 @@ check(vhdl.contains("result_out <= sum_sig;"))
 
 #### rejects unsupported MIR instruction with hard error
 
-- rejects unsupported MIR instruction with hard error
+1. make arg local
+2. make return local
+3. Some
+4. MirOperand
+5. [MirOperand
+6. span: empty span
+7. id: BlockId
+8. check msg
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("rejects unsupported MIR instruction with hard error")
 val backend = make_backend()
 
 # Use a Call instruction which is unsupported in VHDL
@@ -1430,18 +1831,22 @@ check_msg(result.is_err(), "Expected hard error for unsupported Call instruction
 
 #### rejects storage allocation as unsupported synthesizable VHDL
 
-- rejects storage allocation as unsupported synthesizable VHDL
+1. make return local
+2. make temp local
+3. kind: MirInstKind Alloc
+4. span: empty span
+5. id: BlockId
+6. terminator: MirTerminator Return
+7. check msg
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("rejects storage allocation as unsupported synthesizable VHDL")
 val backend = make_backend()
 val ptr_type = MirType(kind: MirTypeKind.Ptr(make_i32(), true))
 val locals = [
@@ -1455,7 +1860,7 @@ val alloc_inst = MirInst(
 val block = MirBlock(
     id: BlockId(id: 0),
     instructions: [alloc_inst],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), make_i32()))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), make_i32()))))
 )
 val func = make_function("bad_alloc", [], make_i32(), locals, [block])
 val module = make_module("bad_alloc_mod", func)
@@ -1468,18 +1873,25 @@ check_msg(result.is_err(), "Expected hard error for unsupported Alloc instructio
 
 #### rejects pointer address arithmetic as unsupported synthesizable VHDL
 
-- rejects pointer address arithmetic as unsupported synthesizable VHDL
+1. make arg local
+2. make return local
+3. make temp local
+4. LocalId
+5. MirOperand
+6. [MirOperand
+7. span: empty span
+8. id: BlockId
+9. terminator: MirTerminator Return
+10. check msg
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("rejects pointer address arithmetic as unsupported synthesizable VHDL")
 val backend = make_backend()
 val ptr_type = MirType(kind: MirTypeKind.Ptr(make_i32(), true))
 val locals = [
@@ -1498,7 +1910,7 @@ val gep_inst = MirInst(
 val block = MirBlock(
     id: BlockId(id: 0),
     instructions: [gep_inst],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), make_i32()))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), make_i32()))))
 )
 val func = make_function("bad_gep", [ptr_type], make_i32(), locals, [block])
 val module = make_module("bad_gep_mod", func)
@@ -1511,18 +1923,25 @@ check_msg(result.is_err(), "Expected hard error for unsupported GetElementPtr in
 
 #### rejects indirect calls as unsupported synthesizable VHDL
 
-- rejects indirect calls as unsupported synthesizable VHDL
+1. make arg local
+2. make arg local
+3. make return local
+4. Some
+5. MirOperand
+6. [MirOperand
+7. MirSignature
+8. span: empty span
+9. id: BlockId
+10. check msg
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("rejects indirect calls as unsupported synthesizable VHDL")
 val backend = make_backend()
 val ptr_type = MirType(kind: MirTypeKind.Ptr(make_i32(), false))
 val locals = [
@@ -1555,18 +1974,22 @@ check_msg(result.is_err(), "Expected hard error for unsupported CallIndirect ins
 
 #### rejects arbitrary intrinsics as unsupported synthesizable VHDL
 
-- rejects arbitrary intrinsics as unsupported synthesizable VHDL
+1. make arg local
+2. make return local
+3. Some
+4. [MirOperand
+5. span: empty span
+6. id: BlockId
+7. check msg
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("rejects arbitrary intrinsics as unsupported synthesizable VHDL")
 val backend = make_backend()
 val locals = [
     make_arg_local(0, 0, "a", make_i32()),
@@ -1596,18 +2019,37 @@ check_msg(result.is_err(), "Expected hard error for unsupported Intrinsic instru
 
 #### rejects delayed signal assignment inside structured process
 
-- rejects delayed signal assignment inside structured process
+1. make arg local
+2. make arg local
+3. make arg local
+4. make return local
+5. make temp local
+6. id: BlockId
+7. MirOperand
+8. BlockId
+9. BlockId
+10. LocalId
+11. MirOperand
+12. MirOperand
+13. span: empty span
+14. id: BlockId
+15. terminator: MirTerminator Return
+16. MirOperand
+17. MirOperand
+18. Some
+19. span: empty span
+20. id: BlockId
+21. terminator: MirTerminator Return
+22. check msg
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 51 lines folded for reproduction.
+Runnable source: 49 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("rejects delayed signal assignment inside structured process")
 val backend = make_resolved_backend()
 val locals = [
     make_arg_local(0, 0, "flag", make_bool()),
@@ -1637,7 +2079,7 @@ val then_add = MirInst(
 val then_block = MirBlock(
     id: BlockId(id: 1),
     instructions: [then_add],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
 )
 val delayed_assign = MirInst(
     kind: MirInstKind.VhdlSignalAssign(
@@ -1650,7 +2092,7 @@ val delayed_assign = MirInst(
 val else_block = MirBlock(
     id: BlockId(id: 2),
     instructions: [delayed_assign],
-    terminator: MirTerminator.Ret(nil)
+    terminator: MirTerminator.Return(nil)
 )
 val func = make_function("bad_delayed_process_assign", [make_bool(), make_i32(), make_i32()], make_i32(), locals, [entry, then_block, else_block])
 val module = make_module("bad_delayed_process_assign_mod", func)
@@ -1665,18 +2107,26 @@ check_msg(result.is_err(), "Expected hard error for delayed signal assignment in
 
 #### compiles struct type to VHDL record package
 
-- compiles struct type to VHDL record package
+1. make field
+2. make field
+3. types[point symbol] = make type def
+4. check msg
+5. check
+6. check
+7. check
+8. check
+9. check
+10. check
+11. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("compiles struct type to VHDL record package")
 val backend = make_backend()
 
 val struct_fields = [
@@ -1714,18 +2164,22 @@ check(pkg.contains("end package geom_pkg;"))
 
 #### compiles enum type to VHDL enumeration
 
-- compiles enum type to VHDL enumeration
+1. make variant
+2. make variant
+3. make variant
+4. types[state symbol] = make type def
+5. check msg
+6. check
+7. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("compiles enum type to VHDL enumeration")
 val backend = make_backend()
 
 val variants = [
@@ -1764,18 +2218,16 @@ check(pkg.contains("type State is (Idle, Running, Done);"))
 
 #### backend-generated adder passes GHDL analysis _(slow)_
 
-- backend-generated adder passes GHDL analysis
+1. check msg
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("backend-generated adder passes GHDL analysis")
 if not ghdl_available():
     print "SKIP: GHDL not available"
     return
@@ -1794,18 +2246,19 @@ check_msg(valid, "GHDL rejected backend-generated add VHDL")
 
 #### backend-generated add passes GHDL elaboration and synthesis _(slow)_
 
-- backend-generated add passes GHDL elaboration and synthesis
+1. check
+2. check msg
+3. check msg
+4. check msg
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("backend-generated add passes GHDL elaboration and synthesis")
 if not ghdl_available():
     print "SKIP: GHDL not available"
     return
@@ -1834,18 +2287,21 @@ check_msg(synth.success, "GHDL synthesis failed for generated add entity")
 
 #### backend-generated add testbench simulates 2 plus 3 equals 5 _(slow)_
 
-- backend-generated add testbench simulates 2 plus 3 equals 5
+1. check
+2. check msg
+3. check
+4. check msg
+5. check msg
+6. check msg
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("backend-generated add testbench simulates 2 plus 3 equals 5")
 if not ghdl_available():
     print "SKIP: GHDL not available"
     return
@@ -1879,18 +2335,21 @@ check_msg(run_result.success, "GHDL simulation failed for generated add testbenc
 
 #### backend-generated package passes GHDL analysis _(slow)_
 
-- backend-generated package passes GHDL analysis
+1. make field
+2. make field
+3. types[point symbol] = make type def
+4. check msg
+5. check
+6. check msg
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("backend-generated package passes GHDL analysis")
 if not ghdl_available():
     print "SKIP: GHDL not available"
     return
@@ -1926,18 +2385,21 @@ check_msg(pkg_valid, "GHDL rejected backend-generated package VHDL")
 
 #### backend-generated entity with package elaborates _(slow)_
 
-- backend-generated entity with package elaborates
+1. make arg local
+2. make return local
+3. kind: MirInstKind Copy
+4. span: empty span
+5. check msg
+6. check msg
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("backend-generated entity with package elaborates")
 if not ghdl_available():
     print "SKIP: GHDL not available"
     return
@@ -1976,18 +2438,40 @@ check_msg(valid, "GHDL rejected backend-generated passthrough VHDL")
 
 #### backend-generated computed if process passes GHDL analysis and elaboration _(slow)_
 
-- backend-generated computed if process passes GHDL analysis and elaboration
+1. make arg local
+2. make arg local
+3. make arg local
+4. make return local
+5. make temp local
+6. make temp local
+7. id: BlockId
+8. MirOperand
+9. BlockId
+10. BlockId
+11. LocalId
+12. MirOperand
+13. MirOperand
+14. span: empty span
+15. id: BlockId
+16. terminator: MirTerminator Return
+17. LocalId
+18. MirOperand
+19. MirOperand
+20. span: empty span
+21. id: BlockId
+22. terminator: MirTerminator Return
+23. check msg
+24. check
+25. check msg
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 64 lines folded for reproduction.
+Runnable source: 62 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("backend-generated computed if process passes GHDL analysis and elaboration")
 if not ghdl_available():
     print "SKIP: GHDL not available"
     return
@@ -2023,7 +2507,7 @@ val then_add = MirInst(
 val then_block = MirBlock(
     id: BlockId(id: 1),
     instructions: [then_add],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
 )
 val else_sub = MirInst(
     kind: MirInstKind.BinOp(
@@ -2037,7 +2521,7 @@ val else_sub = MirInst(
 val else_block = MirBlock(
     id: BlockId(id: 2),
     instructions: [else_sub],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5)))))
 )
 
 val func = make_function("select_computed_i32", [make_bool(), make_i32(), make_i32()], make_i32(), locals, [entry, then_block, else_block])
@@ -2062,18 +2546,49 @@ check_msg(valid.success, "GHDL rejected backend-generated computed if process VH
 
 #### backend-generated switch process passes GHDL analysis and elaboration _(slow)_
 
-- backend-generated switch process passes GHDL analysis and elaboration
+1. make arg local
+2. make arg local
+3. make arg local
+4. make arg local
+5. make return local
+6. make temp local
+7. make temp local
+8. make temp local
+9. id: BlockId
+10. MirOperand
+11. SwitchCase
+12. SwitchCase
+13. BlockId
+14. LocalId
+15. MirOperand
+16. MirOperand
+17. span: empty span
+18. id: BlockId
+19. terminator: MirTerminator Return
+20. LocalId
+21. MirOperand
+22. MirOperand
+23. span: empty span
+24. id: BlockId
+25. terminator: MirTerminator Return
+26. LocalId
+27. MirOperand
+28. MirOperand
+29. span: empty span
+30. id: BlockId
+31. terminator: MirTerminator Return
+32. check msg
+33. check
+34. check msg
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 82 lines folded for reproduction.
+Runnable source: 80 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("backend-generated switch process passes GHDL analysis and elaboration")
 if not ghdl_available():
     print "SKIP: GHDL not available"
     return
@@ -2114,7 +2629,7 @@ val case_zero_add = MirInst(
 val case_zero = MirBlock(
     id: BlockId(id: 1),
     instructions: [case_zero_add],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5)))))
 )
 val case_one_sub = MirInst(
     kind: MirInstKind.BinOp(
@@ -2128,7 +2643,7 @@ val case_one_sub = MirInst(
 val case_one = MirBlock(
     id: BlockId(id: 2),
     instructions: [case_one_sub],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 6)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 6)))))
 )
 val default_add = MirInst(
     kind: MirInstKind.BinOp(
@@ -2142,7 +2657,7 @@ val default_add = MirInst(
 val default_case = MirBlock(
     id: BlockId(id: 3),
     instructions: [default_add],
-    terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 7)))))
+    terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 7)))))
 )
 val func = make_function("select_switch_computed", [u8, make_i32(), make_i32(), make_i32()], make_i32(), locals, [entry, case_zero, case_one, default_case])
 val module = make_module("switch_computed_mod", func)
@@ -2166,18 +2681,18 @@ check_msg(valid.success, "GHDL rejected backend-generated switch process VHDL")
 
 #### GHDL rejects intentionally invalid VHDL _(slow)_
 
-- GHDL rejects intentionally invalid VHDL
+1. check
+2. check msg
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("GHDL rejects intentionally invalid VHDL")
 if not ghdl_available():
     print "SKIP: GHDL not available"
     return
@@ -2199,18 +2714,20 @@ check(result.exit_code != 0)
 
 #### rejects float type with clear error
 
-- rejects float type with clear error
+1. make arg local
+2. make return local
+3. kind: MirInstKind Copy
+4. span: empty span
+5. check msg
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("rejects float type with clear error")
 val backend = make_backend()
 val locals = [
     make_arg_local(0, 0, "x", MirType(kind: MirTypeKind.F64)),
@@ -2234,18 +2751,22 @@ check_msg(result.is_err(), "Expected error for f64 type in VHDL backend")
 
 #### rejects float constant with clear error
 
-- rejects float constant with clear error
+1. make return local
+2. make temp local
+3. LocalId
+4. MirConstValue Float
+5. MirType
+6. span: empty span
+7. check msg
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("rejects float constant with clear error")
 val backend = make_backend()
 val locals = [
     make_return_local(0, make_i32()),
@@ -2273,20 +2794,13 @@ check_msg(result.is_err(), "Expected error for float constant in VHDL backend")
 
 #### Codegen trait returns Vhdl backend kind
 
-- Codegen trait returns Vhdl backend kind
-   - Expected: backend.backend_kind() equals `BackendKind.Vhdl`
-   - Expected: backend.backend_name() equals `vhdl`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("Codegen trait returns Vhdl backend kind")
 val backend = make_backend()
 expect(backend.backend_kind()).to_equal(BackendKind.Vhdl)
 expect(backend.backend_name()).to_equal("vhdl")
@@ -2298,18 +2812,19 @@ expect(backend.backend_name()).to_equal("vhdl")
 
 #### uses bit for unresolved backend
 
-- uses bit for unresolved backend
+1. make arg local
+2. make return local
+3. check msg
+4. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("uses bit for unresolved backend")
 val backend = make_backend()
 val locals = [
     make_arg_local(0, 0, "flag", make_bool()),
@@ -2329,18 +2844,19 @@ check(result.unwrap().vhdl.contains("bit"))
 
 #### uses std_logic for resolved backend
 
-- uses std_logic for resolved backend
+1. make arg local
+2. make return local
+3. check msg
+4. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("uses std_logic for resolved backend")
 val backend = make_resolved_backend()
 val locals = [
     make_arg_local(0, 0, "flag", make_bool()),
@@ -2370,51 +2886,3 @@ check(result.unwrap().vhdl.contains("std_logic"))
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-INTEGRATION`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `d60a3a3129404f0f4209edc5e1c336a0898c63d4d6340a48581ecb42d9589e80`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `d60a3a3129404f0f4209edc5e1c336a0898c63d4d6340a48581ecb42d9589e80`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `d60a3a3129404f0f4209edc5e1c336a0898c63d4d6340a48581ecb42d9589e80`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/02_integration/compiler/vhdl_backend_e2e_spec.spl
-mirror: doc/06_spec/02_integration/compiler/vhdl_backend_e2e_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/compiler/vhdl_backend_e2e_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/compiler/vhdl_backend_e2e_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/02_integration/compiler/vhdl_backend_e2e_spec.spl:166:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compiles simple adder to valid VHDL entity' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/compiler/vhdl_backend_e2e_spec.spl:218:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compiles boolean comparison to valid VHDL' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/compiler/vhdl_backend_e2e_spec.spl:256:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compiles local copies to signal assignments' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

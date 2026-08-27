@@ -1,0 +1,45 @@
+# @req: REQ-COMPILER-HIR-001
+extern fn rt_file_read_text(path: text) -> text
+
+describe "bootstrap HIR owner-index MIR production":
+    it "keeps the promoted owner authoritative through prescan, registration, and function lowering":
+        val globals = rt_file_read_text("src/compiler/50.mir/_MirLowering/bootstrap_globals.spl") ?? ""
+        val registration = rt_file_read_text("src/compiler/50.mir/_MirLowering/bootstrap_type_registration.spl") ?? ""
+
+        expect(globals).to_contain("fn bootstrap_lower_flat_hir_module_to_mir(owner: BootstrapHirModuleOwner, module_index: i64")
+        expect(globals).to_contain("bootstrap_register_flat_type_defs_owner(lowering, owner)")
+        expect(globals).to_contain("bootstrap_register_flat_class_defs_owner(lowering, owner)")
+        expect(globals).to_contain("lowering.prescan_owner_function_for_struct_types(owner, flat_prescan_index)")
+        expect(globals).to_contain("lowering.lower_function_from_module_owner(owner, function_index)")
+        expect(registration).to_contain("fn bootstrap_register_flat_type_defs_owner(lowering: MirLowering, owner: BootstrapHirModuleOwner)")
+        expect(registration).to_contain("fn bootstrap_register_flat_class_defs_owner(lowering: MirLowering, owner: BootstrapHirModuleOwner)")
+
+        # No full HirFunction or root HirBlock value may cross the owner-index
+        # production seam. These copies caused staged aggregate corruption.
+        expect(globals.contains("val hir_fn = owner.functions[function_index]")).to_equal(false)
+        expect(globals.contains("lower_function(hir_fn)")).to_equal(false)
+        expect(globals.contains("prescan_block_for_struct_types(owner.functions[flat_prescan_index].body)")).to_equal(false)
+
+    it "provides complete owner-index function, root-block, GPU, and synthetic-driver routes":
+        val functions = rt_file_read_text("src/compiler/50.mir/_MirLowering/function_lowering.spl") ?? ""
+        val modules = rt_file_read_text("src/compiler/50.mir/_MirLowering/module_lowering.spl") ?? ""
+        val synthetic_codegen = rt_file_read_text("src/compiler/50.mir/synthetic_driver_codegen.spl") ?? ""
+        val synthetic_plan = rt_file_read_text("src/compiler/50.mir/synthetic_driver_registration.spl") ?? ""
+
+        expect(functions).to_contain("me lower_function_from_module_owner(owner: BootstrapHirModuleOwner, function_index: i64) -> MirFunction:")
+        expect(functions).to_contain("self.lower_function_with_gpu_metadata_from_module_owner(owner, function_index, is_gpu_kernel, gpu_target, gpu_backend_order)")
+        expect(functions).to_contain("me lower_function_with_gpu_metadata_from_module_owner(owner: BootstrapHirModuleOwner, function_index: i64")
+        expect(functions).to_contain("self.lower_owner_function_root_block(owner, function_index, true)")
+        expect(functions).to_contain("self.lower_owner_function_root_block(owner, function_index, false)")
+        expect(functions).to_contain("apply_synthetic_driver_codegen_from_module_owner(")
+        expect(functions).to_contain("owner, function_index, fn_result, self.symbols")
+        expect(modules).to_contain("me prescan_owner_function_for_struct_types(owner: BootstrapHirModuleOwner, function_index: i64)")
+        expect(functions).to_contain("me lower_owner_function_root_block(owner: BootstrapHirModuleOwner, function_index: i64, use_declared_expected_type: bool)")
+        expect(functions).to_contain("var expected_type: HirType? = nil\n        if use_declared_expected_type:\n            expected_type = owner.functions[function_index].return_type")
+        expect(functions.contains("Some(owner.functions[function_index].return_type)")).to_equal(false)
+        expect(synthetic_plan).to_contain("fn plan_synthetic_driver_registration_from_module_owner(owner: BootstrapHirModuleOwner, function_index: i64")
+        expect(synthetic_plan).to_contain("find_register_static_driver_call_from_module_owner(owner, function_index, symbols)")
+        expect(synthetic_codegen).to_contain("fn apply_synthetic_driver_codegen_from_module_owner(owner: BootstrapHirModuleOwner, function_index: i64")
+
+        # The owner path must not fall back to the legacy by-value entrypoint.
+        expect(functions.contains("self.lower_function(owner.functions[function_index])")).to_equal(false)

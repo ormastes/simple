@@ -45,69 +45,10 @@ fn _simple_join_text(items: [text], sep: text) -> text:
         i = i + 1
     out
 
-fn _simple_vhdl_erasable_decorators() -> [text]:
-    """W2-B fail-closed allowlist: decorator names (without '@') that direct
-    VHDL emission may legitimately erase. Anything not listed here and not in
-    the supported set (@hardware, @generic, @clocked) is a hard generation
-    error — a silently dropped decorator could remove woven AOP/debug logic
-    from synthesized RTL."""
-    ["type", "enum"]
-
-fn _simple_vhdl_detect_aop_decorators(source: text) -> text:
-    """Detect AOP/decorator usage in source. Returns error message if found, empty string otherwise."""
-    val lines = source.split("\n")
-    var detected_decorators: [text] = []
-    var i = 0
-    while i < lines.len():
-        val line = lines[i].trim()
-        if line.starts_with("@"):
-            # Skip supported decorators
-            if line == "@hardware":
-                i = i + 1
-                continue
-            if line.starts_with("@generic("):
-                i = i + 1
-                continue
-            if line.starts_with("@clocked("):
-                i = i + 1
-                continue
-
-            # Extract decorator name
-            val decorator_text = if line.contains("("):
-                line.substring(1, line.find("(").unwrap())
-            else:
-                line.substring(1, line.len())
-
-            # Check if this is an AOP or decorator keyword
-            if decorator_text == "advice" or decorator_text == "pointcut" or decorator_text == "before" or decorator_text == "after" or decorator_text == "around":
-                detected_decorators = detected_decorators.push(line)
-            elif not _text_list_contains(_simple_vhdl_erasable_decorators(), decorator_text):
-                # Unknown decorator - fail closed (might carry AOP-woven logic)
-                detected_decorators = detected_decorators.push(line)
-        i = i + 1
-
-    if detected_decorators.len() == 0:
-        return ""
-
-    # Build error message with detected decorators
-    var msg = "Found unsupported decorators that require AOP weaving: "
-    var first = true
-    for dec in detected_decorators:
-        if not first:
-            msg = msg + ", "
-        msg = msg + dec
-        first = false
-    msg
-
 fn _simple_vhdl_source_to_text(source: text) -> Result<text, text>:
     val unsupported_gap = _simple_vhdl_unsupported_parity_gap(source)
     if unsupported_gap != "":
         return Err(unsupported_gap)
-
-    # COMPILER-002: Reject AOP/decorators in VHDL subset path
-    val aop_check = _simple_vhdl_detect_aop_decorators(source)
-    if aop_check != "":
-        return Err("VHDL subset path does not support AOP/decorators. {aop_check} Use the full compiler pipeline (source → HIR → MIR → AOP weaving → RTL IR → VHDL) instead. Direct VHDL emission is only supported for: @hardware, @generic, @clocked.")
 
     val aliases = _simple_type_aliases_for_source(source)
     val multi_result = _simple_multi_hardware_vhdl_source_to_text(source)
@@ -144,21 +85,12 @@ fn _simple_vhdl_source_to_text(source: text) -> Result<text, text>:
                 i = i + 1
                 continue
             if line.starts_with("@"):
-                # W2-B fail-closed: only allowlisted-erasable decorators may
-                # be skipped here; anything else must fail loudly instead of
-                # being silently dropped from the emitted RTL.
-                val skipped_decorator = if line.contains("("):
-                    line.substring(1, line.find("(").unwrap())
-                else:
-                    line.substring(1, line.len())
-                if not _text_list_contains(_simple_vhdl_erasable_decorators(), skipped_decorator):
-                    return Err("VHDL generation error: decorator '@{skipped_decorator}' would be silently dropped during VHDL emission (site: _simple_vhdl_source_to_text). Supported: @hardware, @generic, @clocked; erasable allowlist: @type, @enum.")
                 i = i + 1
                 continue
             if header == "":
                 header = line
             else:
-                body_lines = body_lines + [raw_line]
+                body_lines = body_lines.push(raw_line)
         i = i + 1
     if not header.starts_with("fn "):
         return Err("VHDL subset fallback requires a single function declaration")
@@ -170,12 +102,12 @@ fn _simple_vhdl_source_to_text(source: text) -> Result<text, text>:
     val ret_start_opt = after_fn.find("->")
     if not name_end_opt.? or not ret_start_opt.?:
         return Err("VHDL subset fallback could not parse function signature")
-    val name_end = name_end_opt.unwrap()
+    val name_end = if val found_name_end = name_end_opt: found_name_end else: return Err("VHDL subset fallback could not parse function signature")
     val params_end_opt = _simple_find_matching_paren(after_fn, name_end)
     if not params_end_opt.?:
         return Err("VHDL subset fallback could not parse function parameter list")
-    val params_end = params_end_opt.unwrap()
-    val ret_start = ret_start_opt.unwrap()
+    val params_end = if val found_params_end = params_end_opt: found_params_end else: return Err("VHDL subset fallback could not parse function parameter list")
+    val ret_start = if val found_ret_start = ret_start_opt: found_ret_start else: return Err("VHDL subset fallback could not parse function signature")
 
     val fn_name = after_fn.substring(0, name_end).trim()
     val params_text = after_fn.substring(name_end + 1, params_end).trim()
@@ -212,8 +144,8 @@ fn _simple_vhdl_source_to_text(source: text) -> Result<text, text>:
     if clocked_text != "":
         val clock_ports = _simple_clock_ports(clocked_text, param_names)
         for clock_port in clock_ports:
-            ports = ports + [clock_port]
-    ports = ports + ["        result_out : out {return_vhdl_type}"]
+            ports = ports.push(clock_port)
+    ports = ports.push("        result_out : out {return_vhdl_type}")
 
     val expr_result = _simple_body_to_vhdl(body_lines, resolved_return_type, param_names, param_types)
     if expr_result.is_err():
@@ -243,11 +175,6 @@ fn _simple_vhdl_source_to_text(source: text) -> Result<text, text>:
     Ok(out)
 
 fn _simple_multi_hardware_vhdl_source_to_text(source: text) -> Result<text, text>:
-    # COMPILER-002: Reject AOP/decorators in multi-hardware path
-    val aop_check = _simple_vhdl_detect_aop_decorators(source)
-    if aop_check != "":
-        return Err("VHDL subset path does not support AOP/decorators. {aop_check} Use the full compiler pipeline (source → HIR → MIR → AOP weaving → RTL IR → VHDL) instead.")
-
     val aliases = _simple_type_aliases_for_source(source)
     val parse_result = _simple_parse_vhdl_functions(source)
     if parse_result.is_err():
@@ -334,17 +261,7 @@ fn _simple_parse_vhdl_functions(source: text) -> Result<[[text]], text>:
             elif line == "@hardware":
                 pending_hardware = "hardware"
             elif line.starts_with("@"):
-                # COMPILER-002: Detect unsupported decorators
-                val decorator_text = if line.contains("("):
-                    line.substring(1, line.find("(").unwrap())
-                else:
-                    line.substring(1, line.len())
-                if decorator_text == "advice" or decorator_text == "pointcut" or decorator_text == "before" or decorator_text == "after" or decorator_text == "around":
-                    return Err("VHDL subset path does not support AOP/decorators. Found decorator '{line}' which requires AOP weaving. Use the full compiler pipeline instead.")
-                # W2-B fail-closed: no silent decorator skips. Only the
-                # explicit erasable allowlist may pass through.
-                if not _text_list_contains(_simple_vhdl_erasable_decorators(), decorator_text):
-                    return Err("VHDL generation error: decorator '{line}' would be silently dropped by the VHDL subset parser (site: _simple_parse_vhdl_functions). Supported: @hardware, @generic, @clocked; erasable allowlist: @type, @enum.")
+                pass
             elif line.starts_with("fn "):
                 current_header = line
                 generic_text = pending_generic
@@ -374,12 +291,12 @@ fn _simple_function_record(header: text, body_lines: [text], generic_text: text,
     val ret_start_opt = after_fn.find("->")
     if not name_end_opt.? or not ret_start_opt.?:
         return Err("VHDL subset fallback could not parse function signature")
-    val name_end = name_end_opt.unwrap()
+    val name_end = if val found_name_end = name_end_opt: found_name_end else: return Err("VHDL subset fallback could not parse function signature")
     val params_end_opt = _simple_find_matching_paren(after_fn, name_end)
     if not params_end_opt.?:
         return Err("VHDL subset fallback could not parse function parameter list")
-    val params_end = params_end_opt.unwrap()
-    val ret_start = ret_start_opt.unwrap()
+    val params_end = if val found_params_end = params_end_opt: found_params_end else: return Err("VHDL subset fallback could not parse function parameter list")
+    val ret_start = if val found_ret_start = ret_start_opt: found_ret_start else: return Err("VHDL subset fallback could not parse function signature")
     val fn_name = after_fn.substring(0, name_end).trim()
     val params_text = after_fn.substring(name_end + 1, params_end).trim()
     var return_type = after_fn.substring(ret_start + 2, after_fn.len()).trim()
@@ -419,8 +336,8 @@ fn _simple_single_output_vhdl(fn_name: text, params_text: text, return_type: tex
     if clocked_text != "":
         val clock_ports = _simple_clock_ports(clocked_text, param_names)
         for clock_port in clock_ports:
-            ports = ports + [clock_port]
-    ports = ports + ["        result_out : out {return_vhdl_type}"]
+            ports = ports.push(clock_port)
+    ports = ports.push("        result_out : out {return_vhdl_type}")
 
     val expr_result = _simple_body_to_vhdl(body_lines, resolved_return_type, param_names, param_types)
     if expr_result.is_err():
@@ -474,10 +391,10 @@ fn _simple_anonymous_tuple_vhdl(fn_name: text, params_text: text, return_type: t
     if clocked_text != "":
         val clock_ports = _simple_clock_ports(clocked_text, param_names)
         for clock_port in clock_ports:
-            ports = ports + [clock_port]
+            ports = ports.push(clock_port)
             val clock_port_name = _simple_port_name_from_decl(clock_port)
             if clock_port_name != "":
-                input_port_names = input_port_names + [clock_port_name]
+                input_port_names = input_port_names.push(clock_port_name)
 
     var sanitized: [text] = []
     var i = 0
@@ -492,9 +409,9 @@ fn _simple_anonymous_tuple_vhdl(fn_name: text, params_text: text, return_type: t
             if implicit_width_error != "":
                 return Err(implicit_width_error)
             return Err("VHDL subset fallback unsupported anonymous output type: {return_types[i]}")
-        sanitized = sanitized + [port_name]
+        sanitized = sanitized.push(port_name)
         val suffix = if i == labels.len() - 1: "" else: ";"
-        ports = ports + ["        {port_name} : out {vhdl_type}{suffix}"]
+        ports = ports.push("        {port_name} : out {vhdl_type}{suffix}")
         i = i + 1
 
     val lowering_result = _simple_anonymous_body_lowering(body_lines, labels, sanitized, return_types, param_names, param_types, all_names, all_params, all_returns, hardware_flags, alias_names, alias_types)
@@ -556,10 +473,10 @@ fn _simple_labeled_tuple_vhdl(fn_name: text, params_text: text, return_type: tex
     if clocked_text != "":
         val clock_ports = _simple_clock_ports(clocked_text, param_names)
         for clock_port in clock_ports:
-            ports = ports + [clock_port]
+            ports = ports.push(clock_port)
             val clock_port_name = _simple_port_name_from_decl(clock_port)
             if clock_port_name != "":
-                input_port_names = input_port_names + [clock_port_name]
+                input_port_names = input_port_names.push(clock_port_name)
 
     var sanitized: [text] = []
     var i = 0
@@ -579,9 +496,9 @@ fn _simple_labeled_tuple_vhdl(fn_name: text, params_text: text, return_type: tex
             if implicit_width_error != "":
                 return Err(implicit_width_error)
             return Err("VHDL subset fallback unsupported output type: {return_types[i]}")
-        sanitized = sanitized + [port_name]
+        sanitized = sanitized.push(port_name)
         val suffix = if i == labels.len() - 1: "" else: ";"
-        ports = ports + ["        {port_name} : out {vhdl_type}{suffix}"]
+        ports = ports.push("        {port_name} : out {vhdl_type}{suffix}")
         i = i + 1
 
     val lowering_result = _simple_labeled_body_lowering(body_lines, labels, sanitized, return_types, param_names, param_types, all_names, all_params, all_returns, hardware_flags, alias_names, alias_types)

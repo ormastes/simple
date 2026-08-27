@@ -1,0 +1,170 @@
+# Inline-assembly destination lowering. Source aggregates remain rooted in the
+# active HirLowering frame; only scalar destination indices cross boundaries.
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.parser_types_expr.{
+    AsmExpr, AsmConstraint, AsmConstraintKind, AsmLocation,
+    AsmTargetSpec
+}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.hir_destination_graph.{
+    HD_RANGE_AUX, HD_AUX_RANGE_TEXT, HD_AUX_RANGE_ASM_CONSTRAINT,
+    HD_AUX_RANGE_ASM_VERSION
+}
+use compiler.hir.hir_lowering.hir_destination_registry_writer.*
+
+fn destination_asm_aux(slot: i64, generation: i64, span: Span) -> i64:
+    hdw_reserve_aux(slot, generation, span.start, span.end, span.line,
+        span.col, span.file, span.length)
+
+fn destination_asm_kind(kind: AsmConstraintKind) -> i64:
+    match kind:
+        case In: 0
+        case Out: 1
+        case InOut: 2
+        case LateOut: 3
+
+fn destination_asm_location(location: AsmLocation) -> i64:
+    match location:
+        case Reg: 0
+        case RegSpec(_): 1
+        case Mem: 2
+        case Imm: 3
+
+fn destination_asm_location_text(location: AsmLocation) -> text:
+    match location:
+        case RegSpec(name): name
+        case _: ""
+
+fn destination_asm_text_range(slot: i64, generation: i64, values: [text],
+                              span: Span, range: i64) -> bool:
+    var offset = 0
+    while offset < values.len():
+        val row = destination_asm_aux(slot, generation, span)
+        if row < 0 or not hdw_text_aux(slot, generation, row, values[offset]): return false
+        if not hdw_set_range_at(slot, generation, range,
+                                HD_AUX_RANGE_TEXT, offset, row): return false
+        offset = offset + 1
+    hdw_publish_range(slot, generation, range, HD_RANGE_AUX, HD_AUX_RANGE_TEXT)
+
+impl HirLowering:
+    me destination_lower_asm_constraint(constraint: AsmConstraint,
+                                        reserved: i64) -> bool:
+        val value = self.destination_lower_expr(constraint.value)
+        if value < 0: return false
+        var has_output = false
+        var output = -1
+        if val output_expr = constraint.output_value:
+            has_output = true
+            output = self.destination_lower_expr(output_expr)
+            if output < 0: return false
+        hdw_asm_constraint(self.destination_slot, self.destination_generation,
+            reserved, constraint.name, destination_asm_kind(constraint.kind),
+            destination_asm_location(constraint.location),
+            destination_asm_location_text(constraint.location), value,
+            has_output, output)
+
+    me destination_lower_asm(asm_node: AsmExpr) -> i64:
+        val diagnostic_count = self.diagnostic_messages.len()
+        val result = self.destination_lower_asm_unchecked(asm_node)
+        if result < 0 and self.diagnostic_messages.len() == diagnostic_count:
+            self.error("E-HIR-DEST-ASM: inline assembly destination lowering failed", asm_node.span)
+        result
+
+    me destination_lower_asm_unchecked(asm_node: AsmExpr) -> i64:
+        val slot = self.destination_slot
+        val generation = self.destination_generation
+        val parent = destination_asm_aux(slot, generation, asm_node.span)
+        if parent < 0: return -1
+        val constraints = hdw_reserve_range(slot, generation, HD_RANGE_AUX,
+            HD_AUX_RANGE_ASM_CONSTRAINT, asm_node.constraints.len())
+        val clobbers = hdw_reserve_range(slot, generation, HD_RANGE_AUX,
+            HD_AUX_RANGE_TEXT, asm_node.clobbers.len())
+        val abis = hdw_reserve_range(slot, generation, HD_RANGE_AUX,
+            HD_AUX_RANGE_TEXT, asm_node.clobber_abis.len())
+        val options = hdw_reserve_range(slot, generation, HD_RANGE_AUX,
+            HD_AUX_RANGE_TEXT, asm_node.options.len())
+        if constraints < 0 or clobbers < 0 or abis < 0 or options < 0: return -1
+        var first_constraint = -1
+        var i = 0
+        while i < asm_node.constraints.len():
+            val row = destination_asm_aux(slot, generation,
+                                          asm_node.constraints[i].span)
+            if row < 0: return -1
+            if i == 0: first_constraint = row
+            i = i + 1
+        i = 0
+        while i < asm_node.constraints.len():
+            val row = first_constraint + i
+            if not self.destination_lower_asm_constraint(asm_node.constraints[i], row): return -1
+            if not hdw_set_range_at(slot, generation, constraints,
+                    HD_AUX_RANGE_ASM_CONSTRAINT, i, row): return -1
+            i = i + 1
+        if not hdw_publish_range(slot, generation, constraints, HD_RANGE_AUX,
+                                 HD_AUX_RANGE_ASM_CONSTRAINT): return -1
+        if not destination_asm_text_range(slot, generation, asm_node.clobbers,
+                                         asm_node.span, clobbers): return -1
+        if not destination_asm_text_range(slot, generation, asm_node.clobber_abis,
+                                         asm_node.span, abis): return -1
+        if not destination_asm_text_range(slot, generation, asm_node.options,
+                                         asm_node.span, options): return -1
+        if not hdw_asm(slot, generation, parent, asm_node.asm_template,
+            asm_node.is_volatile, constraints, asm_node.constraints.len(),
+            clobbers, asm_node.clobbers.len(), abis, asm_node.clobber_abis.len(),
+            options, asm_node.options.len()): return -1
+        parent
+
+    me destination_lower_asm_spec(spec: AsmTargetSpec) -> i64:
+        val diagnostic_count = self.diagnostic_messages.len()
+        val result = self.destination_lower_asm_spec_unchecked(spec)
+        if result < 0 and self.diagnostic_messages.len() == diagnostic_count:
+            self.error("E-HIR-DEST-ASM-SPEC: assembly target specification lowering failed", spec.span)
+        result
+
+    me destination_lower_asm_spec_unchecked(spec: AsmTargetSpec) -> i64:
+        val slot = self.destination_slot
+        val generation = self.destination_generation
+        val parent = destination_asm_aux(slot, generation, spec.span)
+        if parent < 0: return -1
+        val archs = hdw_reserve_range(slot, generation, HD_RANGE_AUX,
+                                      HD_AUX_RANGE_TEXT, spec.archs.len())
+        val versions = hdw_reserve_range(slot, generation, HD_RANGE_AUX,
+            HD_AUX_RANGE_ASM_VERSION, spec.version_constraints.len())
+        if archs < 0 or versions < 0: return -1
+        var os_row = -1
+        var abi_row = -1
+        var backend_row = -1
+        if spec.has_os: os_row = destination_asm_aux(slot, generation, spec.span)
+        if spec.has_abi: abi_row = destination_asm_aux(slot, generation, spec.span)
+        if spec.has_backend: backend_row = destination_asm_aux(slot, generation, spec.span)
+        if (spec.has_os and os_row < 0) or (spec.has_abi and abi_row < 0) or
+           (spec.has_backend and backend_row < 0): return -1
+        var first_version = -1
+        var i = 0
+        while i < spec.version_constraints.len():
+            val row = destination_asm_aux(slot, generation, spec.span)
+            if row < 0: return -1
+            if i == 0: first_version = row
+            i = i + 1
+        if not destination_asm_text_range(slot, generation, spec.archs,
+                                         spec.span, archs): return -1
+        if spec.has_os and not hdw_text_aux(slot, generation, os_row, spec.os): return -1
+        if spec.has_abi and not hdw_text_aux(slot, generation, abi_row, spec.abi): return -1
+        if spec.has_backend and not hdw_text_aux(slot, generation, backend_row,
+                                                 spec.backend): return -1
+        i = 0
+        while i < spec.version_constraints.len():
+            val version = spec.version_constraints[i]
+            val row = first_version + i
+            if not hdw_asm_version(slot, generation, row, version.op,
+                                   version.version): return -1
+            if not hdw_set_range_at(slot, generation, versions,
+                    HD_AUX_RANGE_ASM_VERSION, i, row): return -1
+            i = i + 1
+        if not hdw_publish_range(slot, generation, versions, HD_RANGE_AUX,
+                                 HD_AUX_RANGE_ASM_VERSION): return -1
+        if not hdw_asm_spec(slot, generation, parent, archs, spec.archs.len(),
+            os_row, abi_row, backend_row, versions,
+            spec.version_constraints.len()): return -1
+        parent
+
+export HirLowering

@@ -67,12 +67,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 - keeps guest control bytes identical to the host correlation line
 - Compare the no-allocation guest wire with hosted formatting
+- backend render capture control line
+- backend render capture control line
+- backend render capture control line
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
